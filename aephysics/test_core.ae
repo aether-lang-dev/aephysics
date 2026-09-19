@@ -1,0 +1,234 @@
+// aephysics.core against the reference's (Box3D's) test_bitset.c, test_id.c, test_table.c,
+// test_container.c and test_allocator.c: the bit math, a bit set filled
+// along the Fibonacci numbers, the hash set over shape-pair keys filled,
+// thinned, searched and emptied, the arrays, the id pool, the stack and
+// the arena. Every allocation the module counts is freed by the end.
+
+import std.string
+import aephysics.core
+
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+extern log2(x: float) -> float
+extern floor(x: float) -> float
+
+var failures = 0
+var checks = 0
+
+ensure(name: string, ok: bool) {
+    checks = checks + 1
+    if !ok {
+        println("core: FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+const BIT_COUNT = 169
+const SET_SPAN = 317
+
+struct Thing {
+    id: int
+    weight: float
+    tag: long
+}
+
+main() {
+    // Bit math.
+    ensure("clz of 9 is 28", core.clz32(9) == 31 - 3)
+    ensure("clz of 0 is 32", core.clz32(0) == 32)
+    ensure("ctz of 8 is 3", core.ctz32(8) == 3)
+    ensure("ctz64 of 1<<40 is 40", core.ctz64((1 as long) << 40) == 40)
+    ensure("popcount of 0xFF is 8", core.pop_count64(255 as long) == 8)
+    ensure("popcount of -1 is 64", core.pop_count64(0 - 1 as long) == 64)
+    ensure("lsr of -1 by 33 is 31 ones", core.lsr(0 - 1 as long, 33) == ((1 as long) << 31) - 1)
+    i = 1
+    while i < 1000 {
+        e1 = core.lower_power_of_2_exponent(i)
+        e2 = floor(log2(i as float)) as int
+        ensure("the lower power of two exponent matches log2", e1 == e2)
+        i = i + 1
+    }
+    ensure("the bounding power of 3008 is 12", core.bounding_power_of_2(3008) == 12)
+    ensure("rounding 3008 up gives 4096", core.round_up_power_of_2(3008) == 4096)
+    ensure("a power of two is one", core.is_power_of_2(1024) && !core.is_power_of_2(1000))
+
+    // The bit set, along the Fibonacci numbers.
+    bits = core.bitset_create(BIT_COUNT)
+    core.bitset_set_count_and_clear(&bits, BIT_COUNT)
+    values_block = calloc(BIT_COUNT, 4)
+    values = values_block as int[]
+    i1 = 0
+    i2 = 1
+    core.bitset_set(&bits, i1)
+    values[i1] = 1
+    while i2 < BIT_COUNT {
+        core.bitset_set(&bits, i2)
+        values[i2] = 1
+        next = i1 + i2
+        i1 = i2
+        i2 = next
+    }
+    i = 0
+    set_bits = 0
+    while i < BIT_COUNT {
+        ensure("a bit reads as it was set", core.bitset_get(&bits, i) == (values[i] == 1))
+        if values[i] == 1 { set_bits = set_bits + 1 }
+        i = i + 1
+    }
+    ensure("the set counts its bits", core.bitset_count(&bits) == set_bits)
+    ensure("a bit past the end reads clear", !core.bitset_get(&bits, 10000))
+    core.bitset_clear(&bits, 1)
+    ensure("a cleared bit is clear", !core.bitset_get(&bits, 1))
+    core.bitset_set_grow(&bits, 500)
+    ensure("setting past the end grows the set", core.bitset_get(&bits, 500) && bits.block_count == 8)
+    other = core.bitset_create(BIT_COUNT)
+    core.bitset_set_count_and_clear(&other, 512)
+    core.bitset_set(&other, 7)
+    core.bitset_union(&bits, &other)
+    ensure("a union carries the other's bits over", core.bitset_get(&bits, 7))
+    core.bitset_destroy(&other)
+    core.bitset_destroy(&bits)
+    free(values_block)
+
+    // The id pool: dense, recycled.
+    pool = core.idpool_create()
+    a = core.idpool_alloc(&pool)
+    b = core.idpool_alloc(&pool)
+    c = core.idpool_alloc(&pool)
+    ensure("ids are dense from zero", a == 0 && b == 1 && c == 2)
+    core.idpool_free(&pool, b)
+    ensure("a freed id is out of the count", core.idpool_count(&pool) == 2 && core.idpool_capacity(&pool) == 3)
+    ensure("and is the next one handed out", core.idpool_alloc(&pool) == 1)
+    core.idpool_destroy(&pool)
+
+    // The hash set over shape-pair keys: fill, thin, search, empty.
+    item_count = (SET_SPAN * SET_SPAN - SET_SPAN) / 2
+    removed_block = calloc(item_count, 4)
+    removed = removed_block as int[]
+    set = core.set_create(16)
+    ensure("a pair key is the same either way round", core.shape_pair_key(3, 9, 0) == core.shape_pair_key(9, 3, 0))
+    ensure("a child index tells pairs apart", core.shape_pair_key(3, 9, 1) != core.shape_pair_key(3, 9, 0))
+    i = 0
+    while i < SET_SPAN {
+        j = i + 1
+        while j < SET_SPAN {
+            core.set_add(&set, core.shape_pair_key(i, j, 0))
+            j = j + 1
+        }
+        i = i + 1
+    }
+    ensure("every pair is in the set once", core.set_count(&set) == item_count)
+    ensure("adding a key again says so", core.set_add(&set, core.shape_pair_key(0, 1, 0)))
+    ensure("and does not count it twice", core.set_count(&set) == item_count)
+    k = 0
+    remove_count = 0
+    i = 0
+    while i < SET_SPAN {
+        j = i + 1
+        while j < SET_SPAN {
+            if j == i + 1 {
+                core.set_remove(&set, core.shape_pair_key(i, j, 0))
+                removed[k] = 1
+                remove_count = remove_count + 1
+            } else {
+                removed[k] = 0
+            }
+            k = k + 1
+            j = j + 1
+        }
+        i = i + 1
+    }
+    ensure("removing takes the count down", core.set_count(&set) == item_count - remove_count)
+    k = 0
+    i = 0
+    while i < SET_SPAN {
+        j = i + 1
+        while j < SET_SPAN {
+            key = core.shape_pair_key(j, i, 0)
+            found = core.set_contains(&set, key)
+            ensure("every kept key is found and every removed one is not", found == (removed[k] == 0))
+            ensure("the hashed lookup agrees", core.set_contains_hashed(&set, key, core.key_hash(key)) == found)
+            k = k + 1
+            j = j + 1
+        }
+        i = i + 1
+    }
+    ensure("removing a key that is not there says so", !core.set_remove(&set, core.shape_pair_key(0, 1, 0)))
+    i = 0
+    while i < SET_SPAN {
+        j = i + 1
+        while j < SET_SPAN {
+            core.set_remove(&set, core.shape_pair_key(i, j, 0))
+            j = j + 1
+        }
+        i = i + 1
+    }
+    ensure("the emptied set is empty", core.set_count(&set) == 0)
+    core.set_clear(&set)
+    core.set_destroy(&set)
+    free(removed_block)
+
+    // Arrays: ints and a buffer of structs.
+    ints = core.ints_create(0)
+    i = 0
+    while i < 100 {
+        core.ints_push(&ints, i * i)
+        i = i + 1
+    }
+    ensure("an int array holds what was pushed", core.ints_count(&ints) == 100 && core.ints_get(&ints, 9) == 81)
+    ensure("it grew as needed", core.ints_capacity(&ints) >= 100)
+    ensure("pop gives the last", core.ints_pop(&ints) == 99 * 99 && core.ints_count(&ints) == 99)
+    core.ints_remove_swap(&ints, 0)
+    ensure("remove-swap moves the last into the hole", core.ints_get(&ints, 0) == 98 * 98 && core.ints_count(&ints) == 98)
+    core.ints_destroy(&ints)
+
+    things = core.buffer_create(sizeof(Thing), 2)
+    i = 0
+    while i < 50 {
+        at = core.buffer_push(&things)
+        items = things.data as Thing[]
+        items[at] = Thing { id: i, weight: i as float * 0.5, tag: (i * 7) as long }
+        i = i + 1
+    }
+    items = things.data as Thing[]
+    ensure("a buffer holds its structs", core.buffer_count(&things) == 50 && items[20].id == 20 && items[20].weight == 10.0 && items[20].tag == 140)
+    core.buffer_remove_swap(&things, 3)
+    items = things.data as Thing[]
+    ensure("remove-swap on a buffer moves the last in", items[3].id == 49 && core.buffer_count(&things) == 49)
+    core.buffer_destroy(&things)
+
+    // The stack: LIFO, with the heap past its capacity.
+    stack = core.stack_create(256)
+    first = core.stack_alloc(&stack, 100)
+    second = core.stack_alloc(&stack, 100)
+    ensure("stack allocations are aligned", (second - first) == 112)
+    third = core.stack_alloc(&stack, 100)
+    ensure("past the block the stack still hands out memory", third != null)
+    ensure("and counts it", core.stack_allocation(&stack) == 336 && core.stack_max_allocation(&stack) == 336)
+    core.stack_free(&stack, third)
+    core.stack_free(&stack, second)
+    core.stack_free(&stack, first)
+    ensure("freed in order, nothing is left", core.stack_allocation(&stack) == 0)
+    core.stack_destroy(&stack)
+
+    // The arena: bump, overflow, sync grows.
+    arena = core.arena_create(128)
+    p1 = core.arena_bump(&arena, 40)
+    p2 = core.arena_bump(&arena, 40)
+    ensure("bumps are aligned", (p2 - p1) == 48)
+    p3 = core.arena_bump(&arena, 200)
+    ensure("an overflow still hands out memory", p3 != null)
+    core.arena_sync(&arena)
+    ensure("after a sync the arena fits the step's peak", core.arena_capacity(&arena) >= 96 + 200)
+    ensure("and starts over", core.arena_bump(&arena, 8) == arena.memory)
+    core.arena_destroy(&arena)
+
+    ensure("every allocation the module counted was freed", core.alloc_count() == 0 && core.bytes_in_use() == 0)
+
+    println("core: ${checks} checks")
+    if failures == 0 {
+        println("core: all checks passed")
+    } else {
+        println("core: ${failures} failure(s)")
+    }
+}

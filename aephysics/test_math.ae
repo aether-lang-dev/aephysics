@@ -1,0 +1,270 @@
+// aephysics.math against the reference's test_math.c (Box3D): the deterministic atan2,
+// cosine and sine against libm within their stated accuracy; vectors,
+// transforms, quaternions and matrices against each other. The tolerances
+// are the original's (float epsilons on double arithmetic, so they are
+// loose here); where the original asserts a range, this checks it.
+
+import std.string
+import aephysics.math
+
+extern atan2(y: float, x: float) -> float
+extern cos(x: float) -> float
+extern sin(x: float) -> float
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+
+var failures = 0
+var checks = 0
+
+ensure(name: string, ok: bool) {
+    checks = checks + 1
+    if !ok {
+        println("math: FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+ensure_small(name: string, value: float, tolerance: float) {
+    ensure(name, math.abs_float(value) < tolerance)
+}
+
+// 0.0023 degrees
+const ATAN_TOL = 0.00004
+
+main() {
+    // The approximations against libm, over twenty turns.
+    t = 0.0 - 10.0
+    worst_cs = 0.0
+    worst_atan = 0.0
+    while t < 10.0 {
+        angle = math.PI * t
+        cs = math.compute_cos_sin(angle)
+        c = cos(angle)
+        s = sin(angle)
+        // Accurate to about 0.1 degrees (0.002 radians).
+        ensure_small("cosine approximation", cs.cosine - c, 0.002)
+        ensure_small("sine approximation", cs.sine - s, 0.002)
+        worst_cs = math.max_float(worst_cs, math.max_float(math.abs_float(cs.cosine - c), math.abs_float(cs.sine - s)))
+
+        xn = math.unwind_angle(angle)
+        a = math.atan2_approx(s, c)
+        ensure("atan2 is a number", math.is_valid_float(a))
+        diff = math.abs_float(a - xn)
+        // The two can differ by a full turn (-pi and pi).
+        if diff > math.PI { diff = diff - 2.0 * math.PI }
+        ensure_small("atan2 of the unwound angle", diff, ATAN_TOL)
+        worst_atan = math.max_float(worst_atan, math.abs_float(diff))
+        t = t + 0.01
+    }
+
+    y = 0.0 - 1.0
+    while y <= 1.0 {
+        x = 0.0 - 1.0
+        while x <= 1.0 {
+            a1 = math.atan2_approx(y, x)
+            a2 = atan2(y, x)
+            ensure("atan2 over the square is a number", math.is_valid_float(a1))
+            ensure_small("atan2 over the square", a1 - a2, ATAN_TOL)
+            x = x + 0.01
+        }
+        y = y + 0.01
+    }
+    ensure_small("atan2 straight up", math.atan2_approx(1.0, 0.0) - atan2(1.0, 0.0), ATAN_TOL)
+    ensure_small("atan2 straight down", math.atan2_approx(0.0 - 1.0, 0.0) - atan2(0.0 - 1.0, 0.0), ATAN_TOL)
+    ensure_small("atan2 right", math.atan2_approx(0.0, 1.0) - atan2(0.0, 1.0), ATAN_TOL)
+    ensure_small("atan2 left", math.atan2_approx(0.0, 0.0 - 1.0) - atan2(0.0, 0.0 - 1.0), ATAN_TOL)
+    ensure_small("atan2 at the origin", math.atan2_approx(0.0, 0.0) - atan2(0.0, 0.0), ATAN_TOL)
+
+    zero = math.vec3_zero()
+    one = math.vec3_one()
+    two = math.vec3(2.0, 2.0, 2.0)
+    v = math.add(one, two)
+    ensure("one and two are three", v.x == 3.0 && v.y == 3.0)
+    v = math.sub(zero, two)
+    ensure("nothing less two is minus two", v.x == 0.0 - 2.0 && v.y == 0.0 - 2.0)
+    v = math.add(two, two)
+    ensure("two and two are not five", v.x != 5.0 && v.y != 5.0)
+
+    axis = math.normalize(math.vec3(0.0 - 0.75, 0.5, 1.0))
+    transform1 = math.transform(math.vec3(0.0 - 2.0, 3.0, 0.0), math.quat_identity())
+    transform2 = math.transform(math.vec3(1.0, 0.0, 0.0), math.make_quat_from_axis_angle(axis, math.PI))
+    combined = math.mul_transforms(transform2, transform1)
+    v = math.transform_point(transform2, math.transform_point(transform1, two))
+    u = math.transform_point(combined, two)
+    ensure_small("a product of transforms transforms as both, x", u.x - v.x, 10.0 * math.EPSILON)
+    ensure_small("a product of transforms transforms as both, y", u.y - v.y, 10.0 * math.EPSILON)
+
+    v = math.transform_point(transform1, two)
+    v = math.inv_transform_point(transform1, v)
+    ensure_small("a transform and its inverse cancel, x", v.x - two.x, 8.0 * math.EPSILON)
+    ensure_small("a transform and its inverse cancel, y", v.y - two.y, 8.0 * math.EPSILON)
+
+    rel = math.inv_mul_transforms(transform1, transform2)
+    v = math.inv_transform_point(transform1, math.transform_point(transform2, two))
+    u = math.transform_point(rel, two)
+    ensure_small("a relative transform is the two applied, x", u.x - v.x, 10.0 * math.EPSILON)
+    ensure_small("a relative transform is the two applied, y", u.y - v.y, 10.0 * math.EPSILON)
+
+    // Quaternions.
+    axis = math.vec3(0.0, 0.0, 1.0)
+    q1 = math.make_quat_from_axis_angle(axis, 0.0 - 0.5 * math.PI)
+    q2 = math.compute_quat_between_unit_vectors(math.vec3(1.0, 0.0, 0.0), math.vec3(0.0, 0.0 - 1.0, 0.0))
+    ensure_small("a quarter turn about z from an axis-angle and from two vectors agree, x", q1.v.x - q2.v.x, math.EPSILON)
+    ensure_small("... y", q1.v.y - q2.v.y, math.EPSILON)
+    ensure_small("... z", q1.v.z - q2.v.z, math.EPSILON)
+    ensure_small("... s", q1.s - q2.s, math.EPSILON)
+
+    q3 = math.normalize_quat(math.quat(1.0, 0.0 - 2.0, 3.0, 4.0))
+    q4 = math.inv_mul_quat(q3, q1)
+    q5 = math.mul_quat(q3, q4)
+    ensure_small("q3 * (inv(q3) * q1) is q1, x", q1.v.x - q5.v.x, math.EPSILON)
+    ensure_small("... y", q1.v.y - q5.v.y, math.EPSILON)
+    ensure_small("... z", q1.v.z - q5.v.z, math.EPSILON)
+    ensure_small("... s", q1.s - q5.s, math.EPSILON)
+
+    q6 = math.compute_quat_between_unit_vectors(math.vec3(0.0, 1.0, 0.0), math.vec3(0.0, 0.0 - 1.0, 0.0))
+    ensure_small("anti-parallel vectors give a half turn", q6.s, math.EPSILON)
+
+    // The rotation between every pair of directions rotates one onto the
+    // other, and its twist stays in range.
+    v = math.normalize(math.vec3(0.2, 0.0 - 0.5, 3.0))
+    pairs = 0
+    z = 0.0 - 1.0
+    while z <= 1.0 {
+        y = 0.0 - 1.0
+        while y <= 1.0 {
+            x = 0.0 - 1.0
+            while x <= 1.0 {
+                if !(x == 0.0 && y == 0.0 && z == 0.0) {
+                    u = math.normalize(math.vec3(x, y, z))
+                    r = math.compute_quat_between_unit_vectors(v, u)
+                    ensure("the rotation between two directions is valid", math.is_valid_quat(r))
+                    w = math.rotate_vector(r, v)
+                    ensure_small("the triple product identity", math.dot(r.v, math.cross(u, w)) - math.scalar_triple_product(r.v, u, w), math.EPSILON)
+                    // Lots of round-off at large angles.
+                    ensure_small("the rotation lands on the target, x", w.x - u.x, 0.001)
+                    ensure_small("... y", w.y - u.y, 0.001)
+                    ensure_small("... z", w.z - u.z, 0.001)
+                    twist = math.get_twist_angle(r)
+                    ensure("the twist angle is in range", 0.0 - math.PI <= twist && twist <= math.PI)
+                    pairs = pairs + 1
+                }
+                x = x + 0.02
+            }
+            y = y + 0.02
+        }
+        z = z + 0.02
+    }
+
+    q = math.quat(0.0 - 0.0558656752, 0.0 - 0.188799798, 0.00689807534, 0.0 - 0.980401039)
+    twist = math.get_twist_angle(q)
+    ensure("a negative-polarity twist stays in range", 0.0 - math.PI <= twist && twist <= math.PI)
+    swing = math.get_swing_angle(q)
+    ensure("the swing angle is in range", 0.0 <= swing && swing <= math.PI)
+
+    // Matrices.
+    m = math.matrix3(math.vec3(3.0, 1.0, 0.0 - 1.0), math.vec3(0.0 - 1.0, 3.0, 1.0), math.vec3(1.0, 0.0 - 1.0, 3.0))
+    mi = math.invert_matrix(m)
+    id = math.mul_mm(m, mi)
+    ensure_small("m * inv(m) is the identity, diagonal", id.cx.x - 1.0, 100.0 * math.EPSILON)
+    ensure_small("m * inv(m) is the identity, off-diagonal", id.cy.x, 100.0 * math.EPSILON)
+    ensure_small("... and the last diagonal", id.cz.z - 1.0, 100.0 * math.EPSILON)
+    b = math.vec3(1.0, 2.0, 3.0)
+    sol = math.solve3(m, b)
+    back = math.mul_mv(m, sol)
+    ensure_small("solve3 solves, x", back.x - b.x, 100.0 * math.EPSILON)
+    ensure_small("solve3 solves, y", back.y - b.y, 100.0 * math.EPSILON)
+    ensure_small("solve3 solves, z", back.z - b.z, 100.0 * math.EPSILON)
+    mt = math.invert_t(m)
+    tt = math.transpose(mi)
+    ensure_small("invert_t is the transposed inverse", mt.cx.y - tt.cx.y, 100.0 * math.EPSILON)
+    singular = math.matrix3(math.vec3(1.0, 2.0, 3.0), math.vec3(2.0, 4.0, 6.0), math.vec3(0.0, 1.0, 0.0))
+    ensure("a singular matrix inverts to nothing", math.det(math.invert_matrix(singular)) == 0.0)
+
+    // A rotation as a matrix and back.
+    q = math.normalize_quat(math.quat(0.3, 0.0 - 0.4, 0.5, 0.7))
+    rm = math.make_matrix_from_quat(q)
+    ensure_small("a rotation matrix has determinant one", math.det(rm) - 1.0, 10.0 * math.EPSILON)
+    rv = math.mul_mv(rm, b)
+    qv = math.rotate_vector(q, b)
+    ensure_small("the matrix rotates as the quaternion, x", rv.x - qv.x, 10.0 * math.EPSILON)
+    ensure_small("... z", rv.z - qv.z, 10.0 * math.EPSILON)
+    qb = math.make_quat_from_matrix(rm)
+    if math.dot_quat(qb, q) < 0.0 { qb = math.negate_quat(qb) }
+    ensure_small("the quaternion comes back from its matrix, x", qb.v.x - q.v.x, 10.0 * math.EPSILON)
+    ensure_small("... s", qb.s - q.s, 10.0 * math.EPSILON)
+
+    // Inertia: a sphere's is the same about every axis, a box's follows
+    // its sides, a point mass offset adds the parallel-axis terms.
+    si = math.sphere_inertia(2.0, 0.5)
+    ensure_small("a sphere's inertia", si.cx.x - 0.4 * 2.0 * 0.25, math.EPSILON)
+    bi = math.box_inertia(1.0, math.vec3(0.0 - 1.0, 0.0 - 2.0, 0.0 - 3.0), math.vec3(1.0, 2.0, 3.0))
+    ensure("a box's inertia is largest about its shortest side", bi.cx.x > bi.cz.z)
+    st = math.steiner(3.0, math.vec3(1.0, 0.0, 0.0))
+    ensure_small("an offset along x adds nothing about x", st.cx.x, math.EPSILON)
+    ensure_small("... and m d^2 about y", st.cy.y - 3.0, math.EPSILON)
+
+    // Boxes.
+    pts_block = calloc(9, 8)
+    pts = pts_block as float[]
+    pts[0] = 1.0
+    pts[1] = 2.0
+    pts[2] = 3.0
+    pts[3] = 0.0 - 1.0
+    pts[4] = 0.0
+    pts[5] = 5.0
+    pts[6] = 0.0
+    pts[7] = 0.0 - 4.0
+    pts[8] = 0.0
+    box = math.make_aabb(pts, 3, 0.5)
+    free(pts_block)
+    ensure("a point cloud's box holds every point, lower", box.lower.x == 0.0 - 1.5 && box.lower.y == 0.0 - 4.5 && box.lower.z == 0.0 - 0.5)
+    ensure("... upper", box.upper.x == 1.5 && box.upper.y == 2.5 && box.upper.z == 5.5)
+    ensure("the box is valid", math.is_valid_aabb(box) && math.is_sane_aabb(box))
+    inner = math.aabb(math.vec3(0.0, 0.0, 0.0), math.vec3(1.0, 1.0, 1.0))
+    ensure("a box contains a box inside it", math.aabb_contains(box, inner))
+    ensure("and not one outside", !math.aabb_contains(inner, box))
+    ensure("overlapping boxes overlap", math.aabb_overlaps(box, inner))
+    far = math.aabb(math.vec3(10.0, 10.0, 10.0), math.vec3(11.0, 11.0, 11.0))
+    ensure("separated boxes do not", !math.aabb_overlaps(box, far))
+    joined = math.aabb_union(inner, far)
+    ensure("a union spans both", joined.lower.x == 0.0 && joined.upper.x == 11.0)
+    ensure("the empty box unions to the other", math.aabb_union(math.aabb_empty(), far).lower.x == 10.0)
+    ensure_small("a unit cube's area is six", math.aabb_area(inner) - 6.0, math.EPSILON)
+    turned = math.aabb_transform(math.transform(math.vec3(0.0, 0.0, 0.0), math.make_quat_from_axis_angle(math.vec3(0.0, 0.0, 1.0), 0.25 * math.PI)), inner)
+    ensure("a turned box's box is wider than the box", turned.upper.x - turned.lower.x > 1.0 && turned.upper.x - turned.lower.x < 1.5)
+    ensure("the closest point to a box is clamped", math.closest_point_to_aabb(math.vec3(5.0, 0.5, 0.0 - 3.0), inner).x == 1.0)
+
+    // Segments.
+    cp = math.point_to_segment_distance(math.vec3(0.0, 0.0, 0.0), math.vec3(2.0, 0.0, 0.0), math.vec3(1.0, 1.0, 0.0))
+    ensure("the closest point on a segment is the projection", cp.x == 1.0 && cp.y == 0.0)
+    cp = math.point_to_segment_distance(math.vec3(0.0, 0.0, 0.0), math.vec3(2.0, 0.0, 0.0), math.vec3(5.0, 1.0, 0.0))
+    ensure("and an end past the end", cp.x == 2.0)
+    sd = math.segment_distance(math.vec3(0.0, 0.0, 0.0), math.vec3(2.0, 0.0, 0.0), math.vec3(1.0, 1.0, 0.0 - 1.0), math.vec3(1.0, 1.0, 1.0))
+    ensure_small("crossing segments meet above each other, fraction 1", sd.fraction1 - 0.5, 10.0 * math.EPSILON)
+    ensure_small("... fraction 2", sd.fraction2 - 0.5, 10.0 * math.EPSILON)
+    ensure_small("... a unit apart", math.distance(sd.point1, sd.point2) - 1.0, 10.0 * math.EPSILON)
+    ld = math.line_distance(math.vec3(0.0, 0.0, 0.0), math.vec3(1.0, 0.0, 0.0), math.vec3(0.0, 1.0, 5.0), math.vec3(0.0, 0.0, 1.0))
+    ensure_small("skew lines' closest points", ld.point1.x, 10.0 * math.EPSILON)
+    ensure_small("... on the second line", ld.point2.z, 10.0 * math.EPSILON)
+
+    // Validity.
+    ensure("a number is valid", math.is_valid_float(1.5))
+    inf = math.MAX_FLOAT * math.MAX_FLOAT * math.MAX_FLOAT * math.MAX_FLOAT * math.MAX_FLOAT * math.MAX_FLOAT * math.MAX_FLOAT * math.MAX_FLOAT * math.MAX_FLOAT
+    ensure("infinity is not", !math.is_valid_float(inf))
+    ensure("nor NaN", !math.is_valid_float(inf - inf))
+    ensure("a unit quaternion is valid", math.is_valid_quat(q))
+    ensure("an unnormalised one is not", !math.is_valid_quat(math.quat(1.0, 1.0, 1.0, 1.0)))
+    ensure("a plane with a unit normal is valid", math.is_valid_plane(math.plane(math.vec3(0.0, 1.0, 0.0), 2.0)))
+    ensure("one without is not", !math.is_valid_plane(math.plane(math.vec3(0.0, 2.0, 0.0), 2.0)))
+    ensure("a box beyond HUGE is not bounded", !math.is_bounded_aabb(math.aabb(math.vec3(0.0, 0.0, 0.0), math.vec3(1000000000.0, 0.0, 0.0))))
+    ensure("a perpendicular is perpendicular and unit", math.abs_float(math.dot(math.perp(v), v)) < 10.0 * math.EPSILON && math.is_normalized(math.perp(v)))
+    ensure("safe scale keeps a scale off zero", math.safe_scale(math.vec3(0.0, 0.0 - 0.001, 2.0)).y == 0.0 - math.MIN_SCALE)
+
+    println("math: ${checks} checks, ${pairs} direction pairs; cos/sin off libm by at most ${worst_cs}, atan2 by ${worst_atan}")
+    if failures == 0 {
+        println("math: all checks passed")
+    } else {
+        println("math: ${failures} failure(s)")
+    }
+}

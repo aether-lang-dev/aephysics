@@ -1,0 +1,43 @@
+---
+name: Test
+
+on:
+  push:
+    branches:
+      - main
+      - main
+  pull_request:
+
+jobs:
+  test:
+    name: aephysics tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout aephysics
+        uses: actions/checkout@v4
+
+      # The toolchain is built from aether's HEAD with its own install.sh
+      # into ~/.aether (the org's `make install` wants /usr/local, which a
+      # runner may not write), and cached under the commit it was built from.
+      - name: Resolve the Aether version
+        id: aether
+        run: echo "sha=$(git ls-remote https://github.com/aether-lang-dev/aether.git HEAD | cut -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache the Aether toolchain
+        uses: actions/cache@v4
+        with:
+          path: ~/.aether
+          key: aether-${{ runner.os }}-${{ steps.aether.outputs.sha }}
+
+      - name: Install the Aether toolchain
+        run: |
+          if [ -x "$HOME/.aether/bin/aetherc" ]; then
+            echo "Aether toolchain restored from cache; skipping the build."
+          else
+            git clone --depth 1 https://github.com/aether-lang-dev/aether.git "$RUNNER_TEMP/aether"
+            (cd "$RUNNER_TEMP/aether" && ./install.sh)
+          fi
+          echo "$HOME/.aether/bin" >> "$GITHUB_PATH"
+
+      - name: Run the tests with ae
+        run: scripts/test.sh

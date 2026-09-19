@@ -1,0 +1,768 @@
+// aephysics.core -- the containers and allocators under the engine.
+//
+// The bit set, id pool, hash set, growable arrays and the stack and arena
+// allocators, in the shape of Box3D's core (Erin Catto, MIT), the reference
+// this engine is measured against; names are the reference's without its
+// prefix, in snake case.
+//
+// Integers: Aether's int is 32 bits and its long 64, both signed. Box3D's
+// unsigned 32-bit words and 64-bit blocks are ints and longs here; the
+// bit operations are the same in two's complement, and where a logical
+// shift right is needed on a long (the hash), it is written out (lsr).
+//
+// Memory: Box3D's arrays are typed by a macro (b3Array(T)). Aether has no
+// generics, so a growable array of structs is a Buffer -- a block, a
+// stride, a count and a capacity -- that a caller reads through a typed
+// cast (`bodies = buffer.data as Body[]`) after every call that may grow
+// it. IntArray is the one typed array, since ids are what most arrays
+// hold. The allocation counters the original keeps (b3Alloc, b3Free with
+// sizes) are kept so a leak is a number.
+import std.string
+
+exports (
+    BitSet, IdPool, HashSet, IntArray, Buffer, Stack, Arena,
+    alloc, free_bytes, alloc_count, bytes_in_use,
+    is_power_of_2, bounding_power_of_2, round_up_power_of_2, lower_power_of_2_exponent,
+    clz32, ctz32, ctz64, pop_count64, lsr,
+    bitset_create, bitset_destroy, bitset_set_count_and_clear, bitset_grow, bitset_union,
+    bitset_set, bitset_set_grow, bitset_clear, bitset_get, bitset_count, bitset_bytes,
+    idpool_create, idpool_destroy, idpool_alloc, idpool_free, idpool_count, idpool_capacity,
+    key_hash, shape_pair_key, SHAPE_POWER, CHILD_POWER, MAX_SHAPES, MAX_CHILD_SHAPES,
+    set_create, set_destroy, set_clear, set_add, set_remove, set_contains, set_contains_hashed,
+    set_count, set_bytes,
+    ints_create, ints_destroy, ints_reserve, ints_push, ints_pop, ints_get, ints_set, ints_clear,
+    ints_remove_swap, ints_count, ints_capacity, ints_bytes,
+    buffer_create, buffer_destroy, buffer_reserve, buffer_push, buffer_pop, buffer_clear,
+    buffer_remove_swap, buffer_count, buffer_capacity, buffer_bytes,
+    stack_create, stack_destroy, stack_alloc, stack_free, stack_capacity, stack_allocation,
+    stack_max_allocation,
+    arena_create, arena_destroy, arena_bump, arena_sync, arena_capacity, arena_peak
+)
+
+extern calloc(count: int, size: int) -> ptr
+extern malloc(size: int) -> ptr
+extern realloc(block: ptr, size: int) -> ptr
+extern free(block: ptr)
+extern memset(block: ptr, value: int, size: int) -> ptr
+extern memcpy(dst: ptr, src: ptr, size: int) -> ptr
+extern memmove(dst: ptr, src: ptr, size: int) -> ptr
+
+// --- allocation, counted ---------------------------------------------------
+
+var g_alloc_count = 0
+var g_bytes_in_use = 0
+
+// Box3D's b3Alloc: zeroed, 16-byte aligned by the C runtime's own promise,
+// and counted, so a leak is a number a test reads.
+alloc(size: int) -> ptr {
+    if size <= 0 { return null }
+    g_alloc_count = g_alloc_count + 1
+    g_bytes_in_use = g_bytes_in_use + size
+    return calloc(1, size)
+}
+
+free_bytes(block: ptr, size: int) {
+    if block == null { return }
+    g_alloc_count = g_alloc_count - 1
+    g_bytes_in_use = g_bytes_in_use - size
+    free(block)
+}
+
+alloc_count() -> int { return g_alloc_count }
+bytes_in_use() -> int { return g_bytes_in_use }
+
+// --- bits (ctz.h) ----------------------------------------------------------
+
+// Leading zeros of a 32-bit word; 32 for zero.
+clz32(value: int) -> int {
+    if value == 0 { return 32 }
+    n = 0
+    v = value
+    // Compare as a long to keep the sign bit out of the way.
+    lv = (v as long) & 4294967295
+    while lv < 2147483648 {
+        lv = lv << 1
+        n = n + 1
+    }
+    return n
+}
+
+// Trailing zeros of a 32-bit word; 32 for zero.
+ctz32(value: int) -> int {
+    if value == 0 { return 32 }
+    n = 0
+    v = value
+    while (v & 1) == 0 {
+        v = v >> 1
+        n = n + 1
+    }
+    return n
+}
+
+// Trailing zeros of a 64-bit block; 64 for zero.
+ctz64(block: long) -> int {
+    if block == 0 { return 64 }
+    n = 0
+    v = block
+    while (v & 1) == 0 {
+        v = v >> 1
+        n = n + 1
+    }
+    return n
+}
+
+// Set bits of a 64-bit block.
+pop_count64(block: long) -> int {
+    n = 0
+    v = block
+    while v != 0 {
+        // Clearing the lowest set bit; the sign bit is one bit like the rest.
+        v = v & (v - 1)
+        n = n + 1
+    }
+    return n
+}
+
+// A logical shift right of a long by 1..63: what an unsigned shift does,
+// where the language's shift is arithmetic.
+lsr(value: long, shift: int) -> long {
+    if shift <= 0 { return value }
+    if shift >= 64 { return 0 }
+    mask = ((1 as long) << (64 - shift)) - 1
+    return (value >> shift) & mask
+}
+
+is_power_of_2(x: int) -> bool { return x > 0 && (x & (x - 1)) == 0 }
+
+// The exponent of the smallest power of two at or above x.
+bounding_power_of_2(x: int) -> int {
+    if x <= 1 { return 0 }
+    return 32 - clz32(x - 1)
+}
+
+round_up_power_of_2(x: int) -> int {
+    if x <= 1 { return 1 }
+    return 1 << (32 - clz32(x - 1))
+}
+
+// The exponent of the largest power of two at or below x (x > 0).
+lower_power_of_2_exponent(x: int) -> int {
+    return 31 - clz32(x)
+}
+
+// --- bit set ---------------------------------------------------------------
+
+// Fast operations on large arrays of bits: 64 to a block.
+struct BitSet {
+    bits: ptr            // long[]
+    block_capacity: int
+    block_count: int
+}
+
+blocks_for(bit_count: int) -> int { return (bit_count + 63) / 64 }
+
+bitset_create(bit_capacity: int) -> BitSet {
+    capacity = blocks_for(bit_capacity)
+    if capacity < 1 { capacity = 1 }
+    return BitSet { bits: alloc(capacity * 8), block_capacity: capacity, block_count: 0 }
+}
+
+bitset_destroy(s: *BitSet) {
+    free_bytes(s.bits, s.block_capacity * 8)
+    s.bits = null
+    s.block_capacity = 0
+    s.block_count = 0
+}
+
+// Room for `bit_count` bits, every one cleared; grown by half again when
+// it has to be, so a set that grows a little each step is not reallocated
+// each step.
+bitset_set_count_and_clear(s: *BitSet, bit_count: int) {
+    count = blocks_for(bit_count)
+    if s.block_capacity < count {
+        bitset_destroy(s)
+        grown = bitset_create(bit_count + (bit_count >> 1))
+        s.bits = grown.bits
+        s.block_capacity = grown.block_capacity
+    }
+    s.block_count = count
+    memset(s.bits, 0, count * 8)
+}
+
+bitset_grow(s: *BitSet, block_count: int) {
+    if block_count > s.block_capacity {
+        old_capacity = s.block_capacity
+        s.block_capacity = block_count + block_count / 2
+        fresh = alloc(s.block_capacity * 8)
+        memcpy(fresh, s.bits, old_capacity * 8)
+        free_bytes(s.bits, old_capacity * 8)
+        s.bits = fresh
+    }
+    s.block_count = block_count
+}
+
+// a |= b, over sets of the same block count.
+bitset_union(a: *BitSet, b: *BitSet) {
+    count = a.block_count
+    if b.block_count < count { count = b.block_count }
+    ab = a.bits as long[]
+    bb = b.bits as long[]
+    i = 0
+    while i < count {
+        ab[i] = ab[i] | bb[i]
+        i = i + 1
+    }
+}
+
+bitset_set(s: *BitSet, bit: int) {
+    block = bit / 64
+    if block >= s.block_count { return }
+    bits = s.bits as long[]
+    bits[block] = bits[block] | ((1 as long) << (bit % 64))
+}
+
+bitset_set_grow(s: *BitSet, bit: int) {
+    block = bit / 64
+    if block >= s.block_count { bitset_grow(s, block + 1) }
+    bits = s.bits as long[]
+    bits[block] = bits[block] | ((1 as long) << (bit % 64))
+}
+
+bitset_clear(s: *BitSet, bit: int) {
+    block = bit / 64
+    if block >= s.block_count { return }
+    bits = s.bits as long[]
+    mask = (1 as long) << (bit % 64)
+    bits[block] = bits[block] - (bits[block] & mask)
+}
+
+bitset_get(s: *BitSet, bit: int) -> bool {
+    block = bit / 64
+    if block >= s.block_count { return false }
+    bits = s.bits as long[]
+    return (bits[block] & ((1 as long) << (bit % 64))) != 0
+}
+
+bitset_count(s: *BitSet) -> int {
+    bits = s.bits as long[]
+    total = 0
+    i = 0
+    while i < s.block_count {
+        total = total + pop_count64(bits[i])
+        i = i + 1
+    }
+    return total
+}
+
+bitset_bytes(s: *BitSet) -> int { return s.block_capacity * 8 }
+
+// --- int array (container.h for ints) --------------------------------------
+
+struct IntArray {
+    data: ptr        // int[]
+    count: int
+    capacity: int
+}
+
+ints_create(capacity: int) -> IntArray {
+    a = IntArray { data: null, count: 0, capacity: 0 }
+    if capacity > 0 { ints_reserve(&a, capacity) }
+    return a
+}
+
+ints_destroy(a: *IntArray) {
+    free_bytes(a.data, a.capacity * 4)
+    a.data = null
+    a.count = 0
+    a.capacity = 0
+}
+
+ints_reserve(a: *IntArray, capacity: int) {
+    if capacity <= a.capacity { return }
+    fresh = alloc(capacity * 4)
+    if a.data != null {
+        memcpy(fresh, a.data, a.count * 4)
+        free_bytes(a.data, a.capacity * 4)
+    }
+    a.data = fresh
+    a.capacity = capacity
+}
+
+ints_push(a: *IntArray, value: int) {
+    if a.count == a.capacity {
+        grown = 8
+        if a.capacity > 0 { grown = a.capacity + a.capacity / 2 }
+        ints_reserve(a, grown)
+    }
+    data = a.data as int[]
+    data[a.count] = value
+    a.count = a.count + 1
+}
+
+ints_pop(a: *IntArray) -> int {
+    a.count = a.count - 1
+    data = a.data as int[]
+    return data[a.count]
+}
+
+ints_get(a: *IntArray, index: int) -> int {
+    data = a.data as int[]
+    return data[index]
+}
+
+ints_set(a: *IntArray, index: int, value: int) {
+    data = a.data as int[]
+    data[index] = value
+}
+
+ints_clear(a: *IntArray) { a.count = 0 }
+
+// Removes by moving the last in: the order is not kept, the way
+// b3Array_RemoveSwap does not keep it. Returns the moved index (count) so
+// a caller tracking positions can fix the one that moved.
+ints_remove_swap(a: *IntArray, index: int) -> int {
+    data = a.data as int[]
+    moved = a.count - 1
+    if index != moved { data[index] = data[moved] }
+    a.count = moved
+    return moved
+}
+
+ints_count(a: *IntArray) -> int { return a.count }
+ints_capacity(a: *IntArray) -> int { return a.capacity }
+ints_bytes(a: *IntArray) -> int { return a.capacity * 4 }
+
+// --- buffer: a growable array of anything -----------------------------------
+
+// A growable array of `stride`-byte items. Read it through a cast of
+// `data` to the item type's array, after any call that may grow it.
+struct Buffer {
+    data: ptr
+    stride: int
+    count: int
+    capacity: int
+}
+
+buffer_create(stride: int, capacity: int) -> Buffer {
+    b = Buffer { data: null, stride: stride, count: 0, capacity: 0 }
+    if capacity > 0 { buffer_reserve(&b, capacity) }
+    return b
+}
+
+buffer_destroy(b: *Buffer) {
+    free_bytes(b.data, b.capacity * b.stride)
+    b.data = null
+    b.count = 0
+    b.capacity = 0
+}
+
+buffer_reserve(b: *Buffer, capacity: int) {
+    if capacity <= b.capacity { return }
+    fresh = alloc(capacity * b.stride)
+    if b.data != null {
+        memcpy(fresh, b.data, b.count * b.stride)
+        free_bytes(b.data, b.capacity * b.stride)
+    }
+    b.data = fresh
+    b.capacity = capacity
+}
+
+// Room for one more item, zeroed; its index, for the caller to write it
+// through the typed view.
+buffer_push(b: *Buffer) -> int {
+    if b.count == b.capacity {
+        grown = 8
+        if b.capacity > 0 { grown = b.capacity + b.capacity / 2 }
+        buffer_reserve(b, grown)
+    }
+    index = b.count
+    b.count = index + 1
+    return index
+}
+
+buffer_pop(b: *Buffer) { if b.count > 0 { b.count = b.count - 1 } }
+buffer_clear(b: *Buffer) { b.count = 0 }
+
+// The last item moved into `index`; the moved index returned.
+buffer_remove_swap(b: *Buffer, index: int) -> int {
+    moved = b.count - 1
+    if index != moved {
+        memcpy(b.data + index * b.stride, b.data + moved * b.stride, b.stride)
+    }
+    b.count = moved
+    return moved
+}
+
+buffer_count(b: *Buffer) -> int { return b.count }
+buffer_capacity(b: *Buffer) -> int { return b.capacity }
+buffer_bytes(b: *Buffer) -> int { return b.capacity * b.stride }
+
+// --- id pool ---------------------------------------------------------------
+
+// Ids handed out densely and recycled, so an id indexes an array.
+struct IdPool {
+    free_ids: IntArray
+    next_index: int
+}
+
+idpool_create() -> IdPool { return IdPool { free_ids: ints_create(32), next_index: 0 } }
+
+idpool_destroy(p: *IdPool) {
+    ints_destroy(&p.free_ids)
+    p.next_index = 0
+}
+
+idpool_alloc(p: *IdPool) -> int {
+    if p.free_ids.count > 0 { return ints_pop(&p.free_ids) }
+    id = p.next_index
+    p.next_index = id + 1
+    return id
+}
+
+idpool_free(p: *IdPool, id: int) {
+    if id < 0 || id >= p.next_index { return }
+    ints_push(&p.free_ids, id)
+}
+
+idpool_count(p: *IdPool) -> int { return p.next_index - p.free_ids.count }
+idpool_capacity(p: *IdPool) -> int { return p.next_index }
+
+// --- hash set (table) ------------------------------------------------------
+
+// Shape pair keys pack two shape ids and a child index into 64 bits.
+const SHAPE_POWER = 22
+const CHILD_POWER = 20
+const MAX_SHAPES = 4194304
+const MAX_CHILD_SHAPES = 1048576
+
+// A good hash, because the keys are built from pairs of increasing
+// integers and xor alone collides. The murmur3 finaliser, with logical
+// shifts written out. The low 32 bits are the hash; zero is the empty
+// slot's mark, so a zero hash is nudged to one.
+key_hash(key: long) -> int {
+    h = key
+    h = h ^ lsr(h, 33)
+    h = h * (0 - 48043033244054079 as long)     // 0xff51afd7ed558ccd
+    h = h ^ lsr(h, 33)
+    h = h * (0 - 4265267296055464877 as long)   // 0xc4ceb9fe1a85ec53
+    h = h ^ lsr(h, 33)
+    hash = (h & 4294967295) as int
+    if hash == 0 { hash = 1 }
+    return hash
+}
+
+// The key of a shape pair and a child shape, the smaller id first, so the
+// pair is the same key whichever way round it is asked for.
+shape_pair_key(s1: int, s2: int, c: int) -> long {
+    shape_mask = MAX_SHAPES - 1
+    child_mask = MAX_CHILD_SHAPES - 1
+    a = s1
+    b = s2
+    if s2 < s1 {
+        a = s2
+        b = s1
+    }
+    return (((a & shape_mask) as long) << (64 - SHAPE_POWER)) |
+           (((b & shape_mask) as long) << (64 - 2 * SHAPE_POWER)) |
+           ((c & child_mask) as long)
+}
+
+// One slot: a key and its hash; a hash of zero is an empty slot.
+struct SetItem {
+    key: long
+    hash: int
+}
+
+// Open addressing with linear probing over a power-of-two capacity.
+struct HashSet {
+    items: ptr       // SetItem[]
+    capacity: int
+    count: int
+}
+
+set_create(capacity: int) -> HashSet {
+    cap = 16
+    if capacity > 16 { cap = round_up_power_of_2(capacity) }
+    return HashSet { items: alloc(cap * sizeof(SetItem)), capacity: cap, count: 0 }
+}
+
+set_destroy(s: *HashSet) {
+    free_bytes(s.items, s.capacity * sizeof(SetItem))
+    s.items = null
+    s.count = 0
+    s.capacity = 0
+}
+
+set_clear(s: *HashSet) {
+    s.count = 0
+    memset(s.items, 0, s.capacity * sizeof(SetItem))
+}
+
+// The slot the key is in, or the empty slot it would go in.
+find_slot(s: *HashSet, key: long, hash: int) -> int {
+    mask = s.capacity - 1
+    index = hash & mask
+    items = s.items as SetItem[]
+    while items[index].hash != 0 && items[index].key != key {
+        index = (index + 1) & mask
+    }
+    return index
+}
+
+add_key_have_capacity(s: *HashSet, key: long, hash: int) {
+    index = find_slot(s, key, hash)
+    items = s.items as SetItem[]
+    items[index].key = key
+    items[index].hash = hash
+    s.count = s.count + 1
+}
+
+grow_table(s: *HashSet) {
+    old_capacity = s.capacity
+    old_items = s.items
+    s.count = 0
+    s.capacity = 2 * old_capacity
+    s.items = alloc(s.capacity * sizeof(SetItem))
+    old = old_items as SetItem[]
+    i = 0
+    while i < old_capacity {
+        if old[i].hash != 0 { add_key_have_capacity(s, old[i].key, old[i].hash) }
+        i = i + 1
+    }
+    free_bytes(old_items, old_capacity * sizeof(SetItem))
+}
+
+// True when the key was already in the set. A key of zero is the empty
+// slot's mark and cannot be stored.
+set_add(s: *HashSet, key: long) -> bool {
+    if key == 0 { return false }
+    hash = key_hash(key)
+    index = find_slot(s, key, hash)
+    items = s.items as SetItem[]
+    if items[index].hash != 0 { return true }
+    if 2 * s.count >= s.capacity { grow_table(s) }
+    add_key_have_capacity(s, key, hash)
+    return false
+}
+
+set_contains(s: *HashSet, key: long) -> bool {
+    if key == 0 { return false }
+    index = find_slot(s, key, key_hash(key))
+    items = s.items as SetItem[]
+    return items[index].key == key
+}
+
+// With the hash already in hand, for a batch that prefetches slots.
+set_contains_hashed(s: *HashSet, key: long, hash: int) -> bool {
+    index = find_slot(s, key, hash)
+    items = s.items as SetItem[]
+    return items[index].key == key
+}
+
+// True when the key was there. The hole is closed by moving later items
+// of the same run back (https://en.wikipedia.org/wiki/Open_addressing).
+set_remove(s: *HashSet, key: long) -> bool {
+    if key == 0 { return false }
+    hash = key_hash(key)
+    i = find_slot(s, key, hash)
+    items = s.items as SetItem[]
+    if items[i].hash == 0 { return false }
+    items[i].key = 0
+    items[i].hash = 0
+    s.count = s.count - 1
+
+    mask = s.capacity - 1
+    j = i
+    filling = true
+    while filling {
+        j = (j + 1) & mask
+        if items[j].hash == 0 {
+            filling = false
+        } else {
+            // k is where j's hash wants it; j stays if k lies cyclically in (i, j].
+            k = items[j].hash & mask
+            stays = false
+            if i <= j {
+                if i < k && k <= j { stays = true }
+            } else {
+                if i < k || k <= j { stays = true }
+            }
+            if !stays {
+                items[i] = items[j]
+                items[j].key = 0
+                items[j].hash = 0
+                i = j
+            }
+        }
+    }
+    return true
+}
+
+set_count(s: *HashSet) -> int { return s.count }
+set_bytes(s: *HashSet) -> int { return s.capacity * sizeof(SetItem) }
+
+// --- stack allocator -------------------------------------------------------
+
+// A LIFO scratch allocator: what a step allocates it frees in reverse
+// order, so the memory is one block and a bump index. An allocation past
+// the block's end falls back to the heap and the block grows for next
+// time, at the same interface.
+const MAX_STACK_ENTRIES = 32
+const STACK_ALIGNMENT = 16
+
+struct StackEntry {
+    data: ptr
+    size: int
+    used_malloc: bool
+}
+
+struct Stack {
+    memory: ptr
+    capacity: int
+    index: int
+    allocation: int
+    max_allocation: int
+    entries: ptr         // StackEntry[MAX_STACK_ENTRIES]
+    entry_count: int
+}
+
+stack_create(capacity: int) -> Stack {
+    return Stack { memory: alloc(capacity), capacity: capacity, index: 0, allocation: 0, max_allocation: 0,
+                   entries: alloc(MAX_STACK_ENTRIES * sizeof(StackEntry)), entry_count: 0 }
+}
+
+stack_destroy(s: *Stack) {
+    free_bytes(s.memory, s.capacity)
+    free_bytes(s.entries, MAX_STACK_ENTRIES * sizeof(StackEntry))
+    s.memory = null
+    s.entries = null
+    s.capacity = 0
+    s.index = 0
+    s.entry_count = 0
+}
+
+stack_alloc(s: *Stack, size: int) -> ptr {
+    if s.entry_count >= MAX_STACK_ENTRIES { return null }
+    entries = s.entries as StackEntry[]
+    aligned = (size + STACK_ALIGNMENT - 1) & (0 - STACK_ALIGNMENT)
+    entry = StackEntry { data: null, size: aligned, used_malloc: false }
+    if s.index + aligned > s.capacity {
+        // Past the block: the heap, and the block grows on the next create.
+        entry.data = alloc(aligned)
+        entry.used_malloc = true
+    } else {
+        entry.data = s.memory + s.index
+        memset(entry.data, 0, aligned)
+        s.index = s.index + aligned
+    }
+    s.allocation = s.allocation + aligned
+    if s.allocation > s.max_allocation { s.max_allocation = s.allocation }
+    entries[s.entry_count] = entry
+    s.entry_count = s.entry_count + 1
+    return entry.data
+}
+
+// Frees the last allocation only: the stack is a stack.
+stack_free(s: *Stack, mem: ptr) {
+    if s.entry_count <= 0 { return }
+    entries = s.entries as StackEntry[]
+    entry = entries[s.entry_count - 1]
+    if entry.data != mem { return }
+    if entry.used_malloc {
+        free_bytes(mem, entry.size)
+    } else {
+        s.index = s.index - entry.size
+    }
+    s.allocation = s.allocation - entry.size
+    s.entry_count = s.entry_count - 1
+}
+
+stack_capacity(s: *Stack) -> int { return s.capacity }
+stack_allocation(s: *Stack) -> int { return s.allocation }
+stack_max_allocation(s: *Stack) -> int { return s.max_allocation }
+
+// --- arena -----------------------------------------------------------------
+
+// A bump allocator for a step's scratch, freed all at once by a sync: no
+// per-allocation free at all. An allocation past the block goes to the
+// heap and is counted, and the sync grows the block to the step's peak so
+// the next step fits.
+const ARENA_ALIGNMENT = 16
+
+struct Arena {
+    memory: ptr
+    capacity: int
+    index: int
+    max_index: int
+    overflows: Buffer    // of OverflowBlock
+    overflow_bytes: int
+    peak_demand: int
+}
+
+struct OverflowBlock {
+    data: ptr
+    size: int
+}
+
+arena_create(capacity: int) -> Arena {
+    cap = capacity
+    if cap < ARENA_ALIGNMENT { cap = ARENA_ALIGNMENT }
+    return Arena { memory: alloc(cap), capacity: cap, index: 0, max_index: 0,
+                   overflows: buffer_create(sizeof(OverflowBlock), 4), overflow_bytes: 0, peak_demand: 0 }
+}
+
+arena_destroy(a: *Arena) {
+    release_overflows(a)
+    buffer_destroy(&a.overflows)
+    free_bytes(a.memory, a.capacity)
+    a.memory = null
+    a.capacity = 0
+    a.index = 0
+}
+
+release_overflows(a: *Arena) {
+    blocks = a.overflows.data as OverflowBlock[]
+    i = 0
+    while i < a.overflows.count {
+        free_bytes(blocks[i].data, blocks[i].size)
+        i = i + 1
+    }
+    buffer_clear(&a.overflows)
+    a.overflow_bytes = 0
+}
+
+// `size` bytes, aligned, zeroed; from the block while it lasts, then the
+// heap.
+arena_bump(a: *Arena, size: int) -> ptr {
+    if size <= 0 { return null }
+    aligned = (a.index + ARENA_ALIGNMENT - 1) & (0 - ARENA_ALIGNMENT)
+    if aligned + size > a.capacity {
+        block = alloc(size)
+        at = buffer_push(&a.overflows)
+        blocks = a.overflows.data as OverflowBlock[]
+        blocks[at] = OverflowBlock { data: block, size: size }
+        a.overflow_bytes = a.overflow_bytes + size
+        return block
+    }
+    a.index = aligned + size
+    if a.index > a.max_index { a.max_index = a.index }
+    return a.memory + aligned
+}
+
+// The end of a step: everything freed, and the block regrown to the
+// step's peak demand when it overflowed.
+arena_sync(a: *Arena) {
+    demand = a.max_index + a.overflow_bytes
+    if demand > a.peak_demand { a.peak_demand = demand }
+    release_overflows(a)
+    if a.peak_demand > a.capacity {
+        free_bytes(a.memory, a.capacity)
+        a.capacity = a.peak_demand + a.peak_demand / 2
+        a.memory = alloc(a.capacity)
+    }
+    a.index = 0
+    a.max_index = 0
+}
+
+arena_capacity(a: *Arena) -> int { return a.capacity }
+arena_peak(a: *Arena) -> int { return a.peak_demand }
