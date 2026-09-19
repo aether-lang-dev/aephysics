@@ -169,3 +169,25 @@ the cache warm -- the state a resting stack is in -- the port is at parity;
 the cold separating axis test is 1.6x, the reference's being SIMD four
 edge pairs at a time, which is the wide path to consider if a step
 benchmark ever shows the cold SAT.
+
+## triangle_manifold
+
+`bench/triangle.ae` and `bench/triangle_box3d.c`: 20,000 triangle-hull
+collisions of a box at a hundred attitudes sinking onto a big triangle
+with a cold SAT cache each time; 20,000 of a box resting on a creeping
+triangle with the cache carried; 20,000 triangle-capsule collisions of a
+capsule swung across a triangle and its edge; 20,000 triangle-sphere
+collisions of a sphere swept over the triangle and off it.
+
+| phase | aephysics | Box3D |
+|---|---|---|
+| 20,000 triangle-hull, cold cache | 2.8 ms | **2.6** |
+| 20,000 triangle-hull, warm cache | 2.6 | **2.4** |
+| 20,000 triangle-capsule | 5.1 | **3.8** |
+| 20,000 triangle-sphere | **0.32** | 0.61 |
+
+The same manifolds come out: 39,536 / 80,000 / 29,778 / 6,422 contact
+points, 19,999 cache hits, equal separation sums. Triangle against hull
+is within 10% of the reference both cold and warm; the capsule is 1.35x
+(its GJK); the sphere, which is the closest point on a triangle and
+nothing else, is faster here.
