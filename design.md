@@ -34,25 +34,31 @@ started until its tests pass.
    scene (same hits, height, area ratio), insert faster, ray cast 1.9x.
    Save/load not ported; the atomic moved-marking waits for the parallel
    layer.
-4. **collision, static**: `aabb`, `hull` (quickhull, 3,100 lines),
+4. **hull** (done): quickhull as `aephysics.hull`, the builder's
+   pointers as indices with the intrusive lists chained through the
+   pools and their sentinels in extra slots, int half-edge indices, no
+   SOA mirrors, the box hull a heap block. 438 checks from test_hull.c
+   at the reference's tolerances; the same hulls on the benchmark
+   scenes at 1.6-2x its time.
+5. **collision, static**: `aabb`,
    `distance` (GJK, shape cast, segment distance), `manifold` and
    `convex_manifold` (sphere/capsule/hull contact manifolds),
    `triangle_manifold`, `mesh`, `height_field`, `shape` (mass properties,
    ray and shape casts per shape).
    Tests: `test_collision`, `test_distance`, `test_hull`, `test_manifold`,
    `test_sat`, `test_shape`, `test_mesh`, `test_height_field`.
-5. **dynamics**: `body`, `contact`, `constraint_graph` (graph colouring),
+6. **dynamics**: `body`, `contact`, `constraint_graph` (graph colouring),
    `solver_set`, `island`, `solver` (the Soft Step: sub-stepping, relax
    iterations, restitution), `contact_solver` (scalar first; the wide SIMD
    path second, measured), the joints (revolute, prismatic, distance,
    motor, weld, wheel, spherical), `sensor`, `mover` (the character mover),
    `physics_world`. Tests: `test_body`, `test_joint`, `test_world`,
    `test_mover`, `test_determinism`, `test_large_world`.
-6. **parallel**: `parallel_for` and the scheduler over Aether's actors;
+7. **parallel**: `parallel_for` and the scheduler over Aether's actors;
    the benchmarks by thread count as the original records them.
-7. **recording and replay**, `world_snapshot`: last, since they are the
+8. **recording and replay**, `world_snapshot`: last, since they are the
    tooling and not the engine.
-8. **benchmarks**: `reference/benchmark/main.c`'s nine scenes ported, run
+9. **benchmarks**: `reference/benchmark/main.c`'s nine scenes ported, run
    against the C build on the same machine, recorded under `benchmark/`.
 
 ## Measures

@@ -1,0 +1,98 @@
+// The hull builder on the same scenes as bench/hull_box3d.c: 200 hulls
+// of 64 sphere points capped at 32 vertices, 20 hulls of 4,096 points
+// inside a cube (the merge churn), and 2,000 boxes. Single thread, wall
+// time per phase. Same random sequence as the reference's.
+import std.string
+import std.os
+import aephysics.math
+import aephysics.hull
+
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+extern sin(x: float) -> float
+extern cos(x: float) -> float
+extern sqrt(x: float) -> float
+
+clock() -> long { return os.now_monotonic_ns() }
+ms(ns: long) -> float { return (ns as float) / 1000000.0 }
+
+var xseed = 12345
+
+unit_random() -> float {
+    xseed = xseed ^ (xseed << 13)
+    xseed = xseed ^ (((xseed >> 17) & 32767))
+    xseed = xseed ^ (xseed << 5)
+    return ((xseed & 32767) as float) / 32767.0
+}
+
+fill_sphere(points: Vec3[], count: int) {
+    i = 0
+    while i < count {
+        u1 = unit_random()
+        u2 = 2.0 * math.PI * unit_random()
+        u3 = 2.0 * math.PI * unit_random()
+        s1 = sqrt(1.0 - u1)
+        s2 = sqrt(u1)
+        points[i] = math.vec3(s1 * sin(u2), s1 * cos(u2), s2 * sin(u3))
+        i = i + 1
+    }
+}
+
+fill_cube(points: Vec3[], count: int) {
+    i = 0
+    while i < count {
+        points[i] = math.vec3(2.0 * unit_random() - 1.0, 2.0 * unit_random() - 1.0, 2.0 * unit_random() - 1.0)
+        i = i + 1
+    }
+    c = 0
+    while c < 8 {
+        x = 0.0 - 1.0
+        y = 0.0 - 1.0
+        z = 0.0 - 1.0
+        if (c & 1) != 0 { x = 1.0 }
+        if (c & 2) != 0 { y = 1.0 }
+        if (c & 4) != 0 { z = 1.0 }
+        points[count - 8 + c] = math.vec3(x, y, z)
+        c = c + 1
+    }
+}
+
+main() {
+    block = calloc(4096, sizeof(Vec3))
+    points = block as Vec3[]
+    vertices = 0
+    faces = 0
+    xseed = 12345
+    t0 = clock()
+    i = 0
+    while i < 200 {
+        fill_sphere(points, 64)
+        h = hull.create_hull(points, 64, 32)
+        vertices = vertices + h.vertex_count
+        faces = faces + h.face_count
+        hull.destroy_hull(h)
+        i = i + 1
+    }
+    t1 = clock()
+    i = 0
+    while i < 20 {
+        fill_cube(points, 4096)
+        h = hull.create_hull(points, 4096, 64)
+        vertices = vertices + h.vertex_count
+        faces = faces + h.face_count
+        hull.destroy_hull(h)
+        i = i + 1
+    }
+    t2 = clock()
+    volume = 0.0
+    i = 0
+    while i < 2000 {
+        box = hull.make_box_hull(0.5 + 0.001 * (i as float), 0.5, 0.5)
+        volume = volume + box.volume
+        hull.destroy_hull(box)
+        i = i + 1
+    }
+    t3 = clock()
+    println("aephysics hull: 200 spheres (64 -> 32) ${ms(t1 - t0)} ms, 20 cubes (4096 -> 8) ${ms(t2 - t1)} ms, 2000 boxes ${ms(t3 - t2)} ms, ${vertices} vertices, ${faces} faces, box volume ${volume}")
+    free(block)
+}

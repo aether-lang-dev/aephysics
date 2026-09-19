@@ -103,3 +103,24 @@ SSE2 box tests and 24-byte float boxes show against the port's scalar
 tests and 48-byte double boxes; that is the number for the native wide
 path to beat, if the whole-step benchmark says the tree's ray cast
 matters.
+
+## hull
+
+`bench/hull.ae` and `bench/hull_box3d.c`: 200 hulls of 64 points on a
+sphere capped at 32 vertices, 20 hulls of 4,096 points inside a cube with
+the corners stamped last (every interior point through the conflict lists,
+most cone faces merged out), and 2,000 box hulls. The same random sequence
+on both.
+
+| phase | aephysics | Box3D |
+|---|---|---|
+| 200 sphere hulls, 64 points to 32 | 4.7 ms | **2.9** |
+| 20 cube hulls, 4,096 points to 8 | 5.2 | **2.5** |
+| 2,000 box hulls | 2.0 | **0.17** |
+
+Both produce 6,554 vertices and 12,106 faces in total: the same hulls.
+The builder runs at 1.6-2x the reference's time (doubles, indices in
+place of pointers, structs passed by value); the box hull is a heap block
+here where the reference's is a stack value, so its cost is the
+allocation and the hash. Hull construction is a load-time cost, not a
+per-step one, so this is recorded rather than chased.

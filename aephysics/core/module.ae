@@ -23,7 +23,7 @@ exports (
     BitSet, IdPool, HashSet, IntArray, Buffer, Stack, Arena,
     alloc, free_bytes, alloc_count, bytes_in_use,
     is_power_of_2, bounding_power_of_2, round_up_power_of_2, lower_power_of_2_exponent,
-    clz32, ctz32, ctz64, pop_count64, lsr,
+    clz32, ctz32, ctz64, pop_count64, lsr, lsr32,
     bitset_create, bitset_destroy, bitset_set_count_and_clear, bitset_grow, bitset_union,
     bitset_set, bitset_set_grow, bitset_clear, bitset_get, bitset_count, bitset_bytes,
     idpool_create, idpool_destroy, idpool_alloc, idpool_free, idpool_count, idpool_capacity,
@@ -125,6 +125,9 @@ pop_count64(block: long) -> int {
 
 // A logical shift right of a long by 1..63: what an unsigned shift does,
 // where the language's shift is arithmetic.
+// The logical shift right of an int, for 0 < n < 32.
+lsr32(x: int, n: int) -> int { return (x >> n) & ((1 << (32 - n)) - 1) }
+
 lsr(value: long, shift: int) -> long {
     if shift <= 0 { return value }
     if shift >= 64 { return 0 }

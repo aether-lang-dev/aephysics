@@ -1,0 +1,731 @@
+// aephysics.hull against the reference's (Box3D's) test_hull.c: the cube
+// and the tetrahedron against analytic values, determinism, the vertex
+// limit, redundant input, cloning, the cylinder, the sphere reduction
+// and stress builds, the merge-churn stress, degenerate input, the
+// transformed box hull's geometry, and the 2D hull with its weld,
+// order-independence and simplification. Every allocation is freed by
+// the end.
+
+import std.string
+import aephysics.math
+import aephysics.core
+import aephysics.hull
+
+extern calloc(count: int, size: int) -> ptr
+extern exit(code: int)
+extern free(p: ptr)
+extern memcmp(a: ptr, b: ptr, size: int) -> int
+extern sin(x: float) -> float
+extern cos(x: float) -> float
+extern sqrt(x: float) -> float
+
+var failures = 0
+var checks = 0
+
+ensure(name: string, ok: bool) {
+    checks = checks + 1
+    if !ok {
+        println("hull: FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+small(name: string, value: float, tolerance: float) {
+    ensure("${name} (${value})", math.abs_float(value) < tolerance)
+}
+
+const FLT_EPSILON = 0.00000011920929
+
+cube_corners() -> ptr {
+    block = calloc(8, sizeof(Vec3))
+    p = block as Vec3[]
+    p[0] = math.vec3(1.0, 1.0, 1.0)
+    p[1] = math.vec3(0.0 - 1.0, 1.0, 1.0)
+    p[2] = math.vec3(0.0 - 1.0, 0.0 - 1.0, 1.0)
+    p[3] = math.vec3(1.0, 0.0 - 1.0, 1.0)
+    p[4] = math.vec3(1.0, 1.0, 0.0 - 1.0)
+    p[5] = math.vec3(0.0 - 1.0, 1.0, 0.0 - 1.0)
+    p[6] = math.vec3(0.0 - 1.0, 0.0 - 1.0, 0.0 - 1.0)
+    p[7] = math.vec3(1.0, 0.0 - 1.0, 0.0 - 1.0)
+    return block
+}
+
+euler(name: string, h: *HullData) {
+    ensure("${name}: Euler's identity", h.vertex_count - h.edge_count / 2 + h.face_count == 2)
+}
+
+// The cube against the analytic box hull.
+against_box(name: string, h: *HullData) {
+    ref = hull.make_box_hull(1.0, 1.0, 1.0)
+    small("${name}: volume", h.volume - ref.volume, 0.0001)
+    small("${name}: surface area", h.surface_area - ref.surface_area, 0.0001)
+    small("${name}: inner radius", h.inner_radius - ref.inner_radius, FLT_EPSILON)
+    small("${name}: center x", h.center.x - ref.center.x, 0.00001)
+    small("${name}: center y", h.center.y - ref.center.y, 0.00001)
+    small("${name}: center z", h.center.z - ref.center.z, 0.00001)
+    small("${name}: lower x", h.aabb.lower.x + 1.0, FLT_EPSILON)
+    small("${name}: lower y", h.aabb.lower.y + 1.0, FLT_EPSILON)
+    small("${name}: lower z", h.aabb.lower.z + 1.0, FLT_EPSILON)
+    small("${name}: upper x", h.aabb.upper.x - 1.0, FLT_EPSILON)
+    small("${name}: upper y", h.aabb.upper.y - 1.0, FLT_EPSILON)
+    small("${name}: upper z", h.aabb.upper.z - 1.0, FLT_EPSILON)
+    d = math.sub_mm(h.central_inertia, ref.central_inertia)
+    small("${name}: inertia xx", d.cx.x, 0.0001)
+    small("${name}: inertia yy", d.cy.y, 0.0001)
+    small("${name}: inertia zz", d.cz.z, 0.0001)
+    small("${name}: inertia xy", d.cx.y, 0.0001)
+    small("${name}: inertia xz", d.cx.z, 0.0001)
+    small("${name}: inertia yz", d.cy.z, 0.0001)
+    small("${name}: inertia yx", d.cy.x, 0.0001)
+    small("${name}: inertia zx", d.cz.x, 0.0001)
+    small("${name}: inertia zy", d.cz.y, 0.0001)
+    hull.destroy_hull(ref)
+}
+
+test_cube() {
+    block = cube_corners()
+    h = hull.create_hull(block as Vec3[], 8, 8)
+    ensure("cube: built", h != null)
+    if h == null {
+        free(block)
+        return
+    }
+    ensure("cube: 8 vertices", h.vertex_count == 8)
+    ensure("cube: 24 half-edges", h.edge_count == 24)
+    ensure("cube: 6 faces", h.face_count == 6)
+    euler("cube", h)
+    against_box("cube", h)
+    ensure("cube: valid", hull.is_valid_hull(h))
+    hull.destroy_hull(h)
+    free(block)
+}
+
+test_tetrahedron() {
+    block = calloc(4, sizeof(Vec3))
+    p = block as Vec3[]
+    p[0] = math.vec3(0.0, 0.0, 0.0)
+    p[1] = math.vec3(1.0, 0.0, 0.0)
+    p[2] = math.vec3(0.0, 1.0, 0.0)
+    p[3] = math.vec3(0.0, 0.0, 1.0)
+    h = hull.create_hull(p, 4, 4)
+    ensure("tetrahedron: built", h != null)
+    if h == null {
+        free(block)
+        return
+    }
+    ensure("tetrahedron: 4 vertices", h.vertex_count == 4)
+    ensure("tetrahedron: 12 half-edges", h.edge_count == 12)
+    ensure("tetrahedron: 4 faces", h.face_count == 4)
+    euler("tetrahedron", h)
+    expected_volume = 1.0 / 6.0
+    expected_area = 1.5 + 0.5 * sqrt(3.0)
+    expected_inner = 0.25 / sqrt(3.0)
+    small("tetrahedron: volume", h.volume - expected_volume, 0.00001)
+    small("tetrahedron: surface area", h.surface_area - expected_area, 0.00001)
+    small("tetrahedron: inner radius", h.inner_radius - expected_inner, 0.00001)
+    small("tetrahedron: center x", h.center.x - 0.25, 0.00001)
+    small("tetrahedron: center y", h.center.y - 0.25, 0.00001)
+    small("tetrahedron: center z", h.center.z - 0.25, 0.00001)
+    small("tetrahedron: lower", h.aabb.lower.x + h.aabb.lower.y + h.aabb.lower.z, FLT_EPSILON)
+    small("tetrahedron: upper x", h.aabb.upper.x - 1.0, FLT_EPSILON)
+    small("tetrahedron: upper y", h.aabb.upper.y - 1.0, FLT_EPSILON)
+    small("tetrahedron: upper z", h.aabb.upper.z - 1.0, FLT_EPSILON)
+    hull.destroy_hull(h)
+    free(block)
+}
+
+test_determinism() {
+    block = cube_corners()
+    h1 = hull.create_hull(block as Vec3[], 8, 8)
+    h2 = hull.create_hull(block as Vec3[], 8, 8)
+    ensure("determinism: both built", h1 != null && h2 != null)
+    if h1 != null && h2 != null {
+        ensure("determinism: same size", h1.byte_count == h2.byte_count)
+        ensure("determinism: hash is not zero", h1.hash != (0 as long))
+        ensure("determinism: same hash", h1.hash == h2.hash)
+        ensure("determinism: same bytes", memcmp(h1 as ptr, h2 as ptr, h1.byte_count) == 0)
+        ensure("determinism: compare agrees", hull.compare_hull_data(h1, h2))
+        hull.destroy_hull(h1)
+        hull.destroy_hull(h2)
+    }
+    free(block)
+}
+
+const SPHERE_N = 6
+
+test_max_vertex() {
+    count = SPHERE_N * SPHERE_N
+    block = calloc(count, sizeof(Vec3))
+    p = block as Vec3[]
+    index = 0
+    i = 0
+    while i < SPHERE_N {
+        theta = math.PI * (i as float) / ((SPHERE_N - 1) as float)
+        j = 0
+        while j < SPHERE_N {
+            phi = 2.0 * math.PI * (j as float) / (SPHERE_N as float)
+            p[index] = math.vec3(sin(theta) * cos(phi), sin(theta) * sin(phi), cos(theta))
+            index = index + 1
+            j = j + 1
+        }
+        i = i + 1
+    }
+    h1 = hull.create_hull(p, count, 8)
+    ensure("max vertex: built with a cap of 8", h1 != null)
+    if h1 != null {
+        ensure("max vertex: the cap held", h1.vertex_count <= 8)
+        euler("max vertex 8", h1)
+        hull.destroy_hull(h1)
+    }
+    h2 = hull.create_hull(p, count, 1)
+    ensure("max vertex: built with a cap below the floor", h2 != null)
+    if h2 != null {
+        ensure("max vertex: clamped up to 4", h2.vertex_count >= 4 && h2.vertex_count <= hull.MAX_HULL_VERTICES)
+        hull.destroy_hull(h2)
+    }
+    h3 = hull.create_hull(p, count, 1000)
+    ensure("max vertex: built with a cap above the ceiling", h3 != null)
+    if h3 != null {
+        ensure("max vertex: clamped down", h3.vertex_count >= 4 && h3.vertex_count <= hull.MAX_HULL_VERTICES)
+        euler("max vertex 1000", h3)
+        hull.destroy_hull(h3)
+    }
+    free(block)
+}
+
+test_redundant_input() {
+    block = calloc(20, sizeof(Vec3))
+    p = block as Vec3[]
+    corners = cube_corners()
+    c = corners as Vec3[]
+    i = 0
+    while i < 8 {
+        p[i] = c[i]
+        i = i + 1
+    }
+    free(corners)
+    p[8] = math.vec3(1.0, 1.0, 1.0)
+    p[9] = math.vec3(1.0, 1.0, 1.0)
+    p[10] = math.vec3(0.0, 0.0, 0.0)
+    p[11] = math.vec3(0.5, 0.0, 0.0)
+    p[12] = math.vec3(0.0, 0.5, 0.0)
+    p[13] = math.vec3(0.0, 0.0, 0.5)
+    p[14] = math.vec3(0.0 - 0.5, 0.0, 0.0)
+    p[15] = math.vec3(0.0, 0.0 - 0.5, 0.0)
+    p[16] = math.vec3(0.0, 0.0, 0.0 - 0.5)
+    p[17] = math.vec3(0.25, 0.25, 0.25)
+    p[18] = math.vec3(0.0 - 0.25, 0.0 - 0.25, 0.0 - 0.25)
+    p[19] = math.vec3(0.5, 0.5, 0.5)
+    h = hull.create_hull(p, 20, 8)
+    ensure("redundant: built", h != null)
+    if h != null {
+        ensure("redundant: 8 vertices", h.vertex_count == 8)
+        ensure("redundant: 24 half-edges", h.edge_count == 24)
+        ensure("redundant: 6 faces", h.face_count == 6)
+        against_box("redundant", h)
+        hull.destroy_hull(h)
+    }
+    free(block)
+}
+
+test_clone() {
+    block = cube_corners()
+    original = hull.create_hull(block as Vec3[], 8, 8)
+    ensure("clone: original built", original != null)
+    if original != null {
+        clone = hull.clone_hull(original)
+        ensure("clone: cloned", clone != null)
+        if clone != null {
+            ensure("clone: same size", clone.byte_count == original.byte_count)
+            ensure("clone: same bytes", memcmp(clone as ptr, original as ptr, original.byte_count) == 0)
+            hull.destroy_hull(clone)
+        }
+        // A mirrored, scaled and moved copy is still a valid cube of the scaled volume.
+        moved = hull.clone_and_transform_hull(original, Transform { p: math.vec3(1.0, 2.0, 3.0), q: math.quat_identity() }, math.vec3(0.0 - 2.0, 1.0, 3.0))
+        ensure("clone: transformed", moved != null)
+        if moved != null {
+            ensure("clone: transformed is valid", hull.is_valid_hull(moved))
+            small("clone: transformed volume", moved.volume - 8.0 * 6.0, 0.001)
+            small("clone: transformed center x", moved.center.x - 1.0, 0.00001)
+            small("clone: transformed center z", moved.center.z - 3.0, 0.00001)
+            hull.destroy_hull(moved)
+        }
+        hull.destroy_hull(original)
+    }
+    free(block)
+}
+
+test_cylinder() {
+    height = 2.0
+    radius = 1.0
+    sides = 8
+    y_offset = 0.0
+    h = hull.create_cylinder(height, radius, y_offset, sides)
+    ensure("cylinder: built", h != null)
+    if h == null { return }
+    ensure("cylinder: vertices", h.vertex_count == 2 * sides)
+    ensure("cylinder: half-edges", h.edge_count == 6 * sides)
+    ensure("cylinder: faces", h.face_count == sides + 2)
+    // Analytic n-gon prism values.
+    half_angle = math.PI / (sides as float)
+    cap_area = (sides as float) * 0.5 * radius * radius * sin(2.0 * half_angle)
+    chord = 2.0 * radius * sin(half_angle)
+    lateral = (sides as float) * chord * height
+    expected_volume = cap_area * height
+    expected_area = 2.0 * cap_area + lateral
+    expected_inner = radius * cos(half_angle)
+    small("cylinder: volume", (h.volume - expected_volume) / expected_volume, 0.0001)
+    small("cylinder: surface area", (h.surface_area - expected_area) / expected_area, 0.0001)
+    small("cylinder: inner radius", h.inner_radius - expected_inner, 0.00001)
+    small("cylinder: center x", h.center.x, 0.00001)
+    small("cylinder: center y", h.center.y - (y_offset + 0.5 * height), 0.00001)
+    small("cylinder: center z", h.center.z, 0.00001)
+    small("cylinder: lower y", h.aabb.lower.y - y_offset, FLT_EPSILON)
+    small("cylinder: upper y", h.aabb.upper.y - (y_offset + height), FLT_EPSILON)
+    hull.destroy_hull(h)
+
+    cone = hull.create_cone(1.0, 1.0, 0.5, 8)
+    ensure("cone: built", cone != null)
+    if cone != null {
+        ensure("cone: faces", cone.face_count == 10)
+        hull.destroy_hull(cone)
+    }
+    rock = hull.create_rock(1.0)
+    ensure("rock: built", rock != null)
+    if rock != null {
+        ensure("rock: valid", hull.is_valid_hull(rock))
+        ensure("rock: 10 vertices", rock.vertex_count == 10)
+        hull.destroy_hull(rock)
+    }
+}
+
+// XorShift32 + Shoemake's unit-vector recipe, the reference's.
+var xseed = 0
+
+xorshift() -> int {
+    xseed = xseed ^ (xseed << 13)
+    xseed = xseed ^ core.lsr32(xseed, 17)
+    xseed = xseed ^ (xseed << 5)
+    return xseed
+}
+
+unit_random() -> float {
+    return ((xorshift() & 32767) as float) / 32767.0
+}
+
+fill_sphere_sample(points: Vec3[], count: int, seed: int) {
+    xseed = seed
+    i = 0
+    while i < count {
+        u1 = unit_random()
+        u2 = 2.0 * math.PI * unit_random()
+        u3 = 2.0 * math.PI * unit_random()
+        s1 = sqrt(1.0 - u1)
+        s2 = sqrt(u1)
+        points[i] = math.vec3(s1 * sin(u2), s1 * cos(u2), s2 * sin(u3))
+        i = i + 1
+    }
+}
+
+fill_cube_sample(points: Vec3[], count: int, seed: int) {
+    xseed = seed
+    i = 0
+    while i < count {
+        x = 2.0 * unit_random() - 1.0
+        y = 2.0 * unit_random() - 1.0
+        z = 2.0 * unit_random() - 1.0
+        points[i] = math.vec3(x, y, z)
+        i = i + 1
+    }
+}
+
+test_sphere_reduction() {
+    block = calloc(64, sizeof(Vec3))
+    p = block as Vec3[]
+    fill_sphere_sample(p, 64, 12345)
+    h = hull.create_hull(p, 64, 20)
+    ensure("sphere reduction: built", h != null)
+    if h != null {
+        ensure("sphere reduction: within the cap", h.vertex_count >= 4 && h.vertex_count <= 20)
+        euler("sphere reduction", h)
+        ensure("sphere reduction: valid", hull.is_valid_hull(h))
+        hull.destroy_hull(h)
+    }
+    free(block)
+}
+
+// Dense random spheres at several caps push the builder's pools close
+// to their peaks; the free lists have to reclaim in time.
+test_sphere_stress() {
+    n = 512
+    block = calloc(n, sizeof(Vec3))
+    p = block as Vec3[]
+    s = 0
+    while s < 4 {
+        seed = 12345
+        if s == 1 { seed = 1 }
+        if s == 2 { seed = 0 - 559038737 }   // 0xdeadbeef
+        if s == 3 { seed = 0 - 889262067 }   // 0xcafef00d
+        fill_sphere_sample(p, n, seed)
+        m = 0
+        while m < 3 {
+            cap = 16 + 8 * m
+            h = hull.create_hull(p, n, cap)
+            ensure("sphere stress: built (seed ${s}, cap ${cap})", h != null)
+            if h != null {
+                ensure("sphere stress: within the cap", h.vertex_count >= 4 && h.vertex_count <= cap)
+                euler("sphere stress", h)
+                ensure("sphere stress: at least 4 faces", h.face_count >= 4)
+                ensure("sphere stress: valid", hull.is_valid_hull(h))
+                hull.destroy_hull(h)
+            }
+            m = m + 1
+        }
+        s = s + 1
+    }
+    free(block)
+}
+
+// Random points inside a cube with the corners stamped last: a small hull
+// out of heavy conflict-list churn and coplanar merges.
+test_merge_churn_stress() {
+    n = 4096
+    block = calloc(n, sizeof(Vec3))
+    p = block as Vec3[]
+    s = 0
+    while s < 2 {
+        seed = 12345
+        if s == 1 { seed = 0 - 559038737 }   // 0xdeadbeef
+        fill_cube_sample(p, n, seed)
+        c = 0
+        while c < 8 {
+            x = 0.0 - 1.0
+            y = 0.0 - 1.0
+            z = 0.0 - 1.0
+            if (c & 1) != 0 { x = 1.0 }
+            if (c & 2) != 0 { y = 1.0 }
+            if (c & 4) != 0 { z = 1.0 }
+            p[n - 8 + c] = math.vec3(x, y, z)
+            c = c + 1
+        }
+        h = hull.create_hull(p, n, 64)
+        ensure("merge churn: built (seed ${s})", h != null)
+        if h != null {
+            ensure("merge churn: 8 vertices", h.vertex_count == 8)
+            ensure("merge churn: 24 half-edges", h.edge_count == 24)
+            ensure("merge churn: 6 faces", h.face_count == 6)
+            hull.destroy_hull(h)
+        }
+        s = s + 1
+    }
+    free(block)
+}
+
+test_degenerate() {
+    block = calloc(8, sizeof(Vec3))
+    p = block as Vec3[]
+    i = 0
+    while i < 8 {
+        p[i] = math.vec3(i as float, 0.0, 0.0)
+        i = i + 1
+    }
+    ensure("degenerate: empty input", hull.create_hull(p, 0, 8) == null)
+    ensure("degenerate: three points", hull.create_hull(p, 3, 8) == null)
+    ensure("degenerate: collinear", hull.create_hull(p, 8, 8) == null)
+    i = 0
+    while i < 8 {
+        p[i] = math.vec3(1.0, 2.0, 3.0)
+        i = i + 1
+    }
+    ensure("degenerate: coincident", hull.create_hull(p, 8, 8) == null)
+    p[0] = math.vec3(0.0, 0.0, 0.0)
+    p[1] = math.vec3(1.0, 0.0, 0.0)
+    p[2] = math.vec3(0.0, 1.0, 0.0)
+    p[3] = math.vec3(1.0, 1.0, 0.0)
+    p[4] = math.vec3(2.0, 0.5, 0.0)
+    p[5] = math.vec3(0.5, 2.0, 0.0)
+    ensure("degenerate: coplanar", hull.create_hull(p, 6, 8) == null)
+    free(block)
+}
+
+// Rotations from libm, so the analytic corners and planes are exact.
+exact_quat(axis: Vec3, radians: float) -> Quat {
+    half = 0.5 * radians
+    s = sin(half)
+    return Quat { v: math.mul_sv(s, axis), s: cos(half) }
+}
+
+corner_sign(i: int) -> Vec3 {
+    if i == 0 { return math.vec3(1.0, 1.0, 1.0) }
+    if i == 1 { return math.vec3(0.0 - 1.0, 1.0, 1.0) }
+    if i == 2 { return math.vec3(0.0 - 1.0, 0.0 - 1.0, 1.0) }
+    if i == 3 { return math.vec3(1.0, 0.0 - 1.0, 1.0) }
+    if i == 4 { return math.vec3(1.0, 1.0, 0.0 - 1.0) }
+    if i == 5 { return math.vec3(0.0 - 1.0, 1.0, 0.0 - 1.0) }
+    if i == 6 { return math.vec3(0.0 - 1.0, 0.0 - 1.0, 0.0 - 1.0) }
+    return math.vec3(1.0, 0.0 - 1.0, 0.0 - 1.0)
+}
+
+// The box hull's geometry against the transform, so an axis swap in the
+// point or plane bake cannot pass silently.
+check_transformed_box(name: string, h: Vec3, xf: Transform) {
+    box = hull.make_transformed_box_hull(h.x, h.y, h.z, xf)
+    tol = 0.00001
+    points = hull.hull_points(box)
+    i = 0
+    while i < 8 {
+        expected = math.transform_point(xf, math.mul(corner_sign(i), h))
+        small("${name}: corner ${i} x", points[i].x - expected.x, tol)
+        small("${name}: corner ${i} y", points[i].y - expected.y, tol)
+        small("${name}: corner ${i} z", points[i].z - expected.z, tol)
+        i = i + 1
+    }
+    planes = hull.hull_planes(box)
+    i = 0
+    while i < 6 {
+        local_normal = math.vec3_axis_z()
+        local_offset = h.z
+        if i < 2 {
+            local_normal = math.vec3_axis_x()
+            local_offset = h.x
+        } else if i < 4 {
+            local_normal = math.vec3_axis_y()
+            local_offset = h.y
+        }
+        if (i & 1) == 0 { local_normal = math.neg(local_normal) }
+        n = math.rotate_vector(xf.q, local_normal)
+        offset = local_offset + math.dot(n, xf.p)
+        small("${name}: plane ${i} normal x", planes[i].normal.x - n.x, tol)
+        small("${name}: plane ${i} normal y", planes[i].normal.y - n.y, tol)
+        small("${name}: plane ${i} normal z", planes[i].normal.z - n.z, tol)
+        small("${name}: plane ${i} offset", planes[i].offset - offset, tol)
+        i = i + 1
+    }
+    // The stored box bounds every corner; the hull is a valid hull.
+    point_box = math.make_aabb(((box as ptr) + box.point_offset) as float[], 8, 0.0)
+    ensure("${name}: the aabb holds the corners", math.aabb_contains(box.aabb, point_box))
+    ensure("${name}: valid", hull.is_valid_hull(box))
+    ensure("${name}: hash is not zero", box.hash != (0 as long))
+    hull.destroy_hull(box)
+}
+
+test_transformed_box() {
+    h = math.vec3(0.25, 0.5, 0.3)
+    check_transformed_box("box identity", h, math.transform_identity())
+    check_transformed_box("box translated", h, Transform { p: math.vec3(0.4, 0.0 - 0.7, 0.1), q: math.quat_identity() })
+    check_transformed_box("box rotated", h, Transform { p: math.vec3_zero(), q: exact_quat(math.vec3_axis_y(), 0.25 * math.PI) })
+    check_transformed_box("box transformed", h, Transform { p: math.vec3(3.0, 0.0 - 2.0, 1.5), q: exact_quat(math.vec3_axis_z(), 0.25 * math.PI) })
+
+    // A scaled box resolves the post scale into half widths.
+    scaled = hull.make_scaled_box_hull(math.vec3(1.0, 1.0, 1.0), math.transform_identity(), math.vec3(2.0, 0.0 - 3.0, 0.5))
+    small("scaled box: volume", scaled.volume - 8.0 * 2.0 * 3.0 * 0.5, 0.0001)
+    hull.destroy_hull(scaled)
+
+    // A ray into a box from the -x side hits the -x face at a third.
+    box = hull.make_box_hull(1.0, 1.0, 1.0)
+    output = hull.ray_cast_hull(box, math.vec3(0.0 - 3.0, 0.0, 0.0), math.vec3(6.0, 0.0, 0.0), 1.0)
+    ensure("ray: hit", output.hit)
+    small("ray: fraction", output.fraction - 1.0 / 3.0, 0.00001)
+    small("ray: normal x", output.normal.x + 1.0, 0.00001)
+    small("ray: point x", output.point.x + 1.0, 0.00001)
+    miss = hull.ray_cast_hull(box, math.vec3(0.0 - 3.0, 2.0, 0.0), math.vec3(6.0, 0.0, 0.0), 1.0)
+    ensure("ray: miss", miss.hit == false)
+    inside = hull.ray_cast_hull(box, math.vec3(0.0, 0.0, 0.0), math.vec3(6.0, 0.0, 0.0), 1.0)
+    ensure("ray: from inside hits at the origin", inside.hit && inside.fraction == 0.0)
+    // The support vertex along +x+y+z is the (1,1,1) corner; the shadow along x is 4.
+    sv = hull.find_hull_support_vertex(box, math.vec3(1.0, 1.0, 1.0))
+    points = hull.hull_points(box)
+    small("support vertex", points[sv].x + points[sv].y + points[sv].z - 3.0, 0.00001)
+    sf = hull.find_hull_support_face(box, math.vec3(0.0, 1.0, 0.0))
+    planes = hull.hull_planes(box)
+    small("support face", planes[sf].normal.y - 1.0, 0.00001)
+    small("projected area", hull.compute_hull_projected_area(box, math.vec3(1.0, 0.0, 0.0)) - 4.0, 0.00001)
+    extent = hull.compute_hull_extent(box, math.vec3_zero())
+    small("extent min", extent.min_extent - 1.0, 0.00001)
+    small("extent max", extent.max_extent.x - 1.0, 0.00001)
+    mass = hull.compute_hull_mass(box, 2.0)
+    small("mass", mass.mass - 16.0, 0.00001)
+    hull.destroy_hull(box)
+}
+
+// --- 2D ---------------------------------------------------------------------
+
+fill_points_2d(pts: Point2D[], xs: float[], count: int) {
+    i = 0
+    while i < count {
+        pts[i] = Point2D { p: math.vec2(xs[2 * i], xs[2 * i + 1]), separation: 0.0, original_index: i }
+        i = i + 1
+    }
+}
+
+hull_2d_area(h: Point2D[], count: int) -> float {
+    sum = 0.0
+    i = 0
+    while i < count {
+        next = (i + 1) % count
+        sum = sum + h[i].p.x * h[next].p.y - h[i].p.y * h[next].p.x
+        i = i + 1
+    }
+    return 0.5 * sum
+}
+
+test_hull_2d() {
+    xs_block = calloc(16, 8)
+    xs = xs_block as float[]
+    pts_block = calloc(8, sizeof(Point2D))
+    pts = pts_block as Point2D[]
+    h_block = calloc(16, sizeof(Point2D))
+    h = h_block as Point2D[]
+
+    // A square with interior points: only the corners survive.
+    values = [ 0.0 - 1.0, 0.0 - 1.0, 1.0, 0.0 - 1.0, 1.0, 1.0, 0.0 - 1.0, 1.0, 0.0, 0.0, 0.5, 0.25, 0.0 - 0.3, 0.6, 0.1, 0.0 - 0.4 ]
+    i = 0
+    while i < 16 {
+        xs[i] = values[i]
+        i = i + 1
+    }
+    fill_points_2d(pts, xs, 8)
+    count = hull.hull_2d(pts, 8, h)
+    ensure("2d square: 4 points", count == 4)
+    ensure("2d square: counter-clockwise", hull_2d_area(h, count) > 0.0)
+    on_hull = calloc(8, 4)
+    marks = on_hull as int[]
+    i = 0
+    while i < count {
+        ensure("2d square: original index in range", h[i].original_index >= 0 && h[i].original_index < 8)
+        marks[h[i].original_index] = 1
+        i = i + 1
+    }
+    i = 0
+    while i < 8 {
+        ensure("2d square: corners on, interior off (${i})", (marks[i] == 1) == (i < 4))
+        i = i + 1
+    }
+    free(on_hull)
+
+    // Collinear points: two survive.
+    i = 0
+    while i < 5 {
+        xs[2 * i] = i as float
+        xs[2 * i + 1] = 0.0
+        i = i + 1
+    }
+    fill_points_2d(pts, xs, 5)
+    ensure("2d collinear: 2 points", hull.hull_2d(pts, 5, h) == 2)
+
+    // A point within a tenth of a slop of a corner welds away; the lower index wins.
+    offset = 0.1 * math.LINEAR_SLOP
+    values2 = [ 0.0 - 1.0, 0.0 - 1.0, 1.0, 0.0 - 1.0, 1.0, 1.0, 0.0 - 1.0, 1.0, 0.0 - 1.0 + offset, 0.0 - 1.0 + offset ]
+    i = 0
+    while i < 10 {
+        xs[i] = values2[i]
+        i = i + 1
+    }
+    fill_points_2d(pts, xs, 5)
+    count = hull.hull_2d(pts, 5, h)
+    ensure("2d weld: 4 points", count == 4)
+    i = 0
+    while i < count {
+        ensure("2d weld: the welded point is gone", h[i].original_index != 4)
+        i = i + 1
+    }
+
+    // The surviving set does not depend on the input order.
+    values3 = [ 0.0 - 2.0, 0.0 - 1.0, 0.0, 0.0 - 1.5, 2.0, 0.0 - 1.0, 2.5, 0.5, 1.0, 2.0, 0.0 - 1.0, 1.8, 0.0 - 2.5, 0.4, 0.2, 0.1 ]
+    permutation = [ 5, 2, 7, 0, 4, 6, 1, 3 ]
+    i = 0
+    while i < 16 {
+        xs[i] = values3[i]
+        i = i + 1
+    }
+    fill_points_2d(pts, xs, 8)
+    count1 = hull.hull_2d(pts, 8, h)
+    ensure("2d order: 7 points", count1 == 7)
+    on1 = calloc(8, 4)
+    marks1 = on1 as int[]
+    i = 0
+    while i < count1 {
+        marks1[h[i].original_index] = 1
+        i = i + 1
+    }
+    i = 0
+    while i < 8 {
+        k = permutation[i]
+        pts[i] = Point2D { p: math.vec2(xs[2 * k], xs[2 * k + 1]), separation: 0.0, original_index: i }
+        i = i + 1
+    }
+    count2 = hull.hull_2d(pts, 8, h)
+    ensure("2d order: the same count", count2 == count1)
+    on2 = calloc(8, 4)
+    marks2 = on2 as int[]
+    i = 0
+    while i < count2 {
+        marks2[permutation[h[i].original_index]] = 1
+        i = i + 1
+    }
+    i = 0
+    while i < 8 {
+        ensure("2d order: the same set (${i})", marks1[i] == marks2[i])
+        i = i + 1
+    }
+    free(on1)
+    free(on2)
+    free(xs_block)
+    free(pts_block)
+    free(h_block)
+
+    // Simplify a 20-gon down to 6; a square stays a square.
+    pts20 = calloc(20, sizeof(Point2D))
+    p20 = pts20 as Point2D[]
+    h40 = calloc(40, sizeof(Point2D))
+    h20 = h40 as Point2D[]
+    i = 0
+    while i < 20 {
+        angle = 2.0 * math.PI * (i as float) / 20.0
+        p20[i] = Point2D { p: math.vec2(cos(angle), sin(angle)), separation: 0.0, original_index: i }
+        i = i + 1
+    }
+    hull_count = hull.hull_2d(p20, 20, h20)
+    ensure("2d simplify: 20 on the hull", hull_count == 20)
+    count = hull.simplify_hull_2d(h20, hull_count, 6)
+    ensure("2d simplify: down to 6", count == 6)
+    ensure("2d simplify: still counter-clockwise", hull_2d_area(h20, count) > 0.0)
+    sq = [ 0.0 - 1.0, 0.0 - 1.0, 1.0, 0.0 - 1.0, 1.0, 1.0, 0.0 - 1.0, 1.0 ]
+    i = 0
+    while i < 4 {
+        p20[i] = Point2D { p: math.vec2(sq[2 * i], sq[2 * i + 1]), separation: 0.0, original_index: i }
+        i = i + 1
+    }
+    hull_count = hull.hull_2d(p20, 4, h20)
+    ensure("2d simplify noop: 4", hull_count == 4)
+    ensure("2d simplify noop: target 8 keeps 4", hull.simplify_hull_2d(h20, hull_count, 8) == 4)
+    ensure("2d simplify noop: target 4 keeps 4", hull.simplify_hull_2d(h20, hull_count, 4) == 4)
+    free(pts20)
+    free(h40)
+}
+
+main() {
+    before = core.alloc_count()
+    test_cube()
+    test_tetrahedron()
+    test_determinism()
+    test_max_vertex()
+    test_redundant_input()
+    test_clone()
+    test_cylinder()
+    test_sphere_reduction()
+    test_sphere_stress()
+    test_merge_churn_stress()
+    test_degenerate()
+    test_transformed_box()
+    test_hull_2d()
+    ensure("every counted allocation was freed", core.alloc_count() == before && core.bytes_in_use() == 0)
+
+    println("hull: ${checks} checks")
+    if failures == 0 {
+        println("hull: all checks passed")
+    } else {
+        println("hull: ${failures} failure(s)")
+        exit(1)
+    }
+}
