@@ -48,23 +48,29 @@ started until its tests pass.
    no axis separating more than the distance, rotating sweeps in the time
    of impact, the hull's overlap and cast through it. The same results as
    the reference at 1.3-1.5x its time.
-6. **collision, static**: `manifold` and `convex_manifold`
-   (sphere/capsule/hull contact manifolds), `triangle_manifold`, `mesh`,
-   `height_field`, `shape` (mass properties, ray and shape casts per
-   shape). Tests: `test_collision`, `test_manifold`, `test_sat`,
-   `test_shape`, `test_mesh`, `test_height_field`.
-7. **dynamics**: `body`, `contact`, `constraint_graph` (graph colouring),
+6. **manifold** (done): manifold.c and convex_manifold.c as
+   `aephysics.manifold`, the reference's scalar SAT path, module scratch
+   for the clip buffers (per-worker in the parallel layer). 43,090 checks:
+   test_sat.c's oracle over 7,000 random pairs and test_manifold.c's hull,
+   sphere and capsule parts. The same manifolds as the reference; warm
+   cache at parity, cold SAT 1.6x. Found aether#2119 (array literals of
+   float expressions typed as int) on the way.
+7. **collision, static**: `triangle_manifold`, `mesh`, `height_field`,
+   `shape` (mass properties, ray and shape casts per shape). Tests:
+   `test_collision`, the triangle parts of `test_manifold`, `test_shape`,
+   `test_mesh`, `test_height_field`.
+8. **dynamics**: `body`, `contact`, `constraint_graph` (graph colouring),
    `solver_set`, `island`, `solver` (the Soft Step: sub-stepping, relax
    iterations, restitution), `contact_solver` (scalar first; the wide SIMD
    path second, measured), the joints (revolute, prismatic, distance,
    motor, weld, wheel, spherical), `sensor`, `mover` (the character mover),
    `physics_world`. Tests: `test_body`, `test_joint`, `test_world`,
    `test_mover`, `test_determinism`, `test_large_world`.
-8. **parallel**: `parallel_for` and the scheduler over Aether's actors;
+9. **parallel**: `parallel_for` and the scheduler over Aether's actors;
    the benchmarks by thread count as the original records them.
-9. **recording and replay**, `world_snapshot`: last, since they are the
+10. **recording and replay**, `world_snapshot`: last, since they are the
    tooling and not the engine.
-10. **benchmarks**: `reference/benchmark/main.c`'s nine scenes ported, run
+11. **benchmarks**: `reference/benchmark/main.c`'s nine scenes ported, run
    against the C build on the same machine, recorded under `benchmark/`.
 
 ## Measures

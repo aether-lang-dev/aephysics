@@ -1,0 +1,901 @@
+// aephysics.manifold against the reference's (Box3D's) test_sat.c and the
+// hull, sphere and capsule parts of test_manifold.c: the separating axis
+// against a brute-force oracle over 7,000 random box pairs, crossed edges
+// from speculative contact into deep overlap, the edge cache, the edge
+// endpoint, parallel edges at the noise floor, overlap never empty, the
+// ridge crossing policy, the edge axis oracles, the capsule stabbed
+// through an edge, the sphere and capsule seams, the capsule's deep face
+// contact, and sphere and capsule pairs. The triangle parts wait for the
+// triangle manifold.
+
+import std.string
+import aephysics.math
+import aephysics.core
+import aephysics.distance
+import aephysics.hull
+import aephysics.manifold
+
+extern calloc(count: int, size: int) -> ptr
+extern exit(code: int)
+extern free(p: ptr)
+extern sin(x: float) -> float
+extern cos(x: float) -> float
+extern sqrt(x: float) -> float
+
+var failures = 0
+var checks = 0
+
+ensure(name: string, ok: bool) {
+    checks = checks + 1
+    if !ok {
+        println("manifold: FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+small(name: string, value: float, tolerance: float) {
+    ensure("${name} (${value})", math.abs_float(value) < tolerance)
+}
+
+const ROOT2 = 1.41421356
+const HALF_ROOT2 = 0.70710678
+
+exact_quat(axis: Vec3, radians: float) -> Quat {
+    half = 0.5 * radians
+    return Quat { v: math.mul_sv(sin(half), axis), s: cos(half) }
+}
+
+exact_rotation(axis: Vec3, radians: float) -> Transform {
+    return Transform { p: math.vec3_zero(), q: exact_quat(axis, radians) }
+}
+
+slide_x(x: float) -> Transform { return Transform { p: math.vec3(x, 0.0, 0.0), q: math.quat_identity() } }
+
+// A point buffer with room for eight points.
+new_manifold() -> ptr { return calloc(8, sizeof(LocalManifoldPoint)) }
+
+min_separation(m: *LocalManifold) -> float {
+    s = math.MAX_FLOAT
+    i = 0
+    while i < m.point_count {
+        s = math.min_float(s, manifold.manifold_point(m, i).separation)
+        i = i + 1
+    }
+    return s
+}
+
+// --- the separating axis against a brute-force oracle -----------------------------
+
+// The projection gap min over B minus max over A along a unit axis from A to B.
+sep_along(hull_a: *HullData, hull_b: *HullData, xf_b: Transform, n: Vec3) -> float {
+    points_a = hull.hull_points(hull_a)
+    max_a = 0.0 - math.MAX_FLOAT
+    i = 0
+    while i < hull_a.vertex_count {
+        max_a = math.max_float(max_a, math.dot(n, points_a[i]))
+        i = i + 1
+    }
+    points_b = hull.hull_points(hull_b)
+    min_b = math.MAX_FLOAT
+    i = 0
+    while i < hull_b.vertex_count {
+        min_b = math.min_float(min_b, math.dot(n, math.transform_point(xf_b, points_b[i])))
+        i = i + 1
+    }
+    return min_b - max_a
+}
+
+// Every face normal and every edge cross product, both ways: the true maximum.
+oracle_separation(hull_a: *HullData, hull_b: *HullData, xf_b: Transform) -> float {
+    best = 0.0 - math.MAX_FLOAT
+    planes_a = hull.hull_planes(hull_a)
+    i = 0
+    while i < hull_a.face_count {
+        best = math.max_float(best, sep_along(hull_a, hull_b, xf_b, planes_a[i].normal))
+        best = math.max_float(best, sep_along(hull_a, hull_b, xf_b, math.neg(planes_a[i].normal)))
+        i = i + 1
+    }
+    planes_b = hull.hull_planes(hull_b)
+    i = 0
+    while i < hull_b.face_count {
+        n = math.rotate_vector(xf_b.q, planes_b[i].normal)
+        best = math.max_float(best, sep_along(hull_a, hull_b, xf_b, n))
+        best = math.max_float(best, sep_along(hull_a, hull_b, xf_b, math.neg(n)))
+        i = i + 1
+    }
+    edges_a = hull.hull_edges(hull_a)
+    points_a = hull.hull_points(hull_a)
+    edges_b = hull.hull_edges(hull_b)
+    points_b = hull.hull_points(hull_b)
+    i = 0
+    while i < hull_a.edge_count {
+        dir_a = math.sub(points_a[edges_a[i + 1].origin], points_a[edges_a[i].origin])
+        j = 0
+        while j < hull_b.edge_count {
+            dir_b = math.rotate_vector(xf_b.q, math.sub(points_b[edges_b[j + 1].origin], points_b[edges_b[j].origin]))
+            c = math.cross(dir_a, dir_b)
+            if math.dot(c, c) >= 0.0000000001 {
+                c = math.normalize(c)
+                best = math.max_float(best, sep_along(hull_a, hull_b, xf_b, c))
+                best = math.max_float(best, sep_along(hull_a, hull_b, xf_b, math.neg(c)))
+            }
+            j = j + 2
+        }
+        i = i + 2
+    }
+    return best
+}
+
+var seed = 987654321
+
+next_float(lower: float, upper: float) -> float {
+    seed = 1664525 * seed + 1013904223
+    t = (((seed >> 8) & 0xFFFFFF) as float) / 16777216.0
+    return lower + t * (upper - lower)
+}
+
+next_direction() -> Vec3 {
+    return math.normalize(math.vec3(next_float(0.0 - 1.0, 1.0), next_float(0.0 - 1.0, 1.0), next_float(0.0 - 1.0, 1.0)))
+}
+
+test_sat_fixed() {
+    // Two cubes apart along x: A's +x face, the gap 0.2, B's -x vertex.
+    a = hull.make_box_hull(0.5, 0.5, 0.5)
+    b = hull.make_box_hull(0.5, 0.5, 0.5)
+    xf = slide_x(1.2)
+    aq = manifold.compute_separating_axis(a, b, xf, true)
+    q = manifold.get_best_axis(&aq)
+    ensure("sat face a: kind", q.kind == manifold.AXIS_FACE_A)
+    small("sat face a: separation", q.separation - 0.2, 0.00001)
+    small("sat face a: normal x", q.normal.x - 1.0, 0.000001)
+    small("sat face a: normal y", q.normal.y, 0.000001)
+    planes_a = hull.hull_planes(a)
+    small("sat face a: the +x face", planes_a[q.index_a].normal.x - 1.0, 0.000001)
+    points_b = hull.hull_points(b)
+    small("sat face a: B's -x vertex", points_b[q.index_b].x + 0.5, 0.000001)
+    small("sat face a: consistent", sep_along(a, b, xf, q.normal) - q.separation, 0.00001)
+    hull.destroy_hull(b)
+
+    // A rotated so no face of it faces B: B's face wins.
+    a_rot = hull.make_transformed_box_hull(0.5, 0.5, 0.5, exact_rotation(math.vec3_axis_y(), 0.25 * math.PI))
+    a_extent = 0.5 * ROOT2
+    b = hull.make_box_hull(0.5, 0.5, 0.5)
+    gap = 0.2
+    xf = slide_x(a_extent + 0.5 + gap)
+    aq = manifold.compute_separating_axis(a_rot, b, xf, true)
+    q = manifold.get_best_axis(&aq)
+    ensure("sat face b: kind", q.kind == manifold.AXIS_FACE_B)
+    small("sat face b: separation", q.separation - gap, 0.00001)
+    small("sat face b: normal x", q.normal.x - 1.0, 0.00001)
+    planes_b = hull.hull_planes(b)
+    small("sat face b: B's -x face", planes_b[q.index_b].normal.x + 1.0, 0.00001)
+    points_a = hull.hull_points(a_rot)
+    small("sat face b: A's +x vertex", points_a[q.index_a].x - a_extent, 0.0001)
+    small("sat face b: consistent", sep_along(a_rot, b, xf, q.normal) - q.separation, 0.0001)
+    hull.destroy_hull(b)
+
+    // Far apart: some separating axis, the true one here.
+    b = hull.make_box_hull(0.5, 0.5, 0.5)
+    xf = slide_x(3.0)
+    aq = manifold.compute_separating_axis(a, b, xf, true)
+    q = manifold.get_best_axis(&aq)
+    ensure("sat far: kind", q.kind == manifold.AXIS_FACE_A)
+    small("sat far: separation", q.separation - 2.0, 0.00001)
+    small("sat far: oracle", q.separation - oracle_separation(a, b, xf), 0.00001)
+    hull.destroy_hull(b)
+
+    // B offset in its own frame: the support has to cope.
+    b_off = hull.make_offset_box_hull(0.5, 0.5, 0.5, math.vec3(3.0, 0.0, 0.0))
+    xf = Transform { p: math.vec3(a_extent + 0.5 + gap - 3.0, 0.0, 0.0), q: math.quat_identity() }
+    aq = manifold.compute_separating_axis(a_rot, b_off, xf, true)
+    q = manifold.get_best_axis(&aq)
+    ensure("sat offset: kind", q.kind == manifold.AXIS_FACE_B)
+    small("sat offset: separation", q.separation - gap, 0.0001)
+    small("sat offset: normal x", q.normal.x - 1.0, 0.00001)
+    small("sat offset: oracle", q.separation - oracle_separation(a_rot, b_off, xf), 0.0001)
+    small("sat offset: consistent", sep_along(a_rot, b_off, xf, q.normal) - q.separation, 0.0001)
+    hull.destroy_hull(b_off)
+    hull.destroy_hull(a)
+
+    // Crossed edges: A yawed 45 about y, B rolled 45 about z, slid along x.
+    b_rot = hull.make_transformed_box_hull(0.5, 0.5, 0.5, exact_rotation(math.vec3_axis_z(), 0.25 * math.PI))
+    distances = [ 1.43, 1.42, ROOT2, 1.40, 1.38, 1.35, 1.30 ]
+    i = 0
+    while i < 7 {
+        d = distances[i]
+        xf = slide_x(d)
+        aq = manifold.compute_separating_axis(a_rot, b_rot, xf, true)
+        q = manifold.get_best_axis(&aq)
+        ensure("sat edge sweep: kind (${d})", q.kind == manifold.AXIS_EDGE_PAIR)
+        small("sat edge sweep: separation", q.separation - (d - ROOT2), 0.0001)
+        small("sat edge sweep: normal x", q.normal.x - 1.0, 0.0001)
+        small("sat edge sweep: normal y", q.normal.y, 0.0001)
+        small("sat edge sweep: normal z", q.normal.z, 0.0001)
+        ensure("sat edge sweep: even half edges", (q.index_a & 1) == 0 && (q.index_b & 1) == 0)
+        small("sat edge sweep: oracle", q.separation - oracle_separation(a_rot, b_rot, xf), 0.0001)
+        small("sat edge sweep: consistent", sep_along(a_rot, b_rot, xf, q.normal) - q.separation, 0.0001)
+        i = i + 1
+    }
+    hull.destroy_hull(a_rot)
+    hull.destroy_hull(b_rot)
+}
+
+// A wide net of random box pairs, thin crossed beams among them, from
+// clearly separated to deep overlap. The axis must reproduce its own
+// separation, never exceed the true maximum, and within the speculative
+// band never fall short of it.
+test_sat_oracle() {
+    seed = 987654321
+    separated = 0
+    penetrating = 0
+    edge_wins = 0
+    worst_shortfall = 0.0
+    worst_excess = 0.0
+    i = 0
+    while i < 4000 {
+        half_a = math.vec3(next_float(0.3, 0.8), next_float(0.3, 0.8), next_float(0.3, 0.8))
+        half_b = math.vec3(next_float(0.3, 0.8), next_float(0.3, 0.8), next_float(0.3, 0.8))
+        reach = next_float(0.0, 1.7)
+        if (i & 1) != 0 {
+            half_a = math.vec3(next_float(1.0, 1.6), next_float(0.08, 0.15), next_float(0.08, 0.15))
+            half_b = math.vec3(next_float(1.0, 1.6), next_float(0.08, 0.15), next_float(0.08, 0.15))
+            reach = next_float(0.0, 0.4)
+        }
+        a = hull.make_transformed_box_hull(half_a.x, half_a.y, half_a.z, exact_rotation(next_direction(), next_float(0.0, math.PI)))
+        b = hull.make_box_hull(half_b.x, half_b.y, half_b.z)
+        xf = Transform { p: math.mul_sv(reach, next_direction()), q: exact_quat(next_direction(), next_float(0.0, math.PI)) }
+        aq = manifold.compute_separating_axis(a, b, xf, true)
+        q = manifold.get_best_axis(&aq)
+        oracle = oracle_separation(a, b, xf)
+        small("oracle: unit normal", math.length(q.normal) - 1.0, 0.001)
+        small("oracle: consistent", sep_along(a, b, xf, q.normal) - q.separation, 0.002)
+        worst_excess = math.max_float(worst_excess, q.separation - oracle)
+        ensure("oracle: never above the true maximum", q.separation <= oracle + 0.002)
+        if q.separation <= manifold.SPECULATIVE_DISTANCE {
+            worst_shortfall = math.max_float(worst_shortfall, oracle - q.separation)
+            ensure("oracle: in band, never short of it", q.separation >= oracle - 0.004)
+        }
+        if oracle > 0.0 { separated = separated + 1 } else { penetrating = penetrating + 1 }
+        if q.kind == manifold.AXIS_EDGE_PAIR { edge_wins = edge_wins + 1 }
+        hull.destroy_hull(a)
+        hull.destroy_hull(b)
+        i = i + 1
+    }
+    println("manifold: oracle separated=${separated} penetrating=${penetrating} edge wins=${edge_wins} worst shortfall=${worst_shortfall} worst excess=${worst_excess}")
+    ensure("oracle: both regimes and the edge path", separated > 100 && penetrating > 100 && edge_wins > 20)
+
+    // Hulls whose vertices sit far from their own origin.
+    seed = 24681012
+    separated = 0
+    penetrating = 0
+    edge_wins = 0
+    i = 0
+    while i < 3000 {
+        half_a = math.vec3(next_float(0.3, 0.8), next_float(0.3, 0.8), next_float(0.3, 0.8))
+        half_b = math.vec3(next_float(0.3, 0.8), next_float(0.3, 0.8), next_float(0.3, 0.8))
+        offset = math.mul_sv(next_float(2.0, 6.0), next_direction())
+        reach = next_float(0.0, 1.7)
+        dir = next_direction()
+        a = null
+        b = null
+        xf = math.transform_identity()
+        if (i & 1) != 0 {
+            place_a = Transform { p: offset, q: exact_quat(next_direction(), next_float(0.0, math.PI)) }
+            a = hull.make_transformed_box_hull(half_a.x, half_a.y, half_a.z, place_a)
+            b = hull.make_box_hull(half_b.x, half_b.y, half_b.z)
+            xf = Transform { p: math.mul_add(offset, reach, dir), q: exact_quat(next_direction(), next_float(0.0, math.PI)) }
+        } else {
+            q_b = exact_quat(next_direction(), next_float(0.0, math.PI))
+            a = hull.make_box_hull(half_a.x, half_a.y, half_a.z)
+            b = hull.make_offset_box_hull(half_b.x, half_b.y, half_b.z, offset)
+            xf = Transform { p: math.sub(math.mul_sv(reach, dir), math.rotate_vector(q_b, offset)), q: q_b }
+        }
+        aq = manifold.compute_separating_axis(a, b, xf, true)
+        q = manifold.get_best_axis(&aq)
+        oracle = oracle_separation(a, b, xf)
+        consistency = math.abs_float(sep_along(a, b, xf, q.normal) - q.separation)
+        small("offset oracle: unit normal", math.length(q.normal) - 1.0, 0.001)
+        ensure("offset oracle: consistent (${consistency})", consistency < 0.001)
+        ensure("offset oracle: never above the true maximum", q.separation <= oracle + 0.003)
+        if q.separation <= manifold.SPECULATIVE_DISTANCE {
+            ensure("offset oracle: in band, never short", q.separation >= oracle - 0.008)
+        }
+        if oracle > 0.0 { separated = separated + 1 } else { penetrating = penetrating + 1 }
+        if q.kind == manifold.AXIS_EDGE_PAIR { edge_wins = edge_wins + 1 }
+        hull.destroy_hull(a)
+        hull.destroy_hull(b)
+        i = i + 1
+    }
+    ensure("offset oracle: both regimes and the edge path (${separated} ${penetrating} ${edge_wins})", separated > 100 && penetrating > 100 && edge_wins > 20)
+}
+
+// --- hull against hull --------------------------------------------------------------
+
+test_crossed_edge() {
+    a = hull.make_transformed_box_hull(0.5, 0.5, 0.5, exact_rotation(math.vec3_axis_y(), 0.25 * math.PI))
+    b = hull.make_transformed_box_hull(0.5, 0.5, 0.5, exact_rotation(math.vec3_axis_z(), 0.25 * math.PI))
+    points = new_manifold()
+    distances = [ 1.42, ROOT2, 1.41, 1.3 ]
+    i = 0
+    while i < 4 {
+        d = distances[i]
+        expected = d - ROOT2
+        m = manifold.local_manifold(points)
+        cache = manifold.empty_sat_cache()
+        manifold.collide_hulls(&m, 8, a, b, slide_x(d), &cache)
+        ensure("crossed: one point (${d})", m.point_count == 1)
+        ensure("crossed: edge pair", cache.kind == manifold.AXIS_EDGE_PAIR)
+        small("crossed: normal x", m.normal.x - 1.0, 0.000001)
+        small("crossed: normal y", m.normal.y, 0.000001)
+        small("crossed: normal z", m.normal.z, 0.000001)
+        if m.point_count == 1 {
+            p = manifold.manifold_point(&m, 0)
+            small("crossed: separation", p.separation - expected, 0.00001)
+            small("crossed: point x", p.point.x - 0.5 * d, 0.00001)
+            small("crossed: point y", p.point.y, 0.00001)
+            small("crossed: point z", p.point.z, 0.00001)
+        }
+        // The forced edge query agrees with the full solver.
+        manual = manifold.local_manifold(points)
+        manual_cache = manifold.empty_sat_cache()
+        manual_cache.kind = manifold.AXIS_MANUAL_EDGE_PAIR
+        manifold.collide_hulls(&manual, 8, a, b, slide_x(d), &manual_cache)
+        ensure("crossed manual: one point", manual.point_count == 1)
+        if manual.point_count == 1 { small("crossed manual: separation", manifold.manifold_point(&manual, 0).separation - expected, 0.00001) }
+        i = i + 1
+    }
+    // Beyond the speculative distance: the axis, no contact.
+    m = manifold.local_manifold(points)
+    cache = manifold.empty_sat_cache()
+    manifold.collide_hulls(&m, 8, a, b, slide_x(1.5), &cache)
+    ensure("crossed far: no points", m.point_count == 0)
+    ensure("crossed far: edge pair cached", cache.kind == manifold.AXIS_EDGE_PAIR)
+    small("crossed far: cached separation", cache.separation - (1.5 - ROOT2), 0.00001)
+
+    // The parallel-edge rejection is a sine threshold: it holds at any scale.
+    scales = [ 100.0, 1.0, 0.2 ]
+    i = 0
+    while i < 3 {
+        s = scales[i]
+        a_s = hull.make_transformed_box_hull(0.5 * s, 0.5 * s, 0.5 * s, exact_rotation(math.vec3_axis_y(), 0.25 * math.PI))
+        b_s = hull.make_transformed_box_hull(0.5 * s, 0.5 * s, 0.5 * s, exact_rotation(math.vec3_axis_z(), 0.25 * math.PI))
+        expected = 0.0 - 0.002
+        d = s * ROOT2 + expected
+        m = manifold.local_manifold(points)
+        cache = manifold.empty_sat_cache()
+        manifold.collide_hulls(&m, 8, a_s, b_s, slide_x(d), &cache)
+        tolerance = 0.00001 * s + 0.000001
+        ensure("scale ${s}: one point", m.point_count == 1)
+        ensure("scale ${s}: edge pair", cache.kind == manifold.AXIS_EDGE_PAIR)
+        small("scale ${s}: normal x", m.normal.x - 1.0, 0.000001)
+        if m.point_count == 1 {
+            p = manifold.manifold_point(&m, 0)
+            small("scale ${s}: separation", p.separation - expected, tolerance)
+            small("scale ${s}: point x", p.point.x - 0.5 * d, tolerance)
+            small("scale ${s}: point y", p.point.y, tolerance)
+            small("scale ${s}: point z", p.point.z, tolerance)
+        }
+        hull.destroy_hull(a_s)
+        hull.destroy_hull(b_s)
+        i = i + 1
+    }
+
+    // The cached edge pair rebuilds the axis without a fresh query.
+    m = manifold.local_manifold(points)
+    cache = manifold.empty_sat_cache()
+    manifold.collide_hulls(&m, 8, a, b, slide_x(1.41), &cache)
+    ensure("edge cache: one point", m.point_count == 1)
+    ensure("edge cache: edge pair", cache.kind == manifold.AXIS_EDGE_PAIR)
+    ensure("edge cache: even half edges in range", (cache.index_a & 1) == 0 && cache.index_a < a.edge_count && (cache.index_b & 1) == 0 && cache.index_b < b.edge_count)
+    seeded = cache.separation
+    small("edge cache: seeded separation", seeded - (1.41 - ROOT2), 0.00001)
+    manifold.collide_hulls(&m, 8, a, b, slide_x(1.4105), &cache)
+    ensure("edge cache: still one point", m.point_count == 1)
+    ensure("edge cache: the cache answered", cache.separation == seeded && cache.hit == 1)
+    if m.point_count == 1 { small("edge cache: new separation", manifold.manifold_point(&m, 0).separation - (1.4105 - ROOT2), 0.00001) }
+    small("edge cache: normal x", m.normal.x - 1.0, 0.000001)
+    manifold.collide_hulls(&m, 8, a, b, slide_x(1.5), &cache)
+    ensure("edge cache: past the band, no points", m.point_count == 0)
+    ensure("edge cache: the cached axis alone answered", cache.separation == seeded)
+
+    // Sliding B along edge A walks the closest point off the end.
+    inside = Transform { p: math.vec3(1.41, 0.49, 0.0), q: math.quat_identity() }
+    m = manifold.local_manifold(points)
+    cache = manifold.empty_sat_cache()
+    cache.kind = manifold.AXIS_MANUAL_EDGE_PAIR
+    manifold.collide_hulls(&m, 8, a, b, inside, &cache)
+    ensure("endpoint inside: one point", m.point_count == 1)
+    if m.point_count == 1 {
+        small("endpoint inside: separation", manifold.manifold_point(&m, 0).separation - (1.41 - ROOT2), 0.00001)
+        small("endpoint inside: point y", manifold.manifold_point(&m, 0).point.y - 0.49, 0.00001)
+    }
+    off = Transform { p: math.vec3(1.41, 0.55, 0.0), q: math.quat_identity() }
+    m = manifold.local_manifold(points)
+    cache = manifold.empty_sat_cache()
+    cache.kind = manifold.AXIS_MANUAL_EDGE_PAIR
+    manifold.collide_hulls(&m, 8, a, b, off, &cache)
+    ensure("endpoint off: no points", m.point_count == 0)
+    ensure("endpoint off: cache cleared", cache.kind == manifold.AXIS_INVALID)
+    fresh = manifold.empty_sat_cache()
+    manifold.collide_hulls(&m, 8, a, b, off, &fresh)
+    ensure("endpoint off: fresh, no points", m.point_count == 0)
+    ensure("endpoint off: fresh separation positive", fresh.separation > 0.0)
+
+    free(points)
+    hull.destroy_hull(a)
+    hull.destroy_hull(b)
+}
+
+// Cubes stacked face to face and tipped by a hair: the near-parallel
+// edge pairs carry no information; the face contact has to survive.
+test_parallel_edges() {
+    a = hull.make_box_hull(0.5, 0.5, 0.5)
+    b = hull.make_box_hull(0.5, 0.5, 0.5)
+    points = new_manifold()
+    overlap = 0.01
+    axes = [ 0.57735027, 0.57735027, 0.57735027,  0.70710678, 0.0, 0.70710678,  0.26726124, 0.53452248, 0.80178373,  0.0 - 0.48507125, 0.72760688, 0.0 - 0.48507125 ]
+    angles = [ 0.0, 0.0000001, 0.000001, 0.00001, 0.0001, 0.001, 0.004, 0.005, 0.006, 0.01, 0.05 ]
+    half_diagonal = 0.87
+    i = 0
+    while i < 4 {
+        axis = math.vec3(axes[3 * i], axes[3 * i + 1], axes[3 * i + 2])
+        j = 0
+        while j < 11 {
+            angle = angles[j]
+            xf = Transform { p: math.vec3(0.0, 1.0 - overlap, 0.0), q: exact_quat(axis, angle) }
+            m = manifold.local_manifold(points)
+            cache = manifold.empty_sat_cache()
+            manifold.collide_hulls(&m, 8, a, b, xf, &cache)
+            ensure("parallel: four points (${i} ${j})", m.point_count == 4)
+            ensure("parallel: a face axis", cache.kind == manifold.AXIS_FACE_A || cache.kind == manifold.AXIS_FACE_B)
+            ensure("parallel: normal up", math.dot(m.normal, math.vec3_axis_y()) > 0.998)
+            bound = half_diagonal * angle + 0.00001
+            k = 0
+            while k < m.point_count {
+                small("parallel: separation", manifold.manifold_point(&m, k).separation + overlap, bound)
+                k = k + 1
+            }
+            // Forced edge: exactly parallel finds nothing; otherwise never positive.
+            manual = manifold.local_manifold(points)
+            manual_cache = manifold.empty_sat_cache()
+            manual_cache.kind = manifold.AXIS_MANUAL_EDGE_PAIR
+            manifold.collide_hulls(&manual, 8, a, b, xf, &manual_cache)
+            if angle == 0.0 {
+                ensure("parallel manual: nothing at zero", manual.point_count == 0 && manual_cache.kind == manifold.AXIS_MANUAL_EDGE_PAIR)
+            } else if manual.point_count > 0 {
+                ensure("parallel manual: one point", manual.point_count == 1)
+                ensure("parallel manual: normal up", math.dot(manual.normal, math.vec3_axis_y()) > 0.99)
+                s = manifold.manifold_point(&manual, 0).separation
+                ensure("parallel manual: not positive (${s})", s <= 0.0 && s >= 0.0 - overlap - half_diagonal * angle - 0.0001)
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    free(points)
+    hull.destroy_hull(a)
+    hull.destroy_hull(b)
+}
+
+// Overlapping hulls admit no separating axis: a manifold always comes out.
+test_overlap_never_empty() {
+    seed = 12345
+    a = hull.make_box_hull(0.5, 0.5, 0.5)
+    b = hull.make_box_hull(0.4, 0.6, 0.5)
+    points = new_manifold()
+    i = 0
+    while i < 2000 {
+        axis = next_direction()
+        angle = next_float(0.0 - math.PI, math.PI)
+        if (i & 1) != 0 { angle = next_float(0.0 - 0.01, 0.01) }
+        offset = math.mul_sv(0.4, next_direction())
+        xf = Transform { p: offset, q: exact_quat(axis, angle) }
+        m = manifold.local_manifold(points)
+        cache = manifold.empty_sat_cache()
+        manifold.collide_hulls(&m, 8, a, b, xf, &cache)
+        ensure("overlap: points", m.point_count > 0)
+        small("overlap: unit normal", math.length(m.normal) - 1.0, 0.00001)
+        ensure("overlap: the deepest penetrates", min_separation(&m) < 0.0)
+        i = i + 1
+    }
+    free(points)
+    hull.destroy_hull(a)
+    hull.destroy_hull(b)
+}
+
+check_roof_face(name: string, m: *LocalManifold, cache: *SATCache, overlap: float) {
+    ensure("${name}: four points", m.point_count == 4)
+    ensure("${name}: a face axis", cache.kind == manifold.AXIS_FACE_A || cache.kind == manifold.AXIS_FACE_B)
+    small("${name}: roof normal", m.normal.y - HALF_ROOT2, 0.0001)
+    s = min_separation(m)
+    ensure("${name}: separation in range (${s})", s < 0.0 - HALF_ROOT2 * overlap + 0.0001 && s > 0.0 - ROOT2 * overlap - 0.0001)
+}
+
+// Two roof ridges across each other: the face contact by preference, the
+// edge contact only when its axis beats the clipped face by more than the slop.
+test_ridge_crossing() {
+    a = hull.make_transformed_box_hull(1.5, 0.1, 0.1, exact_rotation(math.vec3_axis_x(), 0.25 * math.PI))
+    b = hull.make_transformed_box_hull(1.5, 0.1, 0.1, exact_rotation(math.vec3_axis_x(), 0.25 * math.PI))
+    ridge_y = 0.1 * ROOT2
+    points = new_manifold()
+    overlap = 0.01
+    lift = 2.0 * ridge_y - overlap
+    shallow = [ 0.0, 0.001, 0.02, 0.1, 0.5 ]
+    i = 0
+    while i < 5 {
+        xf = Transform { p: math.vec3(0.0, lift, 0.0), q: exact_quat(math.vec3_axis_y(), shallow[i]) }
+        m = manifold.local_manifold(points)
+        cache = manifold.empty_sat_cache()
+        manifold.collide_hulls(&m, 8, a, b, xf, &cache)
+        check_roof_face("ridge shallow ${i}", &m, &cache, overlap)
+        i = i + 1
+    }
+    overlap = 0.05
+    lift = 2.0 * ridge_y - overlap
+    deep = [ 0.05, 0.1, 0.2, 0.5 ]
+    i = 0
+    while i < 4 {
+        xf = Transform { p: math.vec3(0.0, lift, 0.0), q: exact_quat(math.vec3_axis_y(), deep[i]) }
+        m = manifold.local_manifold(points)
+        cache = manifold.empty_sat_cache()
+        manifold.collide_hulls(&m, 8, a, b, xf, &cache)
+        ensure("ridge deep ${i}: one point", m.point_count == 1)
+        ensure("ridge deep ${i}: edge pair", cache.kind == manifold.AXIS_EDGE_PAIR)
+        small("ridge deep ${i}: normal x", m.normal.x, 0.0001)
+        small("ridge deep ${i}: normal y", m.normal.y - 1.0, 0.0001)
+        small("ridge deep ${i}: normal z", m.normal.z, 0.0001)
+        if m.point_count == 1 {
+            p = manifold.manifold_point(&m, 0)
+            small("ridge deep ${i}: separation", p.separation + overlap, 0.0001)
+            small("ridge deep ${i}: point y", p.point.y - (ridge_y - 0.5 * overlap), 0.0001)
+            small("ridge deep ${i}: point x", p.point.x, 0.01)
+            small("ridge deep ${i}: point z", p.point.z, 0.01)
+        }
+        i = i + 1
+    }
+    near = [ 0.0, 0.0001, 0.001, 0.003 ]
+    i = 0
+    while i < 4 {
+        xf = Transform { p: math.vec3(0.0, lift, 0.0), q: exact_quat(math.vec3_axis_y(), near[i]) }
+        m = manifold.local_manifold(points)
+        cache = manifold.empty_sat_cache()
+        manifold.collide_hulls(&m, 8, a, b, xf, &cache)
+        check_roof_face("ridge near ${i}", &m, &cache, overlap)
+        i = i + 1
+    }
+    free(points)
+    hull.destroy_hull(a)
+    hull.destroy_hull(b)
+}
+
+// The edge pair axis must match the classic cross product: rebuild the
+// axis, the separation and the point from the two edges and compare.
+check_edge_contact(name: string, m: *LocalManifold, p1: Vec3, e1: Vec3, p2: Vec3, e2: Vec3, orient: Vec3, radius: float,
+                   normal_tol: float, sep_tol: float, point_tol: float) {
+    axis = math.normalize(math.cross(e1, e2))
+    if math.dot(axis, orient) < 0.0 { axis = math.neg(axis) }
+    small("${name}: normal x", m.normal.x - axis.x, normal_tol)
+    small("${name}: normal y", m.normal.y - axis.y, normal_tol)
+    small("${name}: normal z", m.normal.z - axis.z, normal_tol)
+    small("${name}: perpendicular to e1", math.dot(m.normal, math.normalize(e1)), normal_tol)
+    small("${name}: perpendicular to e2", math.dot(m.normal, math.normalize(e2)), normal_tol)
+    closest = math.line_distance(p1, e1, p2, e2)
+    expected_separation = math.dot(axis, math.sub(closest.point2, closest.point1)) - radius
+    p = manifold.manifold_point(m, 0)
+    small("${name}: separation", p.separation - expected_separation, sep_tol)
+    expected_point = math.mul_sv(0.5, math.add(math.mul_sub(closest.point1, radius, axis), closest.point2))
+    small("${name}: point x", p.point.x - expected_point.x, point_tol)
+    small("${name}: point y", p.point.y - expected_point.y, point_tol)
+    small("${name}: point z", p.point.z - expected_point.z, point_tol)
+}
+
+hull_edge_tail(h: *HullData, edge_index: int, t: Transform) -> Vec3 {
+    edges = hull.hull_edges(h)
+    points = hull.hull_points(h)
+    return math.transform_point(t, points[edges[edge_index].origin])
+}
+
+hull_edge_vector(h: *HullData, edge_index: int, t: Transform) -> Vec3 {
+    edges = hull.hull_edges(h)
+    points = hull.hull_points(h)
+    tail = math.transform_point(t, points[edges[edge_index].origin])
+    head = math.transform_point(t, points[edges[edges[edge_index].twin].origin])
+    return math.sub(head, tail)
+}
+
+test_edge_axis_oracle() {
+    a = hull.make_transformed_box_hull(0.5, 0.5, 0.5, exact_rotation(math.vec3_axis_y(), 0.25 * math.PI))
+    points = new_manifold()
+    // (An array literal of expressions such as 0.18 * PI is mis-typed by
+    // aetherc, so the rolls are computed.)
+    yaws = [ 0.0 - 0.35, 0.0 - 0.15, 0.0, 0.15, 0.35 ]
+    distances = [ 1.38, 1.40, ROOT2, 1.44 ]
+    edge_contacts = 0
+    i = 0
+    while i < 3 {
+        roll = (0.18 + 0.07 * (i as float)) * math.PI
+        b = hull.make_transformed_box_hull(0.5, 0.5, 0.5, exact_rotation(math.vec3_axis_z(), roll))
+        j = 0
+        while j < 5 {
+            k = 0
+            while k < 4 {
+                xf = Transform { p: math.vec3(distances[k], 0.0, 0.0), q: exact_quat(math.vec3_axis_y(), yaws[j]) }
+                m = manifold.local_manifold(points)
+                cache = manifold.empty_sat_cache()
+                manifold.collide_hulls(&m, 8, a, b, xf, &cache)
+                if cache.kind == manifold.AXIS_EDGE_PAIR && m.point_count == 1 {
+                    p1 = hull_edge_tail(a, cache.index_a, math.transform_identity())
+                    e1 = hull_edge_vector(a, cache.index_a, math.transform_identity())
+                    p2 = hull_edge_tail(b, cache.index_b, xf)
+                    e2 = hull_edge_vector(b, cache.index_b, xf)
+                    orient = math.sub(math.transform_point(xf, b.center), a.center)
+                    check_edge_contact("edge oracle", &m, p1, e1, p2, e2, orient, 0.0, 0.0002, 0.0002, 0.002)
+                    edge_contacts = edge_contacts + 1
+                }
+                k = k + 1
+            }
+            j = j + 1
+        }
+        hull.destroy_hull(b)
+        i = i + 1
+    }
+    ensure("edge oracle: drove the edge path (${edge_contacts})", edge_contacts >= 15)
+
+    // Random pairs, the same check.
+    seed = 246813579
+    edge_contacts = 0
+    i = 0
+    while i < 2000 {
+        angle_a = next_float(0.2, 0.5) * math.PI
+        angle_b = next_float(0.2, 0.5) * math.PI
+        a_r = hull.make_transformed_box_hull(0.5, 0.5, 0.5, exact_rotation(next_direction(), angle_a))
+        b_r = hull.make_box_hull(0.5, 0.5, 0.5)
+        d = next_float(1.2, 1.55)
+        xf = Transform { p: math.mul_sv(d, next_direction()), q: exact_quat(next_direction(), angle_b) }
+        m = manifold.local_manifold(points)
+        cache = manifold.empty_sat_cache()
+        manifold.collide_hulls(&m, 8, a_r, b_r, xf, &cache)
+        if cache.kind == manifold.AXIS_EDGE_PAIR && m.point_count == 1 {
+            p1 = hull_edge_tail(a_r, cache.index_a, math.transform_identity())
+            e1 = hull_edge_vector(a_r, cache.index_a, math.transform_identity())
+            p2 = hull_edge_tail(b_r, cache.index_b, xf)
+            e2 = hull_edge_vector(b_r, cache.index_b, xf)
+            sine = math.length(math.cross(math.normalize(e1), math.normalize(e2)))
+            if sine >= 0.1 {
+                orient = math.sub(math.transform_point(xf, b_r.center), a_r.center)
+                check_edge_contact("random edge oracle", &m, p1, e1, p2, e2, orient, 0.0, 0.001, 0.001, 0.005)
+                edge_contacts = edge_contacts + 1
+            }
+        }
+        hull.destroy_hull(a_r)
+        hull.destroy_hull(b_r)
+        i = i + 1
+    }
+    ensure("random edge oracle: drove the edge path (${edge_contacts})", edge_contacts >= 100)
+    free(points)
+    hull.destroy_hull(a)
+}
+
+// --- hull against capsule and sphere -----------------------------------------------------
+
+// A thin capsule stabbed through the +x +y edge of a box: the isolated
+// edge axis, nearly parallel to a face normal.
+test_hull_capsule_edge_deep() {
+    h = hull.make_box_hull(0.5, 0.5, 0.5)
+    points = new_manifold()
+    edge_point = math.vec3(0.5, 0.5, 0.0)
+    edge_dir = math.vec3(0.0, 0.0, 1.0)
+    outward = math.normalize(math.vec3(1.0, 1.0, 0.0))
+    depths = [ 0.12, 0.18, 0.25 ]
+    radii = [ 0.05, 0.1, 0.2 ]
+    tilts = [ 0.0, 0.25, 0.0 - 0.25 ]
+    count = 0
+    i = 0
+    while i < 3 {
+        j = 0
+        while j < 3 {
+            k = 0
+            while k < 3 {
+                dir = math.normalize(math.vec3(1.0, 0.0 - 1.0, tilts[k]))
+                mid = math.mul_add(edge_point, 0.0 - depths[i], outward)
+                c1 = math.mul_add(mid, 0.0 - 0.5, dir)
+                c2 = math.mul_add(mid, 0.5, dir)
+                c = manifold.capsule(c1, c2, radii[j])
+                m = manifold.local_manifold(points)
+                cache = distance.empty_cache()
+                manifold.collide_hull_and_capsule(&m, 8, h, c, math.transform_identity(), &cache)
+                ensure("capsule edge deep: one point (${i} ${j} ${k})", m.point_count == 1)
+                if m.point_count == 1 {
+                    ensure("capsule edge deep: penetrating", manifold.manifold_point(&m, 0).separation < 0.0)
+                    check_edge_contact("capsule edge deep", &m, edge_point, edge_dir, c1, math.sub(c2, c1), outward, radii[j], 0.0001, 0.0001, 0.0001)
+                }
+                count = count + 1
+                k = k + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    ensure("capsule edge deep: all cases", count == 27)
+    free(points)
+    hull.destroy_hull(h)
+}
+
+// A sphere lowered through a box face: the separation is the analytic
+// gap on both sides of the seam between the GJK and the SAT branch.
+test_sphere_hull_seam() {
+    h = hull.make_box_hull(0.5, 0.5, 0.5)
+    points = new_manifold()
+    radius = 0.15
+    y_start = 0.5 + radius + 0.4 * manifold.SPECULATIVE_DISTANCE
+    y_end = 0.1
+    steps = 400
+    dy = (y_start - y_end) / (steps as float)
+    previous = 0.0
+    shallow = 0
+    deep = 0
+    i = 0
+    while i <= steps {
+        y = y_start - (i as float) * dy
+        s = manifold.sphere(math.vec3(0.0, y, 0.0), radius)
+        m = manifold.local_manifold(points)
+        cache = distance.empty_cache()
+        manifold.collide_hull_and_sphere(&m, 8, h, s, math.transform_identity(), &cache)
+        ensure("sphere seam: one point", m.point_count == 1)
+        if m.point_count == 1 {
+            separation = manifold.manifold_point(&m, 0).separation
+            expected = (y - 0.5) - radius
+            small("sphere seam: separation", separation - expected, 0.00001)
+            small("sphere seam: normal x", m.normal.x, 0.00001)
+            small("sphere seam: normal y", m.normal.y - 1.0, 0.00001)
+            small("sphere seam: normal z", m.normal.z, 0.00001)
+            if i > 0 { small("sphere seam: no jump", (previous - separation) - dy, 0.00001) }
+            previous = separation
+        }
+        if y > 0.5 { shallow = shallow + 1 } else { deep = deep + 1 }
+        i = i + 1
+    }
+    ensure("sphere seam: both branches", shallow > 0 && deep > 0)
+
+    // The same seam for a capsule laid along the face: two points, at the gap.
+    half_length = 0.3
+    previous = 0.0
+    shallow = 0
+    deep = 0
+    i = 0
+    while i <= steps {
+        y = y_start - (i as float) * dy
+        c = manifold.capsule(math.vec3(0.0 - half_length, y, 0.0), math.vec3(half_length, y, 0.0), radius)
+        m = manifold.local_manifold(points)
+        cache = distance.empty_cache()
+        manifold.collide_hull_and_capsule(&m, 8, h, c, math.transform_identity(), &cache)
+        ensure("capsule seam: points", m.point_count >= 1)
+        expected = (y - 0.5) - radius
+        k = 0
+        while k < m.point_count {
+            small("capsule seam: separation", manifold.manifold_point(&m, k).separation - expected, 0.00001)
+            k = k + 1
+        }
+        small("capsule seam: normal x", m.normal.x, 0.00001)
+        small("capsule seam: normal y", m.normal.y - 1.0, 0.00001)
+        small("capsule seam: normal z", m.normal.z, 0.00001)
+        ms = min_separation(&m)
+        if i > 0 { small("capsule seam: no jump", (previous - ms) - dy, 0.00001) }
+        previous = ms
+        if y > 0.5 { shallow = shallow + 1 } else { deep = deep + 1 }
+        i = i + 1
+    }
+    ensure("capsule seam: both branches", shallow > 0 && deep > 0)
+
+    // A capsule core inside the box: two points on the top face.
+    depths = [ 0.1, 0.2, 0.3, 0.4, 0.45 ]
+    yaws = [ 0.0, 0.4, 0.8, 1.2 ]
+    radii = [ 0.1, 0.15, 0.2 ]
+    offsets = [ 0.0 - 0.1, 0.0, 0.1 ]
+    face_contacts = 0
+    i = 0
+    while i < 5 {
+        j = 0
+        while j < 4 {
+            r = 0
+            while r < 3 {
+                o = 0
+                while o < 3 {
+                    y = depths[i]
+                    dir = math.vec3(cos(yaws[j]), 0.0, sin(yaws[j]))
+                    center = math.vec3(offsets[o], y, 0.0)
+                    c = manifold.capsule(math.mul_add(center, 0.0 - half_length, dir), math.mul_add(center, half_length, dir), radii[r])
+                    m = manifold.local_manifold(points)
+                    cache = distance.empty_cache()
+                    manifold.collide_hull_and_capsule(&m, 8, h, c, math.transform_identity(), &cache)
+                    ensure("capsule face deep: two points (${i} ${j} ${r} ${o})", m.point_count == 2)
+                    small("capsule face deep: normal x", m.normal.x, 0.00001)
+                    small("capsule face deep: normal y", m.normal.y - 1.0, 0.00001)
+                    small("capsule face deep: normal z", m.normal.z, 0.00001)
+                    expected = (y - 0.5) - radii[r]
+                    if m.point_count == 2 {
+                        small("capsule face deep: separation 0", manifold.manifold_point(&m, 0).separation - expected, 0.00001)
+                        small("capsule face deep: separation 1", manifold.manifold_point(&m, 1).separation - expected, 0.00001)
+                    }
+                    ensure("capsule face deep: penetrating", expected < 0.0)
+                    face_contacts = face_contacts + 1
+                    o = o + 1
+                }
+                r = r + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    ensure("capsule face deep: all cases", face_contacts == 180)
+    free(points)
+    hull.destroy_hull(h)
+}
+
+// Sphere and capsule pairs at analytic distances.
+test_rounded_pairs() {
+    points = new_manifold()
+    a = manifold.sphere(math.vec3_zero(), 0.5)
+    b = manifold.sphere(math.vec3_zero(), 0.25)
+    m = manifold.local_manifold(points)
+    manifold.collide_spheres(&m, 8, a, b, Transform { p: math.vec3(0.7, 0.0, 0.0), q: math.quat_identity() })
+    ensure("spheres: one point", m.point_count == 1)
+    if m.point_count == 1 {
+        small("spheres: separation", manifold.manifold_point(&m, 0).separation + 0.05, 0.00001)
+        small("spheres: point at the midpoint", manifold.manifold_point(&m, 0).point.x - 0.475, 0.00001)
+    }
+    small("spheres: normal", m.normal.x - 1.0, 0.00001)
+    m = manifold.local_manifold(points)
+    manifold.collide_spheres(&m, 8, a, b, Transform { p: math.vec3(0.8, 0.0, 0.0), q: math.quat_identity() })
+    ensure("spheres: apart is empty", m.point_count == 0)
+
+    c = manifold.capsule(math.vec3(0.0 - 1.0, 0.0, 0.0), math.vec3(1.0, 0.0, 0.0), 0.2)
+    m = manifold.local_manifold(points)
+    manifold.collide_capsule_and_sphere(&m, 8, c, b, Transform { p: math.vec3(0.3, 0.4, 0.0), q: math.quat_identity() })
+    ensure("capsule-sphere: one point", m.point_count == 1)
+    if m.point_count == 1 { small("capsule-sphere: separation", manifold.manifold_point(&m, 0).separation + 0.05, 0.00001) }
+    small("capsule-sphere: normal y", m.normal.y - 1.0, 0.00001)
+
+    // Parallel capsules: two points; crossed: one.
+    d = manifold.capsule(math.vec3(0.0 - 0.5, 0.0, 0.0), math.vec3(0.5, 0.0, 0.0), 0.2)
+    m = manifold.local_manifold(points)
+    manifold.collide_capsules(&m, 8, c, d, Transform { p: math.vec3(0.2, 0.39, 0.0), q: math.quat_identity() })
+    ensure("capsules parallel: two points", m.point_count == 2)
+    small("capsules parallel: normal y", m.normal.y - 1.0, 0.00001)
+    if m.point_count == 2 {
+        small("capsules parallel: separation 0", manifold.manifold_point(&m, 0).separation + 0.01, 0.00001)
+        small("capsules parallel: separation 1", manifold.manifold_point(&m, 1).separation + 0.01, 0.00001)
+    }
+    m = manifold.local_manifold(points)
+    manifold.collide_capsules(&m, 8, c, d, Transform { p: math.vec3(0.0, 0.39, 0.0), q: exact_quat(math.vec3_axis_y(), 0.5 * math.PI) })
+    ensure("capsules crossed: one point", m.point_count == 1)
+    if m.point_count == 1 { small("capsules crossed: separation", manifold.manifold_point(&m, 0).separation + 0.01, 0.00001) }
+    m = manifold.local_manifold(points)
+    manifold.collide_capsules(&m, 8, c, d, Transform { p: math.vec3(0.0, 0.5, 0.0), q: math.quat_identity() })
+    ensure("capsules apart: empty", m.point_count == 0)
+    free(points)
+}
+
+main() {
+    before = core.alloc_count()
+    test_sat_fixed()
+    test_sat_oracle()
+    test_crossed_edge()
+    test_parallel_edges()
+    test_overlap_never_empty()
+    test_ridge_crossing()
+    test_edge_axis_oracle()
+    test_hull_capsule_edge_deep()
+    test_sphere_hull_seam()
+    test_rounded_pairs()
+    // The module's clip scratch stays allocated: three blocks.
+    ensure("every other counted allocation was freed", core.alloc_count() == before + 3)
+
+    println("manifold: ${checks} checks")
+    if failures == 0 {
+        println("manifold: all checks passed")
+    } else {
+        println("manifold: ${failures} failure(s)")
+        exit(1)
+    }
+}
