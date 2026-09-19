@@ -46,7 +46,7 @@ exports (
     solve3, invert_t, abs_matrix3, make_matrix_from_quat, make_diagonal_matrix, steiner,
     sphere_inertia, cylinder_inertia, box_inertia,
     make_aabb, aabb_contains, aabb_area, aabb_center, aabb_extents, aabb_union, aabb_inflate,
-    aabb_overlaps, aabb_transform, closest_point_to_aabb,
+    aabb_overlaps, aabb_transform, closest_point_to_aabb, ray_cast_aabb,
     point_to_segment_distance, line_distance, segment_distance,
     is_valid_float, is_valid_vec3, is_valid_quat, is_valid_transform, is_valid_matrix3,
     is_valid_aabb, is_bounded_aabb, is_sane_aabb, is_valid_plane, is_valid_position,
@@ -711,6 +711,52 @@ aabb_transform(t: Transform, a: AABB) -> AABB {
 }
 
 closest_point_to_aabb(point: Vec3, a: AABB) -> Vec3 { return clamp_vec3(point, a.lower, a.upper) }
+
+// One axis of the slab test: narrows [t_min, t_max] (as fractions[0..1])
+// to the slab, false when the interval empties.
+slab_axis(ray_start: float, ray_component: float, box_min: float, box_max: float, fractions: float[]) -> bool {
+    if abs_float(ray_component) < EPSILON {
+        // Parallel to the slab: inside it or not at all.
+        return ray_start >= box_min && ray_start <= box_max
+    }
+    t1 = (box_min - ray_start) / ray_component
+    t2 = (box_max - ray_start) / ray_component
+    if t1 > t2 {
+        swap = t1
+        t1 = t2
+        t2 = swap
+    }
+    fractions[0] = max_float(fractions[0], t1)
+    fractions[1] = min_float(fractions[1], t2)
+    return fractions[0] <= fractions[1]
+}
+
+// The segment p1-p2 against the box by the slab method (Real-Time
+// Collision Detection, p. 179). On a hit, fractions[0] and [1] are where
+// the segment enters and leaves, clamped to [0, 1].
+ray_cast_aabb(a: AABB, p1: Vec3, p2: Vec3, fractions: float[]) -> bool {
+    d = sub(p2, p1)
+    ray_length = length(d)
+    if ray_length < EPSILON {
+        inside = p1.x >= a.lower.x && p1.x <= a.upper.x && p1.y >= a.lower.y && p1.y <= a.upper.y &&
+                 p1.z >= a.lower.z && p1.z <= a.upper.z
+        if inside {
+            fractions[0] = 0.0
+            fractions[1] = 0.0
+        }
+        return inside
+    }
+    ray_dir = mul_sv(1.0 / ray_length, d)
+    fractions[0] = 0.0
+    fractions[1] = ray_length
+    if slab_axis(p1.x, ray_dir.x, a.lower.x, a.upper.x, fractions) == false { return false }
+    if slab_axis(p1.y, ray_dir.y, a.lower.y, a.upper.y, fractions) == false { return false }
+    if slab_axis(p1.z, ray_dir.z, a.lower.z, a.upper.z, fractions) == false { return false }
+    if fractions[1] < 0.0 { return false }
+    fractions[0] = clamp_float(fractions[0] / ray_length, 0.0, 1.0)
+    fractions[1] = clamp_float(fractions[1] / ray_length, 0.0, 1.0)
+    return true
+}
 
 // --- segments --------------------------------------------------------------
 

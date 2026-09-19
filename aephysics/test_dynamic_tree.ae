@@ -1,0 +1,616 @@
+// aephysics.dynamic_tree against the reference's (Box3D's)
+// test_dynamic_tree.c: a leaf at the root, the query against a linear
+// scan, the category filter, moving and enlarging through refit and
+// rebuild, destroying in a scrambled order, the ray and box casts against
+// the slab test, and the closest query against the scan. The debug save
+// and load are not ported, so that subtest is not either. Every
+// allocation is freed by the end.
+
+import std.string
+import aephysics.math
+import aephysics.core
+import aephysics.dynamic_tree
+
+extern calloc(count: int, size: int) -> ptr
+extern exit(code: int)
+extern free(p: ptr)
+
+var failures = 0
+var checks = 0
+
+ensure(name: string, ok: bool) {
+    checks = checks + 1
+    if !ok {
+        println("dynamic_tree: FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+const PROXY_COUNT = 300
+
+// The reference's LCG, so the boxes are the same ones.
+var seed = 12345
+
+next_random() -> int {
+    seed = 1664525 * seed + 1013904223
+    return seed
+}
+
+random_float(lo: float, hi: float) -> float {
+    t = (((next_random() >> 8) & 0xFFFFFF) as float) / 16777216.0
+    return lo + t * (hi - lo)
+}
+
+random_box(extent: float, largest: float) -> AABB {
+    center = math.vec3(random_float(0.0 - extent, extent), random_float(0.0 - extent, extent), random_float(0.0 - extent, extent))
+    half = math.vec3(random_float(0.1, largest), random_float(0.1, largest), random_float(0.1, largest))
+    return math.aabb(math.sub(center, half), math.add(center, half))
+}
+
+// A set of hits keyed on user data (the box index): proxy ids recycle,
+// box indices do not. ids[0..PROXY_COUNT) then count, then bad.
+struct HitSet {
+    ids: ptr
+    count: int
+    bad: bool
+}
+
+hitset_create() -> HitSet {
+    return HitSet { ids: calloc(PROXY_COUNT, 4), count: 0, bad: false }
+}
+
+hitset_destroy(s: *HitSet) { free(s.ids) }
+
+hitset_add(s: *HitSet, user_data: long) -> bool {
+    index = user_data as int
+    if s.count >= PROXY_COUNT || index < 0 || index >= PROXY_COUNT {
+        s.bad = true
+        return false
+    }
+    ids = s.ids as int[]
+    ids[s.count] = index
+    s.count = s.count + 1
+    return true
+}
+
+hitset_has(s: *HitSet, index: int) -> bool {
+    ids = s.ids as int[]
+    i = 0
+    while i < s.count {
+        if ids[i] == index { return true }
+        i = i + 1
+    }
+    return false
+}
+
+sort_ints(ids: int[], count: int) {
+    i = 1
+    while i < count {
+        v = ids[i]
+        j = i - 1
+        while j >= 0 && ids[j] > v {
+            ids[j + 1] = ids[j]
+            j = j - 1
+        }
+        ids[j + 1] = v
+        i = i + 1
+    }
+}
+
+same_set(name: string, a: *HitSet, b: *HitSet) {
+    ensure("${name}: the tree hits were well formed", a.bad == false)
+    ensure("${name}: the scan hits were well formed", b.bad == false)
+    ensure("${name}: the same number of hits", a.count == b.count)
+    if a.count != b.count { return }
+    ids_a = a.ids as int[]
+    ids_b = b.ids as int[]
+    sort_ints(ids_a, a.count)
+    sort_ints(ids_b, b.count)
+    i = 0
+    while i < a.count {
+        ensure("${name}: the same hits", ids_a[i] == ids_b[i])
+        i = i + 1
+    }
+}
+
+// A visitor cannot fail the test directly, so bad news rides back on the context.
+collect(proxy_id: int, user_data: long, context: ptr) -> bool {
+    s = context as *HitSet
+    return hitset_add(s, user_data)
+}
+
+scan(boxes: AABB[], query: AABB, hits: *HitSet) {
+    i = 0
+    while i < PROXY_COUNT {
+        if math.aabb_overlaps(boxes[i], query) { hitset_add(hits, i as long) }
+        i = i + 1
+    }
+}
+
+// A one proxy tree is a leaf at the root with an empty node beside it,
+// which every traversal has to survive.
+struct LeafRootHit {
+    count: int
+    proxy_id: int
+    user_data: long
+}
+
+leaf_root_visit(proxy_id: int, user_data: long, context: ptr) -> bool {
+    hit = context as *LeafRootHit
+    hit.count = hit.count + 1
+    hit.proxy_id = proxy_id
+    hit.user_data = user_data
+    return true
+}
+
+test_leaf_root() {
+    tree = dynamic_tree.tree_create(16)
+    box = math.aabb(math.vec3(0.0 - 1.0, 0.0 - 1.0, 0.0 - 1.0), math.vec3(1.0, 1.0, 1.0))
+    proxy_id = dynamic_tree.tree_create_proxy(&tree, box, dynamic_tree.default_category_bits(), 7 as long)
+    ensure("leaf root: valid", dynamic_tree.tree_validate(&tree))
+    ensure("leaf root: one proxy", dynamic_tree.tree_get_proxy_count(&tree) == 1)
+    ensure("leaf root: height 0", dynamic_tree.tree_get_height(&tree) == 0)
+    ensure("leaf root: area ratio 0", dynamic_tree.tree_get_area_ratio(&tree) == 0.0)
+    ensure("leaf root: user data", dynamic_tree.tree_get_user_data(&tree, proxy_id) == (7 as long))
+
+    hit = LeafRootHit { count: 0, proxy_id: 0 - 1, user_data: 0 as long }
+    hit_box = math.aabb(math.vec3(0.5, 0.5, 0.5), math.vec3(2.0, 2.0, 2.0))
+    dynamic_tree.tree_query(&tree, hit_box, dynamic_tree.default_mask_bits(), false, leaf_root_visit, (&hit) as ptr)
+    ensure("leaf root: one hit", hit.count == 1)
+    ensure("leaf root: the proxy", hit.proxy_id == proxy_id)
+    ensure("leaf root: its user data", hit.user_data == (7 as long))
+
+    hit.count = 0
+    miss_box = math.aabb(math.vec3(4.0, 4.0, 4.0), math.vec3(5.0, 5.0, 5.0))
+    dynamic_tree.tree_query(&tree, miss_box, dynamic_tree.default_mask_bits(), false, leaf_root_visit, (&hit) as ptr)
+    ensure("leaf root: a miss", hit.count == 0)
+
+    // The rebuild has one build leaf and the refit nothing above it.
+    dynamic_tree.tree_rebuild(&tree, true)
+    ensure("leaf root: valid after the rebuild", dynamic_tree.tree_validate(&tree))
+    dynamic_tree.tree_refit(&tree)
+    ensure("leaf root: valid after the refit", dynamic_tree.tree_validate(&tree))
+    ensure("leaf root: still one proxy", dynamic_tree.tree_get_proxy_count(&tree) == 1)
+
+    grown = math.aabb_inflate(box, 1.0)
+    dynamic_tree.tree_enlarge_proxy(&tree, proxy_id, grown)
+    ensure("leaf root: enlarged", math.aabb_contains(dynamic_tree.tree_get_aabb(&tree, proxy_id), grown))
+    dynamic_tree.tree_destroy(&tree)
+}
+
+// The tree must agree with a linear scan over the stored boxes.
+test_query_brute_force() {
+    seed = 12345
+    tree = dynamic_tree.tree_create(16)
+    boxes_block = calloc(PROXY_COUNT, sizeof(AABB))
+    boxes = boxes_block as AABB[]
+    i = 0
+    while i < PROXY_COUNT {
+        boxes[i] = random_box(6.0, 1.5)
+        id = dynamic_tree.tree_create_proxy(&tree, boxes[i], dynamic_tree.default_category_bits(), i as long)
+        ensure("brute force: ids in order", id == i)
+        i = i + 1
+    }
+    ensure("brute force: valid", dynamic_tree.tree_validate(&tree))
+    ensure("brute force: the count", dynamic_tree.tree_get_proxy_count(&tree) == PROXY_COUNT)
+
+    total_hits = 0
+    round = 0
+    while round < 200 {
+        query = random_box(7.0, 3.0)
+        tree_hits = hitset_create()
+        dynamic_tree.tree_query(&tree, query, dynamic_tree.default_mask_bits(), false, collect, (&tree_hits) as ptr)
+        scan_hits = hitset_create()
+        scan(boxes, query, &scan_hits)
+        same_set("brute force", &tree_hits, &scan_hits)
+        total_hits = total_hits + tree_hits.count
+        hitset_destroy(&tree_hits)
+        hitset_destroy(&scan_hits)
+        round = round + 1
+    }
+    ensure("brute force: agreed on something (${total_hits})", total_hits > 1000)
+    ensure("brute force: a tree of 300 is not a list", dynamic_tree.tree_get_height(&tree) < 40)
+    free(boxes_block)
+    dynamic_tree.tree_destroy(&tree)
+}
+
+// Moving and enlarging every proxy exercises remove, insert, the ordered
+// flag, the sweep refit and the partial rebuild; the query must still
+// agree with the scan.
+test_move_refit_rebuild() {
+    seed = 777
+    tree = dynamic_tree.tree_create(16)
+    boxes_block = calloc(PROXY_COUNT, sizeof(AABB))
+    boxes = boxes_block as AABB[]
+    proxies_block = calloc(PROXY_COUNT, 4)
+    proxies = proxies_block as int[]
+    i = 0
+    while i < PROXY_COUNT {
+        boxes[i] = random_box(6.0, 1.0)
+        proxies[i] = dynamic_tree.tree_create_proxy(&tree, boxes[i], dynamic_tree.default_category_bits(), i as long)
+        i = i + 1
+    }
+    dynamic_tree.tree_rebuild(&tree, true)
+    ensure("move: valid after the full build", dynamic_tree.tree_validate(&tree))
+    ensure("move: ordered after the full build", tree.dfs_ordered)
+
+    total_hits = 0
+    round = 0
+    while round < 8 {
+        // Half the proxies move, half grow in place.
+        i = 0
+        while i < PROXY_COUNT {
+            if (i & 1) == 0 {
+                boxes[i] = random_box(6.0, 1.0)
+                dynamic_tree.tree_move_proxy(&tree, proxies[i], boxes[i])
+            } else {
+                grown = math.aabb_inflate(boxes[i], 0.35)
+                boxes[i] = grown
+                dynamic_tree.tree_enlarge_proxy(&tree, proxies[i], grown)
+            }
+            i = i + 1
+        }
+        dynamic_tree.tree_refit(&tree)
+        ensure("move: valid after the refit", dynamic_tree.tree_validate(&tree))
+        dynamic_tree.tree_rebuild(&tree, false)
+        ensure("move: valid after the rebuild", dynamic_tree.tree_validate(&tree))
+        ensure("move: nothing moved after the rebuild", dynamic_tree.tree_validate_no_moved(&tree))
+        ensure("move: ordered after the rebuild", tree.dfs_ordered)
+
+        // Every stored box is inside its leaf and inside the root.
+        root_bounds = dynamic_tree.tree_get_root_bounds(&tree)
+        i = 0
+        while i < PROXY_COUNT {
+            ensure("move: the leaf holds the box", math.aabb_contains(dynamic_tree.tree_get_aabb(&tree, proxies[i]), boxes[i]))
+            ensure("move: the root holds the box", math.aabb_contains(root_bounds, boxes[i]))
+            ensure("move: the user data followed", (dynamic_tree.tree_get_user_data(&tree, proxies[i]) as int) == i)
+            i = i + 1
+        }
+
+        query = random_box(7.0, 3.0)
+        tree_hits = hitset_create()
+        dynamic_tree.tree_query(&tree, query, dynamic_tree.default_mask_bits(), false, collect, (&tree_hits) as ptr)
+        scan_hits = hitset_create()
+        scan(boxes, query, &scan_hits)
+        same_set("move", &tree_hits, &scan_hits)
+        total_hits = total_hits + tree_hits.count
+        hitset_destroy(&tree_hits)
+        hitset_destroy(&scan_hits)
+        round = round + 1
+    }
+    ensure("move: agreed on something (${total_hits})", total_hits > 50)
+    free(boxes_block)
+    free(proxies_block)
+    dynamic_tree.tree_destroy(&tree)
+}
+
+// Destroying proxies in a scrambled order recycles sibling pairs through
+// the free list and leaves the array unordered, the path the fallback
+// refit has to handle.
+test_destroy_scrambled() {
+    seed = 4242
+    tree = dynamic_tree.tree_create(16)
+    boxes_block = calloc(PROXY_COUNT, sizeof(AABB))
+    boxes = boxes_block as AABB[]
+    proxies_block = calloc(PROXY_COUNT, 4)
+    proxies = proxies_block as int[]
+    i = 0
+    while i < PROXY_COUNT {
+        boxes[i] = random_box(10.0, 0.8)
+        proxies[i] = dynamic_tree.tree_create_proxy(&tree, boxes[i], dynamic_tree.default_category_bits(), i as long)
+        i = i + 1
+    }
+    i = 0
+    while i < PROXY_COUNT {
+        dynamic_tree.tree_destroy_proxy(&tree, proxies[i])
+        i = i + 3
+    }
+    ensure("scrambled: valid after destroying a third", dynamic_tree.tree_validate(&tree))
+
+    // Re-create into the holes.
+    i = 0
+    while i < PROXY_COUNT {
+        boxes[i] = random_box(10.0, 0.8)
+        proxies[i] = dynamic_tree.tree_create_proxy(&tree, boxes[i], dynamic_tree.default_category_bits(), i as long)
+        i = i + 3
+    }
+    ensure("scrambled: valid after refilling", dynamic_tree.tree_validate(&tree))
+    ensure("scrambled: the count", dynamic_tree.tree_get_proxy_count(&tree) == PROXY_COUNT)
+
+    // The user data followed each proxy through the churn.
+    i = 0
+    while i < PROXY_COUNT {
+        ensure("scrambled: the user data", (dynamic_tree.tree_get_user_data(&tree, proxies[i]) as int) == i)
+        ensure("scrambled: the leaf holds the box", math.aabb_contains(dynamic_tree.tree_get_aabb(&tree, proxies[i]), boxes[i]))
+        i = i + 1
+    }
+
+    query = math.aabb(math.vec3(0.0 - 10.0, 0.0 - 10.0, 0.0 - 10.0), math.vec3(10.0, 10.0, 10.0))
+    tree_hits = hitset_create()
+    dynamic_tree.tree_query(&tree, query, dynamic_tree.default_mask_bits(), false, collect, (&tree_hits) as ptr)
+    scan_hits = hitset_create()
+    scan(boxes, query, &scan_hits)
+    same_set("scrambled", &tree_hits, &scan_hits)
+    ensure("scrambled: everything is in the big box", tree_hits.count == PROXY_COUNT)
+    hitset_destroy(&tree_hits)
+    hitset_destroy(&scan_hits)
+
+    // Empty the tree.
+    i = 0
+    while i < PROXY_COUNT {
+        dynamic_tree.tree_destroy_proxy(&tree, proxies[i])
+        i = i + 1
+    }
+    ensure("scrambled: valid when empty", dynamic_tree.tree_validate(&tree))
+    ensure("scrambled: no proxies", dynamic_tree.tree_get_proxy_count(&tree) == 0)
+    ensure("scrambled: height 0", dynamic_tree.tree_get_height(&tree) == 0)
+
+    // Queries on an empty tree are silent.
+    empty_hits = hitset_create()
+    dynamic_tree.tree_query(&tree, query, dynamic_tree.default_mask_bits(), false, collect, (&empty_hits) as ptr)
+    ensure("scrambled: an empty tree has no hits", empty_hits.count == 0)
+    hitset_destroy(&empty_hits)
+    free(boxes_block)
+    free(proxies_block)
+    dynamic_tree.tree_destroy(&tree)
+}
+
+// Category bits live on the proxy, so the filter has to bite at the leaf.
+test_category_filter() {
+    seed = 99
+    tree = dynamic_tree.tree_create(16)
+    boxes_block = calloc(PROXY_COUNT, sizeof(AABB))
+    boxes = boxes_block as AABB[]
+    bits_block = calloc(PROXY_COUNT, 8)
+    bits = bits_block as long[]
+    proxies_block = calloc(PROXY_COUNT, 4)
+    proxies = proxies_block as int[]
+    i = 0
+    while i < PROXY_COUNT {
+        boxes[i] = random_box(8.0, 0.6)
+        bits[i] = (1 as long) << (i % 3)
+        proxies[i] = dynamic_tree.tree_create_proxy(&tree, boxes[i], bits[i], i as long)
+        ensure("filter: the bits are stored", dynamic_tree.tree_get_category_bits(&tree, proxies[i]) == bits[i])
+        i = i + 1
+    }
+    query = math.aabb(math.vec3(0.0 - 8.0, 0.0 - 8.0, 0.0 - 8.0), math.vec3(8.0, 8.0, 8.0))
+
+    // A single bit mask makes require-all the same as the any-bit test, so
+    // the last pass is the one that proves require-all accepts.
+    pass = 0
+    while pass < 3 {
+        mask = 1 as long
+        require_all = false
+        if pass == 1 { mask = 3 as long }
+        if pass == 2 {
+            mask = 2 as long
+            require_all = true
+        }
+        tree_hits = hitset_create()
+        dynamic_tree.tree_query(&tree, query, mask, require_all, collect, (&tree_hits) as ptr)
+        scan_hits = hitset_create()
+        i = 0
+        while i < PROXY_COUNT {
+            accept = (bits[i] & mask) != (0 as long)
+            if require_all { accept = (bits[i] & mask) == mask }
+            if accept && math.aabb_overlaps(boxes[i], query) { hitset_add(&scan_hits, i as long) }
+            i = i + 1
+        }
+        same_set("filter pass ${pass}", &tree_hits, &scan_hits)
+        ensure("filter pass ${pass}: a quarter or more", tree_hits.count > PROXY_COUNT / 4)
+        hitset_destroy(&tree_hits)
+        hitset_destroy(&scan_hits)
+        pass = pass + 1
+    }
+
+    // Require-all with two bits never matches a single-bit proxy.
+    no_hits = hitset_create()
+    dynamic_tree.tree_query(&tree, query, 5 as long, true, collect, (&no_hits) as ptr)
+    ensure("filter: two required bits match nothing", no_hits.count == 0)
+    hitset_destroy(&no_hits)
+
+    // Changing the bits changes the filter without touching the structure.
+    dynamic_tree.tree_set_category_bits(&tree, proxies[0], 8 as long)
+    ensure("filter: the bits changed", dynamic_tree.tree_get_category_bits(&tree, proxies[0]) == (8 as long))
+    ensure("filter: still valid", dynamic_tree.tree_validate(&tree))
+    one_hit = hitset_create()
+    dynamic_tree.tree_query(&tree, query, 8 as long, false, collect, (&one_hit) as ptr)
+    ensure("filter: one hit on the new bit", one_hit.count == 1)
+    ensure("filter: it is proxy 0", one_hit.count == 1 && hitset_has(&one_hit, 0))
+    hitset_destroy(&one_hit)
+    free(boxes_block)
+    free(bits_block)
+    free(proxies_block)
+    dynamic_tree.tree_destroy(&tree)
+}
+
+// Returning -1 skips the proxy without shrinking the fraction, so the
+// traversal reports every proxy whose node box the segment crosses.
+ray_collect(input: *RayCastInput, proxy_id: int, user_data: long, context: ptr) -> float {
+    s = context as *HitSet
+    if hitset_add(s, user_data) == false { return 0.0 }
+    return 0.0 - 1.0
+}
+
+box_collect(input: *BoxCastInput, proxy_id: int, user_data: long, context: ptr) -> float {
+    s = context as *HitSet
+    if hitset_add(s, user_data) == false { return 0.0 }
+    return 0.0 - 1.0
+}
+
+// The casts pop a pair, test both nodes and order the survivors. A ray
+// that skips every hit must still reach every proxy its segment crosses.
+test_cast_brute_force() {
+    seed = 31337
+    tree = dynamic_tree.tree_create(16)
+    boxes_block = calloc(PROXY_COUNT, sizeof(AABB))
+    boxes = boxes_block as AABB[]
+    i = 0
+    while i < PROXY_COUNT {
+        boxes[i] = random_box(6.0, 1.0)
+        dynamic_tree.tree_create_proxy(&tree, boxes[i], dynamic_tree.default_category_bits(), i as long)
+        i = i + 1
+    }
+    dynamic_tree.tree_rebuild(&tree, true)
+    ensure("cast: valid", dynamic_tree.tree_validate(&tree))
+
+    fractions_block = calloc(2, 8)
+    fractions = fractions_block as float[]
+    total_crossings = 0
+    round = 0
+    while round < 100 {
+        origin = math.vec3(random_float(0.0 - 8.0, 8.0), random_float(0.0 - 8.0, 8.0), random_float(0.0 - 8.0, 8.0))
+        translation = math.vec3(random_float(0.0 - 16.0, 16.0), random_float(0.0 - 16.0, 16.0), random_float(0.0 - 16.0, 16.0))
+        ray = RayCastInput { origin: origin, translation: translation, max_fraction: 1.0 }
+        tree_hits = hitset_create()
+        dynamic_tree.tree_ray_cast(&tree, &ray, dynamic_tree.default_mask_bits(), false, ray_collect, (&tree_hits) as ptr)
+        ensure("cast: the ray hits were well formed", tree_hits.bad == false)
+
+        // The tree may report a superset, since it tests the node box, not
+        // the shape. Every proxy the segment actually crosses has to be there.
+        p2 = math.mul_add(origin, 1.0, translation)
+        i = 0
+        while i < PROXY_COUNT {
+            fractions[0] = 0.0
+            fractions[1] = 1.0
+            if math.ray_cast_aabb(boxes[i], origin, p2, fractions) {
+                ensure("cast: a crossed box was reported", hitset_has(&tree_hits, i))
+                total_crossings = total_crossings + 1
+            }
+            i = i + 1
+        }
+
+        // Every reported proxy at least overlaps the segment's box.
+        segment_box = math.aabb(math.min_vec3(origin, p2), math.max_vec3(origin, p2))
+        ids = tree_hits.ids as int[]
+        j = 0
+        while j < tree_hits.count {
+            ensure("cast: a reported box overlaps the segment box", math.aabb_overlaps(boxes[ids[j]], segment_box))
+            j = j + 1
+        }
+
+        // A zero-extent box cast reaches the same proxies as the ray.
+        cast = BoxCastInput { box: math.aabb(origin, origin), translation: translation, max_fraction: 1.0 }
+        box_hits = hitset_create()
+        dynamic_tree.tree_box_cast(&tree, &cast, dynamic_tree.default_mask_bits(), false, box_collect, (&box_hits) as ptr)
+        ensure("cast: the box hits were well formed", box_hits.bad == false)
+        j = 0
+        while j < tree_hits.count {
+            ensure("cast: the box cast reached what the ray did", hitset_has(&box_hits, ids[j]))
+            j = j + 1
+        }
+        hitset_destroy(&tree_hits)
+        hitset_destroy(&box_hits)
+        round = round + 1
+    }
+    ensure("cast: agreed on something (${total_crossings})", total_crossings > 100)
+    free(fractions_block)
+    free(boxes_block)
+    dynamic_tree.tree_destroy(&tree)
+}
+
+// The closest query orders by distance and prunes on the running minimum,
+// so seeding it from the root pair has to be right or it prunes away half
+// the tree.
+struct ClosestResult {
+    boxes: ptr
+    point: Vec3
+    bad: bool
+}
+
+distance_to_box_sqr(point: Vec3, box: AABB) -> float {
+    r = math.sub(point, math.clamp_vec3(point, box.lower, box.upper))
+    return math.dot(r, r)
+}
+
+closest_collect(distance_sqr_min: float, proxy_id: int, user_data: long, context: ptr) -> float {
+    result = context as *ClosestResult
+    if (user_data as int) != proxy_id {
+        result.bad = true
+        return distance_sqr_min
+    }
+    boxes = result.boxes as AABB[]
+    d = distance_to_box_sqr(result.point, boxes[proxy_id])
+    if d < distance_sqr_min { return d }
+    return distance_sqr_min
+}
+
+test_query_closest() {
+    seed = 5150
+    tree = dynamic_tree.tree_create(16)
+    boxes_block = calloc(PROXY_COUNT, sizeof(AABB))
+    boxes = boxes_block as AABB[]
+    i = 0
+    while i < PROXY_COUNT {
+        boxes[i] = random_box(6.0, 0.9)
+        id = dynamic_tree.tree_create_proxy(&tree, boxes[i], dynamic_tree.default_category_bits(), i as long)
+        ensure("closest: ids in order", id == i)
+        i = i + 1
+    }
+    min_block = calloc(1, 8)
+    min_distance = min_block as float[]
+    round = 0
+    while round < 100 {
+        point = math.vec3(random_float(0.0 - 8.0, 8.0), random_float(0.0 - 8.0, 8.0), random_float(0.0 - 8.0, 8.0))
+        scan_best = math.MAX_FLOAT
+        i = 0
+        while i < PROXY_COUNT {
+            d = distance_to_box_sqr(point, boxes[i])
+            if d < scan_best { scan_best = d }
+            i = i + 1
+        }
+        // The visitor reports the exact box distance, so the pruned search
+        // lands on the scan's minimum: same arithmetic both ways, an exact compare.
+        result = ClosestResult { boxes: boxes_block, point: point, bad: false }
+        min_distance[0] = math.MAX_FLOAT
+        dynamic_tree.tree_query_closest(&tree, point, dynamic_tree.default_mask_bits(), false, closest_collect, (&result) as ptr, min_distance)
+        ensure("closest: the visitor saw matching ids", result.bad == false)
+        ensure("closest: the scan's minimum", min_distance[0] == scan_best)
+        round = round + 1
+    }
+    free(min_block)
+    free(boxes_block)
+    dynamic_tree.tree_destroy(&tree)
+}
+
+// The slab cast the cast test leans on, on its own.
+test_ray_cast_aabb() {
+    fractions_block = calloc(2, 8)
+    fractions = fractions_block as float[]
+    box = math.aabb(math.vec3(0.0 - 1.0, 0.0 - 1.0, 0.0 - 1.0), math.vec3(1.0, 1.0, 1.0))
+    hit = math.ray_cast_aabb(box, math.vec3(0.0 - 3.0, 0.0, 0.0), math.vec3(3.0, 0.0, 0.0), fractions)
+    ensure("slab: a ray through the box hits", hit)
+    ensure("slab: enters at a third", math.abs_float(fractions[0] - 1.0 / 3.0) < 0.000001)
+    ensure("slab: leaves at two thirds", math.abs_float(fractions[1] - 2.0 / 3.0) < 0.000001)
+    hit = math.ray_cast_aabb(box, math.vec3(0.0 - 3.0, 2.0, 0.0), math.vec3(3.0, 2.0, 0.0), fractions)
+    ensure("slab: a ray beside the box misses", hit == false)
+    hit = math.ray_cast_aabb(box, math.vec3(2.0, 0.0, 0.0), math.vec3(5.0, 0.0, 0.0), fractions)
+    ensure("slab: a ray pointing away misses", hit == false)
+    hit = math.ray_cast_aabb(box, math.vec3(0.0, 0.0, 0.0), math.vec3(0.0, 0.0, 0.0), fractions)
+    ensure("slab: a point inside hits", hit && fractions[0] == 0.0 && fractions[1] == 0.0)
+    hit = math.ray_cast_aabb(box, math.vec3(0.5, 0.5, 0.5), math.vec3(0.5, 0.5, 4.0), fractions)
+    ensure("slab: from inside, enters at 0", hit && fractions[0] == 0.0)
+    ensure("slab: from inside, leaves at the face", math.abs_float(fractions[1] - 0.5 / 3.5) < 0.000001)
+    free(fractions_block)
+}
+
+main() {
+    before = core.alloc_count()
+    test_leaf_root()
+    test_query_brute_force()
+    test_category_filter()
+    test_move_refit_rebuild()
+    test_destroy_scrambled()
+    test_cast_brute_force()
+    test_query_closest()
+    test_ray_cast_aabb()
+    ensure("every counted allocation was freed", core.alloc_count() == before && core.bytes_in_use() == 0)
+
+    println("dynamic_tree: ${checks} checks")
+    if failures == 0 {
+        println("dynamic_tree: all checks passed")
+    } else {
+        println("dynamic_tree: ${failures} failure(s)")
+        exit(1)
+    }
+}
