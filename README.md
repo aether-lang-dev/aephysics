@@ -26,13 +26,14 @@ so a test written against the reference reads the same here.
 | module | holds | state |
 |---|---|---|
 | `aephysics.math` | vectors, quaternions, transforms, 3x3 matrices, bounding boxes, segment distances, inertia helpers, the deterministic atan2/cos/sin | done, `test_math.ae` (6M checks) |
-| `aephysics.core` | bit set, id pool, hash set, arrays, the stack and arena allocators | done, `test_core.ae` (100k checks) |
+| `aephysics.core` | bit set, id pool, hash set, a long-to-int map, arrays, the stack and arena allocators, the block hash | done, `test_core.ae` (100k checks) |
 | `aephysics.dynamic_tree` | the bounding volume hierarchy under the broad phase: SAH insertion, rotations, enlarge, sweep refit, partial rebuild in depth-first order, box / closest / ray / swept-box queries | done, `test_dynamic_tree.ae` (12k checks); [same tree as the reference, ray cast 1.9x its time](bench/RESULTS.md#dynamic_tree) |
 | `aephysics.hull` | quickhull with face merging, the half-edge hull with its mass properties, box / cylinder / cone / rock hulls, clone-and-transform with mirroring, support functions, ray cast, the 2D hull | done, `test_hull.ae` (438 checks); [same hulls as the reference, 1.6-2x its time](bench/RESULTS.md#hull) |
 | `aephysics.distance` | GJK with the warm-started simplex cache, the shape cast by conservative advancement, the time of impact by separating-axis root finding | done, `test_distance.ae` (1.1k checks); [same results as the reference, 1.3-1.5x its time](bench/RESULTS.md#distance) |
 | `aephysics.manifold` | contact manifolds for sphere, capsule and hull in every pairing: the separating axis test with its cache, reference-face clipping, the feature pairs, reduction to four points | done, `test_manifold.ae` (43k checks, 7,000 pairs against a brute-force oracle); [same manifolds as the reference, warm cache at parity](bench/RESULTS.md#manifold) |
 | `aephysics.triangle_manifold` | one mesh triangle against a sphere, capsule or hull: back-side cull with hysteresis, GJK shallow, the separating axis test deep with the triangle's edges as zero-area faces, the feature recorded for the mesh contact's ghost-collision reduction | done, `test_triangle_manifold.ae` (1.5k checks); [same manifolds as the reference, within 10% on hulls](bench/RESULTS.md#triangle_manifold) |
-| `aephysics.collision` | triangle mesh (BVH), height field, shapes with mass properties, ray and shape casts | next |
+| `aephysics.mesh` | the triangle mesh: a BVH by binned SAH or median split with the triangles in depth-first order, vertex welding, edge flags, any scale including mirrored; overlap, ray cast, shape cast, the mover's planes, a box query | done, `test_mesh.ae` (1.6k checks); [same trees as the reference, traversals 1.7-2x](bench/RESULTS.md#mesh) |
+| `aephysics.collision` | height field, shapes with mass properties, ray and shape casts | next |
 | `aephysics.dynamics` | bodies, contacts, the constraint graph, islands, the Soft Step solver, joints (spherical, revolute, prismatic, distance, motor, weld, wheel), sensors, the character mover, the world | |
 | `aephysics` | the public API | |
 

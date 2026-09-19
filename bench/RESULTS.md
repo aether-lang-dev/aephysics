@@ -191,3 +191,28 @@ points, 19,999 cache hits, equal separation sums. Triangle against hull
 is within 10% of the reference both cold and warm; the capsule is 1.35x
 (its GJK); the sphere, which is the closest point on a triangle and
 nothing else, is faster here.
+
+## mesh
+
+`bench/mesh.ae` and `bench/mesh_box3d.c`: a 200 x 200 wave mesh of
+80,000 triangles built ten times with the median split and ten with the
+binned SAH, edges identified each time; 100,000 rays cast down onto it;
+100,000 box queries over it; 10,000 sphere shape casts onto it.
+
+| phase | aephysics | Box3D |
+|---|---|---|
+| 10 builds, median split (80,000 triangles) | 199 ms | **129** |
+| 10 builds, binned SAH | 316 | **256** |
+| 100,000 ray casts | 20.8 | **10.2** |
+| 100,000 box queries | 70.4 | **39.5** |
+| 10,000 shape casts | 24.7 | **14.3** |
+
+The same trees come out: 43,135 nodes of height 16 from the median
+split and 48,063 of height 16 from the SAH on both; every ray and cast
+hits on both with equal sums; the box query reports 2,218,859 triangles
+here against 2,218,676 there (0.008% more, boundary cases of the
+reference's SIMD box-triangle test against the scalar one -- false
+positives the query permits). The build is 1.2-1.5x, with the welding
+map and the edge map through core's LongMap; the traversals are 1.7-2x,
+the reference's SIMD box tests against scalar ones on 48-byte double
+boxes, the same gap the dynamic tree's ray cast showed.

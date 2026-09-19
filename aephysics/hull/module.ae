@@ -1370,25 +1370,9 @@ update_hull_bulk_properties(h: *HullData) -> bool {
     return mass > 0.0 && volume > 0.0 && area > 0.0 && radius > 0.0
 }
 
-// This engine's hash of the block, with the hash field itself zero;
-// never zero.
-hash_block(block: ptr, byte_count: int) -> long {
-    words = block as long[]
-    count = byte_count / 8
-    h = 0x9E3779B9 as long
-    i = 0
-    while i < count {
-        h = core.key_hash(h ^ words[i]) + (i as long)
-        i = i + 1
-    }
-    h = core.key_hash(h)
-    if h == (0 as long) { return 1 as long }
-    return h
-}
-
 stamp_hash(h: *HullData) {
     h.hash = 0 as long
-    h.hash = hash_block(h as ptr, h.byte_count)
+    h.hash = core.hash_bytes(h as ptr, h.byte_count)
 }
 
 hash_hull_data(h: *HullData) -> long { return h.hash }

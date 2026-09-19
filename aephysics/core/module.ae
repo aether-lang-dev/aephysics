@@ -30,6 +30,8 @@ exports (
     key_hash, shape_pair_key, SHAPE_POWER, CHILD_POWER, MAX_SHAPES, MAX_CHILD_SHAPES,
     set_create, set_destroy, set_clear, set_add, set_remove, set_contains, set_contains_hashed,
     set_count, set_bytes,
+    LongMap, map_create, map_destroy, map_clear, map_set, map_get, map_has, map_count, map_bytes,
+    hash_bytes,
     ints_create, ints_destroy, ints_reserve, ints_push, ints_pop, ints_get, ints_set, ints_clear,
     ints_remove_swap, ints_count, ints_capacity, ints_bytes,
     buffer_create, buffer_destroy, buffer_reserve, buffer_push, buffer_pop, buffer_clear,
@@ -258,6 +260,127 @@ bitset_count(s: *BitSet) -> int {
 }
 
 bitset_bytes(s: *BitSet) -> int { return s.block_capacity * 8 }
+
+// --- long -> int map ------------------------------------------------------------
+
+// An open-addressing map from a 64-bit key to an int, on the hash set's
+// pattern (a zero hash marks an empty slot): what the reference's
+// verstable maps are used for -- the mesh's vertex welding and edge
+// pairing, the world's hull database.
+struct MapItem {
+    key: long
+    hash: int
+    value: int
+}
+
+struct LongMap {
+    items: ptr       // MapItem[]
+    capacity: int
+    count: int
+}
+
+map_create(capacity: int) -> LongMap {
+    cap = 16
+    if capacity > 16 { cap = round_up_power_of_2(capacity) }
+    return LongMap { items: alloc(cap * sizeof(MapItem)), capacity: cap, count: 0 }
+}
+
+map_destroy(m: *LongMap) {
+    free_bytes(m.items, m.capacity * sizeof(MapItem))
+    m.items = null
+    m.count = 0
+    m.capacity = 0
+}
+
+map_clear(m: *LongMap) {
+    m.count = 0
+    memset(m.items, 0, m.capacity * sizeof(MapItem))
+}
+
+map_find_slot(m: *LongMap, key: long, hash: int) -> int {
+    mask = m.capacity - 1
+    index = hash & mask
+    items = m.items as MapItem[]
+    while items[index].hash != 0 && items[index].key != key {
+        index = (index + 1) & mask
+    }
+    return index
+}
+
+map_grow(m: *LongMap) {
+    old_capacity = m.capacity
+    old_items = m.items
+    m.count = 0
+    m.capacity = 2 * old_capacity
+    m.items = alloc(m.capacity * sizeof(MapItem))
+    old = old_items as MapItem[]
+    items = m.items as MapItem[]
+    i = 0
+    while i < old_capacity {
+        if old[i].hash != 0 {
+            index = map_find_slot(m, old[i].key, old[i].hash)
+            items[index] = old[i]
+            m.count = m.count + 1
+        }
+        i = i + 1
+    }
+    free_bytes(old_items, old_capacity * sizeof(MapItem))
+}
+
+// Set the key's value; true when the key was already there.
+map_set(m: *LongMap, key: long, value: int) -> bool {
+    hash = key_hash(key)
+    index = map_find_slot(m, key, hash)
+    items = m.items as MapItem[]
+    if items[index].hash != 0 {
+        items[index].value = value
+        return true
+    }
+    if 2 * (m.count + 1) > m.capacity {
+        map_grow(m)
+        index = map_find_slot(m, key, hash)
+        items = m.items as MapItem[]
+    }
+    items[index] = MapItem { key: key, hash: hash, value: value }
+    m.count = m.count + 1
+    return false
+}
+
+// The key's value, or the fallback when it is not there.
+map_get(m: *LongMap, key: long, fallback: int) -> int {
+    index = map_find_slot(m, key, key_hash(key))
+    items = m.items as MapItem[]
+    if items[index].hash == 0 { return fallback }
+    return items[index].value
+}
+
+map_has(m: *LongMap, key: long) -> bool {
+    index = map_find_slot(m, key, key_hash(key))
+    items = m.items as MapItem[]
+    return items[index].hash != 0
+}
+
+map_count(m: *LongMap) -> int { return m.count }
+map_bytes(m: *LongMap) -> int { return m.capacity * sizeof(MapItem) }
+
+// --- a hash over a block --------------------------------------------------------
+
+// This engine's hash of a block of 8-byte words (the count rounded down);
+// never zero. The reference uses rapidhash for the same purpose: identity
+// of hull and mesh data.
+hash_bytes(block: ptr, byte_count: int) -> long {
+    words = block as long[]
+    count = byte_count / 8
+    h = 0x9E3779B9 as long
+    i = 0
+    while i < count {
+        h = key_hash(h ^ words[i]) + (i as long)
+        i = i + 1
+    }
+    h = key_hash(h)
+    if h == (0 as long) { return 1 as long }
+    return h
+}
 
 // --- int array (container.h for ints) --------------------------------------
 

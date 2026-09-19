@@ -115,7 +115,9 @@ struct CastOutput {
     point: Vec3
     fraction: float
     iterations: int
-    triangle_index: int
+    triangle_index: int    // of a mesh or height field, or NULL_INDEX
+    child_index: int       // of a compound, or NULL_INDEX
+    material_index: int    // or NULL_INDEX
     hit: bool
 }
 
@@ -159,7 +161,7 @@ empty_cache() -> SimplexCache {
 
 empty_cast_output() -> CastOutput {
     return CastOutput { normal: math.vec3_zero(), point: math.vec3_zero(), fraction: 0.0, iterations: 0,
-                        triangle_index: NULL_INDEX, hit: false }
+                        triangle_index: NULL_INDEX, child_index: NULL_INDEX, material_index: NULL_INDEX, hit: false }
 }
 
 cache_index_a(c: *SimplexCache, i: int) -> int {

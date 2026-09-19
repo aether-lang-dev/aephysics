@@ -1,0 +1,511 @@
+// aephysics.mesh against the reference's (Box3D's) test_mesh.c: the
+// valley of two quads meeting at a concave crease, from dense vertices,
+// from vertices interleaved with other data (the stride), welded from a
+// split crease, wound clockwise with the flag, wound clockwise without
+// it, all three together, and the built-in meshes; and beyond it the
+// tree's consistency, ray casts against a grid and a wave at analytic
+// hits, the box query against a scan, the overlap, the shape cast, the
+// edge flags of a box and a hollow box, a mirrored scale, and the
+// character mover's planes.
+
+import std.string
+import aephysics.math
+import aephysics.core
+import aephysics.distance
+import aephysics.manifold
+import aephysics.triangle_manifold
+import aephysics.mesh
+
+extern calloc(count: int, size: int) -> ptr
+extern exit(code: int)
+extern free(p: ptr)
+extern sin(x: float) -> float
+extern cos(x: float) -> float
+extern sqrt(x: float) -> float
+
+var failures = 0
+var checks = 0
+
+ensure(name: string, ok: bool) {
+    checks = checks + 1
+    if !ok {
+        println("mesh: FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+small(name: string, value: float, tolerance: float) {
+    ensure("${name} (${value})", math.abs_float(value) < tolerance)
+}
+
+const FLT_EPSILON = 0.00000011920929
+const VALLEY_VERTEX_COUNT = 6
+const VALLEY_TRIANGLE_COUNT = 4
+
+// Two quads meeting at a concave crease along the shared edge 1-4.
+valley_vertices() -> ptr {
+    block = calloc(VALLEY_VERTEX_COUNT, sizeof(Vec3))
+    v = block as Vec3[]
+    v[0] = math.vec3(0.0 - 1.0, 1.0, 0.0 - 1.0)
+    v[1] = math.vec3(0.0, 0.0, 0.0 - 1.0)
+    v[2] = math.vec3(1.0, 1.0, 0.0 - 1.0)
+    v[3] = math.vec3(0.0 - 1.0, 1.0, 1.0)
+    v[4] = math.vec3(0.0, 0.0, 1.0)
+    v[5] = math.vec3(1.0, 1.0, 1.0)
+    return block
+}
+
+valley_indices() -> ptr {
+    block = calloc(3 * VALLEY_TRIANGLE_COUNT, 4)
+    i = block as int[]
+    values = [ 0, 3, 1,  3, 4, 1,  1, 4, 2,  4, 5, 2 ]
+    k = 0
+    while k < 12 {
+        i[k] = values[k]
+        k = k + 1
+    }
+    return block
+}
+
+// A vertex laid out the way a renderer hands it over: a weight, the
+// position, two texture coordinates; six doubles, the position at 8 bytes.
+const FAT_STRIDE = 48
+
+fat_vertices(vertices: Vec3[], count: int) -> ptr {
+    block = calloc(count, FAT_STRIDE)
+    i = 0
+    while i < count {
+        record = (block + i * FAT_STRIDE) as float[]
+        record[0] = 1000.0 + (i as float)
+        record[1] = vertices[i].x
+        record[2] = vertices[i].y
+        record[3] = vertices[i].z
+        record[4] = 0.0 - 1000.0
+        record[5] = 0.0 - 2000.0
+        i = i + 1
+    }
+    return block
+}
+
+reverse_winding(indices: int[], triangle_count: int) {
+    i = 0
+    while i < triangle_count {
+        temp = indices[3 * i + 1]
+        indices[3 * i + 1] = indices[3 * i + 2]
+        indices[3 * i + 2] = temp
+        i = i + 1
+    }
+}
+
+// The hash covers every byte of the block: tree, vertices, triangles, flags.
+meshes_match(a: *MeshData, b: *MeshData) -> bool {
+    return a.byte_count == b.byte_count && a.hash == b.hash
+}
+
+vertices_match(m: *MeshData, expected: Vec3[], count: int) -> bool {
+    if m.vertex_count != count { return false }
+    vertices = mesh.mesh_vertices(m)
+    i = 0
+    while i < count {
+        if math.distance_squared(vertices[i], expected[i]) > FLT_EPSILON { return false }
+        i = i + 1
+    }
+    return true
+}
+
+// The valley faces up: every baked triangle winds counter-clockwise about +y.
+faces_up(m: *MeshData) -> bool {
+    vertices = mesh.mesh_vertices(m)
+    triangles = mesh.mesh_triangles(m)
+    i = 0
+    while i < m.triangle_count {
+        t = triangles[i]
+        normal = math.cross(math.sub(vertices[t.index2], vertices[t.index1]), math.sub(vertices[t.index3], vertices[t.index1]))
+        if normal.y <= 0.0 { return false }
+        i = i + 1
+    }
+    return true
+}
+
+// A concave edge that is not merely flat (a flat edge carries both flags).
+has_concave_edge(m: *MeshData) -> bool {
+    flags = mesh.mesh_flags(m)
+    i = 0
+    while i < m.triangle_count {
+        concave = flags[i] & triangle_manifold.ALL_CONCAVE_EDGES
+        inverse = (flags[i] >> 4) & triangle_manifold.ALL_CONCAVE_EDGES
+        if (concave & (7 - inverse)) != 0 { return true }
+        i = i + 1
+    }
+    return false
+}
+
+valley_def(vertices: ptr, indices: ptr) -> MeshDef {
+    def = mesh.mesh_def()
+    def.vertices = vertices
+    def.stride = sizeof(Vec3)
+    def.indices = indices
+    def.vertex_count = VALLEY_VERTEX_COUNT
+    def.triangle_count = VALLEY_TRIANGLE_COUNT
+    def.identify_edges = true
+    return def
+}
+
+test_valley() {
+    vertices = valley_vertices()
+    indices = valley_indices()
+    v = vertices as Vec3[]
+
+    // Dense input is the reference the others are measured against.
+    def = valley_def(vertices, indices)
+    m = mesh.create_mesh(&def, null, 0)
+    ensure("dense: built", m != null)
+    if m == null { return }
+    ensure("dense: vertex count", m.vertex_count == VALLEY_VERTEX_COUNT)
+    ensure("dense: triangle count", m.triangle_count == VALLEY_TRIANGLE_COUNT)
+    ensure("dense: no degenerates", m.degenerate_count == 0)
+    ensure("dense: vertices kept", vertices_match(m, v, VALLEY_VERTEX_COUNT))
+    ensure("dense: faces up", faces_up(m))
+    ensure("dense: the crease is concave", has_concave_edge(m))
+    ensure("dense: valid", mesh.is_valid_mesh(m))
+    ensure("dense: hash is not zero", m.hash != (0 as long))
+
+    // Interleaved input bakes to exactly the same mesh.
+    fat = fat_vertices(v, VALLEY_VERTEX_COUNT)
+    fat_def = valley_def(fat + 8, indices)
+    fat_def.stride = FAT_STRIDE
+    fat_mesh = mesh.create_mesh(&fat_def, null, 0)
+    ensure("fat stride: built", fat_mesh != null)
+    if fat_mesh != null {
+        ensure("fat stride: vertices kept", vertices_match(fat_mesh, v, VALLEY_VERTEX_COUNT))
+        ensure("fat stride: faces up", faces_up(fat_mesh))
+        ensure("fat stride: the same mesh", meshes_match(m, fat_mesh))
+        mesh.destroy_mesh(fat_mesh)
+    }
+
+    // Welding reads through the stride too: the crease split, then welded back.
+    split_block = calloc(8, sizeof(Vec3))
+    split = split_block as Vec3[]
+    i = 0
+    while i < 6 {
+        split[i] = v[i]
+        i = i + 1
+    }
+    split[6] = v[1]
+    split[7] = v[4]
+    split_indices = valley_indices()
+    si = split_indices as int[]
+    si[6] = 6
+    si[7] = 7
+    si[9] = 7
+    fat_split = fat_vertices(split, 8)
+    weld_def = valley_def(fat_split + 8, split_indices)
+    weld_def.stride = FAT_STRIDE
+    weld_def.vertex_count = 8
+    weld_def.weld_vertices = true
+    weld_def.weld_tolerance = 0.01
+    welded = mesh.create_mesh(&weld_def, null, 0)
+    ensure("weld: built", welded != null)
+    if welded != null {
+        ensure("weld: six vertices", welded.vertex_count == VALLEY_VERTEX_COUNT)
+        ensure("weld: four triangles", welded.triangle_count == VALLEY_TRIANGLE_COUNT)
+        ensure("weld: vertices kept", vertices_match(welded, v, VALLEY_VERTEX_COUNT))
+        ensure("weld: faces up", faces_up(welded))
+        ensure("weld: the crease is concave", has_concave_edge(welded))
+        mesh.destroy_mesh(welded)
+    }
+    free(fat_split)
+    free(split_indices)
+    free(split_block)
+
+    // Clockwise input with the flag bakes to the same mesh; without it, inside out.
+    reversed = valley_indices()
+    reverse_winding(reversed as int[], VALLEY_TRIANGLE_COUNT)
+    cw_def = valley_def(vertices, reversed)
+    cw_def.clockwise_winding = true
+    cw = mesh.create_mesh(&cw_def, null, 0)
+    ensure("clockwise: built", cw != null)
+    if cw != null {
+        ensure("clockwise: faces up", faces_up(cw))
+        ensure("clockwise: the crease is concave", has_concave_edge(cw))
+        ensure("clockwise: the same mesh", meshes_match(m, cw))
+        mesh.destroy_mesh(cw)
+    }
+    ignored_def = valley_def(vertices, reversed)
+    ignored = mesh.create_mesh(&ignored_def, null, 0)
+    ensure("clockwise ignored: built", ignored != null)
+    if ignored != null {
+        ensure("clockwise ignored: inside out", faces_up(ignored) == false)
+        mesh.destroy_mesh(ignored)
+    }
+
+    // Winding, stride and welding compose.
+    ccw_weld_def = valley_def(vertices, indices)
+    ccw_weld_def.weld_vertices = true
+    ccw_weld_def.weld_tolerance = 0.01
+    ccw_weld = mesh.create_mesh(&ccw_weld_def, null, 0)
+    all_def = valley_def(fat + 8, reversed)
+    all_def.stride = FAT_STRIDE
+    all_def.clockwise_winding = true
+    all_def.weld_vertices = true
+    all_def.weld_tolerance = 0.01
+    all = mesh.create_mesh(&all_def, null, 0)
+    ensure("composed: both built", ccw_weld != null && all != null)
+    if ccw_weld != null && all != null {
+        ensure("composed: faces up", faces_up(all))
+        ensure("composed: the same mesh", meshes_match(ccw_weld, all))
+    }
+    if ccw_weld != null { mesh.destroy_mesh(ccw_weld) }
+    if all != null { mesh.destroy_mesh(all) }
+    free(reversed)
+    free(fat)
+    mesh.destroy_mesh(m)
+    free(indices)
+    free(vertices)
+}
+
+// The built-in meshes fill their own definitions.
+test_creators() {
+    center = math.vec3(1.0, 2.0, 3.0)
+    extent = math.vec3(0.5, 1.0, 1.5)
+    grid = mesh.create_grid_mesh(4, 4, 1.0, 2, true)
+    wave = mesh.create_wave_mesh(4, 4, 1.0, 0.5, 1.0, 1.0)
+    torus = mesh.create_torus_mesh(8, 6, 2.0, 0.5)
+    box = mesh.create_box_mesh(center, extent, true)
+    hollow = mesh.create_hollow_box_mesh(center, extent)
+    platform = mesh.create_platform_mesh(center, 2.0, 1.0, 2.0)
+    names = [ "grid", "wave", "torus", "box", "hollow box", "platform" ]
+    i = 0
+    while i < 6 {
+        m = grid
+        if i == 1 { m = wave }
+        if i == 2 { m = torus }
+        if i == 3 { m = box }
+        if i == 4 { m = hollow }
+        if i == 5 { m = platform }
+        ensure("${names[i]}: built", m != null)
+        if m != null {
+            ensure("${names[i]}: vertices", m.vertex_count >= 3)
+            ensure("${names[i]}: triangles", m.triangle_count >= 1)
+            ensure("${names[i]}: sane bounds", math.is_sane_aabb(m.bounds))
+            ensure("${names[i]}: valid", mesh.is_valid_mesh(m))
+            // The build counts a leaf as one, the query as zero, as in the reference.
+            ensure("${names[i]}: height as recorded", mesh.get_height(m) == m.tree_height - 1)
+        }
+        i = i + 1
+    }
+    ensure("grid: 32 triangles, 25 vertices", grid.triangle_count == 32 && grid.vertex_count == 25)
+    ensure("grid: two materials", grid.material_count == 2)
+    ensure("torus: 96 triangles", torus.triangle_count == 96)
+    small("box: surface area", box.surface_area - 2.0 * 4.0 * (0.5 * 1.0 + 0.5 * 1.5 + 1.0 * 1.5), 0.00001)
+    // A box's edges are convex (its diagonals flat): no concave flags. A hollow box's are all concave.
+    ensure("box: no concave edges", has_concave_edge(box) == false)
+    box_flags = mesh.mesh_flags(box)
+    one_flat_each = true
+    i = 0
+    while i < box.triangle_count {
+        concave = box_flags[i] & 7
+        inverse = (box_flags[i] >> 4) & 7
+        if inverse != 7 || concave == 0 || (concave & inverse) != concave { one_flat_each = false }
+        i = i + 1
+    }
+    ensure("box: every triangle has its inverse flags and a flat diagonal", one_flat_each)
+    ensure("hollow box: concave edges", has_concave_edge(hollow))
+    // A grid is flat: every shared edge is flat, so both flags on it.
+    flags = mesh.mesh_flags(grid)
+    all_flat = true
+    i = 0
+    while i < grid.triangle_count {
+        if (flags[i] & triangle_manifold.ALL_FLAT_EDGES) == 0 { all_flat = false }
+        i = i + 1
+    }
+    ensure("grid: flat edges flagged", all_flat)
+    mesh.destroy_mesh(grid)
+    mesh.destroy_mesh(wave)
+    mesh.destroy_mesh(torus)
+    mesh.destroy_mesh(box)
+    mesh.destroy_mesh(hollow)
+    mesh.destroy_mesh(platform)
+}
+
+// Rays down onto a flat grid hit at the analytic height; a wave at its
+// own height; from below they miss the front face; a mirrored scale flips it.
+test_ray_casts() {
+    grid = mesh.create_grid_mesh(20, 20, 1.0, 0, true)
+    sh = mesh.mesh(grid, math.vec3_one())
+    hits = 0
+    i = 0
+    while i < 200 {
+        x = 0.0 - 9.5 + 19.0 * ((i as float) / 200.0)
+        z = 3.0 * sin(0.7 * (i as float))
+        out = mesh.ray_cast_mesh(sh, math.vec3(x, 5.0, z), math.vec3(0.0, 0.0 - 10.0, 0.0), 1.0)
+        ensure("grid ray: hit", out.hit)
+        if out.hit {
+            small("grid ray: fraction", out.fraction - 0.5, 0.00001)
+            small("grid ray: point y", out.point.y, 0.00001)
+            small("grid ray: normal up", out.normal.y - 1.0, 0.00001)
+            ensure("grid ray: a triangle index", out.triangle_index >= 0 && out.triangle_index < grid.triangle_count)
+            hits = hits + 1
+        }
+        i = i + 1
+    }
+    ensure("grid ray: every ray hit", hits == 200)
+    from_below = mesh.ray_cast_mesh(sh, math.vec3(0.5, 0.0 - 5.0, 0.5), math.vec3(0.0, 10.0, 0.0), 1.0)
+    ensure("grid ray: the back face is not hit", from_below.hit == false)
+    beside = mesh.ray_cast_mesh(sh, math.vec3(30.0, 5.0, 0.0), math.vec3(0.0, 0.0 - 10.0, 0.0), 1.0)
+    ensure("grid ray: beside the grid misses", beside.hit == false)
+    // Mirrored in y: the grid faces down now, so a ray from below hits.
+    mirrored = mesh.mesh(grid, math.vec3(1.0, 0.0 - 1.0, 1.0))
+    up = mesh.ray_cast_mesh(mirrored, math.vec3(0.5, 0.0 - 5.0, 0.5), math.vec3(0.0, 10.0, 0.0), 1.0)
+    ensure("mirrored ray: hit from below", up.hit)
+    small("mirrored ray: normal down", up.normal.y + 1.0, 0.00001)
+    down = mesh.ray_cast_mesh(mirrored, math.vec3(0.5, 5.0, 0.5), math.vec3(0.0, 0.0 - 10.0, 0.0), 1.0)
+    ensure("mirrored ray: missed from above", down.hit == false)
+    // Scaled by 2: the edge of the grid is at 20 now.
+    doubled = mesh.mesh(grid, math.vec3(2.0, 2.0, 2.0))
+    far = mesh.ray_cast_mesh(doubled, math.vec3(15.0, 5.0, 15.0), math.vec3(0.0, 0.0 - 10.0, 0.0), 1.0)
+    ensure("scaled ray: hit inside the doubled grid", far.hit)
+    mesh.destroy_mesh(grid)
+
+    // A wave: the hit is at the wave's own height, the normal along its gradient.
+    wave = mesh.create_wave_mesh(16, 16, 0.5, 0.3, 0.5, 0.5)
+    wsh = mesh.mesh(wave, math.vec3_one())
+    vertices = mesh.mesh_vertices(wave)
+    triangles = mesh.mesh_triangles(wave)
+    i = 0
+    while i < 100 {
+        x = 0.0 - 3.9 + 7.8 * ((i as float) / 100.0)
+        z = 2.0 * cos(1.3 * (i as float))
+        out = mesh.ray_cast_mesh(wsh, math.vec3(x, 3.0, z), math.vec3(0.0, 0.0 - 6.0, 0.0), 1.0)
+        ensure("wave ray: hit", out.hit)
+        if out.hit {
+            // The hit lies on the plane of the triangle it names.
+            t = triangles[out.triangle_index]
+            plane = math.make_plane_from_points(vertices[t.index1], vertices[t.index2], vertices[t.index3])
+            small("wave ray: on the triangle's plane", math.plane_separation(plane, out.point), 0.00001)
+            small("wave ray: the triangle's normal", math.distance(out.normal, plane.normal), 0.00001)
+            ensure("wave ray: within the amplitude", math.abs_float(out.point.y) <= 0.3 + 0.00001)
+        }
+        i = i + 1
+    }
+    mesh.destroy_mesh(wave)
+}
+
+// Every triangle the query reports overlaps the box; every triangle whose
+// box overlaps is reported.
+struct QueryHits {
+    count: int
+    bad: bool
+    bounds: AABB
+}
+
+count_triangle(a: Vec3, b: Vec3, c: Vec3, triangle_index: int, context: ptr) -> bool {
+    hits = context as *QueryHits
+    box = AABB { lower: math.min_vec3(a, math.min_vec3(b, c)), upper: math.max_vec3(a, math.max_vec3(b, c)) }
+    if math.aabb_overlaps(box, hits.bounds) == false { hits.bad = true }
+    hits.count = hits.count + 1
+    return true
+}
+
+test_query_and_overlap() {
+    wave = mesh.create_wave_mesh(30, 30, 0.5, 0.4, 0.3, 0.7)
+    sh = mesh.mesh(wave, math.vec3_one())
+    vertices = mesh.mesh_vertices(wave)
+    triangles = mesh.mesh_triangles(wave)
+    total = 0
+    i = 0
+    while i < 50 {
+        c = math.vec3(0.0 - 6.0 + 12.0 * ((i as float) / 50.0), 0.3 * sin(3.0 * (i as float)), 4.0 * cos(0.9 * (i as float)))
+        h = math.vec3(0.4 + 0.3 * ((i % 5) as float), 0.5, 0.4 + 0.2 * ((i % 3) as float))
+        bounds = AABB { lower: math.sub(c, h), upper: math.add(c, h) }
+        hits = QueryHits { count: 0, bad: false, bounds: bounds }
+        mesh.query_mesh(sh, bounds, count_triangle, (&hits) as ptr)
+        ensure("query: every reported triangle overlaps", hits.bad == false)
+        // The scan: every triangle whose box overlaps is a lower bound on
+        // the count (the query's triangle test is exact on the box).
+        scan = 0
+        k = 0
+        while k < wave.triangle_count {
+            t = triangles[k]
+            a = vertices[t.index1]
+            b = vertices[t.index2]
+            d = vertices[t.index3]
+            if mesh.test_bounds_triangle_overlap(c, h, a, b, d) { scan = scan + 1 }
+            k = k + 1
+        }
+        ensure("query: agrees with the scan (${hits.count} vs ${scan})", hits.count == scan)
+        total = total + hits.count
+        i = i + 1
+    }
+    ensure("query: found things (${total})", total > 100)
+
+    // Overlap: a sphere proxy on the surface, and one well above it.
+    point = calloc(1, sizeof(Vec3))
+    pp = point as Vec3[]
+    pp[0] = math.vec3(0.3, 0.1, 0.2)
+    sphere = distance.shape_proxy(point, 1, 0.5)
+    ensure("overlap: on the surface", mesh.overlap_mesh(sh, math.transform_identity(), sphere))
+    pp[0] = math.vec3(0.3, 3.0, 0.2)
+    ensure("overlap: above it", mesh.overlap_mesh(sh, math.transform_identity(), sphere) == false)
+    // Under a transform lifting the mesh by 3, the high sphere touches.
+    ensure("overlap: the mesh lifted", mesh.overlap_mesh(sh, Transform { p: math.vec3(0.0, 2.6, 0.0), q: math.quat_identity() }, sphere))
+    free(point)
+    mesh.destroy_mesh(wave)
+
+    // Shape cast: a sphere falling on the grid stops at its radius above it.
+    grid = mesh.create_grid_mesh(10, 10, 1.0, 0, false)
+    gsh = mesh.mesh(grid, math.vec3_one())
+    start = calloc(1, sizeof(Vec3))
+    sp = start as Vec3[]
+    sp[0] = math.vec3(0.3, 2.0, 0.0 - 0.7)
+    falling = distance.shape_proxy(start, 1, 0.25)
+    cast = mesh.shape_cast_mesh(gsh, falling, math.vec3(0.0, 0.0 - 4.0, 0.0), 1.0, false)
+    ensure("shape cast: hit", cast.hit)
+    small("shape cast: fraction", cast.fraction - 1.75 / 4.0, 0.002)
+    small("shape cast: normal up", cast.normal.y - 1.0, 0.001)
+    ensure("shape cast: a triangle", cast.triangle_index >= 0)
+    miss = mesh.shape_cast_mesh(gsh, falling, math.vec3(0.0, 4.0, 0.0), 1.0, false)
+    ensure("shape cast: away misses", miss.hit == false)
+
+    // The mover: a capsule standing on the grid finds the floor's plane.
+    planes_block = calloc(8, sizeof(PlaneResult))
+    planes = planes_block as PlaneResult[]
+    mover = manifold.capsule(math.vec3(0.3, 0.4, 0.3), math.vec3(0.3, 1.2, 0.3), 0.45)
+    plane_count = mesh.collide_mover_and_mesh(planes, 8, gsh, mover)
+    ensure("mover: planes found (${plane_count})", plane_count >= 1)
+    if plane_count >= 1 {
+        small("mover: the floor's normal", planes[0].plane.normal.y - 1.0, 0.00001)
+        small("mover: the push out", planes[0].plane.offset - 0.05, 0.00001)
+    }
+    free(planes_block)
+    free(start)
+
+    // A triangle at a mirrored scale keeps a counter-clockwise winding.
+    m1 = mesh.mesh(grid, math.vec3_one())
+    tri = mesh.get_mesh_triangle(m1, 5)
+    n1 = math.cross(math.sub(tri.v2, tri.v1), math.sub(tri.v3, tri.v1))
+    ensure("triangle: faces up", n1.y > 0.0)
+    m2 = mesh.mesh(grid, math.vec3(1.0, 0.0 - 1.0, 1.0))
+    tri2 = mesh.get_mesh_triangle(m2, 5)
+    n2 = math.cross(math.sub(tri2.v2, tri2.v1), math.sub(tri2.v3, tri2.v1))
+    ensure("triangle: mirrored faces down with the winding kept", n2.y < 0.0 && tri2.i2 == tri.i3)
+    mesh.destroy_mesh(grid)
+}
+
+main() {
+    before = core.alloc_count()
+    test_valley()
+    test_creators()
+    test_ray_casts()
+    test_query_and_overlap()
+    // The module's scratch stays allocated: three blocks.
+    ensure("every other counted allocation was freed", core.alloc_count() == before + 3)
+
+    println("mesh: ${checks} checks")
+    if failures == 0 {
+        println("mesh: all checks passed")
+    } else {
+        println("mesh: ${failures} failure(s)")
+        exit(1)
+    }
+}
