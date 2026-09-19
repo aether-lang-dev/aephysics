@@ -1,0 +1,106 @@
+// The mesh on the same scenes as bench/mesh_box3d.c: a 200 x 200 wave
+// mesh (80,000 triangles) built ten times with the median split and ten
+// with the SAH, with edges identified; 100,000 ray casts down onto it;
+// 100,000 box queries over it; 10,000 sphere shape casts onto it. Single
+// thread, wall time per phase, with the hit counts and sums as the
+// checksum.
+import std.string
+import std.os
+import aephysics.math
+import aephysics.distance
+import aephysics.mesh
+
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+extern sin(x: float) -> float
+extern cos(x: float) -> float
+
+clock() -> long { return os.now_monotonic_ns() }
+ms(ns: long) -> float { return (ns as float) / 1000000.0 }
+
+const RAYS = 100000
+const QUERIES = 100000
+const CASTS = 10000
+
+var query_hits = 0
+
+count_triangle(a: Vec3, b: Vec3, c: Vec3, triangle_index: int, context: ptr) -> bool {
+    query_hits = query_hits + 1
+    return true
+}
+
+main() {
+    t0 = clock()
+    data = mesh.create_wave_mesh(200, 200, 0.5, 0.4, 0.3, 0.7)
+    i = 1
+    while i < 10 {
+        mesh.destroy_mesh(data)
+        data = mesh.create_wave_mesh(200, 200, 0.5, 0.4, 0.3, 0.7)
+        i = i + 1
+    }
+    t1 = clock()
+    // The wave mesh uses the median split; the same triangles through the SAH.
+    def = mesh.mesh_def()
+    def.vertices = (data as ptr) + data.vertex_offset
+    def.vertex_count = data.vertex_count
+    def.indices = (data as ptr) + data.triangle_offset
+    def.triangle_count = data.triangle_count
+    def.identify_edges = true
+    sah = mesh.create_mesh(&def, null, 0)
+    i = 1
+    while i < 10 {
+        mesh.destroy_mesh(sah)
+        sah = mesh.create_mesh(&def, null, 0)
+        i = i + 1
+    }
+    t2 = clock()
+
+    sh = mesh.mesh(data, math.vec3_one())
+    ray_hits = 0
+    ray_sum = 0.0
+    i = 0
+    while i < RAYS {
+        t = (i as float) / (RAYS as float)
+        out = mesh.ray_cast_mesh(sh, math.vec3(0.0 - 49.0 + 98.0 * t, 3.0, 40.0 * sin(40.0 * t)), math.vec3(0.0, 0.0 - 6.0, 0.0), 1.0)
+        if out.hit {
+            ray_hits = ray_hits + 1
+            ray_sum = ray_sum + out.point.y
+        }
+        i = i + 1
+    }
+    t3 = clock()
+
+    query_hits = 0
+    i = 0
+    while i < QUERIES {
+        t = (i as float) / (QUERIES as float)
+        c = math.vec3(0.0 - 48.0 + 96.0 * t, 0.2 * sin(3.0 * t), 40.0 * cos(30.0 * t))
+        h = math.vec3(0.6, 0.5, 0.6)
+        bounds = AABB { lower: math.sub(c, h), upper: math.add(c, h) }
+        mesh.query_mesh(sh, bounds, count_triangle, null)
+        i = i + 1
+    }
+    t4 = clock()
+
+    cast_hits = 0
+    cast_sum = 0.0
+    start_block = calloc(1, sizeof(Vec3))
+    start = start_block as Vec3[]
+    i = 0
+    while i < CASTS {
+        t = (i as float) / (CASTS as float)
+        start[0] = math.vec3(0.0 - 48.0 + 96.0 * t, 3.0, 40.0 * sin(50.0 * t))
+        out = mesh.shape_cast_mesh(sh, distance.shape_proxy(start_block, 1, 0.3), math.vec3(0.0, 0.0 - 6.0, 0.0), 1.0, false)
+        if out.hit {
+            cast_hits = cast_hits + 1
+            cast_sum = cast_sum + out.fraction
+        }
+        i = i + 1
+    }
+    t5 = clock()
+
+    println("aephysics mesh: 10 median builds ${ms(t1 - t0)} ms (${data.triangle_count} triangles, ${data.node_count} nodes, height ${data.tree_height}), 10 SAH builds ${ms(t2 - t1)} ms (${sah.node_count} nodes, height ${sah.tree_height}), ${RAYS} rays ${ms(t3 - t2)} ms (${ray_hits} hits, sum ${ray_sum}), ${QUERIES} queries ${ms(t4 - t3)} ms (${query_hits} hits), ${CASTS} casts ${ms(t5 - t4)} ms (${cast_hits} hits, sum ${cast_sum})")
+    free(start_block)
+    mesh.destroy_mesh(sah)
+    mesh.destroy_mesh(data)
+}
