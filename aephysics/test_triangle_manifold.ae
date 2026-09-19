@@ -1,0 +1,449 @@
+// aephysics.triangle_manifold against the triangle parts of the
+// reference's (Box3D's) test_manifold.c: the tipped cube's edge on a
+// tilted triangle edge from speculative gap into deep overlap and the
+// edge axis carrying the cull, the parallel edge pair through the
+// rejection threshold, the triangle-hull edge sweep against the cross
+// product, the capsule pushed across a triangle edge, the capsule core
+// straddling the face; and beyond it the closest point on a triangle by
+// region, the sphere on every feature, the face contact of a resting
+// cube, the back-side cull with hysteresis and the cache.
+
+import std.string
+import aephysics.math
+import aephysics.core
+import aephysics.distance
+import aephysics.hull
+import aephysics.manifold
+import aephysics.triangle_manifold
+
+extern calloc(count: int, size: int) -> ptr
+extern exit(code: int)
+extern free(p: ptr)
+extern sin(x: float) -> float
+extern cos(x: float) -> float
+extern sqrt(x: float) -> float
+
+var failures = 0
+var checks = 0
+
+ensure(name: string, ok: bool) {
+    checks = checks + 1
+    if !ok {
+        println("triangle_manifold: FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+small(name: string, value: float, tolerance: float) {
+    ensure("${name} (${value})", math.abs_float(value) < tolerance)
+}
+
+const ROOT2 = 1.41421356
+const HALF_ROOT2 = 0.70710678
+const HALF_DIAGONAL = 0.87
+
+exact_quat(axis: Vec3, radians: float) -> Quat {
+    half = 0.5 * radians
+    return Quat { v: math.mul_sv(sin(half), axis), s: cos(half) }
+}
+
+exact_rotation(axis: Vec3, radians: float) -> Transform {
+    return Transform { p: math.vec3_zero(), q: exact_quat(axis, radians) }
+}
+
+new_points() -> ptr { return calloc(8, sizeof(LocalManifoldPoint)) }
+
+min_separation(m: *LocalManifold) -> float {
+    s = math.MAX_FLOAT
+    i = 0
+    while i < m.point_count {
+        s = math.min_float(s, manifold.manifold_point(m, i).separation)
+        i = i + 1
+    }
+    return s
+}
+
+// The edge pair axis must match the cross product: the axis, separation
+// and point rebuilt from the two edges and the radius.
+check_edge_contact(name: string, m: *LocalManifold, p1: Vec3, e1: Vec3, p2: Vec3, e2: Vec3, orient: Vec3, radius: float,
+                   normal_tol: float, sep_tol: float, point_tol: float) {
+    axis = math.normalize(math.cross(e1, e2))
+    if math.dot(axis, orient) < 0.0 { axis = math.neg(axis) }
+    small("${name}: normal x", m.normal.x - axis.x, normal_tol)
+    small("${name}: normal y", m.normal.y - axis.y, normal_tol)
+    small("${name}: normal z", m.normal.z - axis.z, normal_tol)
+    small("${name}: perpendicular to e1", math.dot(m.normal, math.normalize(e1)), normal_tol)
+    small("${name}: perpendicular to e2", math.dot(m.normal, math.normalize(e2)), normal_tol)
+    closest = math.line_distance(p1, e1, p2, e2)
+    expected_separation = math.dot(axis, math.sub(closest.point2, closest.point1)) - radius
+    p = manifold.manifold_point(m, 0)
+    small("${name}: separation", p.separation - expected_separation, sep_tol)
+    expected_point = math.mul_sv(0.5, math.add(math.mul_sub(closest.point1, radius, axis), closest.point2))
+    small("${name}: point x", p.point.x - expected_point.x, point_tol)
+    small("${name}: point y", p.point.y - expected_point.y, point_tol)
+    small("${name}: point z", p.point.z - expected_point.z, point_tol)
+}
+
+hull_edge_tail(h: *HullData, edge_index: int) -> Vec3 {
+    edges = hull.hull_edges(h)
+    points = hull.hull_points(h)
+    return points[edges[edge_index].origin]
+}
+
+hull_edge_vector(h: *HullData, edge_index: int) -> Vec3 {
+    edges = hull.hull_edges(h)
+    points = hull.hull_points(h)
+    return math.sub(points[edges[edges[edge_index].twin].origin], points[edges[edge_index].origin])
+}
+
+// A cube pitched 45 degrees rests an edge along x at y = -h root2; a
+// tilted triangle edge crosses under it so the arc intersection lands
+// inside the arc.
+test_triangle_edge() {
+    beta = 20.0 * math.PI / 180.0
+    gamma = 30.0 * math.PI / 180.0
+    h = hull.make_transformed_box_hull(0.5, 0.5, 0.5, exact_rotation(math.vec3_axis_x(), 0.25 * math.PI))
+    tri_normal = math.vec3(sin(beta), cos(beta), 0.0)
+    tri_edge = math.vec3(sin(gamma) * cos(beta), 0.0 - sin(gamma) * sin(beta), cos(gamma))
+    axis = math.normalize(math.cross(math.vec3_axis_x(), tri_edge))
+    hull_point = math.vec3(0.0, 0.0 - HALF_ROOT2, 0.0)
+    points = new_points()
+    gaps = [ 0.03, 0.01, 0.0, 0.0 - 0.01, 0.0 - 0.1 ]
+    i = 0
+    while i < 5 {
+        gap = gaps[i]
+        triangle_point = math.mul_add(hull_point, gap, axis)
+        v1 = math.mul_add(triangle_point, 0.0 - 1.0, tri_edge)
+        v2 = math.mul_add(triangle_point, 1.0, tri_edge)
+        v3 = math.mul_add(v1, 1.5, math.cross(tri_normal, tri_edge))
+        m = manifold.local_manifold(points)
+        cache = manifold.empty_sat_cache()
+        cache.kind = manifold.AXIS_MANUAL_EDGE_PAIR
+        triangle_manifold.collide_triangle_and_hull(&m, 8, v1, v2, v3, 0, h, &cache, true)
+        expected_normal = math.neg(axis)
+        expected_point = math.mul_add(hull_point, 0.5 * gap, axis)
+        ensure("triangle edge ${i}: one point", m.point_count == 1)
+        ensure("triangle edge ${i}: edge pair", cache.kind == manifold.AXIS_EDGE_PAIR)
+        small("triangle edge ${i}: normal x", m.normal.x - expected_normal.x, 0.00001)
+        small("triangle edge ${i}: normal y", m.normal.y - expected_normal.y, 0.00001)
+        small("triangle edge ${i}: normal z", m.normal.z - expected_normal.z, 0.00001)
+        if m.point_count == 1 {
+            p = manifold.manifold_point(&m, 0)
+            small("triangle edge ${i}: separation", p.separation - gap, 0.00001)
+            small("triangle edge ${i}: point x", p.point.x - expected_point.x, 0.00001)
+            small("triangle edge ${i}: point y", p.point.y - expected_point.y, 0.00001)
+            small("triangle edge ${i}: point z", p.point.z - expected_point.z, 0.00001)
+        }
+        i = i + 1
+    }
+    // The tipped plane buries a hull corner: only the edge axis can cull.
+    culled = [ 0.03, 0.05 ]
+    i = 0
+    while i < 2 {
+        gap = culled[i]
+        triangle_point = math.mul_add(hull_point, gap, axis)
+        v1 = math.mul_add(triangle_point, 0.0 - 1.0, tri_edge)
+        v2 = math.mul_add(triangle_point, 1.0, tri_edge)
+        v3 = math.mul_add(v1, 1.5, math.cross(tri_normal, tri_edge))
+        m = manifold.local_manifold(points)
+        cache = manifold.empty_sat_cache()
+        triangle_manifold.collide_triangle_and_hull(&m, 8, v1, v2, v3, 0, h, &cache, true)
+        ensure("triangle edge cull ${i}: no points", m.point_count == 0)
+        ensure("triangle edge cull ${i}: edge pair cached", cache.kind == manifold.AXIS_EDGE_PAIR)
+        small("triangle edge cull ${i}: cached separation", cache.separation - gap, 0.00001)
+        i = i + 1
+    }
+
+    // The cube's bottom edge on a triangle whose first edge runs along x,
+    // tipped from exactly parallel through the rejection threshold.
+    overlap = 0.01
+    y = 0.0 - HALF_ROOT2 + overlap
+    axes = [ 0.57735027, 0.57735027, 0.57735027,  0.70710678, 0.0, 0.70710678,  0.26726124, 0.53452248, 0.80178373,  0.0 - 0.48507125, 0.72760688, 0.0 - 0.48507125 ]
+    angles = [ 0.0, 0.0000001, 0.000001, 0.00001, 0.0001, 0.001, 0.004, 0.005, 0.006, 0.01, 0.05 ]
+    i = 0
+    while i < 4 {
+        tilt_axis = math.vec3(axes[3 * i], axes[3 * i + 1], axes[3 * i + 2])
+        j = 0
+        while j < 11 {
+            q = exact_quat(tilt_axis, angles[j])
+            v1 = math.rotate_vector(q, math.vec3(0.0 - 2.0, y, 0.0 - 1.0))
+            v2 = math.rotate_vector(q, math.vec3(0.0, y, 2.0))
+            v3 = math.rotate_vector(q, math.vec3(2.0, y, 0.0 - 1.0))
+            m = manifold.local_manifold(points)
+            cache = manifold.empty_sat_cache()
+            triangle_manifold.collide_triangle_and_hull(&m, 8, v1, v2, v3, 0, h, &cache, true)
+            ensure("parallel ${i} ${j}: face points", m.point_count >= 4)
+            ensure("parallel ${i} ${j}: the triangle face", cache.kind == manifold.AXIS_FACE_A)
+            ensure("parallel ${i} ${j}: normal up", math.dot(m.normal, math.vec3_axis_y()) > 0.99)
+            small("parallel ${i} ${j}: separation", min_separation(&m) + overlap, HALF_DIAGONAL * angles[j] + 0.00001)
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // The edge sweep: plane tip, edge yaw, gap; every edge contact against the cross product.
+    betas = [ 8.0, 20.0, 32.0 ]
+    gammas = [ 20.0, 35.0, 50.0, 70.0 ]
+    gaps2 = [ 0.02, 0.0, 0.0 - 0.03, 0.0 - 0.08 ]
+    edge_contacts = 0
+    a = 0
+    while a < 3 {
+        b = 0
+        while b < 4 {
+            c = 0
+            while c < 4 {
+                beta2 = betas[a] * math.PI / 180.0
+                gamma2 = gammas[b] * math.PI / 180.0
+                tri_normal2 = math.vec3(sin(beta2), cos(beta2), 0.0)
+                tri_edge2 = math.vec3(sin(gamma2) * cos(beta2), 0.0 - sin(gamma2) * sin(beta2), cos(gamma2))
+                axis2 = math.normalize(math.cross(math.vec3_axis_x(), tri_edge2))
+                triangle_point = math.mul_add(hull_point, gaps2[c], axis2)
+                v1 = math.mul_add(triangle_point, 0.0 - 1.0, tri_edge2)
+                v2 = math.mul_add(triangle_point, 1.0, tri_edge2)
+                v3 = math.mul_add(v1, 1.5, math.cross(tri_normal2, tri_edge2))
+                triangle_center = math.mul_sv(1.0 / 3.0, math.add(v1, math.add(v2, v3)))
+                m = manifold.local_manifold(points)
+                cache = manifold.empty_sat_cache()
+                cache.kind = manifold.AXIS_MANUAL_EDGE_PAIR
+                triangle_manifold.collide_triangle_and_hull(&m, 8, v1, v2, v3, 0, h, &cache, true)
+                if cache.kind == manifold.AXIS_EDGE_PAIR && m.point_count == 1 {
+                    p1 = v1
+                    e1 = math.sub(v2, v1)
+                    if cache.index_a == 1 {
+                        p1 = v2
+                        e1 = math.sub(v3, v2)
+                    } else if cache.index_a == 2 {
+                        p1 = v3
+                        e1 = math.sub(v1, v3)
+                    }
+                    p2 = hull_edge_tail(h, cache.index_b)
+                    e2 = hull_edge_vector(h, cache.index_b)
+                    orient = math.sub(h.center, triangle_center)
+                    check_edge_contact("edge sweep", &m, p1, e1, p2, e2, orient, 0.0, 0.0001, 0.0001, 0.001)
+                    edge_contacts = edge_contacts + 1
+                }
+                c = c + 1
+            }
+            b = b + 1
+        }
+        a = a + 1
+    }
+    ensure("edge sweep: drove the edge path (${edge_contacts})", edge_contacts >= 30)
+    free(points)
+    hull.destroy_hull(h)
+}
+
+// A capsule nearly in the triangle plane pushed across an edge, and a
+// capsule core straddling the face.
+test_triangle_capsule() {
+    v1 = math.vec3(0.0 - 2.0, 0.0, 0.0)
+    v2 = math.vec3(2.0, 0.0, 0.0)
+    v3 = math.vec3(0.0, 0.0, 0.0 - 2.0)
+    triangle_center = math.mul_sv(1.0 / 3.0, math.add(v1, math.add(v2, v3)))
+    points = new_points()
+    z0s = [ 0.0 - 0.05, 0.0 - 0.03, 0.0 - 0.01 ]
+    tilts = [ 0.2, 0.3, 0.4 ]
+    yaws = [ 0.4, 0.6, 0.8 ]
+    radii = [ 0.05, 0.1 ]
+    edge_contacts = 0
+    i = 0
+    while i < 3 {
+        j = 0
+        while j < 3 {
+            y = 0
+            while y < 3 {
+                r = 0
+                while r < 2 {
+                    dir = math.normalize(math.vec3(sin(yaws[y]), tilts[j], cos(yaws[y])))
+                    mid = math.vec3(0.0, 0.0, z0s[i])
+                    c1 = math.mul_add(mid, 0.0 - 0.6, dir)
+                    c2 = math.mul_add(mid, 0.6, dir)
+                    c = manifold.capsule(c1, c2, radii[r])
+                    m = manifold.local_manifold(points)
+                    cache = distance.empty_cache()
+                    triangle_manifold.collide_triangle_and_capsule(&m, 8, v1, v2, v3, c, &cache)
+                    if m.point_count == 1 && m.feature >= triangle_manifold.FEATURE_EDGE1 && m.feature <= triangle_manifold.FEATURE_EDGE3 {
+                        edge_index = m.feature - triangle_manifold.FEATURE_EDGE1
+                        p1 = v1
+                        e1 = math.sub(v2, v1)
+                        if edge_index == 1 {
+                            p1 = v2
+                            e1 = math.sub(v3, v2)
+                        } else if edge_index == 2 {
+                            p1 = v3
+                            e1 = math.sub(v1, v3)
+                        }
+                        orient = math.sub(math.lerp(c1, c2, 0.5), triangle_center)
+                        check_edge_contact("capsule edge deep", &m, p1, e1, c1, math.sub(c2, c1), orient, radii[r], 0.0001, 0.0001, 0.0002)
+                        edge_contacts = edge_contacts + 1
+                    }
+                    r = r + 1
+                }
+                y = y + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    ensure("capsule edge deep: reached the edge path (${edge_contacts})", edge_contacts >= 15)
+
+    // The core straddling the face: two points at the endpoint heights.
+    w1 = math.vec3(0.0 - 3.0, 0.0, 0.0 - 2.0)
+    w2 = math.vec3(0.0, 0.0, 4.0)
+    w3 = math.vec3(3.0, 0.0, 0.0 - 2.0)
+    yaws2 = [ 0.0, 0.6, 1.2, 1.8, 2.4 ]
+    tilts2 = [ 0.06, 0.1, 0.15 ]
+    radii2 = [ 0.05, 0.1, 0.2 ]
+    bias = 0.01
+    half_length = 1.0
+    face_contacts = 0
+    i = 0
+    while i < 5 {
+        j = 0
+        while j < 3 {
+            r = 0
+            while r < 3 {
+                axis = math.vec3(cos(tilts2[j]) * cos(yaws2[i]), sin(tilts2[j]), cos(tilts2[j]) * sin(yaws2[i]))
+                center = math.vec3(0.0, bias, 0.0)
+                c1 = math.mul_add(center, 0.0 - half_length, axis)
+                c2 = math.mul_add(center, half_length, axis)
+                c = manifold.capsule(c1, c2, radii2[r])
+                m = manifold.local_manifold(points)
+                cache = distance.empty_cache()
+                triangle_manifold.collide_triangle_and_capsule(&m, 8, w1, w2, w3, c, &cache)
+                ensure("capsule face deep ${i} ${j} ${r}: two points", m.point_count == 2)
+                ensure("capsule face deep: the triangle face", m.feature == triangle_manifold.FEATURE_TRIANGLE_FACE)
+                small("capsule face deep: normal x", m.normal.x, 0.00001)
+                small("capsule face deep: normal y", m.normal.y - 1.0, 0.00001)
+                small("capsule face deep: normal z", m.normal.z, 0.00001)
+                if m.point_count == 2 {
+                    lower = math.min_float(c1.y, c2.y) - radii2[r]
+                    upper = math.max_float(c1.y, c2.y) - radii2[r]
+                    s0 = manifold.manifold_point(&m, 0).separation
+                    s1 = manifold.manifold_point(&m, 1).separation
+                    small("capsule face deep: min separation", math.min_float(s0, s1) - lower, 0.00001)
+                    small("capsule face deep: max separation", math.max_float(s0, s1) - upper, 0.00001)
+                    ensure("capsule face deep: penetrating", math.min_float(s0, s1) < 0.0)
+                }
+                face_contacts = face_contacts + 1
+                r = r + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    ensure("capsule face deep: all cases", face_contacts == 45)
+    free(points)
+}
+
+// The closest point by region and the sphere against every feature.
+test_sphere_and_closest() {
+    // Wound so the normal is +y.
+    v1 = math.vec3(0.0 - 1.0, 0.0, 0.0 - 1.0)
+    v2 = math.vec3(0.0, 0.0, 1.0)
+    v3 = math.vec3(1.0, 0.0, 0.0 - 1.0)
+    inside = triangle_manifold.closest_point_on_triangle(v1, v2, v3, math.vec3(0.0, 2.0, 0.0))
+    ensure("closest: face", inside.feature == triangle_manifold.FEATURE_TRIANGLE_FACE)
+    small("closest: face point", math.length(inside.point), 0.00001)
+    corner = triangle_manifold.closest_point_on_triangle(v1, v2, v3, math.vec3(0.0 - 3.0, 1.0, 0.0 - 3.0))
+    ensure("closest: vertex 1", corner.feature == triangle_manifold.FEATURE_VERTEX1)
+    small("closest: vertex point", math.distance(corner.point, v1), 0.00001)
+    edge = triangle_manifold.closest_point_on_triangle(v1, v2, v3, math.vec3(0.0, 1.0, 0.0 - 3.0))
+    ensure("closest: edge 3 (v3-v1)", edge.feature == triangle_manifold.FEATURE_EDGE3)
+    small("closest: edge point", math.distance(edge.point, math.vec3(0.0, 0.0, 0.0 - 1.0)), 0.00001)
+    corner2 = triangle_manifold.closest_point_on_triangle(v1, v2, v3, math.vec3(0.0, 0.0 - 1.0, 4.0))
+    ensure("closest: vertex 2", corner2.feature == triangle_manifold.FEATURE_VERTEX2)
+
+    points = new_points()
+    // Above the face: the gap is the height minus the radius, the normal up.
+    s = manifold.sphere(math.vec3(0.0, 0.26, 0.0), 0.25)
+    m = manifold.local_manifold(points)
+    triangle_manifold.collide_triangle_and_sphere(&m, 8, v1, v2, v3, s)
+    ensure("sphere face: one point", m.point_count == 1)
+    ensure("sphere face: feature", m.feature == triangle_manifold.FEATURE_TRIANGLE_FACE)
+    small("sphere face: normal y", m.normal.y - 1.0, 0.00001)
+    if m.point_count == 1 { small("sphere face: separation", manifold.manifold_point(&m, 0).separation - 0.01, 0.00001) }
+    // Off an edge: the normal from the edge to the centre.
+    s = manifold.sphere(math.vec3(0.0, 0.15, 0.0 - 1.15), 0.25)
+    m = manifold.local_manifold(points)
+    triangle_manifold.collide_triangle_and_sphere(&m, 8, v1, v2, v3, s)
+    ensure("sphere edge: one point", m.point_count == 1)
+    ensure("sphere edge: feature", m.feature == triangle_manifold.FEATURE_EDGE3)
+    if m.point_count == 1 { small("sphere edge: separation", manifold.manifold_point(&m, 0).separation - (sqrt(0.045) - 0.25), 0.00001) }
+    // Below the plane: culled. Far above: nothing.
+    s = manifold.sphere(math.vec3(0.0, 0.0 - 0.1, 0.0), 0.25)
+    m = manifold.local_manifold(points)
+    triangle_manifold.collide_triangle_and_sphere(&m, 8, v1, v2, v3, s)
+    ensure("sphere back side: culled", m.point_count == 0)
+    s = manifold.sphere(math.vec3(0.0, 1.0, 0.0), 0.25)
+    m = manifold.local_manifold(points)
+    triangle_manifold.collide_triangle_and_sphere(&m, 8, v1, v2, v3, s)
+    ensure("sphere far: nothing", m.point_count == 0)
+    free(points)
+}
+
+// A cube resting on a big triangle: the face contact, the cache reused,
+// the back side culled with hysteresis, the separation when lifted.
+test_resting_cube() {
+    h = hull.make_box_hull(0.5, 0.5, 0.5)
+    points = new_points()
+    y = 0.0 - 0.5 - 0.005
+    v1 = math.vec3(0.0 - 3.0, y, 0.0 - 2.0)
+    v2 = math.vec3(0.0, y, 4.0)
+    v3 = math.vec3(3.0, y, 0.0 - 2.0)
+    m = manifold.local_manifold(points)
+    cache = manifold.empty_sat_cache()
+    triangle_manifold.collide_triangle_and_hull(&m, 8, v1, v2, v3, 0, h, &cache, true)
+    ensure("resting: four points", m.point_count == 4)
+    // Both face axes tie at the gap; the reference takes the hull's face on a tie.
+    ensure("resting: the hull face", cache.kind == manifold.AXIS_FACE_B && m.feature == triangle_manifold.FEATURE_HULL_FACE)
+    small("resting: normal up", m.normal.y - 1.0, 0.00001)
+    i = 0
+    while i < m.point_count {
+        small("resting: separation", manifold.manifold_point(&m, i).separation - 0.005, 0.00001)
+        i = i + 1
+    }
+    ensure("resting: cache miss the first time", cache.hit == 0)
+    triangle_manifold.collide_triangle_and_hull(&m, 8, v1, v2, v3, 0, h, &cache, true)
+    ensure("resting: the cache answered", cache.hit == 1 && m.point_count == 4)
+
+    // Lifted past the speculative distance: the axis alone, no points.
+    y2 = 0.0 - 0.5 - 0.05
+    m = manifold.local_manifold(points)
+    cache = manifold.empty_sat_cache()
+    triangle_manifold.collide_triangle_and_hull(&m, 8, math.vec3(0.0 - 3.0, y2, 0.0 - 2.0), math.vec3(0.0, y2, 4.0), math.vec3(3.0, y2, 0.0 - 2.0), 0, h, &cache, true)
+    ensure("lifted: no points", m.point_count == 0)
+    ensure("lifted: the triangle face cached", cache.kind == manifold.AXIS_FACE_A)
+    small("lifted: cached separation", cache.separation - 0.05, 0.00001)
+
+    // A triangle above the cube, facing up: the hull's centre is behind it, culled with hysteresis.
+    y3 = 1.0
+    m = manifold.local_manifold(points)
+    cache = manifold.empty_sat_cache()
+    triangle_manifold.collide_triangle_and_hull(&m, 8, math.vec3(0.0 - 3.0, y3, 0.0 - 2.0), math.vec3(0.0, y3, 4.0), math.vec3(3.0, y3, 0.0 - 2.0), 0, h, &cache, true)
+    ensure("back side: culled", m.point_count == 0 && cache.kind == manifold.AXIS_BACKSIDE)
+    small("back side: the offset cached", cache.separation + 1.0, 0.00001)
+    y4 = 1.002
+    triangle_manifold.collide_triangle_and_hull(&m, 8, math.vec3(0.0 - 3.0, y4, 0.0 - 2.0), math.vec3(0.0, y4, 4.0), math.vec3(3.0, y4, 0.0 - 2.0), 0, h, &cache, true)
+    ensure("back side: hysteresis holds", m.point_count == 0 && cache.kind == manifold.AXIS_BACKSIDE)
+    free(points)
+    hull.destroy_hull(h)
+}
+
+main() {
+    before = core.alloc_count()
+    test_sphere_and_closest()
+    test_triangle_edge()
+    test_triangle_capsule()
+    test_resting_cube()
+    // This module's scratch stays allocated: three blocks.
+    ensure("every other counted allocation was freed", core.alloc_count() == before + 3)
+
+    println("triangle_manifold: ${checks} checks")
+    if failures == 0 {
+        println("triangle_manifold: all checks passed")
+    } else {
+        println("triangle_manifold: ${failures} failure(s)")
+        exit(1)
+    }
+}
