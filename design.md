@@ -40,25 +40,31 @@ started until its tests pass.
    SOA mirrors, the box hull a heap block. 438 checks from test_hull.c
    at the reference's tolerances; the same hulls on the benchmark
    scenes at 1.6-2x its time.
-5. **collision, static**: `aabb`,
-   `distance` (GJK, shape cast, segment distance), `manifold` and
-   `convex_manifold` (sphere/capsule/hull contact manifolds),
-   `triangle_manifold`, `mesh`, `height_field`, `shape` (mass properties,
-   ray and shape casts per shape).
-   Tests: `test_collision`, `test_distance`, `test_hull`, `test_manifold`,
-   `test_sat`, `test_shape`, `test_mesh`, `test_height_field`.
-6. **dynamics**: `body`, `contact`, `constraint_graph` (graph colouring),
+5. **distance** (done): GJK, the shape cast and the time of impact as
+   `aephysics.distance`, the simplex's vertices as named fields and the
+   cache's index pairs as named ints. 1,143 checks: the reference's four
+   plus spheres and capsules at analytic distances, warm against cold
+   caches over a sweep of poses, witness points inside their shapes and
+   no axis separating more than the distance, rotating sweeps in the time
+   of impact, the hull's overlap and cast through it. The same results as
+   the reference at 1.3-1.5x its time.
+6. **collision, static**: `manifold` and `convex_manifold`
+   (sphere/capsule/hull contact manifolds), `triangle_manifold`, `mesh`,
+   `height_field`, `shape` (mass properties, ray and shape casts per
+   shape). Tests: `test_collision`, `test_manifold`, `test_sat`,
+   `test_shape`, `test_mesh`, `test_height_field`.
+7. **dynamics**: `body`, `contact`, `constraint_graph` (graph colouring),
    `solver_set`, `island`, `solver` (the Soft Step: sub-stepping, relax
    iterations, restitution), `contact_solver` (scalar first; the wide SIMD
    path second, measured), the joints (revolute, prismatic, distance,
    motor, weld, wheel, spherical), `sensor`, `mover` (the character mover),
    `physics_world`. Tests: `test_body`, `test_joint`, `test_world`,
    `test_mover`, `test_determinism`, `test_large_world`.
-7. **parallel**: `parallel_for` and the scheduler over Aether's actors;
+8. **parallel**: `parallel_for` and the scheduler over Aether's actors;
    the benchmarks by thread count as the original records them.
-8. **recording and replay**, `world_snapshot`: last, since they are the
+9. **recording and replay**, `world_snapshot`: last, since they are the
    tooling and not the engine.
-9. **benchmarks**: `reference/benchmark/main.c`'s nine scenes ported, run
+10. **benchmarks**: `reference/benchmark/main.c`'s nine scenes ported, run
    against the C build on the same machine, recorded under `benchmark/`.
 
 ## Measures

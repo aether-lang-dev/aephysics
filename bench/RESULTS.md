@@ -124,3 +124,26 @@ place of pointers, structs passed by value); the box hull is a heap block
 here where the reference's is a stack value, so its cost is the
 allocation and the hash. Hull construction is a load-time cost, not a
 per-step one, so this is recorded rather than chased.
+
+## distance
+
+`bench/distance.ae` and `bench/distance_box3d.c`: two boxes (1 x 0.5 x
+0.75 and 0.6 x 0.8 x 0.4) over 100,000 poses along a sweep that passes
+through overlap, each pose a GJK query from a cold cache and then from a
+cache warmed by the pose before; 10,000 shape casts of the second box at
+the first; 10,000 times of impact of the second box falling and turning
+onto a slab.
+
+| phase | aephysics | Box3D |
+|---|---|---|
+| 100,000 GJK queries, cold cache | 22.9 ms | **17.3** |
+| 100,000 GJK queries, warm cache | 18.2 | **11.9** |
+| 10,000 shape casts | 5.0 | **3.5** |
+| 10,000 times of impact | 13.8 | **9.4** |
+
+The sums of the results agree to the precision of the reference's floats
+(distances 26,291.3 on both, cast fractions 2,780.06, impact fractions
+5,523.1) and the GJK iteration counts within 0.01% (335,952 against
+335,990): the same algorithm taking the same paths. The port runs at
+1.3-1.5x the reference's time; the simplex is passed by value here
+where the reference works on it in place.

@@ -1,0 +1,114 @@
+// GJK, the shape cast and the time of impact on the same scenes as
+// bench/distance_box3d.c: two boxes over 100,000 poses along a sweep,
+// cold cache then warm; 10,000 shape casts; 10,000 times of impact of a
+// falling, turning box. Single thread, wall time per phase.
+import std.string
+import std.os
+import aephysics.math
+import aephysics.distance
+
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+extern sin(x: float) -> float
+extern cos(x: float) -> float
+
+clock() -> long { return os.now_monotonic_ns() }
+ms(ns: long) -> float { return (ns as float) / 1000000.0 }
+
+const N = 100000
+const CASTS = 10000
+const TOIS = 10000
+
+box_points(hx: float, hy: float, hz: float) -> ptr {
+    block = calloc(8, sizeof(Vec3))
+    p = block as Vec3[]
+    i = 0
+    while i < 8 {
+        x = hx
+        y = hy
+        z = hz
+        if (i & 1) != 0 { x = 0.0 - hx }
+        if (i & 2) != 0 { y = 0.0 - hy }
+        if (i & 4) != 0 { z = 0.0 - hz }
+        p[i] = math.vec3(x, y, z)
+        i = i + 1
+    }
+    return block
+}
+
+exact_quat(axis: Vec3, radians: float) -> Quat {
+    h = 0.5 * radians
+    return Quat { v: math.mul_sv(sin(h), axis), s: cos(h) }
+}
+
+main() {
+    a = box_points(1.0, 0.5, 0.75)
+    b = box_points(0.6, 0.8, 0.4)
+    proxy_a = distance.shape_proxy(a, 8, 0.0)
+    proxy_b = distance.shape_proxy(b, 8, 0.0)
+    axis = math.normalize(math.vec3(1.0, 2.0, 0.5))
+
+    sum = 0.0
+    iterations = 0
+    t0 = clock()
+    step = 0
+    while step < N {
+        t = (step as float) / (N as float)
+        input = DistanceInput { proxy_a: proxy_a, proxy_b: proxy_b,
+                                transform: Transform { p: math.vec3(3.0 - 4.0 * t, 0.5 * sin(4.0 * t), 1.5 * cos(2.0 * t)), q: exact_quat(axis, 3.0 * t) },
+                                use_radii: false }
+        cache = distance.empty_cache()
+        o = distance.shape_distance(&input, &cache, null, 0)
+        sum = sum + o.distance
+        iterations = iterations + o.iterations
+        step = step + 1
+    }
+    t1 = clock()
+    sum_warm = 0.0
+    warm = distance.empty_cache()
+    step = 0
+    while step < N {
+        t = (step as float) / (N as float)
+        input = DistanceInput { proxy_a: proxy_a, proxy_b: proxy_b,
+                                transform: Transform { p: math.vec3(3.0 - 4.0 * t, 0.5 * sin(4.0 * t), 1.5 * cos(2.0 * t)), q: exact_quat(axis, 3.0 * t) },
+                                use_radii: false }
+        o = distance.shape_distance(&input, &warm, null, 0)
+        sum_warm = sum_warm + o.distance
+        step = step + 1
+    }
+    t2 = clock()
+
+    cast_sum = 0.0
+    i = 0
+    while i < CASTS {
+        t = (i as float) / (CASTS as float)
+        cast_input = ShapeCastPairInput { proxy_a: proxy_a, proxy_b: proxy_b,
+                                     transform: Transform { p: math.vec3(4.0, 0.5 * sin(4.0 * t), 0.0), q: exact_quat(axis, 3.0 * t) },
+                                     translation_b: math.vec3(0.0 - 8.0, 0.0, 0.0), max_fraction: 1.0, can_encroach: false }
+        c = distance.shape_cast(&cast_input)
+        if c.hit { cast_sum = cast_sum + c.fraction } else { cast_sum = cast_sum - 1.0 }
+        i = i + 1
+    }
+    t3 = clock()
+
+    toi_sum = 0.0
+    ground = box_points(2.0, 0.25, 2.0)
+    proxy_g = distance.shape_proxy(ground, 8, 0.0)
+    i = 0
+    while i < TOIS {
+        t = (i as float) / (TOIS as float)
+        toi_input = TOIInput { proxy_a: proxy_g, proxy_b: proxy_b,
+                           sweep_a: Sweep { local_center: math.vec3_zero(), c1: math.vec3_zero(), c2: math.vec3_zero(), q1: math.quat_identity(), q2: math.quat_identity() },
+                           sweep_b: Sweep { local_center: math.vec3_zero(), c1: math.vec3(0.0, 4.0, 0.0), c2: math.vec3(0.5, 0.0 - 1.0, 0.0), q1: math.quat_identity(), q2: exact_quat(math.vec3_axis_z(), 0.5 + t) },
+                           max_fraction: 1.0 }
+        toi = distance.time_of_impact(&toi_input)
+        toi_sum = toi_sum + toi.fraction
+        i = i + 1
+    }
+    t4 = clock()
+
+    println("aephysics distance: ${N} cold queries ${ms(t1 - t0)} ms (sum ${sum}, ${iterations} iterations), ${N} warm ${ms(t2 - t1)} ms (sum ${sum_warm}), ${CASTS} casts ${ms(t3 - t2)} ms (sum ${cast_sum}), ${TOIS} tois ${ms(t4 - t3)} ms (sum ${toi_sum})")
+    free(a)
+    free(b)
+    free(ground)
+}

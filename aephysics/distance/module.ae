@@ -1,0 +1,1124 @@
+// aephysics.distance -- the distance between convex point clouds by GJK,
+// the shape cast by conservative advancement on it, and the time of
+// impact of two sweeps by separating-axis root finding.
+//
+// The shape is Box3D's distance.c (Erin Catto, with portions by Dirk
+// Gregorius, MIT), the reference this engine is measured against: the
+// simplex solved by Voronoi regions with barycentric coordinates, the
+// support search warm-started from a cache whose metric is checked, the
+// duplicate support as the termination, and the time of impact that
+// builds a separation function (vertices, edges, or a face of either)
+// from the cached simplex and root-finds on it. Names are the reference's
+// without its prefix, in snake case: b3ShapeDistance is shape_distance.
+//
+// Differences: the simplex's four vertices are named fields rather than
+// an array (a simplex is passed by value and never allocated); the cache
+// holds its four index pairs as named ints; the debug simplex trail is a
+// block of Simplex structs the caller may pass.
+import std.string
+import aephysics.math
+
+exports (
+    ShapeProxy, SimplexCache, SimplexVertex, Simplex, DistanceInput, DistanceOutput,
+    ShapeCastPairInput, CastOutput, Sweep, TOIInput, TOIOutput,
+    MAX_SIMPLEX_VERTICES, MAX_GJK_ITERATIONS, MAX_SHAPE_CAST_POINTS, NULL_INDEX,
+    TOI_STATE_UNKNOWN, TOI_STATE_FAILED, TOI_STATE_OVERLAPPED, TOI_STATE_HIT, TOI_STATE_SEPARATED,
+    shape_proxy, empty_cache, empty_cast_output,
+    get_proxy_support, get_point_support, shape_distance, shape_cast, get_sweep_transform,
+    time_of_impact, simplex_vertex, cache_index_a, cache_index_b
+)
+
+const NULL_INDEX = 0 - 1
+const MAX_SIMPLEX_VERTICES = 4
+const MAX_GJK_ITERATIONS = 32
+const MAX_SHAPE_CAST_POINTS = 128
+
+const TOI_STATE_UNKNOWN = 0
+const TOI_STATE_FAILED = 1
+const TOI_STATE_OVERLAPPED = 2
+const TOI_STATE_HIT = 3
+const TOI_STATE_SEPARATED = 4
+
+// The reference's single-precision epsilon and smallest normal, which
+// its tolerances are in.
+const FLOAT_EPSILON = 0.00000011920929
+const FLOAT_MIN = 0.000000000000000000000000000000000000011754944
+
+// A convex shape for GJK: a point cloud with a radius around it. A
+// sphere is one point with a radius, a capsule two, a box eight with none.
+struct ShapeProxy {
+    points: ptr      // Vec3[]
+    count: int
+    radius: float
+}
+
+// The last simplex, to warm-start the next query on nearby transforms.
+// Zero it for a first call.
+struct SimplexCache {
+    metric: float    // the length, area or volume of the simplex
+    count: int
+    index_a0: int
+    index_a1: int
+    index_a2: int
+    index_a3: int
+    index_b0: int
+    index_b1: int
+    index_b2: int
+    index_b3: int
+}
+
+struct SimplexVertex {
+    w_a: Vec3        // the support point in proxy A
+    w_b: Vec3        // the support point in proxy B, in A's frame
+    w: Vec3          // w_b - w_a
+    a: float         // the barycentric coordinate
+    index_a: int
+    index_b: int
+}
+
+struct Simplex {
+    v0: SimplexVertex
+    v1: SimplexVertex
+    v2: SimplexVertex
+    v3: SimplexVertex
+    count: int
+}
+
+struct DistanceInput {
+    proxy_a: ShapeProxy
+    proxy_b: ShapeProxy
+    transform: Transform   // B in A's frame; the query runs in frame A
+    use_radii: bool
+}
+
+struct DistanceOutput {
+    point_a: Vec3          // the closest point on A, in A's frame
+    point_b: Vec3          // the closest point on B, in A's frame
+    normal: Vec3           // A to B; meaningless when the distance is zero
+    distance: float        // zero when overlapped
+    iterations: int
+    simplex_count: int     // simplexes written to the debug trail
+}
+
+struct ShapeCastPairInput {
+    proxy_a: ShapeProxy
+    proxy_b: ShapeProxy
+    transform: Transform   // B in A's frame
+    translation_b: Vec3    // B's translation, in A's frame
+    max_fraction: float
+    can_encroach: bool     // let shapes with a radius move closer when already touching
+}
+
+// A ray or shape cast's result.
+struct CastOutput {
+    normal: Vec3
+    point: Vec3
+    fraction: float
+    iterations: int
+    triangle_index: int
+    hit: bool
+}
+
+// The motion of a body over a step: its centre of mass from c1 to c2,
+// its rotation from q1 to q2, with the shapes at local_center from it.
+struct Sweep {
+    local_center: Vec3
+    c1: Vec3
+    c2: Vec3
+    q1: Quat
+    q2: Quat
+}
+
+struct TOIInput {
+    proxy_a: ShapeProxy
+    proxy_b: ShapeProxy
+    sweep_a: Sweep
+    sweep_b: Sweep
+    max_fraction: float
+}
+
+struct TOIOutput {
+    state: int
+    point: Vec3
+    normal: Vec3
+    fraction: float
+    distance: float
+    distance_iterations: int
+    push_back_iterations: int
+    root_iterations: int
+}
+
+shape_proxy(points: ptr, count: int, radius: float) -> ShapeProxy {
+    return ShapeProxy { points: points, count: count, radius: radius }
+}
+
+empty_cache() -> SimplexCache {
+    return SimplexCache { metric: 0.0, count: 0, index_a0: 0, index_a1: 0, index_a2: 0, index_a3: 0,
+                          index_b0: 0, index_b1: 0, index_b2: 0, index_b3: 0 }
+}
+
+empty_cast_output() -> CastOutput {
+    return CastOutput { normal: math.vec3_zero(), point: math.vec3_zero(), fraction: 0.0, iterations: 0,
+                        triangle_index: NULL_INDEX, hit: false }
+}
+
+cache_index_a(c: *SimplexCache, i: int) -> int {
+    if i == 0 { return c.index_a0 }
+    if i == 1 { return c.index_a1 }
+    if i == 2 { return c.index_a2 }
+    return c.index_a3
+}
+
+cache_index_b(c: *SimplexCache, i: int) -> int {
+    if i == 0 { return c.index_b0 }
+    if i == 1 { return c.index_b1 }
+    if i == 2 { return c.index_b2 }
+    return c.index_b3
+}
+
+simplex_vertex(s: Simplex, i: int) -> SimplexVertex {
+    if i == 0 { return s.v0 }
+    if i == 1 { return s.v1 }
+    if i == 2 { return s.v2 }
+    return s.v3
+}
+
+simplex_set(s: *Simplex, i: int, v: SimplexVertex) {
+    if i == 0 { s.v0 = v
+    } else if i == 1 { s.v1 = v
+    } else if i == 2 { s.v2 = v
+    } else { s.v3 = v }
+}
+
+proxy_point(p: ShapeProxy, i: int) -> Vec3 {
+    points = p.points as Vec3[]
+    return points[i]
+}
+
+// --- support ------------------------------------------------------------------
+
+// The point of the proxy farthest along the axis. The first point is
+// moved to the origin for precision: the points may be far from it.
+get_proxy_support(p: ShapeProxy, axis: Vec3) -> int {
+    return get_point_support(p.points, p.count, axis)
+}
+
+get_point_support(block: ptr, count: int, axis: Vec3) -> int {
+    points = block as Vec3[]
+    origin = points[0]
+    max_index = 0
+    max_projection = 0.0
+    i = 1
+    while i < count {
+        projection = math.dot(axis, math.sub(points[i], origin))
+        if projection > max_projection {
+            max_index = i
+            max_projection = projection
+        }
+        i = i + 1
+    }
+    return max_index
+}
+
+// --- barycentric coordinates ----------------------------------------------------
+
+// The unnormalised barycentric coordinates of the origin on an edge, a
+// triangle or a tetrahedron, with the divisor last.
+struct Bary {
+    u: float
+    v: float
+    w: float
+    x: float
+    divisor: float
+}
+
+bary_edge(a: Vec3, b: Vec3) -> Bary {
+    ab = math.sub(b, a)
+    return Bary { u: math.dot(b, ab), v: 0.0 - math.dot(a, ab), w: 0.0, x: 0.0, divisor: math.dot(ab, ab) }
+}
+
+bary_tri(a: Vec3, b: Vec3, c: Vec3) -> Bary {
+    ab = math.sub(b, a)
+    ac = math.sub(c, a)
+    b_x_c = math.cross(b, c)
+    c_x_a = math.cross(c, a)
+    a_x_b = math.cross(a, b)
+    ab_x_ac = math.cross(ab, ac)
+    return Bary { u: math.dot(b_x_c, ab_x_ac), v: math.dot(c_x_a, ab_x_ac), w: math.dot(a_x_b, ab_x_ac), x: 0.0,
+                  divisor: math.dot(ab_x_ac, ab_x_ac) }
+}
+
+bary_tet(a: Vec3, b: Vec3, c: Vec3, d: Vec3) -> Bary {
+    ab = math.sub(b, a)
+    ac = math.sub(c, a)
+    ad = math.sub(d, a)
+    // The divisor is forced positive.
+    divisor = math.scalar_triple_product(ab, ac, ad)
+    sign = 1.0
+    if divisor < 0.0 { sign = 0.0 - 1.0 }
+    return Bary { u: sign * math.scalar_triple_product(b, c, d), v: sign * math.scalar_triple_product(a, d, c),
+                  w: sign * math.scalar_triple_product(a, b, d), x: sign * math.scalar_triple_product(a, c, b),
+                  divisor: sign * divisor }
+}
+
+// --- the simplex ----------------------------------------------------------------
+
+// The length, area or volume of the simplex: what the cache compares.
+get_metric(s: Simplex) -> float {
+    if s.count == 1 { return 0.0 }
+    if s.count == 2 { return math.distance(s.v0.w, s.v1.w) }
+    if s.count == 3 { return math.length(math.cross(math.sub(s.v1.w, s.v0.w), math.sub(s.v2.w, s.v0.w))) / 2.0 }
+    return math.scalar_triple_product(math.sub(s.v1.w, s.v0.w), math.sub(s.v2.w, s.v0.w), math.sub(s.v3.w, s.v0.w)) / 6.0
+}
+
+write_cache(cache: *SimplexCache, s: Simplex) {
+    cache.metric = get_metric(s)
+    cache.count = s.count
+    cache.index_a0 = s.v0.index_a
+    cache.index_b0 = s.v0.index_b
+    cache.index_a1 = s.v1.index_a
+    cache.index_b1 = s.v1.index_b
+    cache.index_a2 = s.v2.index_a
+    cache.index_b2 = s.v2.index_b
+    cache.index_a3 = s.v3.index_a
+    cache.index_b3 = s.v3.index_b
+}
+
+with_a(vertex: SimplexVertex, a: float) -> SimplexVertex {
+    v = vertex
+    v.a = a
+    return v
+}
+
+// The closest point of a segment to the origin, by Voronoi region: the
+// simplex is reduced to the region's feature with its barycentrics.
+// False where a divisor is not positive.
+solve_simplex2(s: *Simplex) -> bool {
+    a = s.v0.w
+    b = s.v1.w
+    ab = math.sub(b, a)
+    divisor = math.dot(ab, ab)
+    u = math.dot(b, ab)
+    v = 0.0 - math.dot(a, ab)
+    if v <= 0.0 {
+        s.count = 1
+        s.v0.a = 1.0
+        return true
+    }
+    if u <= 0.0 {
+        s.count = 1
+        s.v0 = with_a(s.v1, 1.0)
+        return true
+    }
+    if divisor <= 0.0 { return false }
+    denominator = 1.0 / divisor
+    s.v0.a = denominator * u
+    s.v1.a = denominator * v
+    return true
+}
+
+solve_simplex3(s: *Simplex) -> bool {
+    v1 = s.v0
+    v2 = s.v1
+    v3 = s.v2
+    w_ab = bary_edge(v1.w, v2.w)
+    w_bc = bary_edge(v2.w, v3.w)
+    w_ca = bary_edge(v3.w, v1.w)
+
+    if w_ab.v <= 0.0 && w_ca.u <= 0.0 {
+        s.count = 1
+        s.v0 = with_a(v1, 1.0)
+        return true
+    }
+    if w_bc.v <= 0.0 && w_ab.u <= 0.0 {
+        s.count = 1
+        s.v0 = with_a(v2, 1.0)
+        return true
+    }
+    if w_ca.v <= 0.0 && w_bc.u <= 0.0 {
+        s.count = 1
+        s.v0 = with_a(v3, 1.0)
+        return true
+    }
+
+    w_abc = bary_tri(v1.w, v2.w, v3.w)
+
+    if w_abc.w <= 0.0 && w_ab.u > 0.0 && w_ab.v > 0.0 {
+        s.count = 2
+        if w_ab.divisor <= 0.0 { return false }
+        s.v0 = with_a(v1, w_ab.u / w_ab.divisor)
+        s.v1 = with_a(v2, w_ab.v / w_ab.divisor)
+        return true
+    }
+    if w_abc.u <= 0.0 && w_bc.u > 0.0 && w_bc.v > 0.0 {
+        s.count = 2
+        if w_bc.divisor <= 0.0 { return false }
+        s.v0 = with_a(v2, w_bc.u / w_bc.divisor)
+        s.v1 = with_a(v3, w_bc.v / w_bc.divisor)
+        return true
+    }
+    if w_abc.v <= 0.0 && w_ca.u > 0.0 && w_ca.v > 0.0 {
+        s.count = 2
+        if w_ca.divisor <= 0.0 { return false }
+        s.v0 = with_a(v3, w_ca.u / w_ca.divisor)
+        s.v1 = with_a(v1, w_ca.v / w_ca.divisor)
+        return true
+    }
+
+    if w_abc.divisor <= 0.0 { return false }
+    s.v0.a = w_abc.u / w_abc.divisor
+    s.v1.a = w_abc.v / w_abc.divisor
+    s.v2.a = w_abc.w / w_abc.divisor
+    return true
+}
+
+reduce_to_edge(s: *Simplex, p: SimplexVertex, q: SimplexVertex, bary: Bary) -> bool {
+    s.count = 2
+    if bary.divisor <= 0.0 { return false }
+    s.v0 = with_a(p, bary.u / bary.divisor)
+    s.v1 = with_a(q, bary.v / bary.divisor)
+    return true
+}
+
+reduce_to_face(s: *Simplex, p: SimplexVertex, q: SimplexVertex, r: SimplexVertex, bary: Bary) -> bool {
+    s.count = 3
+    if bary.divisor <= 0.0 { return false }
+    s.v0 = with_a(p, bary.u / bary.divisor)
+    s.v1 = with_a(q, bary.v / bary.divisor)
+    s.v2 = with_a(r, bary.w / bary.divisor)
+    return true
+}
+
+solve_simplex4(s: *Simplex) -> bool {
+    va = s.v0
+    vb = s.v1
+    vc = s.v2
+    vd = s.v3
+    w_ab = bary_edge(va.w, vb.w)
+    w_ac = bary_edge(va.w, vc.w)
+    w_ad = bary_edge(va.w, vd.w)
+    w_bc = bary_edge(vb.w, vc.w)
+    w_cd = bary_edge(vc.w, vd.w)
+    w_db = bary_edge(vd.w, vb.w)
+
+    if w_ab.v <= 0.0 && w_ac.v <= 0.0 && w_ad.v <= 0.0 {
+        s.count = 1
+        s.v0 = with_a(va, 1.0)
+        return true
+    }
+    if w_ab.u <= 0.0 && w_db.u <= 0.0 && w_bc.v <= 0.0 {
+        s.count = 1
+        s.v0 = with_a(vb, 1.0)
+        return true
+    }
+    if w_ac.u <= 0.0 && w_bc.u <= 0.0 && w_cd.v <= 0.0 {
+        s.count = 1
+        s.v0 = with_a(vc, 1.0)
+        return true
+    }
+    if w_ad.u <= 0.0 && w_cd.u <= 0.0 && w_db.v <= 0.0 {
+        s.count = 1
+        s.v0 = with_a(vd, 1.0)
+        return true
+    }
+
+    w_acb = bary_tri(va.w, vc.w, vb.w)
+    w_abd = bary_tri(va.w, vb.w, vd.w)
+    w_adc = bary_tri(va.w, vd.w, vc.w)
+    w_bcd = bary_tri(vb.w, vc.w, vd.w)
+
+    if w_abd.w <= 0.0 && w_acb.v <= 0.0 && w_ab.u > 0.0 && w_ab.v > 0.0 { return reduce_to_edge(s, va, vb, w_ab) }
+    if w_acb.w <= 0.0 && w_adc.v <= 0.0 && w_ac.u > 0.0 && w_ac.v > 0.0 { return reduce_to_edge(s, va, vc, w_ac) }
+    if w_adc.w <= 0.0 && w_abd.v <= 0.0 && w_ad.u > 0.0 && w_ad.v > 0.0 { return reduce_to_edge(s, va, vd, w_ad) }
+    if w_acb.u <= 0.0 && w_bcd.w <= 0.0 && w_bc.u > 0.0 && w_bc.v > 0.0 { return reduce_to_edge(s, vb, vc, w_bc) }
+    if w_adc.u <= 0.0 && w_bcd.u <= 0.0 && w_cd.u > 0.0 && w_cd.v > 0.0 { return reduce_to_edge(s, vc, vd, w_cd) }
+    if w_abd.u <= 0.0 && w_bcd.v <= 0.0 && w_db.u > 0.0 && w_db.v > 0.0 { return reduce_to_edge(s, vd, vb, w_db) }
+
+    w_abcd = bary_tet(va.w, vb.w, vc.w, vd.w)
+
+    if w_abcd.x < 0.0 && w_acb.u > 0.0 && w_acb.v > 0.0 && w_acb.w > 0.0 { return reduce_to_face(s, va, vc, vb, w_acb) }
+    if w_abcd.w < 0.0 && w_abd.u > 0.0 && w_abd.v > 0.0 && w_abd.w > 0.0 { return reduce_to_face(s, va, vb, vd, w_abd) }
+    if w_abcd.v < 0.0 && w_adc.u > 0.0 && w_adc.v > 0.0 && w_adc.w > 0.0 { return reduce_to_face(s, va, vd, vc, w_adc) }
+    if w_abcd.u < 0.0 && w_bcd.u > 0.0 && w_bcd.v > 0.0 && w_bcd.w > 0.0 { return reduce_to_face(s, vb, vc, vd, w_bcd) }
+
+    // Inside the tetrahedron.
+    if w_abcd.divisor <= 0.0 { return false }
+    s.v0.a = w_abcd.u / w_abcd.divisor
+    s.v1.a = w_abcd.v / w_abcd.divisor
+    s.v2.a = w_abcd.w / w_abcd.divisor
+    s.v3.a = w_abcd.x / w_abcd.divisor
+    return true
+}
+
+blend3(a1: float, v1: Vec3, a2: float, v2: Vec3, a3: float, v3: Vec3) -> Vec3 {
+    return math.add(math.add(math.mul_sv(a1, v1), math.mul_sv(a2, v2)), math.mul_sv(a3, v3))
+}
+
+// The closest points on A and B from the solved simplex; identical for a
+// tetrahedron (the shapes overlap).
+witness_a(s: Simplex) -> Vec3 {
+    if s.count == 1 { return s.v0.w_a }
+    if s.count == 2 { return math.blend2(s.v0.a, s.v0.w_a, s.v1.a, s.v1.w_a) }
+    if s.count == 3 { return blend3(s.v0.a, s.v0.w_a, s.v1.a, s.v1.w_a, s.v2.a, s.v2.w_a) }
+    return math.add(math.blend2(s.v0.a, s.v0.w_a, s.v1.a, s.v1.w_a), math.blend2(s.v2.a, s.v2.w_a, s.v3.a, s.v3.w_a))
+}
+
+witness_b(s: Simplex) -> Vec3 {
+    if s.count == 1 { return s.v0.w_b }
+    if s.count == 2 { return math.blend2(s.v0.a, s.v0.w_b, s.v1.a, s.v1.w_b) }
+    if s.count == 3 { return blend3(s.v0.a, s.v0.w_b, s.v1.a, s.v1.w_b, s.v2.a, s.v2.w_b) }
+    return witness_a(s)
+}
+
+closest_point(s: Simplex) -> Vec3 {
+    if s.count == 1 { return s.v0.w }
+    if s.count == 2 { return math.blend2(s.v0.a, s.v0.w, s.v1.a, s.v1.w) }
+    if s.count == 3 { return blend3(s.v0.a, s.v0.w, s.v1.a, s.v1.w, s.v2.a, s.v2.w) }
+    return math.add(math.blend2(s.v0.a, s.v0.w, s.v1.a, s.v1.w), math.blend2(s.v2.a, s.v2.w, s.v3.a, s.v3.w))
+}
+
+make_vertex(pa: Vec3, pb: Vec3, ia: int, ib: int) -> SimplexVertex {
+    return SimplexVertex { w_a: pa, w_b: pb, w: math.sub(pb, pa), a: 0.0, index_a: ia, index_b: ib }
+}
+
+overlap_output(s: Simplex, iteration: int, simplex_index: int) -> DistanceOutput {
+    return DistanceOutput { point_a: witness_a(s), point_b: witness_b(s), normal: math.vec3_zero(), distance: 0.0,
+                            iterations: iteration, simplex_count: simplex_index }
+}
+
+// --- GJK ------------------------------------------------------------------------
+
+// The distance between two proxies, in A's frame, with the closest
+// points and the normal from A to B. The cache warm-starts the simplex
+// and receives the result; simplexes (Simplex[] of simplex_capacity, or
+// null) receives the trail for debugging.
+shape_distance(input: *DistanceInput, cache: *SimplexCache, simplexes: ptr, simplex_capacity: int) -> DistanceOutput {
+    xf = input.transform
+    m = math.make_matrix_from_quat(xf.q)
+    mt = math.transpose(m)
+    proxy_a = input.proxy_a
+    proxy_b = input.proxy_b
+    trail = simplexes as Simplex[]
+
+    // The initial simplex from the cache.
+    empty_vertex = SimplexVertex { w_a: math.vec3_zero(), w_b: math.vec3_zero(), w: math.vec3_zero(), a: 0.0, index_a: 0, index_b: 0 }
+    simplex = Simplex { v0: empty_vertex, v1: empty_vertex, v2: empty_vertex, v3: empty_vertex, count: cache.count }
+    i = 0
+    while i < cache.count {
+        index1 = cache_index_a(cache, i)
+        index2 = cache_index_b(cache, i)
+        vertex1 = proxy_point(proxy_a, index1)
+        vertex2 = math.add(math.mul_mv(m, proxy_point(proxy_b, index2)), xf.p)
+        simplex_set(&simplex, i, make_vertex(vertex1, vertex2, index1, index2))
+        i = i + 1
+    }
+
+    // If the new metric differs much from the cached one, flush.
+    if simplex.count > 0 {
+        metric1 = cache.metric
+        metric2 = get_metric(simplex)
+        if 2.0 * metric1 < metric2 || metric2 < 0.5 * metric1 || metric2 < FLOAT_EPSILON { simplex.count = 0 }
+    }
+    if simplex.count == 0 {
+        vertex1 = proxy_point(proxy_a, 0)
+        vertex2 = math.add(math.mul_mv(m, proxy_point(proxy_b, 0)), xf.p)
+        simplex.count = 1
+        simplex.v0 = make_vertex(vertex1, vertex2, 0, 0)
+    }
+
+    backup = simplex
+    backup.count = 0
+    simplex_index = 0
+    if simplexes != null && simplex_index < simplex_capacity {
+        trail[simplex_index] = simplex
+        simplex_index = simplex_index + 1
+    }
+
+    output = DistanceOutput { point_a: math.vec3_zero(), point_b: math.vec3_zero(), normal: math.vec3_zero(),
+                              distance: 0.0, iterations: 0, simplex_count: 0 }
+    distance_sq = math.MAX_FLOAT
+    normal = math.vec3_zero()
+
+    iteration = 0
+    while iteration < MAX_GJK_ITERATIONS {
+        solved = false
+        if simplex.count == 1 {
+            simplex.v0.a = 1.0
+            solved = true
+        } else if simplex.count == 2 {
+            solved = solve_simplex2(&simplex)
+        } else if simplex.count == 3 {
+            solved = solve_simplex3(&simplex)
+        } else {
+            solved = solve_simplex4(&simplex)
+        }
+
+        if solved == false {
+            // No progress: the last simplex stands.
+            simplex = backup
+            break
+        }
+
+        if simplexes != null && simplex_index < simplex_capacity {
+            trail[simplex_index] = simplex
+            simplex_index = simplex_index + 1
+            output.iterations = iteration
+            output.simplex_count = simplex_index
+        }
+
+        if simplex.count == MAX_SIMPLEX_VERTICES {
+            // The origin is inside the tetrahedron: overlap.
+            return overlap_output(simplex, iteration, simplex_index)
+        }
+
+        old_distance_sq = distance_sq
+        closest = closest_point(simplex)
+        distance_sq = math.dot(closest, closest)
+        if distance_sq >= old_distance_sq {
+            simplex = backup
+            break
+        }
+
+        // The next search direction, towards the origin.
+        search = math.vec3_zero()
+        if simplex.count == 1 {
+            search = math.neg(simplex.v0.w)
+        } else if simplex.count == 2 {
+            a = simplex.v0.w
+            ab = math.sub(simplex.v1.w, a)
+            search = math.cross(math.cross(ab, math.neg(a)), ab)
+        } else {
+            a = simplex.v0.w
+            n = math.cross(math.sub(simplex.v1.w, a), math.sub(simplex.v2.w, a))
+            search = n
+            if math.dot(n, a) >= 0.0 { search = math.neg(n) }
+        }
+
+        if math.length_squared(search) < 1000.0 * FLOAT_MIN {
+            // The origin is on a segment or triangle: overlap.
+            return overlap_output(simplex, iteration, simplex_index)
+        }
+
+        normal = math.neg(search)
+
+        index_a = get_proxy_support(proxy_a, math.neg(search))
+        support_a = proxy_point(proxy_a, index_a)
+        index_b = get_proxy_support(proxy_b, math.mul_mv(mt, search))
+        support_b = math.add(math.mul_mv(m, proxy_point(proxy_b, index_b)), xf.p)
+
+        // Save the simplex before adding; a repeated support ends the search.
+        backup = simplex
+        duplicate = false
+        i = 0
+        while i < simplex.count {
+            v = simplex_vertex(simplex, i)
+            if v.index_a == index_a && v.index_b == index_b {
+                duplicate = true
+                break
+            }
+            i = i + 1
+        }
+        if duplicate { break }
+
+        simplex_set(&simplex, simplex.count, make_vertex(support_a, support_b, index_a, index_b))
+        simplex.count = simplex.count + 1
+        iteration = iteration + 1
+    }
+
+    output.point_a = witness_a(simplex)
+    output.point_b = witness_b(simplex)
+    output.iterations = iteration
+    output.simplex_count = simplex_index
+
+    normal = math.normalize(normal)
+    if math.is_normalized(normal) == false {
+        output.distance = 0.0
+        output.normal = math.vec3_zero()
+        return output
+    }
+
+    output.distance = math.distance(output.point_a, output.point_b)
+    output.normal = normal
+
+    if input.use_radii {
+        r_a = proxy_a.radius
+        r_b = proxy_b.radius
+        output.distance = math.max_float(0.0, output.distance - r_a - r_b)
+        // The points stay on the perimeters even when overlapped, so they move smoothly.
+        output.point_a = math.add(output.point_a, math.mul_sv(r_a, normal))
+        output.point_b = math.sub(output.point_b, math.mul_sv(r_b, normal))
+    }
+
+    write_cache(cache, simplex)
+    return output
+}
+
+// --- shape cast -----------------------------------------------------------------
+
+// B swept along its translation in A's frame by conservative advancement
+// on the distance: each step moves B up to the point where the current
+// distance would close along the current normal, until it is within a
+// slop of the target. The hit point is on A's surface.
+shape_cast(input: *ShapeCastPairInput) -> CastOutput {
+    linear_slop = math.LINEAR_SLOP
+    total_radius = input.proxy_a.radius + input.proxy_b.radius
+    target = math.max_float(linear_slop, total_radius - linear_slop)
+    tolerance = 0.25 * linear_slop
+
+    cache = empty_cache()
+    alpha = 0.0
+    distance_input = DistanceInput { proxy_a: input.proxy_a, proxy_b: input.proxy_b, transform: input.transform, use_radii: false }
+    delta2 = input.translation_b
+    output = empty_cast_output()
+
+    iteration = 0
+    while iteration < 20 {
+        output.iterations = output.iterations + 1
+        d = shape_distance(&distance_input, &cache, null, 0)
+
+        if d.distance < target + tolerance {
+            if iteration == 0 {
+                if input.can_encroach && d.distance > 2.0 * linear_slop {
+                    target = d.distance - linear_slop
+                } else {
+                    // Initial overlap: a common point.
+                    output.hit = true
+                    c1 = math.mul_add(d.point_a, input.proxy_a.radius, d.normal)
+                    c2 = math.mul_add(d.point_b, 0.0 - input.proxy_b.radius, d.normal)
+                    output.point = math.lerp(c1, c2, 0.5)
+                    return output
+                }
+            } else {
+                if d.distance > 0.0 && math.is_normalized(d.normal) == false {
+                    // A numerical problem, likely extreme input.
+                    return output
+                }
+                output.fraction = alpha
+                output.point = math.mul_add(d.point_a, input.proxy_a.radius, d.normal)
+                output.normal = d.normal
+                output.hit = true
+                return output
+            }
+        }
+
+        // Are the shapes approaching?
+        denominator = math.dot(delta2, d.normal)
+        if denominator >= 0.0 { return output }
+
+        alpha = alpha + (target - d.distance) / denominator
+        if alpha >= input.max_fraction { return output }
+
+        distance_input.transform.p = math.mul_add(input.transform.p, alpha, delta2)
+        iteration = iteration + 1
+    }
+    return output
+}
+
+// --- time of impact --------------------------------------------------------------
+
+get_sweep_transform(sweep: Sweep, time: float) -> Transform {
+    q = math.nlerp(sweep.q1, sweep.q2, time)
+    p = math.sub(math.lerp(sweep.c1, sweep.c2, time), math.rotate_vector(q, sweep.local_center))
+    return Transform { p: p, q: q }
+}
+
+get_final_sweep_transform(sweep: Sweep) -> Transform {
+    return Transform { p: math.sub(sweep.c2, math.rotate_vector(sweep.q2, sweep.local_center)), q: sweep.q2 }
+}
+
+unique_count(count: int, i0: int, i1: int, i2: int) -> int {
+    if count == 1 { return 1 }
+    if count == 2 {
+        if i0 != i1 { return 2 }
+        return 1
+    }
+    if i0 != i1 && i0 != i2 && i1 != i2 { return 3 }
+    if i0 == i1 && i0 == i2 { return 1 }
+    return 2
+}
+
+// Whether the cross product of two edges flips over the sweep.
+check_fast_edges(xf_a: Transform, local_edge_a: Vec3, xf_b: Transform, local_edge_b: Vec3, axis0: Vec3) -> bool {
+    edge_a = math.rotate_vector(xf_a.q, local_edge_a)
+    edge_b = math.rotate_vector(xf_b.q, local_edge_b)
+    return math.dot(math.cross(edge_a, edge_b), axis0) < 0.0
+}
+
+const SEPARATION_UNKNOWN = 0
+const SEPARATION_VERTICES = 1
+const SEPARATION_EDGES = 2
+const SEPARATION_FACE_A = 3
+const SEPARATION_FACE_B = 4
+
+// The separation along an axis from the cached simplex: a world axis
+// (vertices), the cross product of two local edges, or a local face of
+// A or B.
+struct SeparationFunction {
+    proxy_a: ShapeProxy
+    proxy_b: ShapeProxy
+    sweep_a: Sweep
+    sweep_b: Sweep
+    witness1: Vec3
+    witness2: Vec3
+    kind: int
+}
+
+make_separation_function(cache: SimplexCache, proxy_a: ShapeProxy, sweep_a: Sweep, proxy_b: ShapeProxy, sweep_b: Sweep,
+                         world_normal: Vec3, t1: float) -> SeparationFunction {
+    fcn = SeparationFunction { proxy_a: proxy_a, proxy_b: proxy_b, sweep_a: sweep_a, sweep_b: sweep_b,
+                               witness1: math.vec3_zero(), witness2: math.vec3_zero(), kind: SEPARATION_UNKNOWN }
+    ia0 = cache.index_a0
+    ia1 = cache.index_a1
+    ia2 = cache.index_a2
+    ib0 = cache.index_b0
+    ib1 = cache.index_b1
+    ib2 = cache.index_b2
+    unique_a = unique_count(cache.count, ia0, ia1, ia2)
+    unique_b = unique_count(cache.count, ib0, ib1, ib2)
+
+    xf_a1 = get_sweep_transform(sweep_a, t1)
+    xf_b1 = get_sweep_transform(sweep_b, t1)
+    q_a = xf_a1.q
+    q_b = xf_b1.q
+    delta_p = math.sub(xf_b1.p, xf_a1.p)
+
+    if cache.count == 1 {
+        fcn.kind = SEPARATION_VERTICES
+        fcn.witness1 = world_normal
+        return fcn
+    }
+
+    if cache.count == 2 {
+        if unique_a == 2 && unique_b == 2 {
+            // Edge against edge.
+            v_a1 = proxy_point(proxy_a, ia0)
+            local_edge_a = math.normalize(math.sub(proxy_point(proxy_a, ia1), v_a1))
+            v_b1 = proxy_point(proxy_b, ib0)
+            local_edge_b = math.normalize(math.sub(proxy_point(proxy_b, ib1), v_b1))
+            return edge_separation(fcn, q_a, q_b, delta_p, v_a1, local_edge_a, v_b1, local_edge_b, world_normal, 0.05 * 0.05)
+        }
+        // A vertex against an edge: the world axis.
+        fcn.kind = SEPARATION_VERTICES
+        fcn.witness1 = world_normal
+        return fcn
+    }
+
+    // Three: a face of A, a face of B, or two edges.
+    if unique_a == 3 {
+        v_a1 = proxy_point(proxy_a, ia0)
+        v_a2 = proxy_point(proxy_a, ia1)
+        v_a3 = proxy_point(proxy_a, ia2)
+        local_axis_a = math.normalize(math.cross(math.sub(v_a2, v_a1), math.sub(v_a3, v_a1)))
+        axis_a = math.rotate_vector(q_a, local_axis_a)
+        local_point_a = math.mul_sv(1.0 / 3.0, math.add(math.add(v_a1, v_a2), v_a3))
+        local_point_b = proxy_point(proxy_b, ib0)
+        delta = math.add(math.sub(math.rotate_vector(q_b, local_point_b), math.rotate_vector(q_a, local_point_a)), delta_p)
+        if math.dot(delta, axis_a) < 0.0 { local_axis_a = math.neg(local_axis_a) }
+        fcn.kind = SEPARATION_FACE_A
+        fcn.witness1 = local_axis_a
+        fcn.witness2 = local_point_a
+        return fcn
+    }
+    if unique_b == 3 {
+        v_b1 = proxy_point(proxy_b, ib0)
+        v_b2 = proxy_point(proxy_b, ib1)
+        v_b3 = proxy_point(proxy_b, ib2)
+        local_axis_b = math.normalize(math.cross(math.sub(v_b2, v_b1), math.sub(v_b3, v_b1)))
+        axis_b = math.rotate_vector(q_b, local_axis_b)
+        local_point_a = proxy_point(proxy_a, ia0)
+        local_point_b = math.mul_sv(1.0 / 3.0, math.add(math.add(v_b1, v_b2), v_b3))
+        delta = math.sub(math.sub(math.rotate_vector(q_a, local_point_a), math.rotate_vector(q_b, local_point_b)), delta_p)
+        if math.dot(delta, axis_b) < 0.0 { local_axis_b = math.neg(local_axis_b) }
+        fcn.kind = SEPARATION_FACE_B
+        fcn.witness1 = local_axis_b
+        fcn.witness2 = local_point_b
+        return fcn
+    }
+
+    // Two unique on each: make the first two indices unique.
+    if ia0 == ia1 { ia1 = ia2 }
+    if ib0 == ib1 { ib1 = ib2 }
+    v_a1 = proxy_point(proxy_a, ia0)
+    local_edge_a = math.normalize(math.sub(proxy_point(proxy_a, ia1), v_a1))
+    v_b1 = proxy_point(proxy_b, ib0)
+    local_edge_b = math.normalize(math.sub(proxy_point(proxy_b, ib1), v_b1))
+    return edge_separation(fcn, q_a, q_b, delta_p, v_a1, local_edge_a, v_b1, local_edge_b, world_normal, 0.005 * 0.005)
+}
+
+// The edge-edge case: the cross product axis when the edges are not near
+// parallel and it does not flip over the sweep; a fixed axis otherwise.
+edge_separation(base: SeparationFunction, q_a: Quat, q_b: Quat, delta_p: Vec3, v_a1: Vec3, local_edge_a: Vec3,
+                v_b1: Vec3, local_edge_b_in: Vec3, world_normal: Vec3, tolerance_squared: float) -> SeparationFunction {
+    fcn = base
+    local_edge_b = local_edge_b_in
+    edge_a = math.rotate_vector(q_a, local_edge_a)
+    edge_b = math.rotate_vector(q_b, local_edge_b)
+    axis = math.cross(edge_a, edge_b)
+    if math.length_squared(axis) < tolerance_squared {
+        fcn.kind = SEPARATION_VERTICES
+        fcn.witness1 = world_normal
+        return fcn
+    }
+    delta = math.add(math.sub(math.rotate_vector(q_b, v_b1), math.rotate_vector(q_a, v_a1)), delta_p)
+    if math.dot(delta, axis) < 0.0 {
+        // The axis points from A to B.
+        axis = math.neg(axis)
+        local_edge_b = math.neg(local_edge_b)
+    }
+    xf_a2 = get_final_sweep_transform(fcn.sweep_a)
+    xf_b2 = get_final_sweep_transform(fcn.sweep_b)
+    if check_fast_edges(xf_a2, local_edge_a, xf_b2, local_edge_b, axis) {
+        fcn.kind = SEPARATION_VERTICES
+        fcn.witness1 = math.normalize(axis)
+        return fcn
+    }
+    fcn.kind = SEPARATION_EDGES
+    fcn.witness1 = local_edge_a
+    fcn.witness2 = local_edge_b
+    return fcn
+}
+
+// The deepest points at time t along the function's axis and their separation.
+struct MinSeparation {
+    separation: float
+    index_a: int
+    index_b: int
+}
+
+find_min_separation(fcn: *SeparationFunction, t: float) -> MinSeparation {
+    xf_a = get_sweep_transform(fcn.sweep_a, t)
+    xf_b = get_sweep_transform(fcn.sweep_b, t)
+    if fcn.kind == SEPARATION_VERTICES {
+        axis = fcn.witness1
+        ia = get_point_support(fcn.proxy_a.points, fcn.proxy_a.count, math.inv_rotate_vector(xf_a.q, axis))
+        ib = get_point_support(fcn.proxy_b.points, fcn.proxy_b.count, math.inv_rotate_vector(xf_b.q, math.neg(axis)))
+        delta = math.add(math.sub(math.rotate_vector(xf_b.q, proxy_point(fcn.proxy_b, ib)),
+                                  math.rotate_vector(xf_a.q, proxy_point(fcn.proxy_a, ia))),
+                         math.sub(xf_b.p, xf_a.p))
+        return MinSeparation { separation: math.dot(delta, axis), index_a: ia, index_b: ib }
+    }
+    if fcn.kind == SEPARATION_EDGES {
+        edge_a = math.rotate_vector(xf_a.q, fcn.witness1)
+        edge_b = math.rotate_vector(xf_b.q, fcn.witness2)
+        axis = math.normalize(math.cross(edge_a, edge_b))
+        ia = get_point_support(fcn.proxy_a.points, fcn.proxy_a.count, math.inv_rotate_vector(xf_a.q, axis))
+        ib = get_point_support(fcn.proxy_b.points, fcn.proxy_b.count, math.neg(math.inv_rotate_vector(xf_b.q, axis)))
+        delta = math.add(math.sub(math.rotate_vector(xf_b.q, proxy_point(fcn.proxy_b, ib)),
+                                  math.rotate_vector(xf_a.q, proxy_point(fcn.proxy_a, ia))),
+                         math.sub(xf_b.p, xf_a.p))
+        return MinSeparation { separation: math.dot(delta, axis), index_a: ia, index_b: ib }
+    }
+    if fcn.kind == SEPARATION_FACE_A {
+        normal = math.rotate_vector(xf_a.q, fcn.witness1)
+        point_a = math.transform_point(xf_a, fcn.witness2)
+        ib = get_point_support(fcn.proxy_b.points, fcn.proxy_b.count, math.neg(math.inv_rotate_vector(xf_b.q, normal)))
+        point_b = math.transform_point(xf_b, proxy_point(fcn.proxy_b, ib))
+        return MinSeparation { separation: math.dot(math.sub(point_b, point_a), normal), index_a: NULL_INDEX, index_b: ib }
+    }
+    normal = math.rotate_vector(xf_b.q, fcn.witness1)
+    ia = get_point_support(fcn.proxy_a.points, fcn.proxy_a.count, math.neg(math.inv_rotate_vector(xf_a.q, normal)))
+    point_a = math.transform_point(xf_a, proxy_point(fcn.proxy_a, ia))
+    point_b = math.transform_point(xf_b, fcn.witness2)
+    return MinSeparation { separation: math.dot(math.sub(point_a, point_b), normal), index_a: ia, index_b: NULL_INDEX }
+}
+
+// The separation of two given points at time beta.
+evaluate_separation(fcn: *SeparationFunction, index1: int, index2: int, beta: float) -> float {
+    xf1 = get_sweep_transform(fcn.sweep_a, beta)
+    xf2 = get_sweep_transform(fcn.sweep_b, beta)
+    if fcn.kind == SEPARATION_VERTICES {
+        point1 = math.transform_point(xf1, proxy_point(fcn.proxy_a, index1))
+        point2 = math.transform_point(xf2, proxy_point(fcn.proxy_b, index2))
+        return math.dot(math.sub(point2, point1), fcn.witness1)
+    }
+    if fcn.kind == SEPARATION_EDGES {
+        axis = math.normalize(math.cross(math.rotate_vector(xf1.q, fcn.witness1), math.rotate_vector(xf2.q, fcn.witness2)))
+        point1 = math.transform_point(xf1, proxy_point(fcn.proxy_a, index1))
+        point2 = math.transform_point(xf2, proxy_point(fcn.proxy_b, index2))
+        return math.dot(math.sub(point2, point1), axis)
+    }
+    if fcn.kind == SEPARATION_FACE_A {
+        axis = math.rotate_vector(xf1.q, fcn.witness1)
+        point1 = math.transform_point(xf1, fcn.witness2)
+        point2 = math.transform_point(xf2, proxy_point(fcn.proxy_b, index2))
+        return math.dot(math.sub(point2, point1), axis)
+    }
+    axis = math.rotate_vector(xf2.q, fcn.witness1)
+    point1 = math.transform_point(xf1, proxy_point(fcn.proxy_a, index1))
+    point2 = math.transform_point(xf2, fcn.witness2)
+    return math.dot(math.sub(point1, point2), axis)
+}
+
+// Freeze an edge-edge axis at time beta into a fixed world axis.
+force_fixed_axis(fcn: *SeparationFunction, beta: float) {
+    xf1 = get_sweep_transform(fcn.sweep_a, beta)
+    xf2 = get_sweep_transform(fcn.sweep_b, beta)
+    axis = math.normalize(math.cross(math.rotate_vector(xf1.q, fcn.witness1), math.rotate_vector(xf2.q, fcn.witness2)))
+    fcn.kind = SEPARATION_VERTICES
+    fcn.witness1 = axis
+    fcn.witness2 = math.vec3_zero()
+}
+
+toi_point(output: *TOIOutput, world_point_a: Vec3, world_point_b: Vec3, world_normal: Vec3,
+          radius_a: float, radius_b: float, origin: Vec3) {
+    p_a = math.mul_add(world_point_a, radius_a, world_normal)
+    p_b = math.mul_add(world_point_b, 0.0 - radius_b, world_normal)
+    output.point = math.add(math.lerp(p_a, p_b, 0.5), origin)
+    output.normal = world_normal
+}
+
+// The time in [0, max_fraction] at which the two sweeps first come
+// within a slop of touching, by separating axes taken from the distance
+// query's simplex and root-found on, each axis resolving the deepest
+// points until they are separated at that time.
+time_of_impact(input: *TOIInput) -> TOIOutput {
+    output = TOIOutput { state: TOI_STATE_UNKNOWN, point: math.vec3_zero(), normal: math.vec3_zero(), fraction: 0.0 - 1.0,
+                         distance: 0.0, distance_iterations: 0, push_back_iterations: 0, root_iterations: 0 }
+    sweep_a = input.sweep_a
+    sweep_b = input.sweep_b
+
+    // Shift to the origin.
+    origin = sweep_a.c1
+    sweep_a.c1 = math.vec3_zero()
+    sweep_a.c2 = math.sub(sweep_a.c2, origin)
+    sweep_b.c1 = math.sub(sweep_b.c1, origin)
+    sweep_b.c2 = math.sub(sweep_b.c2, origin)
+
+    proxy_a = input.proxy_a
+    proxy_b = input.proxy_b
+    max_push_back_iterations = proxy_a.count + proxy_b.count
+    t_max = input.max_fraction
+
+    linear_slop = math.LINEAR_SLOP
+    total_radius = proxy_a.radius + proxy_b.radius
+    target = math.max_float(linear_slop, total_radius - linear_slop)
+    tolerance = 0.25 * linear_slop
+
+    t1 = 0.0
+    max_iterations = 25
+    distance_iterations = 0
+    cache = empty_cache()
+    distance_input = DistanceInput { proxy_a: proxy_a, proxy_b: proxy_b, transform: math.transform_identity(), use_radii: false }
+
+    // The outer loop finds new separating axes until one repeats.
+    while true {
+        xf_a = get_sweep_transform(sweep_a, t1)
+        xf_b = get_sweep_transform(sweep_b, t1)
+        distance_input.transform = math.inv_mul_transforms(xf_a, xf_b)
+        d = shape_distance(&distance_input, &cache, null, 0)
+        output.distance = d.distance
+
+        // The query ran in frame A; back to the shifted world.
+        world_normal = math.rotate_vector(xf_a.q, d.normal)
+        world_point_a = math.transform_point(xf_a, d.point_a)
+        world_point_b = math.transform_point(xf_a, d.point_b)
+
+        output.distance_iterations = output.distance_iterations + 1
+        distance_iterations = distance_iterations + 1
+
+        if d.distance <= 0.0 {
+            // Overlapped: continuous collision gives up.
+            output.state = TOI_STATE_OVERLAPPED
+            output.fraction = 0.0
+            toi_point(&output, world_point_a, world_point_b, world_normal, proxy_a.radius, proxy_b.radius, origin)
+            break
+        }
+        if d.distance <= target + tolerance {
+            output.state = TOI_STATE_HIT
+            output.fraction = t1
+            toi_point(&output, world_point_a, world_point_b, world_normal, proxy_a.radius, proxy_b.radius, origin)
+            break
+        }
+        if distance_iterations == max_iterations {
+            // Too slow: a capsule turning about a triangle vertex, say.
+            output.state = TOI_STATE_FAILED
+            output.fraction = t1
+            toi_point(&output, world_point_a, world_point_b, world_normal, proxy_a.radius, proxy_b.radius, origin)
+            break
+        }
+
+        fcn = make_separation_function(cache, proxy_a, sweep_a, proxy_b, sweep_b, world_normal, t1)
+
+        // Resolve the deepest points on this axis, one after another.
+        done = false
+        t2 = t_max
+        push_back_iterations = 0
+        while true {
+            deepest = find_min_separation(&fcn, t2)
+            s2 = deepest.separation
+            index_a = deepest.index_a
+            index_b = deepest.index_b
+
+            if s2 - target > tolerance {
+                // Separated at the end.
+                output.state = TOI_STATE_SEPARATED
+                output.fraction = input.max_fraction
+                done = true
+                break
+            }
+            if s2 >= target - tolerance {
+                // Within tolerance at t2: advance.
+                t1 = t2
+                break
+            }
+
+            s1 = evaluate_separation(&fcn, index_a, index_b, t1)
+            if s1 < target - tolerance {
+                // Overlap: the root finder ran out.
+                output.state = TOI_STATE_FAILED
+                output.fraction = t1
+                done = true
+                break
+            }
+            if s1 <= target + tolerance {
+                // t1 holds the time of impact (it may be zero).
+                output.state = TOI_STATE_HIT
+                output.fraction = t1
+                done = true
+                break
+            }
+
+            // The 1D root of s(t) - target, by false position and bisection in turn.
+            root_iteration_count = 0
+            max_root_iterations = 50
+            a1 = t1
+            a2 = t2
+            while true {
+                t = 0.5 * (a1 + a2)
+                if (root_iteration_count & 1) != 0 { t = a1 + (target - s1) * (a2 - a1) / (s2 - s1) }
+                output.root_iterations = output.root_iterations + 1
+                root_iteration_count = root_iteration_count + 1
+                s = evaluate_separation(&fcn, index_a, index_b, t)
+                if math.abs_float(s - target) <= tolerance {
+                    t2 = t
+                    break
+                }
+                if s > target {
+                    a1 = t
+                    s1 = s
+                } else {
+                    a2 = t
+                    s2 = s
+                }
+                if root_iteration_count == max_root_iterations { break }
+            }
+
+            // An edge axis that would not converge becomes a fixed one.
+            if root_iteration_count == max_root_iterations - 1 && fcn.kind == SEPARATION_EDGES {
+                root_iteration_count = 0
+                t2 = input.max_fraction
+                force_fixed_axis(&fcn, t1)
+            }
+
+            output.push_back_iterations = output.push_back_iterations + 1
+            push_back_iterations = push_back_iterations + 1
+            if push_back_iterations == max_push_back_iterations { break }
+        }
+
+        if done {
+            toi_point(&output, world_point_a, world_point_b, world_normal, input.proxy_a.radius, input.proxy_b.radius, origin)
+            break
+        }
+    }
+    return output
+}
