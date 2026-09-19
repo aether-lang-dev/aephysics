@@ -11,6 +11,7 @@ extern atan2(y: float, x: float) -> float
 extern cos(x: float) -> float
 extern sin(x: float) -> float
 extern calloc(count: int, size: int) -> ptr
+extern exit(code: int)
 extern free(p: ptr)
 
 var failures = 0
@@ -266,5 +267,6 @@ main() {
         println("math: all checks passed")
     } else {
         println("math: ${failures} failure(s)")
+        exit(1)
     }
 }

@@ -75,3 +75,31 @@ constraint islands, speculative contacts with continuous collision,
 island-based sleep, convex hulls / capsules / spheres / triangle meshes /
 height fields, a dynamic-tree broad phase, and cross-platform determinism.
 Jolt stays as the second baseline in this table.
+
+# Layer by layer
+
+Each layer of aephysics against the same code in the reference, on this
+machine, one thread. `scripts/bench.sh` builds and runs every pair.
+
+## dynamic_tree
+
+`bench/tree.ae` and `bench/tree_box3d.c`: 10,000 boxes (1 m, in a 200 m
+cube) inserted one by one, 100 full rebuilds, 100,000 box queries (2 m),
+10,000 ray casts (up to 200 m), then ten rounds of enlarging every proxy
+by a random metre and a partial rebuild. The same random sequence on both.
+
+| phase | aephysics | Box3D |
+|---|---|---|
+| insert 10,000 | **5.0 ms** | 9.4 |
+| 100 full rebuilds | 46 | **42** |
+| 100,000 box queries | 12.5 | **11.9** |
+| 10,000 ray casts | 13.4 | **7.2** |
+| 10 x enlarge all | **2.5** | 2.9 |
+| 10 x partial rebuild | 5.9 | **5.0** |
+
+Both report 3,965 query hits, 1,950 ray hits, height 17 and area ratio
+63.45: the trees are the same tree. The ray cast is where the reference's
+SSE2 box tests and 24-byte float boxes show against the port's scalar
+tests and 48-byte double boxes; that is the number for the native wide
+path to beat, if the whole-step benchmark says the tree's ray cast
+matters.

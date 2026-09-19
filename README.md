@@ -27,7 +27,8 @@ so a test written against the reference reads the same here.
 |---|---|---|
 | `aephysics.math` | vectors, quaternions, transforms, 3x3 matrices, bounding boxes, segment distances, inertia helpers, the deterministic atan2/cos/sin | done, `test_math.ae` (6M checks) |
 | `aephysics.core` | bit set, id pool, hash set, arrays, the stack and arena allocators | done, `test_core.ae` (100k checks) |
-| `aephysics.collision` | hull (quickhull), GJK distance and shape cast, contact manifolds, triangle mesh, height field, the dynamic tree broad phase, shapes with mass properties, ray and shape casts | next |
+| `aephysics.dynamic_tree` | the bounding volume hierarchy under the broad phase: SAH insertion, rotations, enlarge, sweep refit, partial rebuild in depth-first order, box / closest / ray / swept-box queries | done, `test_dynamic_tree.ae` (12k checks); [same tree as the reference, ray cast 1.9x its time](bench/RESULTS.md#dynamic_tree) |
+| `aephysics.collision` | hull (quickhull), GJK distance and shape cast, contact manifolds, triangle mesh, height field, shapes with mass properties, ray and shape casts | next |
 | `aephysics.dynamics` | bodies, contacts, the constraint graph, islands, the Soft Step solver, joints (spherical, revolute, prismatic, distance, motor, weld, wheel), sensors, the character mover, the world | |
 | `aephysics` | the public API | |
 
@@ -50,6 +51,7 @@ Deliberate choices:
 scripts/test.sh                 # builds and runs every aephysics/test_*.ae with ae; what CI runs
 scripts/fetch_references.sh     # Box3D and Jolt into reference/, built (needs cmake, ninja, gcc)
 scripts/bake.sh [steps]         # the bake-off scenes on the references
+scripts/bench.sh [layer]        # a layer of aephysics against the same code in the reference
 ```
 
 ## Where it is going

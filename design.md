@@ -27,26 +27,32 @@ started until its tests pass.
    the stack and arena allocators with the original's counting. 100,000
    checks: the Fibonacci bit set, 50,000 pair keys filled, thinned,
    searched and emptied, every allocation freed.
-3. **collision, static**: `aabb`, `hull` (quickhull, 3,100 lines),
+3. **dynamic_tree** (done): the tree as its own module, Box3D's
+   dynamic_tree.c with the traversal stacks in the tree and validation
+   returning false where the reference asserts. 12,772 checks against
+   test_dynamic_tree.c; the same tree as the reference on the benchmark
+   scene (same hits, height, area ratio), insert faster, ray cast 1.9x.
+   Save/load not ported; the atomic moved-marking waits for the parallel
+   layer.
+4. **collision, static**: `aabb`, `hull` (quickhull, 3,100 lines),
    `distance` (GJK, shape cast, segment distance), `manifold` and
    `convex_manifold` (sphere/capsule/hull contact manifolds),
    `triangle_manifold`, `mesh`, `height_field`, `shape` (mass properties,
-   ray and shape casts per shape), `dynamic_tree` (the broad phase's tree).
+   ray and shape casts per shape).
    Tests: `test_collision`, `test_distance`, `test_hull`, `test_manifold`,
-   `test_sat`, `test_shape`, `test_mesh`, `test_height_field`,
-   `test_dynamic_tree`.
-4. **dynamics**: `body`, `contact`, `constraint_graph` (graph colouring),
+   `test_sat`, `test_shape`, `test_mesh`, `test_height_field`.
+5. **dynamics**: `body`, `contact`, `constraint_graph` (graph colouring),
    `solver_set`, `island`, `solver` (the Soft Step: sub-stepping, relax
    iterations, restitution), `contact_solver` (scalar first; the wide SIMD
    path second, measured), the joints (revolute, prismatic, distance,
    motor, weld, wheel, spherical), `sensor`, `mover` (the character mover),
    `physics_world`. Tests: `test_body`, `test_joint`, `test_world`,
    `test_mover`, `test_determinism`, `test_large_world`.
-5. **parallel**: `parallel_for` and the scheduler over Aether's actors;
+6. **parallel**: `parallel_for` and the scheduler over Aether's actors;
    the benchmarks by thread count as the original records them.
-6. **recording and replay**, `world_snapshot`: last, since they are the
+7. **recording and replay**, `world_snapshot`: last, since they are the
    tooling and not the engine.
-7. **benchmarks**: `reference/benchmark/main.c`'s nine scenes ported, run
+8. **benchmarks**: `reference/benchmark/main.c`'s nine scenes ported, run
    against the C build on the same machine, recorded under `benchmark/`.
 
 ## Measures

@@ -8,6 +8,7 @@ import std.string
 import aephysics.core
 
 extern calloc(count: int, size: int) -> ptr
+extern exit(code: int)
 extern free(p: ptr)
 extern log2(x: float) -> float
 extern floor(x: float) -> float
@@ -230,5 +231,6 @@ main() {
         println("core: all checks passed")
     } else {
         println("core: ${failures} failure(s)")
+        exit(1)
     }
 }
