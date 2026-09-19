@@ -46,7 +46,10 @@ exports (
     solve3, invert_t, abs_matrix3, make_matrix_from_quat, make_diagonal_matrix, steiner,
     sphere_inertia, cylinder_inertia, box_inertia,
     make_aabb, aabb_contains, aabb_area, aabb_center, aabb_extents, aabb_union, aabb_inflate,
-    aabb_overlaps, aabb_transform, closest_point_to_aabb, ray_cast_aabb,
+    aabb_overlaps, aabb_transform, closest_point_to_aabb, ray_cast_aabb, aabb_add_point,
+    LINEAR_SLOP, max_element, max_element_index, make_plane_from_normal_and_point,
+    make_plane_from_points, make_normal_from_points, transform_plane, plane_separation,
+    signed_volume, rotate_inertia, transform_inertia, distance_squared_2,
     point_to_segment_distance, line_distance, segment_distance,
     is_valid_float, is_valid_vec3, is_valid_quat, is_valid_transform, is_valid_matrix3,
     is_valid_aabb, is_bounded_aabb, is_sane_aabb, is_valid_plane, is_valid_position,
@@ -75,6 +78,8 @@ const MAX_FLOAT = 340282346600000000000000000000000000000.0
 // Reasonable bound on a world coordinate (B3_HUGE with a metre as the
 // length unit; Box3D scales it by the length units per metre).
 const HUGE = 100000.0
+// The linear slop: the collision margin, 5 mm, with the length unit a metre.
+const LINEAR_SLOP = 0.005
 
 struct Vec2 {
     x: float
@@ -711,6 +716,63 @@ aabb_transform(t: Transform, a: AABB) -> AABB {
 }
 
 closest_point_to_aabb(point: Vec3, a: AABB) -> Vec3 { return clamp_vec3(point, a.lower, a.upper) }
+aabb_add_point(a: AABB, point: Vec3) -> AABB { return AABB { lower: min_vec3(a.lower, point), upper: max_vec3(a.upper, point) } }
+
+// --- planes and inertia (math_internal.h) ------------------------------------
+
+max_element(v: Vec3) -> float { return max_float(v.x, max_float(v.y, v.z)) }
+
+max_element_index(v: Vec3) -> int {
+    if v.x < v.y {
+        if v.y < v.z { return 2 }
+        return 1
+    }
+    if v.x < v.z { return 2 }
+    return 0
+}
+
+make_plane_from_normal_and_point(normal: Vec3, point: Vec3) -> Plane {
+    return Plane { normal: normal, offset: dot(normal, point) }
+}
+
+make_plane_from_points(point1: Vec3, point2: Vec3, point3: Vec3) -> Plane {
+    normal = normalize(cross(sub(point2, point1), sub(point3, point1)))
+    return Plane { normal: normal, offset: dot(normal, point1) }
+}
+
+make_normal_from_points(point1: Vec3, point2: Vec3, point3: Vec3) -> Vec3 {
+    return normalize(cross(sub(point2, point1), sub(point3, point1)))
+}
+
+// normal2 = q * normal1; offset2 = dot(normal2, p) + offset1
+transform_plane(t: Transform, p: Plane) -> Plane {
+    normal = rotate_vector(t.q, p.normal)
+    return Plane { normal: normal, offset: p.offset + dot(normal, t.p) }
+}
+
+// The signed distance of a point from a plane.
+plane_separation(p: Plane, point: Vec3) -> float { return dot(p.normal, point) - p.offset }
+
+// Negative if p is below the triangle v1-v2-v3.
+signed_volume(v1: Vec3, v2: Vec3, v3: Vec3, p: Vec3) -> float {
+    n = cross(sub(v2, v1), sub(v3, v1))
+    return dot(n, sub(p, v1))
+}
+
+rotate_inertia(q: Quat, central_inertia: Matrix3) -> Matrix3 {
+    r = make_matrix_from_quat(q)
+    return mul_mm(r, mul_mm(central_inertia, transpose(r)))
+}
+
+transform_inertia(t: Transform, central_inertia: Matrix3, mass: float) -> Matrix3 {
+    return add_mm(rotate_inertia(t.q, central_inertia), steiner(mass, t.p))
+}
+
+distance_squared_2(a: Vec2, b: Vec2) -> float {
+    dx = b.x - a.x
+    dy = b.y - a.y
+    return dx * dx + dy * dy
+}
 
 // One axis of the slab test: narrows [t_min, t_max] (as fractions[0..1])
 // to the slab, false when the interval empties.

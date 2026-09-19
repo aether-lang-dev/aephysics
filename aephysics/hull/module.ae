@@ -1,0 +1,2082 @@
+// aephysics.hull -- convex hulls: quickhull over a point cloud, the
+// half-edge hull that comes out, its mass properties, the box hull, the
+// tessellated cylinder, cone and rock, ray casts and support functions
+// on a hull, and the 2D hull the contact reduction uses.
+//
+// The shape is Box3D's hull.c (Erin Catto, with portions by Dirk
+// Gregorius, MIT), the reference this engine is measured against: the
+// builder keeps every face's conflict list with its farthest point
+// cached, walks the horizon iteratively, builds a cone from the apex,
+// merges the cone faces that came out flipped, concave or coplanar, and
+// packs the result as one block with the arrays hanging off the end.
+// Names are the reference's without its prefix, in snake case:
+// b3CreateHull is create_hull.
+//
+// Differences: the builder's pointers are indices into its pools, with
+// the intrusive lists chained through prev/next indices and their
+// sentinels in extra slots; the hull's half-edge indices are ints, not
+// bytes (Aether has no byte type); the structure-of-arrays mirrors for
+// the SIMD support function are not kept (the wide path is native, later);
+// the box hull is a heap block like any other hull and is destroyed like
+// one; and the hull hash is this engine's own, not the reference's.
+import std.string
+import aephysics.math
+import aephysics.core
+
+exports (
+    HullData, HalfEdge, MassData, CastOutput, ShapeExtent, Point2D,
+    MAX_HULL_VERTICES, MAX_HULL_FACES, MAX_HULL_EDGES, HULL_VERSION, NULL_INDEX,
+    hull_vertices, hull_points, hull_edges, hull_planes, hull_faces,
+    create_hull, destroy_hull, clone_hull, clone_and_transform_hull, is_valid_hull,
+    hash_hull_data, compare_hull_data,
+    create_cylinder, create_cone, create_rock,
+    make_box_hull, make_cube_hull, make_offset_box_hull, make_transformed_box_hull,
+    make_scaled_box_hull, scale_box,
+    find_hull_support_vertex, find_hull_support_face,
+    compute_hull_mass, compute_hull_aabb, compute_swept_hull_aabb, ray_cast_hull,
+    compute_hull_extent, compute_hull_projected_area,
+    hull_2d, simplify_hull_2d
+)
+
+extern memcpy(dst: ptr, src: ptr, size: int) -> ptr
+extern memmove(dst: ptr, src: ptr, size: int) -> ptr
+extern memset(block: ptr, value: int, size: int) -> ptr
+extern memcmp(a: ptr, b: ptr, size: int) -> int
+extern sqrt(x: float) -> float
+
+const NULL_INDEX = 0 - 1
+const MAX_HULL_VERTICES = 128
+const MAX_HULL_FACES = 128
+const MAX_HULL_EDGES = 128
+// The final hull's counts are capped at 256 as in the reference, whose indices are bytes.
+const HULL_MAX_COUNT = 256
+const HULL_VERSION = 0x4A4C9587
+
+const MARK_VISIBLE = 0
+const MARK_DELETE = 1
+
+// A half-edge of a hull: the next edge counter-clockwise around the face,
+// the twin across the edge, the origin vertex, the face to the left.
+struct HalfEdge {
+    next: int
+    twin: int
+    origin: int
+    face: int
+}
+
+// A convex hull: one block, with the arrays at byte offsets from its
+// start. vertices are the index of one half-edge leaving each vertex;
+// faces the index of one half-edge on each face. Cannot be copied by
+// value: clone it.
+struct HullData {
+    version: int
+    hash: long
+    aabb: AABB
+    surface_area: float
+    volume: float
+    inner_radius: float
+    center: Vec3
+    central_inertia: Matrix3
+    vertex_count: int
+    vertex_offset: int
+    point_offset: int
+    edge_count: int
+    edge_offset: int
+    face_count: int
+    plane_offset: int
+    face_offset: int
+    byte_count: int
+}
+
+struct MassData {
+    mass: float
+    center: Vec3
+    inertia: Matrix3
+}
+
+// A ray or shape cast's result.
+struct CastOutput {
+    normal: Vec3
+    point: Vec3
+    fraction: float
+    iterations: int
+    triangle_index: int
+    hit: bool
+}
+
+// The smallest sphere at the origin inside the shape and the largest box around it.
+struct ShapeExtent {
+    min_extent: float
+    max_extent: Vec3
+}
+
+// A point of the 2D hull, with where it came from.
+struct Point2D {
+    p: Vec2
+    separation: float
+    original_index: int
+}
+
+// --- the hull's arrays --------------------------------------------------------
+
+hull_vertices(h: *HullData) -> int[] { return ((h as ptr) + h.vertex_offset) as int[] }
+hull_points(h: *HullData) -> Vec3[] { return ((h as ptr) + h.point_offset) as Vec3[] }
+hull_edges(h: *HullData) -> HalfEdge[] { return ((h as ptr) + h.edge_offset) as HalfEdge[] }
+hull_planes(h: *HullData) -> Plane[] { return ((h as ptr) + h.plane_offset) as Plane[] }
+hull_faces(h: *HullData) -> int[] { return ((h as ptr) + h.face_offset) as int[] }
+
+align8(x: int) -> int { return (x + 7) & (0 - 8) }
+
+// --- the builder ---------------------------------------------------------------
+
+struct QHVertex {
+    prev: int            // intrusive list link, NULL_INDEX when not in a list
+    next: int
+    conflict_face: int
+    position: Vec3
+    final_index: int
+    reachable: bool
+}
+
+struct QHHalfEdge {
+    prev: int            // the ring around the owning face
+    next: int
+    origin: int
+    face: int
+    twin: int
+    final_index: int
+}
+
+struct QHFace {
+    prev: int            // intrusive list link
+    next: int
+    edge: int
+    mark: int
+    area: float
+    plane: Plane
+    centroid: Vec3
+    max_conflict_distance: float
+    max_conflict: int    // the farthest conflict above min_outside, or NULL_INDEX
+    final_index: int
+    flipped: bool
+}
+
+// One frame of the iterative horizon walk: four ints.
+const FRAME_INTS = 4
+
+// All working memory for one build. Vertices, edges and faces are pools;
+// the vertex list, the orphaned list and every face's conflict list are
+// chained through the vertices' prev/next with a sentinel slot each,
+// past the pool: vertex_list_head, orphaned_head, then one per face.
+struct HullBuilder {
+    tolerance: float
+    min_radius: float
+    min_outside: float
+    interior_point: Vec3
+
+    vertices: ptr        // QHVertex[]: vertex_capacity + 2 + face_capacity
+    vertex_capacity: int
+    vertex_count: int
+    vertex_list_head: int
+    orphaned_head: int
+    conflict_head_base: int
+
+    edges: ptr           // QHHalfEdge[]
+    edge_capacity: int
+    edge_count: int
+    edge_free_head: int  // LIFO through next
+
+    faces: ptr           // QHFace[]: face_capacity + 1
+    face_capacity: int
+    face_count: int
+    face_free_head: int  // LIFO through next
+    face_list_head: int
+
+    horizon: ptr         // int[] of edges
+    horizon_capacity: int
+    horizon_count: int
+    cone: ptr            // int[] of faces
+    cone_capacity: int
+    cone_count: int
+    merged_faces: ptr    // int[] of faces
+    merged_capacity: int
+    merged_count: int
+    horizon_stack: ptr   // int[]: FRAME_INTS per frame
+    horizon_stack_capacity: int
+
+    final_vertex_count: int
+    final_half_edge_count: int
+    final_face_count: int
+}
+
+conflict_head(b: *HullBuilder, face: int) -> int { return b.conflict_head_base + face }
+
+// The vertex lists: doubly linked through the vertices, a sentinel per list.
+vlist_init(vertices: QHVertex[], head: int) {
+    vertices[head].prev = head
+    vertices[head].next = head
+}
+
+vlist_contains(vertices: QHVertex[], node: int) -> bool {
+    return vertices[node].prev != NULL_INDEX && vertices[node].next != NULL_INDEX
+}
+
+// Insert node before `where`.
+vlist_insert(vertices: QHVertex[], node: int, where: int) {
+    before = vertices[where].prev
+    vertices[node].prev = before
+    vertices[node].next = where
+    vertices[before].next = node
+    vertices[where].prev = node
+}
+
+vlist_remove(vertices: QHVertex[], node: int) {
+    before = vertices[node].prev
+    after = vertices[node].next
+    vertices[before].next = after
+    vertices[after].prev = before
+    vertices[node].prev = NULL_INDEX
+    vertices[node].next = NULL_INDEX
+}
+
+vlist_push_back(vertices: QHVertex[], head: int, node: int) { vlist_insert(vertices, node, head) }
+vlist_empty(vertices: QHVertex[], head: int) -> bool { return vertices[head].next == head }
+
+// The face list, the same way through the faces.
+flist_init(faces: QHFace[], head: int) {
+    faces[head].prev = head
+    faces[head].next = head
+}
+
+flist_contains(faces: QHFace[], node: int) -> bool {
+    return faces[node].prev != NULL_INDEX && faces[node].next != NULL_INDEX
+}
+
+flist_push_back(faces: QHFace[], head: int, node: int) {
+    before = faces[head].prev
+    faces[node].prev = before
+    faces[node].next = head
+    faces[before].next = node
+    faces[head].prev = node
+}
+
+flist_remove(faces: QHFace[], node: int) {
+    before = faces[node].prev
+    after = faces[node].next
+    faces[before].next = after
+    faces[after].prev = before
+    faces[node].prev = NULL_INDEX
+    faces[node].next = NULL_INDEX
+}
+
+new_vertex(b: *HullBuilder, position: Vec3) -> int {
+    vertices = b.vertices as QHVertex[]
+    v = b.vertex_count
+    b.vertex_count = v + 1
+    vertices[v] = QHVertex { prev: NULL_INDEX, next: NULL_INDEX, conflict_face: NULL_INDEX,
+                             position: position, final_index: NULL_INDEX, reachable: false }
+    return v
+}
+
+new_edge(b: *HullBuilder) -> int {
+    edges = b.edges as QHHalfEdge[]
+    e = b.edge_free_head
+    if e != NULL_INDEX {
+        b.edge_free_head = edges[e].next
+    } else {
+        e = b.edge_count
+        b.edge_count = e + 1
+    }
+    // The rest is written by new_face right after.
+    edges[e].final_index = NULL_INDEX
+    return e
+}
+
+retire_edge(b: *HullBuilder, e: int) {
+    edges = b.edges as QHHalfEdge[]
+    edges[e].next = b.edge_free_head
+    b.edge_free_head = e
+}
+
+new_face(b: *HullBuilder, v1: int, v2: int, v3: int) -> int {
+    faces = b.faces as QHFace[]
+    f = b.face_free_head
+    if f != NULL_INDEX {
+        // next was the free-list pointer; recover the head before it is clobbered.
+        b.face_free_head = faces[f].next
+    } else {
+        f = b.face_count
+        b.face_count = f + 1
+    }
+    faces[f].prev = NULL_INDEX
+    faces[f].next = NULL_INDEX
+    faces[f].max_conflict = NULL_INDEX
+    faces[f].max_conflict_distance = 0.0
+    faces[f].final_index = NULL_INDEX
+
+    edge1 = new_edge(b)
+    edge2 = new_edge(b)
+    edge3 = new_edge(b)
+
+    vertices = b.vertices as QHVertex[]
+    p1 = vertices[v1].position
+    p2 = vertices[v2].position
+    p3 = vertices[v3].position
+
+    n = math.cross(math.sub(p2, p1), math.sub(p3, p1))
+    length = math.length(n)
+    normal = math.vec3_zero()
+    if length > 0.0 { normal = math.mul_sv(1.0 / length, n) }
+    plane = Plane { normal: normal, offset: math.dot(normal, p1) }
+    area = 0.5 * length
+
+    faces[f].edge = edge1
+    faces[f].mark = MARK_VISIBLE
+    faces[f].area = area
+    faces[f].centroid = math.mul_sv(1.0 / 3.0, math.add(p1, math.add(p2, p3)))
+    faces[f].plane = plane
+    faces[f].flipped = math.plane_separation(plane, b.interior_point) > 0.0
+    vlist_init(vertices, conflict_head(b, f))
+
+    edges = b.edges as QHHalfEdge[]
+    edges[edge1] = QHHalfEdge { prev: edge3, next: edge2, origin: v1, face: f, twin: NULL_INDEX, final_index: NULL_INDEX }
+    edges[edge2] = QHHalfEdge { prev: edge1, next: edge3, origin: v2, face: f, twin: NULL_INDEX, final_index: NULL_INDEX }
+    edges[edge3] = QHHalfEdge { prev: edge2, next: edge1, origin: v3, face: f, twin: NULL_INDEX, final_index: NULL_INDEX }
+    return f
+}
+
+// Remove the face from the list and put it on the free list.
+retire_face(b: *HullBuilder, f: int) {
+    faces = b.faces as QHFace[]
+    // A cone face can be merged before it was ever added to the list.
+    if flist_contains(faces, f) { flist_remove(faces, f) }
+    faces[f].edge = NULL_INDEX
+    faces[f].next = b.face_free_head
+    b.face_free_head = f
+}
+
+build_bounds(count: int, points: Vec3[]) -> AABB {
+    bounds = math.aabb_empty()
+    i = 0
+    while i < count {
+        bounds = math.aabb_add_point(bounds, points[i])
+        i = i + 1
+    }
+    return bounds
+}
+
+// The two points farthest apart along the cardinal axis they spread most
+// on: out[0] and out[1], or NULL_INDEX when the spread is within tolerance.
+find_farthest_points_along_cardinal_axes(out: int[], tolerance: float, count: int, points: Vec3[]) {
+    out[0] = NULL_INDEX
+    out[1] = NULL_INDEX
+    v0 = points[0]
+    min_x = v0.x
+    max_x = v0.x
+    min_y = v0.y
+    max_y = v0.y
+    min_z = v0.z
+    max_z = v0.z
+    min_ix = 0
+    max_ix = 0
+    min_iy = 0
+    max_iy = 0
+    min_iz = 0
+    max_iz = 0
+    i = 1
+    while i < count {
+        v = points[i]
+        if v.x < min_x {
+            min_x = v.x
+            min_ix = i
+        } else if v.x > max_x {
+            max_x = v.x
+            max_ix = i
+        }
+        if v.y < min_y {
+            min_y = v.y
+            min_iy = i
+        } else if v.y > max_y {
+            max_y = v.y
+            max_iy = i
+        }
+        if v.z < min_z {
+            min_z = v.z
+            min_iz = i
+        } else if v.z > max_z {
+            max_z = v.z
+            max_iz = i
+        }
+        i = i + 1
+    }
+    d = math.vec3(max_x - min_x, max_y - min_y, max_z - min_z)
+    axis = math.max_element_index(d)
+    spread = d.z
+    first = min_iz
+    second = max_iz
+    if axis == 0 {
+        spread = d.x
+        first = min_ix
+        second = max_ix
+    } else if axis == 1 {
+        spread = d.y
+        first = min_iy
+        second = max_iy
+    }
+    if spread > 2.0 * tolerance {
+        out[0] = first
+        out[1] = second
+    }
+}
+
+find_farthest_point_from_line(index1: int, index2: int, tolerance: float, count: int, points: Vec3[]) -> int {
+    a = points[index1]
+    ab = math.sub(points[index2], a)
+    ab_length_sqr = math.dot(ab, ab)
+    inv = 1.0 / ab_length_sqr
+    max_distance_sqr = 4.0 * tolerance * tolerance
+    max_index = NULL_INDEX
+    i = 0
+    while i < count {
+        if i != index1 && i != index2 {
+            ap = math.sub(points[i], a)
+            c = math.cross(ap, ab)
+            distance_sqr = math.dot(c, c) * inv
+            if distance_sqr > max_distance_sqr {
+                max_distance_sqr = distance_sqr
+                max_index = i
+            }
+        }
+        i = i + 1
+    }
+    return max_index
+}
+
+find_farthest_point_from_plane(index1: int, index2: int, index3: int, tolerance: float, count: int, points: Vec3[]) -> int {
+    plane = math.make_plane_from_points(points[index1], points[index2], points[index3])
+    max_distance = 2.0 * tolerance
+    max_index = NULL_INDEX
+    i = 0
+    while i < count {
+        if i != index1 && i != index2 && i != index3 {
+            distance = math.abs_float(math.plane_separation(plane, points[i]))
+            if distance > max_distance {
+                max_distance = distance
+                max_index = i
+            }
+        }
+        i = i + 1
+    }
+    return max_index
+}
+
+is_edge_convex(b: *HullBuilder, e: int, tolerance: float) -> bool {
+    edges = b.edges as QHHalfEdge[]
+    faces = b.faces as QHFace[]
+    distance = math.plane_separation(faces[edges[e].face].plane, faces[edges[edges[e].twin].face].centroid)
+    return distance < 0.0 - tolerance
+}
+
+is_edge_concave(b: *HullBuilder, e: int, tolerance: float) -> bool {
+    edges = b.edges as QHHalfEdge[]
+    faces = b.faces as QHFace[]
+    distance = math.plane_separation(faces[edges[e].face].plane, faces[edges[edges[e].twin].face].centroid)
+    return distance > tolerance
+}
+
+vertex_count_of_face(b: *HullBuilder, f: int) -> int {
+    edges = b.edges as QHHalfEdge[]
+    faces = b.faces as QHFace[]
+    count = 0
+    start = faces[f].edge
+    e = start
+    while true {
+        count = count + 1
+        e = edges[e].next
+        if e == start { break }
+    }
+    return count
+}
+
+// The index-th edge around the face.
+face_edge_at(b: *HullBuilder, f: int, index: int) -> int {
+    edges = b.edges as QHHalfEdge[]
+    faces = b.faces as QHFace[]
+    e = faces[f].edge
+    while index > 0 {
+        e = edges[e].next
+        index = index - 1
+    }
+    return e
+}
+
+link_face(b: *HullBuilder, f: int, index: int, twin: int) {
+    edges = b.edges as QHHalfEdge[]
+    e = face_edge_at(b, f, index)
+    edges[e].twin = twin
+    edges[twin].twin = e
+}
+
+link_faces(b: *HullBuilder, f1: int, index1: int, f2: int, index2: int) {
+    edges = b.edges as QHHalfEdge[]
+    e1 = face_edge_at(b, f1, index1)
+    e2 = face_edge_at(b, f2, index2)
+    edges[e1].twin = e2
+    edges[e2].twin = e1
+}
+
+// Newell's plane of a polygon face, its centroid and area.
+newell_plane(b: *HullBuilder, f: int) {
+    edges = b.edges as QHHalfEdge[]
+    faces = b.faces as QHFace[]
+    vertices = b.vertices as QHVertex[]
+    count = 0
+    centroid = math.vec3_zero()
+    nx = 0.0
+    ny = 0.0
+    nz = 0.0
+    start = faces[f].edge
+    // The first vertex is the origin, to reduce round-off.
+    origin = vertices[edges[start].origin].position
+    e = start
+    while true {
+        twin = edges[e].twin
+        v1 = math.sub(vertices[edges[e].origin].position, origin)
+        v2 = math.sub(vertices[edges[twin].origin].position, origin)
+        count = count + 1
+        centroid = math.add(centroid, v1)
+        nx = nx + (v1.y - v2.y) * (v1.z + v2.z)
+        ny = ny + (v1.z - v2.z) * (v1.x + v2.x)
+        nz = nz + (v1.x - v2.x) * (v1.y + v2.y)
+        e = edges[e].next
+        if e == start { break }
+    }
+    centroid = math.add(math.mul_sv(1.0 / (count as float), centroid), origin)
+    normal = math.vec3(nx, ny, nz)
+    length = math.length(normal)
+    normal = math.mul_sv(1.0 / length, normal)
+    faces[f].centroid = centroid
+    faces[f].plane = math.make_plane_from_normal_and_point(normal, centroid)
+    faces[f].area = 0.5 * length
+}
+
+compute_tolerance(b: *HullBuilder, count: int, points: Vec3[]) {
+    bounds = build_bounds(count, points)
+    max_abs = math.max_vec3(math.abs_vec3(bounds.lower), math.abs_vec3(bounds.upper))
+    max_sum = max_abs.x + max_abs.y + max_abs.z
+    max_coord = math.max_element(max_abs)
+    max_distance = math.min_float(math.SQRT3 * max_coord, max_sum)
+    // The reference's tolerance is in its float's epsilon; the hull's
+    // decisions (what is coplanar, what is outside) keep that scale.
+    b.tolerance = (3.0 * max_distance * 1.01 + max_coord) * FLOAT_EPSILON
+    b.min_radius = 4.0 * b.tolerance
+    b.min_outside = 2.0 * b.min_radius
+}
+
+// The reference's single-precision epsilon, which its tolerances are in.
+const FLOAT_EPSILON = 0.00000011920929
+
+build_initial_hull(b: *HullBuilder, count: int, points: Vec3[]) -> bool {
+    pair_block = core.alloc(8)
+    pair = pair_block as int[]
+    find_farthest_points_along_cardinal_axes(pair, b.tolerance, count, points)
+    index1 = pair[0]
+    index2 = pair[1]
+    core.free_bytes(pair_block, 8)
+    if index1 < 0 || index2 < 0 { return false }
+    index3 = find_farthest_point_from_line(index1, index2, b.tolerance, count, points)
+    if index3 < 0 { return false }
+    index4 = find_farthest_point_from_plane(index1, index2, index3, b.tolerance, count, points)
+    if index4 < 0 { return false }
+
+    v1 = math.sub(points[index1], points[index4])
+    v2 = math.sub(points[index2], points[index4])
+    v3 = math.sub(points[index3], points[index4])
+    if math.scalar_triple_product(v1, v2, v3) < 0.0 {
+        swap = index2
+        index2 = index3
+        index3 = swap
+    }
+
+    b.interior_point = math.mul_sv(0.25, math.add(math.add(points[index1], points[index2]), math.add(points[index3], points[index4])))
+
+    vertices = b.vertices as QHVertex[]
+    faces = b.faces as QHFace[]
+    vertex1 = new_vertex(b, points[index1])
+    vlist_push_back(vertices, b.vertex_list_head, vertex1)
+    vertex2 = new_vertex(b, points[index2])
+    vlist_push_back(vertices, b.vertex_list_head, vertex2)
+    vertex3 = new_vertex(b, points[index3])
+    vlist_push_back(vertices, b.vertex_list_head, vertex3)
+    vertex4 = new_vertex(b, points[index4])
+    vlist_push_back(vertices, b.vertex_list_head, vertex4)
+
+    face1 = new_face(b, vertex1, vertex2, vertex3)
+    flist_push_back(faces, b.face_list_head, face1)
+    face2 = new_face(b, vertex4, vertex2, vertex1)
+    flist_push_back(faces, b.face_list_head, face2)
+    face3 = new_face(b, vertex4, vertex3, vertex2)
+    flist_push_back(faces, b.face_list_head, face3)
+    face4 = new_face(b, vertex4, vertex1, vertex3)
+    flist_push_back(faces, b.face_list_head, face4)
+
+    link_faces(b, face1, 0, face2, 1)
+    link_faces(b, face1, 1, face3, 1)
+    link_faces(b, face1, 2, face4, 1)
+    link_faces(b, face2, 0, face3, 2)
+    link_faces(b, face3, 0, face4, 2)
+    link_faces(b, face4, 0, face2, 2)
+
+    // Every other point goes on the conflict list of the face it is farthest above.
+    index = 0
+    while index < count {
+        if index != index1 && index != index2 && index != index3 && index != index4 {
+            point = points[index]
+            max_distance = b.min_outside
+            max_face = NULL_INDEX
+            f = faces[b.face_list_head].next
+            while f != b.face_list_head {
+                distance = math.plane_separation(faces[f].plane, point)
+                if distance > max_distance {
+                    max_distance = distance
+                    max_face = f
+                }
+                f = faces[f].next
+            }
+            if max_face != NULL_INDEX {
+                v = new_vertex(b, point)
+                vertices[v].conflict_face = max_face
+                vlist_push_back(vertices, conflict_head(b, max_face), v)
+                if max_distance > faces[max_face].max_conflict_distance {
+                    faces[max_face].max_conflict_distance = max_distance
+                    faces[max_face].max_conflict = v
+                }
+            }
+        }
+        index = index + 1
+    }
+    return true
+}
+
+// Recompute a face's farthest conflict after its plane changed; bounded
+// by its own list.
+recache_conflicts(b: *HullBuilder, f: int) {
+    vertices = b.vertices as QHVertex[]
+    faces = b.faces as QHFace[]
+    max_vertex = NULL_INDEX
+    max_distance = b.min_outside
+    head = conflict_head(b, f)
+    v = vertices[head].next
+    while v != head {
+        distance = math.plane_separation(faces[f].plane, vertices[v].position)
+        if distance > max_distance {
+            max_distance = distance
+            max_vertex = v
+        }
+        v = vertices[v].next
+    }
+    faces[f].max_conflict = max_vertex
+    faces[f].max_conflict_distance = max_distance
+}
+
+next_conflict_vertex(b: *HullBuilder) -> int {
+    faces = b.faces as QHFace[]
+    max_vertex = NULL_INDEX
+    max_distance = b.min_outside
+    f = faces[b.face_list_head].next
+    while f != b.face_list_head {
+        if faces[f].max_conflict != NULL_INDEX && faces[f].max_conflict_distance > max_distance {
+            max_distance = faces[f].max_conflict_distance
+            max_vertex = faces[f].max_conflict
+        }
+        f = faces[f].next
+    }
+    return max_vertex
+}
+
+// Every conflict vertex of the face onto the orphaned list.
+drain_conflict_list(b: *HullBuilder, f: int) {
+    vertices = b.vertices as QHVertex[]
+    head = conflict_head(b, f)
+    v = vertices[head].next
+    while v != head {
+        orphan = v
+        v = vertices[v].next
+        vertices[orphan].conflict_face = NULL_INDEX
+        vlist_remove(vertices, orphan)
+        vlist_push_back(vertices, b.orphaned_head, orphan)
+    }
+}
+
+// Mark a face for deletion, drain its conflicts and open a frame for it
+// on the horizon stack. entry_edge is the half-edge of the face whose
+// twin is in the parent just deleted, or NULL_INDEX for the seed.
+enter_horizon_face(b: *HullBuilder, f: int, entry_edge: int, frame: int) {
+    faces = b.faces as QHFace[]
+    edges = b.edges as QHHalfEdge[]
+    stack = b.horizon_stack as int[]
+    faces[f].mark = MARK_DELETE
+    drain_conflict_list(b, f)
+    base = frame * FRAME_INTS
+    stack[base] = f
+    stack[base + 3] = 0
+    if entry_edge != NULL_INDEX {
+        stack[base + 1] = entry_edge
+        stack[base + 2] = edges[entry_edge].next
+    } else {
+        stack[base + 1] = faces[f].edge
+        stack[base + 2] = faces[f].edge
+    }
+}
+
+// The horizon of the faces the apex sees, as the half-edges of the
+// visible faces along it, by an explicit depth-first walk.
+build_horizon(b: *HullBuilder, apex: int, seed: int) {
+    faces = b.faces as QHFace[]
+    edges = b.edges as QHHalfEdge[]
+    vertices = b.vertices as QHVertex[]
+    stack = b.horizon_stack as int[]
+    horizon = b.horizon as int[]
+    apex_position = vertices[apex].position
+    top = 0
+    enter_horizon_face(b, seed, NULL_INDEX, top)
+    top = top + 1
+    while top > 0 {
+        base = (top - 1) * FRAME_INTS
+        if stack[base + 3] != 0 && stack[base + 2] == stack[base + 1] {
+            top = top - 1
+            continue
+        }
+        stack[base + 3] = 1
+        e = stack[base + 2]
+        twin = edges[e].twin
+        stack[base + 2] = edges[e].next
+        twin_face = edges[twin].face
+        if faces[twin_face].mark != MARK_VISIBLE { continue }
+        distance = math.plane_separation(faces[twin_face].plane, apex_position)
+        if distance > b.min_radius {
+            enter_horizon_face(b, twin_face, twin, top)
+            top = top + 1
+        } else {
+            horizon[b.horizon_count] = e
+            b.horizon_count = b.horizon_count + 1
+        }
+    }
+}
+
+// New faces from the apex to each horizon edge, linked to the outside
+// and to each other.
+build_cone(b: *HullBuilder, apex: int) {
+    edges = b.edges as QHHalfEdge[]
+    horizon = b.horizon as int[]
+    cone = b.cone as int[]
+    i = 0
+    while i < b.horizon_count {
+        e = horizon[i]
+        f = new_face(b, apex, edges[e].origin, edges[edges[e].twin].origin)
+        cone[b.cone_count] = f
+        b.cone_count = b.cone_count + 1
+        link_face(b, f, 1, edges[e].twin)
+        i = i + 1
+    }
+    face1 = cone[b.cone_count - 1]
+    i = 0
+    while i < b.cone_count {
+        face2 = cone[i]
+        link_faces(b, face1, 2, face2, 0)
+        face1 = face2
+        i = i + 1
+    }
+}
+
+// Retire the half-edges in [begin, end) around a ring.
+destroy_edges(b: *HullBuilder, begin: int, end: int) {
+    edges = b.edges as QHHalfEdge[]
+    e = begin
+    while e != end {
+        next = edges[e].next
+        retire_edge(b, e)
+        e = next
+    }
+}
+
+connect_edges(b: *HullBuilder, prev: int, next: int) {
+    edges = b.edges as QHHalfEdge[]
+    faces = b.faces as QHFace[]
+    vertices = b.vertices as QHVertex[]
+    merged = b.merged_faces as int[]
+    prev_twin = edges[prev].twin
+    next_twin = edges[next].twin
+    if edges[prev_twin].face == edges[next_twin].face {
+        // The same face on both sides: next is redundant and the shared
+        // neighbour would be orphaned.
+        face = edges[next].face
+        if faces[face].edge == next { faces[face].edge = prev }
+        twin = NULL_INDEX
+        opposing = edges[prev_twin].face
+        if vertex_count_of_face(b, opposing) == 3 {
+            // The dead triangle's three half-edges, captured before the rewire.
+            dead0 = prev_twin
+            dead1 = next_twin
+            dead2 = edges[next_twin].prev
+            twin = edges[dead2].twin
+            faces[opposing].mark = MARK_DELETE
+            merged[b.merged_count] = opposing
+            b.merged_count = b.merged_count + 1
+
+            edges[prev].next = edges[next].next
+            edges[edges[prev].next].prev = prev
+            edges[prev].twin = twin
+            edges[twin].twin = prev
+            // The redundant vertex leaves the list; its slot is abandoned.
+            vlist_remove(vertices, edges[next].origin)
+            retire_edge(b, dead0)
+            retire_edge(b, dead1)
+            retire_edge(b, dead2)
+        } else {
+            twin = next_twin
+            twin_face = edges[twin].face
+            if faces[twin_face].edge == prev_twin { faces[twin_face].edge = twin }
+            edges[twin].next = edges[prev_twin].next
+            edges[edges[twin].next].prev = twin
+            retire_edge(b, prev_twin)
+
+            edges[prev].next = edges[next].next
+            edges[edges[prev].next].prev = prev
+            edges[prev].twin = twin
+            edges[twin].twin = prev
+            vlist_remove(vertices, edges[next].origin)
+        }
+        // The twin's face changed shape.
+        newell_plane(b, edges[twin].face)
+        recache_conflicts(b, edges[twin].face)
+    } else {
+        edges[prev].next = next
+        edges[next].prev = prev
+    }
+}
+
+// The conflicts of the merged faces go to the face that absorbed them,
+// or to the orphaned list; the merged faces are retired.
+absorb_faces(b: *HullBuilder, f: int) {
+    vertices = b.vertices as QHVertex[]
+    faces = b.faces as QHFace[]
+    merged = b.merged_faces as int[]
+    i = 0
+    while i < b.merged_count {
+        head = conflict_head(b, merged[i])
+        v = vertices[head].next
+        while v != head {
+            vertex = v
+            v = vertices[v].next
+            vlist_remove(vertices, vertex)
+            distance = math.plane_separation(faces[f].plane, vertices[vertex].position)
+            if distance > b.min_outside {
+                vlist_push_back(vertices, conflict_head(b, f), vertex)
+                vertices[vertex].conflict_face = f
+                if distance > faces[f].max_conflict_distance {
+                    faces[f].max_conflict_distance = distance
+                    faces[f].max_conflict = vertex
+                }
+            } else {
+                vlist_push_back(vertices, b.orphaned_head, vertex)
+                vertices[vertex].conflict_face = NULL_INDEX
+            }
+        }
+        retire_face(b, merged[i])
+        i = i + 1
+    }
+}
+
+// Merge the face across the edge into the edge's face.
+connect_faces(b: *HullBuilder, e: int) {
+    edges = b.edges as QHHalfEdge[]
+    faces = b.faces as QHFace[]
+    merged = b.merged_faces as int[]
+    face = edges[e].face
+    twin = edges[e].twin
+    twin_face = edges[twin].face
+
+    edge_prev = edges[e].prev
+    edge_next = edges[e].next
+    twin_prev = edges[twin].prev
+    twin_next = edges[twin].next
+
+    while edges[edges[edge_prev].twin].face == twin_face {
+        edge_prev = edges[edge_prev].prev
+        twin_next = edges[twin_next].next
+    }
+    while edges[edges[edge_next].twin].face == twin_face {
+        edge_next = edges[edge_next].next
+        twin_prev = edges[twin_prev].prev
+    }
+
+    faces[face].edge = edge_prev
+
+    // The opposing face goes; merged_faces is single-buffered, connect_faces does not nest.
+    b.merged_count = 0
+    merged[0] = twin_face
+    b.merged_count = 1
+    faces[twin_face].mark = MARK_DELETE
+    faces[twin_face].edge = NULL_INDEX
+
+    absorbed = twin_next
+    stop = edges[twin_prev].next
+    while absorbed != stop {
+        edges[absorbed].face = face
+        absorbed = edges[absorbed].next
+    }
+
+    destroy_edges(b, edges[edge_prev].next, edge_next)
+    destroy_edges(b, edges[twin_prev].next, twin_next)
+
+    connect_edges(b, edge_prev, twin_next)
+    connect_edges(b, twin_prev, edge_next)
+
+    newell_plane(b, face)
+    recache_conflicts(b, face)
+    absorb_faces(b, face)
+}
+
+merge_concave(b: *HullBuilder, f: int) -> bool {
+    edges = b.edges as QHHalfEdge[]
+    faces = b.faces as QHFace[]
+    start = faces[f].edge
+    e = start
+    while true {
+        twin = edges[e].twin
+        if is_edge_concave(b, e, b.min_radius) || is_edge_concave(b, twin, b.min_radius) {
+            connect_faces(b, e)
+            return true
+        }
+        e = edges[e].next
+        if e == start { break }
+    }
+    return false
+}
+
+merge_coplanar(b: *HullBuilder, f: int) -> bool {
+    edges = b.edges as QHHalfEdge[]
+    faces = b.faces as QHFace[]
+    start = faces[f].edge
+    e = start
+    while true {
+        twin = edges[e].twin
+        if is_edge_convex(b, e, b.min_radius) == false || is_edge_convex(b, twin, b.min_radius) == false {
+            connect_faces(b, e)
+            return true
+        }
+        e = edges[e].next
+        if e == start { break }
+    }
+    return false
+}
+
+// The cone faces that came out flipped merge into their largest
+// neighbour; then concave edges, then coplanar ones.
+merge_faces(b: *HullBuilder) {
+    edges = b.edges as QHHalfEdge[]
+    faces = b.faces as QHFace[]
+    cone = b.cone as int[]
+    i = 0
+    while i < b.cone_count {
+        f = cone[i]
+        if faces[f].mark == MARK_VISIBLE && faces[f].flipped {
+            faces[f].flipped = false
+            best_area = 0.0
+            best_edge = NULL_INDEX
+            start = faces[f].edge
+            e = start
+            while true {
+                area = faces[edges[edges[e].twin].face].area
+                if area > best_area {
+                    best_area = area
+                    best_edge = e
+                }
+                e = edges[e].next
+                if e == start { break }
+            }
+            connect_faces(b, best_edge)
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < b.cone_count {
+        f = cone[i]
+        if faces[f].mark == MARK_VISIBLE {
+            while merge_concave(b, f) { }
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < b.cone_count {
+        f = cone[i]
+        if faces[f].mark == MARK_VISIBLE {
+            while merge_coplanar(b, f) { }
+        }
+        i = i + 1
+    }
+}
+
+// The orphaned vertices find the cone face they are farthest above, or
+// are interior and abandoned.
+resolve_vertices(b: *HullBuilder) {
+    vertices = b.vertices as QHVertex[]
+    faces = b.faces as QHFace[]
+    cone = b.cone as int[]
+    v = vertices[b.orphaned_head].next
+    while v != b.orphaned_head {
+        vertex = v
+        v = vertices[v].next
+        vlist_remove(vertices, vertex)
+        max_distance = b.min_outside
+        max_face = NULL_INDEX
+        i = 0
+        while i < b.cone_count {
+            f = cone[i]
+            if faces[f].mark == MARK_VISIBLE {
+                distance = math.plane_separation(faces[f].plane, vertices[vertex].position)
+                if distance > max_distance {
+                    max_distance = distance
+                    max_face = f
+                }
+            }
+            i = i + 1
+        }
+        if max_face != NULL_INDEX {
+            vlist_push_back(vertices, conflict_head(b, max_face), vertex)
+            vertices[vertex].conflict_face = max_face
+            if max_distance > faces[max_face].max_conflict_distance {
+                faces[max_face].max_conflict_distance = max_distance
+                faces[max_face].max_conflict = vertex
+            }
+        }
+    }
+}
+
+// The deleted faces leave the list with their edges; the surviving cone
+// faces join it.
+resolve_faces(b: *HullBuilder) {
+    edges = b.edges as QHHalfEdge[]
+    faces = b.faces as QHFace[]
+    cone = b.cone as int[]
+    f = faces[b.face_list_head].next
+    while f != b.face_list_head {
+        face = f
+        f = faces[f].next
+        if faces[face].mark == MARK_DELETE && flist_contains(faces, face) {
+            // Each half-edge is owned by one face, so the rings of the dead
+            // region retire every interior edge once.
+            start = faces[face].edge
+            e = start
+            while true {
+                next = edges[e].next
+                retire_edge(b, e)
+                e = next
+                if e == start { break }
+            }
+            retire_face(b, face)
+        }
+    }
+    i = 0
+    while i < b.cone_count {
+        if faces[cone[i]].mark != MARK_DELETE { flist_push_back(faces, b.face_list_head, cone[i]) }
+        i = i + 1
+    }
+}
+
+add_vertex_to_hull(b: *HullBuilder, vertex: int) {
+    vertices = b.vertices as QHVertex[]
+    f = vertices[vertex].conflict_face
+    vertices[vertex].conflict_face = NULL_INDEX
+    vlist_remove(vertices, vertex)
+    vlist_push_back(vertices, b.vertex_list_head, vertex)
+    b.horizon_count = 0
+    build_horizon(b, vertex, f)
+    b.cone_count = 0
+    build_cone(b, vertex)
+    merge_faces(b)
+    resolve_vertices(b)
+    resolve_faces(b)
+}
+
+// Drop the vertices no face reaches, shift everything back by the origin
+// and count what is left.
+clean_hull(b: *HullBuilder, origin: Vec3) {
+    vertices = b.vertices as QHVertex[]
+    edges = b.edges as QHHalfEdge[]
+    faces = b.faces as QHFace[]
+    face_count = 0
+    half_edge_count = 0
+    f = faces[b.face_list_head].next
+    while f != b.face_list_head {
+        start = faces[f].edge
+        e = start
+        while true {
+            vertices[edges[e].origin].reachable = true
+            e = edges[e].next
+            half_edge_count = half_edge_count + 1
+            if e == start { break }
+        }
+        faces[f].plane.offset = faces[f].plane.offset + math.dot(faces[f].plane.normal, origin)
+        faces[f].centroid = math.add(faces[f].centroid, origin)
+        face_count = face_count + 1
+        f = faces[f].next
+    }
+    vertex_count = 0
+    v = vertices[b.vertex_list_head].next
+    while v != b.vertex_list_head {
+        vertex = v
+        v = vertices[v].next
+        if vertices[vertex].reachable == false {
+            vlist_remove(vertices, vertex)
+        } else {
+            vertices[vertex].position = math.add(vertices[vertex].position, origin)
+            vertex_count = vertex_count + 1
+        }
+    }
+    b.interior_point = math.add(b.interior_point, origin)
+    b.final_vertex_count = vertex_count
+    b.final_half_edge_count = half_edge_count
+    b.final_face_count = face_count
+}
+
+has_hull(b: *HullBuilder) -> bool {
+    v = b.final_vertex_count
+    e = b.final_half_edge_count / 2
+    f = b.final_face_count
+    return v - e + f == 2 && f >= 4
+}
+
+// The whole build. True iff the result satisfies Euler's identity.
+construct(b: *HullBuilder, points: Vec3[], count: int, max_vertex_count: int, origin: Vec3, shifted: Vec3[]) -> bool {
+    if count < 4 { return false }
+    i = 0
+    while i < count {
+        shifted[i] = math.sub(points[i], origin)
+        i = i + 1
+    }
+    compute_tolerance(b, count, shifted)
+    if build_initial_hull(b, count, shifted) == false { return false }
+    budget = math.clamp_int(max_vertex_count - 4, 0, HULL_MAX_COUNT - 4)
+    vertex = next_conflict_vertex(b)
+    while vertex != NULL_INDEX && budget > 0 {
+        add_vertex_to_hull(b, vertex)
+        vertex = next_conflict_vertex(b)
+        budget = budget - 1
+    }
+    clean_hull(b, origin)
+    return has_hull(b)
+}
+
+// The builder's pools, sized from the input count and the vertex limit.
+builder_create(count: int, clamped_max: int) -> HullBuilder {
+    m = clamped_max
+    b = HullBuilder {
+        tolerance: 0.0, min_radius: 0.0, min_outside: 0.0, interior_point: math.vec3_zero(),
+        vertices: null, vertex_capacity: count + 4, vertex_count: 0,
+        vertex_list_head: 0, orphaned_head: 0, conflict_head_base: 0,
+        edges: null, edge_capacity: math.max_int(48, 24 * m - 48), edge_count: 0, edge_free_head: NULL_INDEX,
+        faces: null, face_capacity: math.max_int(16, 5 * m - 10), face_count: 0, face_free_head: NULL_INDEX,
+        face_list_head: 0,
+        horizon: null, horizon_capacity: math.max_int(6, 3 * m - 6), horizon_count: 0,
+        cone: null, cone_capacity: math.max_int(6, 3 * m - 6), cone_count: 0,
+        merged_faces: null, merged_capacity: math.max_int(4, 2 * m - 4), merged_count: 0,
+        horizon_stack: null, horizon_stack_capacity: math.max_int(4, 2 * m - 4),
+        final_vertex_count: 0, final_half_edge_count: 0, final_face_count: 0
+    }
+    vertex_slots = b.vertex_capacity + 2 + b.face_capacity
+    b.vertices = core.alloc(vertex_slots * sizeof(QHVertex))
+    b.vertex_list_head = b.vertex_capacity
+    b.orphaned_head = b.vertex_capacity + 1
+    b.conflict_head_base = b.vertex_capacity + 2
+    b.edges = core.alloc(b.edge_capacity * sizeof(QHHalfEdge))
+    b.faces = core.alloc((b.face_capacity + 1) * sizeof(QHFace))
+    b.face_list_head = b.face_capacity
+    b.horizon = core.alloc(b.horizon_capacity * 4)
+    b.cone = core.alloc(b.cone_capacity * 4)
+    b.merged_faces = core.alloc(b.merged_capacity * 4)
+    b.horizon_stack = core.alloc(b.horizon_stack_capacity * FRAME_INTS * 4)
+    vertices = b.vertices as QHVertex[]
+    vlist_init(vertices, b.vertex_list_head)
+    vlist_init(vertices, b.orphaned_head)
+    faces = b.faces as QHFace[]
+    flist_init(faces, b.face_list_head)
+    return b
+}
+
+builder_destroy(b: *HullBuilder) {
+    core.free_bytes(b.vertices, (b.vertex_capacity + 2 + b.face_capacity) * sizeof(QHVertex))
+    core.free_bytes(b.edges, b.edge_capacity * sizeof(QHHalfEdge))
+    core.free_bytes(b.faces, (b.face_capacity + 1) * sizeof(QHFace))
+    core.free_bytes(b.horizon, b.horizon_capacity * 4)
+    core.free_bytes(b.cone, b.cone_capacity * 4)
+    core.free_bytes(b.merged_faces, b.merged_capacity * 4)
+    core.free_bytes(b.horizon_stack, b.horizon_stack_capacity * FRAME_INTS * 4)
+}
+
+// --- the hull -------------------------------------------------------------------
+
+find_hull_support_vertex(h: *HullData, direction: Vec3) -> int {
+    points = hull_points(h)
+    best_index = NULL_INDEX
+    best_dot = 0.0 - math.MAX_FLOAT
+    i = 0
+    while i < h.vertex_count {
+        d = math.dot(direction, points[i])
+        if d > best_dot {
+            best_index = i
+            best_dot = d
+        }
+        i = i + 1
+    }
+    return best_index
+}
+
+find_hull_support_face(h: *HullData, direction: Vec3) -> int {
+    planes = hull_planes(h)
+    best_index = NULL_INDEX
+    best_dot = 0.0 - math.MAX_FLOAT
+    i = 0
+    while i < h.face_count {
+        d = math.dot(planes[i].normal, direction)
+        if d > best_dot {
+            best_index = i
+            best_dot = d
+        }
+        i = i + 1
+    }
+    return best_index
+}
+
+// Every invariant of a hull: Euler, the vertex-edge links, the twin
+// pairing, the face rings, the centre below every plane, the bulk
+// properties positive.
+is_valid_hull(h: *HullData) -> bool {
+    if h == null { return false }
+    if h.version != HULL_VERSION { return false }
+    v = h.vertex_count
+    e = h.edge_count / 2
+    f = h.face_count
+    if v - e + f != 2 { return false }
+    vertices = hull_vertices(h)
+    edges = hull_edges(h)
+    i = 0
+    while i < h.vertex_count {
+        if edges[vertices[i]].origin != i { return false }
+        i = i + 1
+    }
+    i = 0
+    while i < h.edge_count {
+        if edges[i].twin != i + 1 || edges[i + 1].twin != i { return false }
+        i = i + 2
+    }
+    faces = hull_faces(h)
+    planes = hull_planes(h)
+    face_index = 0
+    while face_index < h.face_count {
+        if math.plane_separation(planes[face_index], h.center) >= 0.0 { return false }
+        base = faces[face_index]
+        edge_index = base
+        while true {
+            next = edges[edge_index].next
+            twin = edges[edge_index].twin
+            if edges[edge_index].face != face_index { return false }
+            if edges[twin].twin != edge_index { return false }
+            if edges[next].origin != edges[twin].origin { return false }
+            edge_index = next
+            if edge_index == base { break }
+        }
+        face_index = face_index + 1
+    }
+    if h.volume <= 0.0 || h.surface_area <= 0.0 || h.inner_radius <= 0.0 { return false }
+    return true
+}
+
+update_hull_bounds(h: *HullData) {
+    points = hull_points(h)
+    bounds = AABB { lower: points[0], upper: points[0] }
+    i = 1
+    while i < h.vertex_count {
+        bounds = math.aabb_add_point(bounds, points[i])
+        i = i + 1
+    }
+    h.aabb = bounds
+}
+
+// Volume, centroid, inertia about it, surface area and the inner radius
+// (M. Kallay, "Computing the Moment of Inertia of a Solid Defined by a
+// Triangle Mesh"). False when the hull has no volume.
+update_hull_bulk_properties(h: *HullData) -> bool {
+    points = hull_points(h)
+    faces = hull_faces(h)
+    edges = hull_edges(h)
+    planes = hull_planes(h)
+    area = 0.0
+    volume = 0.0
+    center = math.vec3_zero()
+    // The first vertex as the origin, to reduce round-off.
+    origin = points[0]
+    xx = 0.0
+    xy = 0.0
+    yy = 0.0
+    xz = 0.0
+    zz = 0.0
+    yz = 0.0
+    face_index = 0
+    while face_index < h.face_count {
+        edge1 = faces[face_index]
+        edge2 = edges[edge1].next
+        edge3 = edges[edge2].next
+        v1 = math.sub(points[edges[edge1].origin], origin)
+        while true {
+            v2 = math.sub(points[edges[edge2].origin], origin)
+            v3 = math.sub(points[edges[edge3].origin], origin)
+            area = area + math.length(math.cross(math.sub(v2, v1), math.sub(v3, v1)))
+            det = math.scalar_triple_product(v1, v2, v3)
+            volume = volume + det
+            v4 = math.add(v1, math.add(v2, v3))
+            center = math.add(center, math.mul_sv(det, v4))
+            xx = xx + det * (v1.x * v1.x + v2.x * v2.x + v3.x * v3.x + v4.x * v4.x)
+            yy = yy + det * (v1.y * v1.y + v2.y * v2.y + v3.y * v3.y + v4.y * v4.y)
+            zz = zz + det * (v1.z * v1.z + v2.z * v2.z + v3.z * v3.z + v4.z * v4.z)
+            xy = xy + det * (v1.x * v1.y + v2.x * v2.y + v3.x * v3.y + v4.x * v4.y)
+            xz = xz + det * (v1.x * v1.z + v2.x * v2.z + v3.x * v3.z + v4.x * v4.z)
+            yz = yz + det * (v1.y * v1.z + v2.y * v2.z + v3.y * v3.z + v4.y * v4.z)
+            edge2 = edge3
+            edge3 = edges[edge3].next
+            if edge1 == edge3 { break }
+        }
+        face_index = face_index + 1
+    }
+
+    local_center = math.vec3_zero()
+    if volume > 0.0 { local_center = math.mul_sv(0.25 / volume, center) }
+    center = math.add(local_center, origin)
+
+    radius = math.MAX_FLOAT
+    face_index = 0
+    while face_index < h.face_count {
+        distance = math.plane_separation(planes[face_index], center)
+        radius = math.min_float(radius, 0.0 - distance)
+        face_index = face_index + 1
+    }
+
+    inertia = Matrix3 {
+        cx: math.vec3(yy + zz, 0.0 - xy, 0.0 - xz),
+        cy: math.vec3(0.0 - xy, xx + zz, 0.0 - yz),
+        cz: math.vec3(0.0 - xz, 0.0 - yz, xx + yy)
+    }
+    mass = volume / 6.0
+    central = math.sub_mm(math.mul_sm(1.0 / 120.0, inertia), math.steiner(mass, local_center))
+
+    h.center = center
+    h.central_inertia = central
+    h.volume = mass
+    h.surface_area = 0.5 * area
+    h.inner_radius = radius
+    return mass > 0.0 && volume > 0.0 && area > 0.0 && radius > 0.0
+}
+
+// This engine's hash of the block, with the hash field itself zero;
+// never zero.
+hash_block(block: ptr, byte_count: int) -> long {
+    words = block as long[]
+    count = byte_count / 8
+    h = 0x9E3779B9 as long
+    i = 0
+    while i < count {
+        h = core.key_hash(h ^ words[i]) + (i as long)
+        i = i + 1
+    }
+    h = core.key_hash(h)
+    if h == (0 as long) { return 1 as long }
+    return h
+}
+
+stamp_hash(h: *HullData) {
+    h.hash = 0 as long
+    h.hash = hash_block(h as ptr, h.byte_count)
+}
+
+hash_hull_data(h: *HullData) -> long { return h.hash }
+
+compare_hull_data(a: *HullData, b: *HullData) -> bool {
+    if a == b { return true }
+    if a.byte_count != b.byte_count { return false }
+    return memcmp(a as ptr, b as ptr, a.byte_count) == 0
+}
+
+// The block for a hull of these counts, with the offsets set.
+allocate_hull(vertex_count: int, edge_count: int, face_count: int) -> *HullData {
+    byte_count = align8(sizeof(HullData))
+    vertex_offset = byte_count
+    byte_count = byte_count + align8(vertex_count * 4)
+    point_offset = byte_count
+    byte_count = byte_count + align8(vertex_count * sizeof(Vec3))
+    edge_offset = byte_count
+    byte_count = byte_count + align8(edge_count * sizeof(HalfEdge))
+    plane_offset = byte_count
+    byte_count = byte_count + align8(face_count * sizeof(Plane))
+    face_offset = byte_count
+    byte_count = byte_count + align8(face_count * 4)
+    h = core.alloc(byte_count) as *HullData
+    h.version = HULL_VERSION
+    h.vertex_offset = vertex_offset
+    h.point_offset = point_offset
+    h.edge_offset = edge_offset
+    h.plane_offset = plane_offset
+    h.face_offset = face_offset
+    h.vertex_count = vertex_count
+    h.edge_count = edge_count
+    h.face_count = face_count
+    h.byte_count = byte_count
+    return h
+}
+
+// The convex hull of the points, with at most max_vertex_count vertices
+// (clamped to [4, MAX_HULL_VERTICES]). Null when the points are fewer
+// than four, coincident, collinear or coplanar, or the hull would exceed
+// the limits.
+create_hull(points: Vec3[], count: int, max_vertex_count: int) -> *HullData {
+    if count < 4 { return null }
+    origin = points[0]
+    clamped_max = math.clamp_int(max_vertex_count, 4, MAX_HULL_VERTICES)
+    b = builder_create(count, clamped_max)
+    shifted_block = core.alloc(count * sizeof(Vec3))
+    shifted = shifted_block as Vec3[]
+    ok = construct(&b, points, count, clamped_max, origin, shifted)
+    core.free_bytes(shifted_block, count * sizeof(Vec3))
+    if ok == false {
+        builder_destroy(&b)
+        return null
+    }
+    if b.final_vertex_count > MAX_HULL_VERTICES || b.final_face_count > MAX_HULL_FACES || b.final_half_edge_count > 2 * MAX_HULL_EDGES {
+        builder_destroy(&b)
+        return null
+    }
+
+    vertices = b.vertices as QHVertex[]
+    edges = b.edges as QHHalfEdge[]
+    faces = b.faces as QHFace[]
+
+    // Walk the lists into temp arrays, stamping the final index on each
+    // node so the resolution below is linear.
+    temp_vertices_block = core.alloc(HULL_MAX_COUNT * 4)
+    temp_vertices = temp_vertices_block as int[]
+    vertex_count = 0
+    v = vertices[b.vertex_list_head].next
+    while v != b.vertex_list_head {
+        vertices[v].final_index = vertex_count
+        temp_vertices[vertex_count] = v
+        vertex_count = vertex_count + 1
+        v = vertices[v].next
+    }
+
+    // Edges in twin-paired order (i, i + 1).
+    temp_faces_block = core.alloc(HULL_MAX_COUNT * 4)
+    temp_faces = temp_faces_block as int[]
+    temp_edges_block = core.alloc(HULL_MAX_COUNT * 4)
+    temp_edges = temp_edges_block as int[]
+    face_count = 0
+    edge_count = 0
+    f = faces[b.face_list_head].next
+    while f != b.face_list_head {
+        faces[f].final_index = face_count
+        temp_faces[face_count] = f
+        face_count = face_count + 1
+        start = faces[f].edge
+        e = start
+        while true {
+            if edges[e].final_index < 0 {
+                edges[e].final_index = edge_count
+                temp_edges[edge_count] = e
+                edge_count = edge_count + 1
+                twin = edges[e].twin
+                edges[twin].final_index = edge_count
+                temp_edges[edge_count] = twin
+                edge_count = edge_count + 1
+            }
+            e = edges[e].next
+            if e == start { break }
+        }
+        f = faces[f].next
+    }
+
+    h = allocate_hull(vertex_count, edge_count, face_count)
+    hull_vertex = hull_vertices(h)
+    hull_edge = hull_edges(h)
+    hull_face = hull_faces(h)
+    final_points = hull_points(h)
+    planes = hull_planes(h)
+
+    i = 0
+    while i < vertex_count {
+        hull_vertex[i] = 0
+        final_points[i] = vertices[temp_vertices[i]].position
+        i = i + 1
+    }
+    i = 0
+    while i < edge_count {
+        e = temp_edges[i]
+        hull_edge[i] = HalfEdge { next: edges[edges[e].next].final_index, twin: edges[edges[e].twin].final_index,
+                                  origin: vertices[edges[e].origin].final_index, face: faces[edges[e].face].final_index }
+        hull_vertex[vertices[edges[e].origin].final_index] = i
+        i = i + 1
+    }
+    i = 0
+    while i < face_count {
+        f = temp_faces[i]
+        hull_face[i] = edges[faces[f].edge].final_index
+        planes[i] = faces[f].plane
+        i = i + 1
+    }
+
+    core.free_bytes(temp_vertices_block, HULL_MAX_COUNT * 4)
+    core.free_bytes(temp_faces_block, HULL_MAX_COUNT * 4)
+    core.free_bytes(temp_edges_block, HULL_MAX_COUNT * 4)
+    builder_destroy(&b)
+
+    update_hull_bounds(h)
+    if update_hull_bulk_properties(h) == false {
+        destroy_hull(h)
+        return null
+    }
+    if is_valid_hull(h) == false {
+        destroy_hull(h)
+        return null
+    }
+    stamp_hash(h)
+    return h
+}
+
+destroy_hull(h: *HullData) { core.free_bytes(h as ptr, h.byte_count) }
+
+clone_hull(h: *HullData) -> *HullData {
+    if h == null || is_valid_hull(h) == false { return null }
+    clone = core.alloc(h.byte_count)
+    memcpy(clone, h as ptr, h.byte_count)
+    return clone as *HullData
+}
+
+// A copy, scaled (non-uniformly, or mirrored) then transformed, with the
+// planes and bulk properties recomputed. Null if the result has no volume.
+clone_and_transform_hull(original: *HullData, t: Transform, scale: Vec3) -> *HullData {
+    if original == null || is_valid_hull(original) == false { return null }
+    h = clone_hull(original)
+    safe = math.safe_scale(scale)
+    edges = hull_edges(h)
+    faces = hull_faces(h)
+    face_count = h.face_count
+    vertex_count = h.vertex_count
+
+    if safe.x * safe.y * safe.z < 0.0 {
+        // Reflected: reverse the winding of every face.
+        i = 0
+        while i < face_count {
+            start = faces[i]
+            current = start
+            prev = NULL_INDEX
+            while true {
+                if edges[current].next == start {
+                    prev = current
+                    break
+                }
+                current = edges[current].next
+                if current == start { break }
+            }
+            current = start
+            while true {
+                next = edges[current].next
+                edges[current].next = prev
+                if current < edges[current].twin {
+                    twin = edges[current].twin
+                    swap = edges[current].origin
+                    edges[current].origin = edges[twin].origin
+                    edges[twin].origin = swap
+                }
+                prev = current
+                current = next
+                if current == start { break }
+            }
+            i = i + 1
+        }
+        vertices = hull_vertices(h)
+        i = 0
+        while i < vertex_count {
+            vertices[i] = edges[vertices[i]].twin
+            i = i + 1
+        }
+    }
+
+    m = math.make_matrix_from_quat(t.q)
+    points = hull_points(h)
+    i = 0
+    while i < vertex_count {
+        points[i] = math.add(math.mul_mv(m, math.mul(safe, points[i])), t.p)
+        i = i + 1
+    }
+
+    planes = hull_planes(h)
+    i = 0
+    while i < face_count {
+        count = 0
+        centroid = math.vec3_zero()
+        nx = 0.0
+        ny = 0.0
+        nz = 0.0
+        start = faces[i]
+        current = start
+        origin = points[edges[start].origin]
+        while true {
+            twin = edges[current].twin
+            v1 = math.sub(points[edges[current].origin], origin)
+            v2 = math.sub(points[edges[twin].origin], origin)
+            count = count + 1
+            centroid = math.add(centroid, v1)
+            nx = nx + (v1.y - v2.y) * (v1.z + v2.z)
+            ny = ny + (v1.z - v2.z) * (v1.x + v2.x)
+            nz = nz + (v1.x - v2.x) * (v1.y + v2.y)
+            current = edges[current].next
+            if current == start { break }
+        }
+        centroid = math.add(math.mul_sv(1.0 / (count as float), centroid), origin)
+        normal = math.vec3(nx, ny, nz)
+        area = math.length(normal)
+        normal = math.mul_sv(1.0 / area, normal)
+        planes[i] = math.make_plane_from_normal_and_point(normal, centroid)
+        i = i + 1
+    }
+
+    update_hull_bounds(h)
+    if update_hull_bulk_properties(h) == false {
+        destroy_hull(h)
+        return null
+    }
+    stamp_hash(h)
+    return h
+}
+
+// --- tessellated hulls -----------------------------------------------------------
+
+// A cylinder of `sides` sides along y, from y_offset up by height.
+create_cylinder(height: float, radius: float, y_offset: float, sides: int) -> *HullData {
+    count = 2 * sides
+    block = core.alloc(count * sizeof(Vec3))
+    points = block as Vec3[]
+    alpha = 0.0
+    delta = 2.0 * math.PI / (sides as float)
+    i = 0
+    while i < sides {
+        cs = math.compute_cos_sin(alpha)
+        points[2 * i] = math.vec3(radius * cs.cosine, y_offset, radius * cs.sine)
+        points[2 * i + 1] = math.vec3(radius * cs.cosine, y_offset + height, radius * cs.sine)
+        alpha = alpha + delta
+        i = i + 1
+    }
+    h = create_hull(points, count, count)
+    core.free_bytes(block, count * sizeof(Vec3))
+    return h
+}
+
+// A truncated cone along y: radius1 at the bottom, radius2 at height.
+create_cone(height: float, radius1: float, radius2: float, slices: int) -> *HullData {
+    count = 2 * slices
+    block = core.alloc(count * sizeof(Vec3))
+    points = block as Vec3[]
+    alpha = 0.0
+    delta = 2.0 * math.PI / (slices as float)
+    i = 0
+    while i < slices {
+        cs = math.compute_cos_sin(alpha)
+        points[2 * i] = math.vec3(radius1 * cs.cosine, 0.0, radius1 * cs.sine)
+        points[2 * i + 1] = math.vec3(radius2 * cs.cosine, height, radius2 * cs.sine)
+        alpha = alpha + delta
+        i = i + 1
+    }
+    h = create_hull(points, count, count)
+    core.free_bytes(block, count * sizeof(Vec3))
+    return h
+}
+
+// Ten points of a Fibonacci lattice on a sphere: a rock.
+create_rock(radius: float) -> *HullData {
+    count = 10
+    block = core.alloc(count * sizeof(Vec3))
+    points = block as Vec3[]
+    phi = (1.0 + sqrt(5.0)) / 2.0
+    theta = 2.0 * math.PI / phi
+    cosine = 1.0
+    sine = 0.0
+    delta = math.compute_cos_sin(theta)
+    i = 0
+    while i < count {
+        z = 1.0 - (2.0 * (i as float) + 1.0) / (count as float)
+        radius_xy = sqrt(1.0 - z * z)
+        points[i] = math.vec3(radius * radius_xy * cosine, radius * radius_xy * sine, radius * z)
+        c0 = cosine
+        s0 = sine
+        cosine = delta.cosine * c0 - delta.sine * s0
+        sine = delta.sine * c0 + delta.cosine * s0
+        i = i + 1
+    }
+    h = create_hull(points, count, count)
+    core.free_bytes(block, count * sizeof(Vec3))
+    return h
+}
+
+// --- the box hull ----------------------------------------------------------------
+
+// The box's topology: 8 vertices, 24 half-edges, 6 faces, as the
+// reference bakes it; the geometry is filled in per box.
+box_edge_table(index: int, field: int) -> int {
+    // next, twin, origin, face per half-edge
+    table = [ 2, 1, 2, 0,  17, 0, 1, 5,  4, 3, 1, 0,  20, 2, 5, 3,  6, 5, 5, 0,  23, 4, 6, 4,  0, 7, 6, 0,  18, 6, 2, 2,
+              10, 9, 0, 1,  21, 8, 3, 5,  12, 11, 3, 1,  16, 10, 7, 2,  14, 13, 7, 1,  19, 12, 4, 4,  8, 15, 4, 1,  22, 14, 0, 3,
+              7, 17, 3, 2,  9, 16, 2, 5,  11, 19, 6, 2,  5, 18, 7, 4,  15, 21, 1, 3,  1, 20, 0, 5,  3, 23, 4, 3,  13, 22, 5, 4 ]
+    return table[index * 4 + field]
+}
+
+box_vertex_edge(index: int) -> int {
+    table = [ 8, 1, 0, 9, 13, 3, 5, 11 ]
+    return table[index]
+}
+
+box_face_edge(index: int) -> int {
+    table = [ 0, 8, 16, 20, 19, 21 ]
+    return table[index]
+}
+
+box_corner_sign(index: int) -> Vec3 {
+    if index == 0 { return math.vec3(1.0, 1.0, 1.0) }
+    if index == 1 { return math.vec3(0.0 - 1.0, 1.0, 1.0) }
+    if index == 2 { return math.vec3(0.0 - 1.0, 0.0 - 1.0, 1.0) }
+    if index == 3 { return math.vec3(1.0, 0.0 - 1.0, 1.0) }
+    if index == 4 { return math.vec3(1.0, 1.0, 0.0 - 1.0) }
+    if index == 5 { return math.vec3(0.0 - 1.0, 1.0, 0.0 - 1.0) }
+    if index == 6 { return math.vec3(0.0 - 1.0, 0.0 - 1.0, 0.0 - 1.0) }
+    return math.vec3(1.0, 0.0 - 1.0, 0.0 - 1.0)
+}
+
+// A box of half widths hx, hy, hz under a local transform, as a hull
+// with analytic mass properties. Destroy it like any hull.
+make_transformed_box_hull(hx: float, hy: float, hz: float, t: Transform) -> *HullData {
+    min_h = 0.2 * math.LINEAR_SLOP
+    h = math.max_vec3(math.vec3(min_h, min_h, min_h), math.vec3(hx, hy, hz))
+    box = allocate_hull(8, 24, 6)
+    box.aabb = math.aabb_transform(t, AABB { lower: math.neg(h), upper: h })
+    box.surface_area = 8.0 * (h.x * h.y + h.x * h.z + h.y * h.z)
+    box.volume = 8.0 * h.x * h.y * h.z
+    box.inner_radius = math.min_float(h.x, math.min_float(h.y, h.z))
+    box.center = t.p
+    box.central_inertia = math.rotate_inertia(t.q, math.box_inertia(box.volume, math.neg(h), h))
+
+    vertices = hull_vertices(box)
+    edges = hull_edges(box)
+    faces = hull_faces(box)
+    points = hull_points(box)
+    planes = hull_planes(box)
+    i = 0
+    while i < 8 {
+        vertices[i] = box_vertex_edge(i)
+        points[i] = math.transform_point(t, math.mul(box_corner_sign(i), h))
+        i = i + 1
+    }
+    i = 0
+    while i < 24 {
+        edges[i] = HalfEdge { next: box_edge_table(i, 0), twin: box_edge_table(i, 1),
+                              origin: box_edge_table(i, 2), face: box_edge_table(i, 3) }
+        i = i + 1
+    }
+    i = 0
+    while i < 6 {
+        faces[i] = box_face_edge(i)
+        i = i + 1
+    }
+    lower = math.neg(h)
+    planes[0] = math.transform_plane(t, math.make_plane_from_normal_and_point(math.neg(math.vec3_axis_x()), lower))
+    planes[1] = math.transform_plane(t, math.make_plane_from_normal_and_point(math.vec3_axis_x(), h))
+    planes[2] = math.transform_plane(t, math.make_plane_from_normal_and_point(math.neg(math.vec3_axis_y()), lower))
+    planes[3] = math.transform_plane(t, math.make_plane_from_normal_and_point(math.vec3_axis_y(), h))
+    planes[4] = math.transform_plane(t, math.make_plane_from_normal_and_point(math.neg(math.vec3_axis_z()), lower))
+    planes[5] = math.transform_plane(t, math.make_plane_from_normal_and_point(math.vec3_axis_z(), h))
+    stamp_hash(box)
+    return box
+}
+
+make_cube_hull(half_width: float) -> *HullData { return make_box_hull(half_width, half_width, half_width) }
+
+make_offset_box_hull(hx: float, hy: float, hz: float, offset: Vec3) -> *HullData {
+    return make_transformed_box_hull(hx, hy, hz, Transform { p: offset, q: math.quat_identity() })
+}
+
+make_box_hull(hx: float, hy: float, hz: float) -> *HullData {
+    return make_transformed_box_hull(hx, hy, hz, math.transform_identity())
+}
+
+// Resolve a post scale (non-uniform, possibly negative) into new half
+// widths and transform; approximate under shear. half_widths[0..2] and
+// the transform are in/out.
+scale_box(half_widths: float[], t: *Transform, post_scale: Vec3, min_half_width: float) {
+    q = t.q
+    if post_scale.x < 0.0 || post_scale.y < 0.0 || post_scale.z < 0.0 {
+        m = math.make_matrix_from_quat(q)
+        m.cx.x = m.cx.x * post_scale.x
+        m.cy.x = m.cy.x * post_scale.x
+        m.cz.x = m.cz.x * post_scale.x
+        m.cx.y = m.cx.y * post_scale.y
+        m.cy.y = m.cy.y * post_scale.y
+        m.cz.y = m.cz.y * post_scale.y
+        m.cx.z = m.cx.z * post_scale.z
+        m.cy.z = m.cy.z * post_scale.z
+        m.cz.z = m.cz.z * post_scale.z
+        m.cx = math.normalize(m.cx)
+        m.cy = math.normalize(m.cy)
+        m.cz = math.normalize(m.cz)
+        if post_scale.x < 0.0 { m.cx = math.neg(m.cx) }
+        if post_scale.y < 0.0 { m.cy = math.neg(m.cy) }
+        if post_scale.z < 0.0 { m.cz = math.neg(m.cz) }
+        q = math.make_quat_from_matrix(m)
+    }
+    abs_scale = math.abs_vec3(post_scale)
+    h = math.vec3(half_widths[0], half_widths[1], half_widths[2])
+    p1 = math.mul(abs_scale, math.rotate_vector(q, math.neg(h)))
+    p2 = math.mul(abs_scale, math.rotate_vector(q, h))
+    local1 = math.inv_rotate_vector(q, p1)
+    local2 = math.inv_rotate_vector(q, p2)
+    lower = math.min_vec3(local1, local2)
+    upper = math.max_vec3(local1, local2)
+    scaled = math.mul_sv(0.5, math.sub(upper, lower))
+    limit = math.vec3(min_half_width, min_half_width, min_half_width)
+    result = math.max_vec3(scaled, limit)
+    half_widths[0] = result.x
+    half_widths[1] = result.y
+    half_widths[2] = result.z
+    t.p = math.mul(post_scale, t.p)
+    t.q = q
+}
+
+make_scaled_box_hull(half_widths: Vec3, t: Transform, post_scale: Vec3) -> *HullData {
+    block = core.alloc(24)
+    h = block as float[]
+    h[0] = half_widths.x
+    h[1] = half_widths.y
+    h[2] = half_widths.z
+    xf = t
+    scale_box(h, &xf, post_scale, 4.0 * math.LINEAR_SLOP)
+    box = make_transformed_box_hull(h[0], h[1], h[2], xf)
+    core.free_bytes(block, 24)
+    return box
+}
+
+// --- shape functions -------------------------------------------------------------
+
+compute_hull_mass(h: *HullData, density: float) -> MassData {
+    return MassData { mass: density * h.volume, center: h.center, inertia: math.mul_sm(density, h.central_inertia) }
+}
+
+compute_hull_aabb(h: *HullData, t: Transform) -> AABB { return math.aabb_transform(t, h.aabb) }
+
+compute_swept_hull_aabb(h: *HullData, xf1: Transform, xf2: Transform) -> AABB {
+    return math.aabb_union(math.aabb_transform(xf1, h.aabb), math.aabb_transform(xf2, h.aabb))
+}
+
+// A ray from origin along translation, to max_fraction of it, against
+// the hull's planes: the entering face is the hit; a ray starting inside
+// hits at its origin with no normal.
+ray_cast_hull(h: *HullData, origin: Vec3, translation: Vec3, max_fraction: float) -> CastOutput {
+    output = CastOutput { normal: math.vec3_zero(), point: math.vec3_zero(), fraction: 0.0, iterations: 0, triangle_index: NULL_INDEX, hit: false }
+    lower = 0.0
+    upper = max_fraction
+    best_face = NULL_INDEX
+    planes = hull_planes(h)
+    i = 0
+    while i < h.face_count {
+        plane = planes[i]
+        distance = plane.offset - math.dot(plane.normal, origin)
+        denominator = math.dot(plane.normal, translation)
+        if denominator == 0.0 {
+            if distance < 0.0 { return output }
+        } else {
+            fraction = distance / denominator
+            if denominator < 0.0 {
+                if fraction > lower {
+                    best_face = i
+                    lower = fraction
+                }
+            } else if fraction < upper {
+                upper = fraction
+            }
+            if upper < lower { return output }
+        }
+        i = i + 1
+    }
+    if best_face >= 0 {
+        output.point = math.add(origin, math.mul_sv(lower, translation))
+        output.normal = planes[best_face].normal
+        output.fraction = lower
+    } else {
+        output.point = origin
+    }
+    output.hit = true
+    return output
+}
+
+compute_hull_extent(h: *HullData, origin: Vec3) -> ShapeExtent {
+    points = hull_points(h)
+    extent = ShapeExtent { min_extent: h.inner_radius, max_extent: math.vec3_zero() }
+    i = 0
+    while i < h.vertex_count {
+        extent.max_extent = math.max_vec3(extent.max_extent, math.abs_vec3(math.sub(points[i], origin)))
+        i = i + 1
+    }
+    return extent
+}
+
+// The area of the hull's shadow along the direction: the faces that
+// face it, fanned into triangles.
+compute_hull_projected_area(h: *HullData, direction: Vec3) -> float {
+    area = 0.0
+    faces = hull_faces(h)
+    edges = hull_edges(h)
+    points = hull_points(h)
+    i = 0
+    while i < h.face_count {
+        base = faces[i]
+        p1 = points[edges[base].origin]
+        edge_index = edges[base].next
+        p2 = points[edges[edge_index].origin]
+        edge_index = edges[edge_index].next
+        while true {
+            p3 = points[edges[edge_index].origin]
+            n = math.cross(math.sub(p2, p1), math.sub(p3, p1))
+            area = area + math.max_float(math.dot(n, direction), 0.0)
+            p2 = p3
+            edge_index = edges[edge_index].next
+            if edge_index == base { break }
+        }
+        i = i + 1
+    }
+    return 0.5 * area
+}
+
+// --- 2D hull (Andrew's monotone chain) --------------------------------------------
+
+// cross(b - a, c - a)
+cross_2d(a: Vec2, b: Vec2, c: Vec2) -> float {
+    return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
+}
+
+// Drop the vertices that add the least area until the count is at the
+// target and nothing left is within tolerance. Returns the new count.
+simplify_hull_2d(hull: Point2D[], count1: int, target: int) -> int {
+    if count1 <= 3 { return count1 }
+    area_tol = 0.25 * math.LINEAR_SLOP * math.LINEAR_SLOP
+    count2 = count1
+    while true {
+        min_area = math.MAX_FLOAT
+        min_index = 0
+        i = 0
+        while i < count2 {
+            prev = (i + count2 - 1) % count2
+            next = (i + 1) % count2
+            area = cross_2d(hull[prev].p, hull[i].p, hull[next].p)
+            if area + area_tol < min_area {
+                min_area = area
+                min_index = i
+            }
+            i = i + 1
+        }
+        if count2 <= 3 || (min_area > area_tol && count2 <= target) { break }
+        count2 = count2 - 1
+        if min_index < count2 {
+            j = min_index
+            while j < count2 {
+                hull[j] = hull[j + 1]
+                j = j + 1
+            }
+        }
+    }
+    return count2
+}
+
+// By x then y; insertion, since n is usually twenty or fewer.
+sort_2d(pts: Point2D[], count: int) {
+    i = 1
+    while i < count {
+        base = pts[i]
+        j = i - 1
+        while j >= 0 && (pts[j].p.x > base.p.x || (pts[j].p.x == base.p.x && pts[j].p.y > base.p.y)) {
+            pts[j + 1] = pts[j]
+            j = j - 1
+        }
+        pts[j + 1] = base
+        i = i + 1
+    }
+}
+
+// Weld sorted points within a quarter slop; the lower original index wins.
+weld_2d(pts: Point2D[], count1: int) -> int {
+    if count1 <= 1 { return count1 }
+    slop = 0.25 * math.LINEAR_SLOP
+    tol_sqr = slop * slop
+    count2 = 1
+    base = 0
+    i = 1
+    while i < count1 {
+        if math.distance_squared_2(pts[i].p, pts[base].p) < tol_sqr {
+            if pts[i].original_index < pts[base].original_index { pts[base] = pts[i] }
+        } else {
+            pts[count2] = pts[i]
+            base = count2
+            count2 = count2 + 1
+        }
+        i = i + 1
+    }
+    return count2
+}
+
+// The convex hull of the points, counter-clockwise, into hull (room for
+// 2 * count). Sorts and welds pts in place. Returns the hull's count.
+hull_2d(pts: Point2D[], count: int, hull: Point2D[]) -> int {
+    count1 = count
+    if count1 <= 0 { return 0 }
+    if count1 == 1 {
+        hull[0] = pts[0]
+        return 1
+    }
+    sort_2d(pts, count1)
+    count1 = weld_2d(pts, count1)
+    if count1 == 1 {
+        hull[0] = pts[0]
+        return 1
+    }
+    if count1 == 2 {
+        hull[0] = pts[0]
+        hull[1] = pts[1]
+        return 2
+    }
+    count2 = 0
+    i = 0
+    while i < count1 {
+        while count2 >= 2 {
+            if cross_2d(hull[count2 - 2].p, hull[count2 - 1].p, pts[i].p) > 0.0 { break }
+            count2 = count2 - 1
+        }
+        hull[count2] = pts[i]
+        count2 = count2 + 1
+        i = i + 1
+    }
+    lower_count = count2 + 1
+    i = count1 - 2
+    while i >= 0 {
+        while count2 >= lower_count {
+            if cross_2d(hull[count2 - 2].p, hull[count2 - 1].p, pts[i].p) > 0.0 { break }
+            count2 = count2 - 1
+        }
+        hull[count2] = pts[i]
+        count2 = count2 + 1
+        i = i - 1
+    }
+    return count2 - 1
+}
