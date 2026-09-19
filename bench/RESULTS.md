@@ -147,3 +147,25 @@ The sums of the results agree to the precision of the reference's floats
 335,990): the same algorithm taking the same paths. The port runs at
 1.3-1.5x the reference's time; the simplex is passed by value here
 where the reference works on it in place.
+
+## manifold
+
+`bench/manifold.ae` and `bench/manifold_box3d.c`: 20,000 hull-hull
+collisions of two boxes (1 x 0.5 x 0.75 and 0.6 x 0.8 x 0.4) along a sweep
+through overlap with a cold SAT cache each time; the same 20,000 with the
+cache carried from pose to pose (a stack's steady state); 20,000
+hull-capsule and 20,000 hull-sphere collisions along a sweep.
+
+| phase | aephysics | Box3D |
+|---|---|---|
+| 20,000 hull-hull, cold cache | 15.3 ms | **9.5** |
+| 20,000 hull-hull, warm cache | 3.7 | **3.6** |
+| 20,000 hull-capsule | 7.2 | **5.0** |
+| 20,000 hull-sphere | 4.0 | **2.6** |
+
+The same manifolds come out: 52,386 / 52,074 / 23,482 / 11,500 contact
+points, 19,706 cache hits, and equal separation sums on every phase. With
+the cache warm -- the state a resting stack is in -- the port is at parity;
+the cold separating axis test is 1.6x, the reference's being SIMD four
+edge pairs at a time, which is the wide path to consider if a step
+benchmark ever shows the cold SAT.

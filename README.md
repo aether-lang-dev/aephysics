@@ -30,7 +30,8 @@ so a test written against the reference reads the same here.
 | `aephysics.dynamic_tree` | the bounding volume hierarchy under the broad phase: SAH insertion, rotations, enlarge, sweep refit, partial rebuild in depth-first order, box / closest / ray / swept-box queries | done, `test_dynamic_tree.ae` (12k checks); [same tree as the reference, ray cast 1.9x its time](bench/RESULTS.md#dynamic_tree) |
 | `aephysics.hull` | quickhull with face merging, the half-edge hull with its mass properties, box / cylinder / cone / rock hulls, clone-and-transform with mirroring, support functions, ray cast, the 2D hull | done, `test_hull.ae` (438 checks); [same hulls as the reference, 1.6-2x its time](bench/RESULTS.md#hull) |
 | `aephysics.distance` | GJK with the warm-started simplex cache, the shape cast by conservative advancement, the time of impact by separating-axis root finding | done, `test_distance.ae` (1.1k checks); [same results as the reference, 1.3-1.5x its time](bench/RESULTS.md#distance) |
-| `aephysics.collision` | contact manifolds, triangle mesh, height field, shapes with mass properties, ray and shape casts | next |
+| `aephysics.manifold` | contact manifolds for sphere, capsule and hull in every pairing: the separating axis test with its cache, reference-face clipping, the feature pairs, reduction to four points | done, `test_manifold.ae` (43k checks, 7,000 pairs against a brute-force oracle); [same manifolds as the reference, warm cache at parity](bench/RESULTS.md#manifold) |
+| `aephysics.collision` | triangle manifolds, triangle mesh, height field, shapes with mass properties, ray and shape casts | next |
 | `aephysics.dynamics` | bodies, contacts, the constraint graph, islands, the Soft Step solver, joints (spherical, revolute, prismatic, distance, motor, weld, wheel), sensors, the character mover, the world | |
 | `aephysics` | the public API | |
 

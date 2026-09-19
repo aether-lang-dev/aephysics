@@ -1,0 +1,1276 @@
+// aephysics.manifold -- contact manifolds between convex shapes: sphere,
+// capsule and hull in every pairing, the separating axis test over two
+// hulls with its cache, reference-face clipping and the reduction of the
+// clipped polygon to four points.
+//
+// The shape is Box3D's manifold.c and convex_manifold.c (Erin Catto, with
+// portions by Dirk Gregorius, MIT), the reference this engine is measured
+// against: GJK for the shallow cases, the separating axis test (face
+// normals of each hull, then the edge pairs whose Gauss-map arcs cross)
+// for the deep ones, the incident face found from the closest vertex,
+// Sutherland-Hodgman clipping against the reference face's side planes,
+// the feature pair on every point so the solver can match it across
+// steps, and the SAT cache that skips the full test when the last axis
+// still holds. Names are the reference's without its prefix, in snake
+// case: b3CollideHulls is collide_hulls.
+//
+// Differences: the axis test is the reference's scalar path (its SIMD
+// path is the same arithmetic four edges at a time); the clip buffers
+// are module scratch rather than the C stack, so one thread collides at
+// a time until the parallel layer gives each worker its own; the reduction
+// to four points is the reference's default (the 2D-hull alternative is
+// there for larger manifolds).
+import std.string
+import aephysics.math
+import aephysics.core
+import aephysics.distance
+import aephysics.hull
+
+exports (
+    Sphere, Capsule, FeaturePair, LocalManifoldPoint, LocalManifold, SATCache, SeparatingAxis, AxisQuery,
+    ClipVertex,
+    MAX_MANIFOLD_POINTS, MAX_CLIP_POINTS, SPECULATIVE_DISTANCE, PARALLEL_EDGE_TOL, NULL_INDEX,
+    AXIS_INVALID, AXIS_BACKSIDE, AXIS_FACE_A, AXIS_FACE_B, AXIS_EDGE_PAIR, AXIS_CLOSEST_POINTS,
+    AXIS_MANUAL_FACE_A, AXIS_MANUAL_FACE_B, AXIS_MANUAL_EDGE_PAIR,
+    FEATURE_SHAPE_A, FEATURE_SHAPE_B,
+    sphere, capsule, make_feature_pair, feature_pair_single, flip_pair, make_feature_id,
+    local_manifold, empty_sat_cache, clear_sat_cache, copy_sat_cache, empty_point, manifold_point, set_manifold_point,
+    find_incident_face, clip_polygon, validate_polygon, compute_separating_axis, get_best_axis,
+    collide_spheres, collide_capsule_and_sphere, collide_hull_and_sphere, collide_capsules,
+    collide_hull_and_capsule, collide_hulls, reduce_manifold_points
+)
+
+const NULL_INDEX = 0 - 1
+const MAX_MANIFOLD_POINTS = 4
+const MAX_CLIP_POINTS = 64
+// Four linear slops: contacts start this far apart, so the solver sees them coming.
+const SPECULATIVE_DISTANCE = 0.02
+// Edge pairs whose sine is below this are not an axis.
+const PARALLEL_EDGE_TOL = 0.005
+
+const AXIS_INVALID = 0
+const AXIS_BACKSIDE = 1
+const AXIS_FACE_A = 2
+const AXIS_FACE_B = 3
+const AXIS_EDGE_PAIR = 4
+const AXIS_CLOSEST_POINTS = 5
+// For testing: force the axis.
+const AXIS_MANUAL_FACE_A = 6
+const AXIS_MANUAL_FACE_B = 7
+const AXIS_MANUAL_EDGE_PAIR = 8
+
+const FEATURE_SHAPE_A = 0
+const FEATURE_SHAPE_B = 1
+
+const FLOAT_EPSILON = 0.00000011920929
+const FLOAT_MIN = 0.000000000000000000000000000000000000011754944
+const MIN_CAPSULE_LENGTH = 0.005
+
+struct Sphere {
+    center: Vec3
+    radius: float
+}
+
+// Two hemispheres joined by a cylinder.
+struct Capsule {
+    center1: Vec3
+    center2: Vec3
+    radius: float
+}
+
+// A contact point is where two edges cross: two of one shape (a vertex)
+// or one of each. The pair identifies the point across steps.
+struct FeaturePair {
+    owner1: int
+    index1: int
+    owner2: int
+    index2: int
+}
+
+// A contact point in frame A.
+struct LocalManifoldPoint {
+    point: Vec3
+    separation: float      // negative when overlapping
+    pair: FeaturePair
+    triangle_index: int
+}
+
+// A manifold in frame A, with the points in a buffer the caller owns.
+struct LocalManifold {
+    normal: Vec3           // from A to B, in frame A
+    triangle_normal: Vec3
+    points: ptr            // LocalManifoldPoint[]
+    point_count: int
+    triangle_index: int
+    i1: int
+    i2: int
+    i3: int
+    squared_distance: float
+    feature: int
+    triangle_flags: int
+}
+
+// The last separating axis, for temporal coherence.
+struct SATCache {
+    separation: float
+    kind: int              // AXIS_*
+    index_a: int
+    index_b: int
+    hit: int               // the cache answered
+}
+
+struct SeparatingAxis {
+    normal: Vec3
+    separation: float
+    index_a: int
+    index_b: int
+    kind: int
+}
+
+struct AxisQuery {
+    face_a: SeparatingAxis
+    face_b: SeparatingAxis
+    edge: SeparatingAxis
+    separated_feature: int
+}
+
+struct ClipVertex {
+    position: Vec3
+    separation: float
+    pair: FeaturePair
+}
+
+sphere(center: Vec3, radius: float) -> Sphere { return Sphere { center: center, radius: radius } }
+
+capsule(center1: Vec3, center2: Vec3, radius: float) -> Capsule {
+    return Capsule { center1: center1, center2: center2, radius: radius }
+}
+
+make_feature_pair(owner1: int, index1: int, owner2: int, index2: int) -> FeaturePair {
+    return FeaturePair { owner1: owner1, index1: index1, owner2: owner2, index2: index2 }
+}
+
+// For a single point contact: sphere against anything.
+feature_pair_single() -> FeaturePair { return FeaturePair { owner1: 0, index1: 0, owner2: 0, index2: 0 } }
+
+// Choosing face A or B as the reference does not change the pair, so
+// impulses persist through a reference-face flip-flop.
+flip_pair(pair: FeaturePair) -> FeaturePair {
+    return FeaturePair { owner1: 1 - pair.owner2, index1: pair.index2, owner2: 1 - pair.owner1, index2: pair.index1 }
+}
+
+make_feature_id(pair: FeaturePair) -> int {
+    return (pair.owner1 << 24) | (pair.index1 << 16) | (pair.owner2 << 8) | pair.index2
+}
+
+empty_point() -> LocalManifoldPoint {
+    return LocalManifoldPoint { point: math.vec3_zero(), separation: 0.0, pair: feature_pair_single(), triangle_index: NULL_INDEX }
+}
+
+// A manifold over a point buffer of the given capacity, which the caller allocated.
+local_manifold(points: ptr) -> LocalManifold {
+    return LocalManifold { normal: math.vec3_zero(), triangle_normal: math.vec3_zero(), points: points, point_count: 0,
+                           triangle_index: NULL_INDEX, i1: 0, i2: 0, i3: 0, squared_distance: 0.0, feature: 0, triangle_flags: 0 }
+}
+
+empty_sat_cache() -> SATCache { return SATCache { separation: 0.0, kind: AXIS_INVALID, index_a: 0, index_b: 0, hit: 0 } }
+
+clear_sat_cache(c: *SATCache) {
+    c.separation = 0.0
+    c.kind = AXIS_INVALID
+    c.index_a = 0
+    c.index_b = 0
+    c.hit = 0
+}
+
+copy_sat_cache(dst: *SATCache, src: SATCache) {
+    dst.separation = src.separation
+    dst.kind = src.kind
+    dst.index_a = src.index_a
+    dst.index_b = src.index_b
+    dst.hit = src.hit
+}
+
+clear_simplex_cache(c: *SimplexCache) {
+    c.metric = 0.0
+    c.count = 0
+}
+
+manifold_point(m: *LocalManifold, i: int) -> LocalManifoldPoint {
+    points = m.points as LocalManifoldPoint[]
+    return points[i]
+}
+
+set_manifold_point(m: *LocalManifold, i: int, p: LocalManifoldPoint) {
+    points = m.points as LocalManifoldPoint[]
+    points[i] = p
+}
+
+// --- scratch ------------------------------------------------------------------------
+
+// The clip polygons and the unreduced points, allocated once. One collision
+// at a time until the parallel layer gives each worker its own.
+var g_clip1: ptr = null
+var g_clip2: ptr = null
+var g_clip_points: ptr = null
+
+scratch_ready() {
+    if g_clip1 == null {
+        g_clip1 = core.alloc(MAX_CLIP_POINTS * sizeof(ClipVertex))
+        g_clip2 = core.alloc(MAX_CLIP_POINTS * sizeof(ClipVertex))
+        g_clip_points = core.alloc(MAX_CLIP_POINTS * sizeof(LocalManifoldPoint))
+    }
+}
+
+// --- the incident face and clipping ----------------------------------------------------
+
+// The face of the hull most anti-parallel to the reference normal, found
+// from the closest vertex: the edge out of it most perpendicular to the
+// normal, then the more anti-parallel of that edge's two faces. Extended
+// from the plain search so a wedge gets the right incident face.
+find_incident_face(h: *HullData, ref_normal: Vec3, vertex_index: int) -> int {
+    vertices = hull.hull_vertices(h)
+    edges = hull.hull_edges(h)
+    planes = hull.hull_planes(h)
+    points = hull.hull_points(h)
+    min_edge = NULL_INDEX
+    min_projection = math.MAX_FLOAT
+    start = vertices[vertex_index]
+    edge_index = start
+    edge_origin = points[edges[start].origin]
+    while true {
+        twin = edges[edge_index].twin
+        axis = math.normalize(math.sub(points[edges[twin].origin], edge_origin))
+        projection = math.abs_float(math.dot(axis, ref_normal))
+        if projection < min_projection {
+            min_edge = edge_index
+            min_projection = projection
+        }
+        edge_index = edges[twin].next
+        if edge_index == start { break }
+    }
+    face1 = edges[min_edge].face
+    face2 = edges[edges[min_edge].twin].face
+    if math.dot(planes[face1].normal, ref_normal) < math.dot(planes[face2].normal, ref_normal) { return face1 }
+    return face2
+}
+
+// Every vertex's outgoing edge is the next vertex's incoming one.
+validate_polygon(polygon: ClipVertex[], count: int) -> bool {
+    if count == 0 { return true }
+    vertex1 = polygon[count - 1]
+    i = 0
+    while i < count {
+        vertex2 = polygon[i]
+        if vertex1.pair.owner2 != vertex2.pair.owner1 || vertex1.pair.index2 != vertex2.pair.index1 { return false }
+        vertex1 = vertex2
+        i = i + 1
+    }
+    return true
+}
+
+// Sutherland-Hodgman: the polygon against one side plane of the reference
+// face, whose edge tags the new vertices; separations are from the
+// reference plane. Returns the output count.
+clip_polygon(out: ClipVertex[], polygon: ClipVertex[], count: int, clip_plane: Plane, edge: int, ref_plane: Plane) -> int {
+    vertex1 = polygon[count - 1]
+    distance1 = math.plane_separation(clip_plane, vertex1.position)
+    out_count = 0
+    i = 0
+    while i < count {
+        vertex2 = polygon[i]
+        distance2 = math.plane_separation(clip_plane, vertex2.position)
+        if distance1 <= 0.0 && distance2 <= 0.0 {
+            // Both behind: keep vertex2.
+            out[out_count] = vertex2
+            out_count = out_count + 1
+        } else if distance1 <= 0.0 && distance2 > 0.0 {
+            // Leaving: the intersection, with its outgoing edge adjusted.
+            fraction = distance1 / (distance1 - distance2)
+            position = math.mul_add(vertex1.position, fraction, math.sub(vertex2.position, vertex1.position))
+            v = ClipVertex { position: position, separation: math.plane_separation(ref_plane, position), pair: vertex2.pair }
+            v.pair.owner2 = FEATURE_SHAPE_A
+            v.pair.index2 = edge
+            out[out_count] = v
+            out_count = out_count + 1
+        } else if distance2 <= 0.0 && distance1 > 0.0 {
+            // Entering: the intersection with its incoming edge adjusted, then vertex2.
+            fraction = distance1 / (distance1 - distance2)
+            position = math.mul_add(vertex1.position, fraction, math.sub(vertex2.position, vertex1.position))
+            v = ClipVertex { position: position, separation: math.plane_separation(ref_plane, position), pair: vertex1.pair }
+            v.pair.owner1 = FEATURE_SHAPE_A
+            v.pair.index1 = edge
+            out[out_count] = v
+            out_count = out_count + 1
+            out[out_count] = vertex2
+            out_count = out_count + 1
+        }
+        vertex1 = vertex2
+        distance1 = distance2
+        i = i + 1
+    }
+    return out_count
+}
+
+// A segment (segment[0..1]) against a plane, in place; the count kept.
+clip_segment(segment: ClipVertex[], plane: Plane) -> int {
+    count = 0
+    vertex1 = segment[0]
+    vertex2 = segment[1]
+    distance1 = math.plane_separation(plane, vertex1.position)
+    distance2 = math.plane_separation(plane, vertex2.position)
+    if distance1 <= 0.0 {
+        segment[count] = vertex1
+        count = count + 1
+    }
+    if distance2 <= 0.0 {
+        segment[count] = vertex2
+        count = count + 1
+    }
+    if distance1 * distance2 < 0.0 {
+        t = distance1 / (distance1 - distance2)
+        pair = vertex2.pair
+        if distance1 > 0.0 { pair = vertex1.pair }
+        segment[count] = ClipVertex { position: math.add(math.mul_sv(1.0 - t, vertex1.position), math.mul_sv(t, vertex2.position)),
+                                      separation: 0.0, pair: pair }
+        count = count + 1
+    }
+    return count
+}
+
+// The segment against the side planes of a hull face: 2 if it survives, else 0.
+clip_segment_to_hull_face(segment: ClipVertex[], h: *HullData, ref_face: int) -> int {
+    faces = hull.hull_faces(h)
+    planes = hull.hull_planes(h)
+    edges = hull.hull_edges(h)
+    points = hull.hull_points(h)
+    ref_plane = planes[ref_face]
+    start = faces[ref_face]
+    edge_index = start
+    while true {
+        next_index = edges[edge_index].next
+        vertex1 = points[edges[edge_index].origin]
+        vertex2 = points[edges[next_index].origin]
+        tangent = math.normalize(math.sub(vertex2, vertex1))
+        binormal = math.cross(tangent, ref_plane.normal)
+        if clip_segment(segment, math.make_plane_from_normal_and_point(binormal, vertex1)) < 2 { return 0 }
+        edge_index = next_index
+        if edge_index == start { break }
+    }
+    return 2
+}
+
+// --- reduction -------------------------------------------------------------------------
+
+// Four points from the clipped polygon: the deepest touching point (with
+// a tangent tie-break), the farthest from it, the largest triangle, then
+// the point adding the most area outside it. The 0.95 bias keeps the
+// choice stable across steps. Consumes the point array.
+reduce_manifold_points(m: *LocalManifold, capacity: int, points: LocalManifoldPoint[], count: int) {
+    if capacity < 4 { return }
+    if count <= 4 {
+        i = 0
+        while i < count {
+            set_manifold_point(m, i, points[i])
+            i = i + 1
+        }
+        m.point_count = count
+        return
+    }
+    normal = m.normal
+    tol_sqr = SPECULATIVE_DISTANCE * SPECULATIVE_DISTANCE
+    bias = 0.95
+
+    // 1: the extreme touching point.
+    best_index = NULL_INDEX
+    best_score = 0.0 - math.MAX_FLOAT
+    search = arbitrary_perp(normal)
+    i = 0
+    while i < count {
+        if points[i].separation <= SPECULATIVE_DISTANCE {
+            score = 0.0 - points[i].separation + math.dot(search, points[i].point)
+            if bias * score > best_score {
+                best_index = i
+                best_score = score
+            }
+        }
+        i = i + 1
+    }
+    if best_index == NULL_INDEX {
+        m.point_count = 0
+        return
+    }
+    set_manifold_point(m, 0, points[best_index])
+    m.point_count = 1
+    points[best_index] = points[count - 1]
+    count = count - 1
+    a = manifold_point(m, 0).point
+
+    // 2: the farthest point in the plane.
+    best_score = 0.0
+    best_index = NULL_INDEX
+    i = 0
+    while i < count {
+        d = math.sub(points[i].point, a)
+        v = math.mul_sub(d, math.dot(d, normal), normal)
+        separation = math.max_float(0.0, 0.0 - points[i].separation)
+        score = math.length_squared(v) + 4.0 * separation * separation
+        if bias * score > best_score {
+            best_score = score
+            best_index = i
+        }
+        i = i + 1
+    }
+    if best_score < tol_sqr { return }
+    set_manifold_point(m, 1, points[best_index])
+    m.point_count = 2
+    points[best_index] = points[count - 1]
+    count = count - 1
+    b = manifold_point(m, 1).point
+
+    // 3: the largest triangle.
+    best_score = tol_sqr
+    best_index = NULL_INDEX
+    best_signed_area = 0.0
+    ba = math.sub(b, a)
+    i = 0
+    while i < count {
+        signed_area = math.dot(normal, math.cross(ba, math.sub(points[i].point, a)))
+        score = math.abs_float(signed_area)
+        if bias * score >= best_score {
+            best_score = score
+            best_index = i
+            best_signed_area = signed_area
+        }
+        i = i + 1
+    }
+    if best_index == NULL_INDEX { return }
+    set_manifold_point(m, 2, points[best_index])
+    m.point_count = 3
+    points[best_index] = points[count - 1]
+    count = count - 1
+    c = manifold_point(m, 2).point
+
+    // 4: the most area outside the triangle.
+    best_score = tol_sqr
+    best_index = NULL_INDEX
+    sign = 1.0
+    if best_signed_area < 0.0 { sign = 0.0 - 1.0 }
+    i = 0
+    while i < count {
+        p = points[i].point
+        u1 = sign * math.dot(normal, math.cross(math.sub(p, a), ba))
+        u2 = sign * math.dot(normal, math.cross(math.sub(p, b), math.sub(c, b)))
+        u3 = sign * math.dot(normal, math.cross(math.sub(p, c), math.sub(a, c)))
+        score = math.max_float(u1, math.max_float(u2, u3))
+        if bias * score > best_score {
+            best_score = score
+            best_index = i
+        }
+        i = i + 1
+    }
+    if best_index != NULL_INDEX {
+        set_manifold_point(m, m.point_count, points[best_index])
+        m.point_count = m.point_count + 1
+    }
+}
+
+// A fixed perpendicular to a unit vector, the reference's, so the
+// reduction's tie-break is the same on every platform.
+arbitrary_perp(v: Vec3) -> Vec3 {
+    a = 0.67
+    b = 0.0 - 0.42
+    p = math.vec3_zero()
+    if v.x < 0.0 - 0.5 || 0.5 < v.x {
+        p = math.vec3(a * v.y + b * v.z, 0.0 - a * v.x, 0.0 - b * v.x)
+    } else if v.y < 0.0 - 0.5 || 0.5 < v.y {
+        p = math.vec3(a * v.y, 0.0 - a * v.x + b * v.z, 0.0 - b * v.y)
+    } else {
+        p = math.vec3(a * v.z, b * v.z, 0.0 - a * v.x - b * v.y)
+    }
+    return math.normalize(p)
+}
+
+// --- spheres and capsules ----------------------------------------------------------------
+
+one_point(m: *LocalManifold, normal: Vec3, point: Vec3, separation: float, pair: FeaturePair) {
+    m.normal = normal
+    m.point_count = 1
+    set_manifold_point(m, 0, LocalManifoldPoint { point: point, separation: separation, pair: pair, triangle_index: NULL_INDEX })
+}
+
+two_points(m: *LocalManifold, normal: Vec3, p1: Vec3, s1: float, pair1: FeaturePair, p2: Vec3, s2: float, pair2: FeaturePair) {
+    m.normal = normal
+    m.point_count = 2
+    set_manifold_point(m, 0, LocalManifoldPoint { point: p1, separation: s1, pair: pair1, triangle_index: NULL_INDEX })
+    set_manifold_point(m, 1, LocalManifoldPoint { point: p2, separation: s2, pair: pair2, triangle_index: NULL_INDEX })
+}
+
+collide_spheres(m: *LocalManifold, capacity: int, sphere_a: Sphere, sphere_b: Sphere, transform_b_to_a: Transform) {
+    m.point_count = 0
+    if capacity == 0 { return }
+    center1 = sphere_a.center
+    center2 = math.transform_point(transform_b_to_a, sphere_b.center)
+    total_radius = sphere_a.radius + sphere_b.radius
+    offset = math.sub(center2, center1)
+    distance_sq = math.length_squared(offset)
+    if distance_sq > total_radius * total_radius { return }
+    normal = math.vec3(0.0, 1.0, 0.0)
+    d = math.sqrt_float(distance_sq)
+    if d * d > 1000.0 * FLOAT_MIN { normal = math.mul_sv(1.0 / d, offset) }
+    // The contact at the midpoint of the two surfaces.
+    point = math.mul_sv(0.5, math.mul_sub(math.add(math.mul_add(center1, sphere_a.radius, normal), center2), sphere_b.radius, normal))
+    one_point(m, normal, point, d - total_radius, feature_pair_single())
+}
+
+collide_capsule_and_sphere(m: *LocalManifold, capacity: int, capsule_a: Capsule, sphere_b: Sphere, transform_b_to_a: Transform) {
+    m.point_count = 0
+    if capacity < 1 { return }
+    center = math.transform_point(transform_b_to_a, sphere_b.center)
+    total_radius = sphere_b.radius + capsule_a.radius
+    closest = math.point_to_segment_distance(capsule_a.center1, capsule_a.center2, center)
+    offset = math.sub(center, closest)
+    distance_sq = math.length_squared(offset)
+    if distance_sq > total_radius * total_radius { return }
+    normal = math.vec3(0.0, 1.0, 0.0)
+    d = math.sqrt_float(distance_sq)
+    if d * d > 1000.0 * FLOAT_MIN { normal = math.mul_sv(1.0 / d, offset) }
+    point = math.mul_sv(0.5, math.mul_add(math.add(math.mul_sub(center, sphere_b.radius, normal), closest), capsule_a.radius, normal))
+    one_point(m, normal, point, d - total_radius, feature_pair_single())
+}
+
+// GJK from the sphere's centre for the shallow case; the deepest face for
+// the deep one.
+collide_hull_and_sphere(m: *LocalManifold, capacity: int, hull_a: *HullData, sphere_b: Sphere, transform_b_to_a: Transform,
+                        cache: *SimplexCache) {
+    m.point_count = 0
+    if capacity == 0 { return }
+    center = math.transform_point(transform_b_to_a, sphere_b.center)
+    input = DistanceInput { proxy_a: hull.hull_proxy(hull_a), proxy_b: distance.shape_proxy((&center) as ptr, 1, 0.0),
+                            transform: math.transform_identity(), use_radii: false }
+    radius_a = 0.0
+    radius_b = sphere_b.radius
+    radius = radius_a + radius_b
+    output = distance.shape_distance(&input, cache, null, 0)
+
+    if output.distance > radius + SPECULATIVE_DISTANCE {
+        clear_simplex_cache(cache)
+        return
+    }
+    if output.distance > 100.0 * FLOAT_EPSILON {
+        // Shallow.
+        normal = math.normalize(math.sub(output.point_b, output.point_a))
+        c_a = math.mul_add(center, radius_a - math.dot(math.sub(center, output.point_a), normal), normal)
+        c_b = math.mul_sub(center, radius_b, normal)
+        one_point(m, normal, math.lerp(c_a, c_b, 0.5), output.distance - radius, feature_pair_single())
+        return
+    }
+    // Deep: the face the centre is least below.
+    planes = hull.hull_planes(hull_a)
+    best_index = NULL_INDEX
+    best_distance = 0.0 - math.MAX_FLOAT
+    i = 0
+    while i < hull_a.face_count {
+        d = math.plane_separation(planes[i], center)
+        if d > best_distance {
+            best_index = i
+            best_distance = d
+        }
+        i = i + 1
+    }
+    normal = planes[best_index].normal
+    c_a = math.mul_add(center, radius_a - math.dot(math.sub(center, output.point_a), normal), normal)
+    c_b = math.mul_sub(center, radius_b, normal)
+    one_point(m, normal, math.lerp(c_a, c_b, 0.5), best_distance - radius, feature_pair_single())
+}
+
+// Two points when the capsules are nearly parallel and B's clipped ends
+// both touch A; otherwise the closest points of the segments.
+collide_capsules(m: *LocalManifold, capacity: int, capsule_a: Capsule, capsule_b: Capsule, transform_b_to_a: Transform) {
+    m.point_count = 0
+    if capacity < 2 { return }
+    center_a1 = capsule_a.center1
+    center_a2 = capsule_a.center2
+    center_b1 = math.transform_point(transform_b_to_a, capsule_b.center1)
+    center_b2 = math.transform_point(transform_b_to_a, capsule_b.center2)
+    radius = capsule_a.radius + capsule_b.radius
+    max_distance = radius + SPECULATIVE_DISTANCE
+    result = math.segment_distance(center_a1, center_a2, center_b1, center_b2)
+    offset = math.sub(result.point2, result.point1)
+    distance_squared = math.length_squared(offset)
+    min_distance = 0.01 * math.LINEAR_SLOP
+    if distance_squared > max_distance * max_distance || distance_squared < min_distance * min_distance { return }
+
+    segment_a = math.sub(center_a2, center_a1)
+    length_a = math.length(segment_a)
+    if length_a < MIN_CAPSULE_LENGTH { return }
+    edge_a = math.mul_sv(1.0 / length_a, segment_a)
+    segment_b = math.sub(center_b2, center_b1)
+    length_b = math.length(segment_b)
+    if length_b < MIN_CAPSULE_LENGTH { return }
+    edge_b = math.mul_sv(1.0 / length_b, segment_b)
+
+    // Nearly parallel: |eA x eB| = sin(alpha).
+    alpha_tol_sqr = 0.05 * 0.05
+    axis = math.cross(edge_a, edge_b)
+    if math.length_squared(axis) < alpha_tol_sqr {
+        scratch_ready()
+        vertices_b = g_clip1 as ClipVertex[]
+        vertices_b[0] = ClipVertex { position: center_b1, separation: 0.0, pair: make_feature_pair(FEATURE_SHAPE_A, 0, FEATURE_SHAPE_A, 0) }
+        vertices_b[1] = ClipVertex { position: center_b2, separation: 0.0, pair: make_feature_pair(FEATURE_SHAPE_A, 1, FEATURE_SHAPE_A, 1) }
+        plane1 = Plane { normal: math.neg(edge_a), offset: 0.0 - math.dot(edge_a, capsule_a.center1) }
+        plane2 = Plane { normal: edge_a, offset: math.dot(edge_a, capsule_a.center2) }
+        point_count = clip_segment(vertices_b, plane1)
+        if point_count == 2 { point_count = clip_segment(vertices_b, plane2) }
+        if point_count == 2 {
+            closest1 = math.point_to_segment_distance(center_a1, center_a2, vertices_b[0].position)
+            closest2 = math.point_to_segment_distance(center_a1, center_a2, vertices_b[1].position)
+            distance1 = math.distance(closest1, vertices_b[0].position)
+            distance2 = math.distance(closest2, vertices_b[1].position)
+            if distance1 <= radius && distance2 <= radius {
+                if distance1 < min_distance || distance2 < min_distance { return }
+                normal1 = math.mul_sv(1.0 / distance1, math.sub(vertices_b[0].position, closest1))
+                normal2 = math.mul_sv(1.0 / distance2, math.sub(vertices_b[1].position, closest2))
+                normal = math.normalize(math.add(normal1, normal2))
+                radius_a = capsule_a.radius
+                radius_b = capsule_b.radius
+                point1 = math.mul_sv(0.5, math.mul_sub(math.add(math.mul_add(vertices_b[0].position, radius_a, normal1), closest1), radius_b, normal))
+                point2 = math.mul_sv(0.5, math.mul_sub(math.add(math.mul_add(vertices_b[1].position, radius_a, normal2), closest2), radius_b, normal))
+                two_points(m, normal, point1, distance1 - radius, vertices_b[0].pair, point2, distance2 - radius, vertices_b[1].pair)
+                return
+            }
+        }
+    }
+
+    d = math.length(offset)
+    normal = math.mul_sv(1.0 / d, offset)
+    point = math.mul_sv(0.5, math.mul_sub(math.add(math.mul_add(result.point1, capsule_a.radius, normal), result.point2), capsule_b.radius, normal))
+    one_point(m, normal, point, d - radius, feature_pair_single())
+}
+
+// --- hull and capsule ------------------------------------------------------------------------
+
+// The hull face the capsule is least below, and the capsule end that is.
+query_face_direction_hull_and_capsule(h: *HullData, c: Capsule, capsule_transform: Transform) -> SeparatingAxis {
+    planes = hull.hull_planes(h)
+    p1 = math.transform_point(capsule_transform, c.center1)
+    p2 = math.transform_point(capsule_transform, c.center2)
+    max_face = NULL_INDEX
+    max_vertex = NULL_INDEX
+    max_separation = 0.0 - math.MAX_FLOAT
+    i = 0
+    while i < h.face_count {
+        plane = planes[i]
+        vertex_index = 0
+        support = p1
+        if math.dot(math.neg(plane.normal), math.sub(p2, p1)) > 0.0 {
+            vertex_index = 1
+            support = p2
+        }
+        separation = math.plane_separation(plane, support)
+        if separation > max_separation {
+            max_vertex = vertex_index
+            max_face = i
+            max_separation = separation
+        }
+        i = i + 1
+    }
+    return SeparatingAxis { normal: planes[max_face].normal, separation: max_separation, index_a: max_face, index_b: max_vertex, kind: AXIS_FACE_A }
+}
+
+// The hull edge whose Gauss-map arc the capsule's circle crosses with the
+// most separation; index_a stays 0, index_b is the hull's half-edge.
+query_edge_direction_hull_and_capsule(h: *HullData, c: Capsule, capsule_transform: Transform) -> SeparatingAxis {
+    max_normal = math.vec3_zero()
+    max_separation = 0.0 - math.MAX_FLOAT
+    max_index_a = NULL_INDEX
+    max_index_b = NULL_INDEX
+    p_a = math.transform_point(capsule_transform, c.center1)
+    q_a = math.transform_point(capsule_transform, c.center2)
+    e_a = math.sub(q_a, p_a)
+    edges = hull.hull_edges(h)
+    points = hull.hull_points(h)
+    planes = hull.hull_planes(h)
+    squared_tolerance = PARALLEL_EDGE_TOL * PARALLEL_EDGE_TOL
+    index = 0
+    while index < h.edge_count {
+        twin = index + 1
+        q_b = points[edges[twin].origin]
+        u_b = planes[edges[index].face].normal
+        v_b = planes[edges[twin].face].normal
+        // An isolated edge is a circle through the origin on the Gauss map,
+        // so the overlap with the arc u-v is a plane test.
+        cba = math.dot(u_b, e_a)
+        dba = math.dot(v_b, e_a)
+        if cba * dba < 0.0 {
+            if math.max_float(cba * cba, dba * dba) >= squared_tolerance * math.length_squared(e_a) {
+                t = cba / (cba - dba)
+                axis = math.normalize(math.lerp(u_b, v_b, t))
+                separation = math.dot(axis, math.sub(q_a, q_b))
+                if separation > max_separation {
+                    max_normal = axis
+                    max_separation = separation
+                    max_index_a = 0
+                    max_index_b = index
+                }
+            }
+        }
+        index = index + 2
+    }
+    return SeparatingAxis { normal: max_normal, separation: max_separation, index_a: max_index_a, index_b: max_index_b, kind: AXIS_EDGE_PAIR }
+}
+
+build_hull_face_and_capsule_contact(m: *LocalManifold, hull_a: *HullData, capsule_b: Capsule, transform_b_to_a: Transform,
+                                    query: SeparatingAxis) -> bool {
+    planes = hull.hull_planes(hull_a)
+    ref_face = query.index_a
+    ref_plane = planes[ref_face]
+    scratch_ready()
+    segment = g_clip1 as ClipVertex[]
+    segment[0] = ClipVertex { position: math.transform_point(transform_b_to_a, capsule_b.center1), separation: 0.0,
+                              pair: make_feature_pair(FEATURE_SHAPE_A, 0, FEATURE_SHAPE_A, 0) }
+    segment[1] = ClipVertex { position: math.transform_point(transform_b_to_a, capsule_b.center2), separation: 0.0,
+                              pair: make_feature_pair(FEATURE_SHAPE_A, 1, FEATURE_SHAPE_A, 1) }
+    if clip_segment_to_hull_face(segment, hull_a, ref_face) < 2 { return false }
+    distance1 = math.plane_separation(ref_plane, segment[0].position)
+    distance2 = math.plane_separation(ref_plane, segment[1].position)
+    if distance1 <= SPECULATIVE_DISTANCE || distance2 <= SPECULATIVE_DISTANCE {
+        normal = ref_plane.normal
+        point1 = math.mul_sub(segment[0].position, 0.5 * (distance1 + capsule_b.radius), normal)
+        point2 = math.mul_sub(segment[1].position, 0.5 * (distance2 + capsule_b.radius), normal)
+        two_points(m, normal, point1, distance1 - capsule_b.radius, segment[0].pair, point2, distance2 - capsule_b.radius, segment[1].pair)
+        return true
+    }
+    return false
+}
+
+is_within_segments(r: SegmentDistanceResult) -> bool {
+    return 0.0 <= r.fraction1 && r.fraction1 <= 1.0 && 0.0 <= r.fraction2 && r.fraction2 <= 1.0
+}
+
+build_hull_and_capsule_edge_contact(m: *LocalManifold, capacity: int, hull_a: *HullData, capsule_b: Capsule,
+                                    transform_b_to_a: Transform, query: SeparatingAxis) -> bool {
+    if capacity < 1 { return false }
+    p_c = math.transform_point(transform_b_to_a, capsule_b.center1)
+    q_c = math.transform_point(transform_b_to_a, capsule_b.center2)
+    e_c = math.sub(q_c, p_c)
+    edges = hull.hull_edges(hull_a)
+    points = hull.hull_points(hull_a)
+    edge2 = query.index_b
+    p_h = points[edges[edge2].origin]
+    q_h = points[edges[edges[edge2].twin].origin]
+    e_h = math.sub(q_h, p_h)
+    normal = query.normal
+    result = math.line_distance(p_h, e_h, p_c, e_c)
+    if is_within_segments(result) == false { return false }
+    point = math.mul_sv(0.5, math.add(math.mul_sub(result.point1, capsule_b.radius, normal), result.point2))
+    separation = math.dot(normal, math.sub(result.point2, result.point1))
+    one_point(m, normal, point, separation - capsule_b.radius, make_feature_pair(FEATURE_SHAPE_A, query.index_a, FEATURE_SHAPE_B, query.index_b))
+    return true
+}
+
+// GJK for the shallow case, clipping the capsule to the support face when
+// it lies along it; the face and edge axes for the deep case.
+collide_hull_and_capsule(m: *LocalManifold, capacity: int, hull_a: *HullData, capsule_b: Capsule, transform_b_to_a: Transform,
+                         cache: *SimplexCache) {
+    m.point_count = 0
+    if capacity < 2 { return }
+    input = DistanceInput { proxy_a: hull.hull_proxy(hull_a), proxy_b: distance.shape_proxy((&capsule_b) as ptr, 2, 0.0),
+                            transform: transform_b_to_a, use_radii: false }
+    output = distance.shape_distance(&input, cache, null, 0)
+    if output.distance > capsule_b.radius + SPECULATIVE_DISTANCE {
+        clear_simplex_cache(cache)
+        return
+    }
+
+    if output.distance > 100.0 * FLOAT_EPSILON {
+        // Shallow.
+        planes = hull.hull_planes(hull_a)
+        delta = output.normal
+        ref_face = hull.find_hull_support_face(hull_a, delta)
+        ref_plane = planes[ref_face]
+        // Two points when the closest-point direction is nearly the face normal.
+        if math.abs_float(math.dot(ref_plane.normal, delta)) > 0.998 {
+            scratch_ready()
+            vertices_b = g_clip1 as ClipVertex[]
+            vertices_b[0] = ClipVertex { position: math.transform_point(transform_b_to_a, capsule_b.center1), separation: 0.0,
+                                         pair: make_feature_pair(FEATURE_SHAPE_A, 0, FEATURE_SHAPE_A, 0) }
+            vertices_b[1] = ClipVertex { position: math.transform_point(transform_b_to_a, capsule_b.center2), separation: 0.0,
+                                         pair: make_feature_pair(FEATURE_SHAPE_A, 1, FEATURE_SHAPE_A, 1) }
+            if clip_segment_to_hull_face(vertices_b, hull_a, ref_face) == 2 {
+                distance1 = math.plane_separation(ref_plane, vertices_b[0].position)
+                distance2 = math.plane_separation(ref_plane, vertices_b[1].position)
+                if distance1 <= capsule_b.radius + SPECULATIVE_DISTANCE || distance2 <= capsule_b.radius + SPECULATIVE_DISTANCE {
+                    normal = ref_plane.normal
+                    point1 = math.mul_sub(vertices_b[0].position, 0.5 * (capsule_b.radius + distance1), normal)
+                    point2 = math.mul_sub(vertices_b[1].position, 0.5 * (capsule_b.radius + distance2), normal)
+                    two_points(m, normal, point1, distance1 - capsule_b.radius, vertices_b[0].pair, point2, distance2 - capsule_b.radius, vertices_b[1].pair)
+                    return
+                }
+            }
+        }
+        point = math.mul_sv(0.5, math.add(math.mul_sub(output.point_a, capsule_b.radius, delta), output.point_b))
+        one_point(m, delta, point, output.distance - capsule_b.radius, feature_pair_single())
+        return
+    }
+
+    // Deep.
+    face_query = query_face_direction_hull_and_capsule(hull_a, capsule_b, transform_b_to_a)
+    if face_query.separation > capsule_b.radius { return }
+    edge_query = query_edge_direction_hull_and_capsule(hull_a, capsule_b, transform_b_to_a)
+    if edge_query.separation > capsule_b.radius { return }
+
+    face_separation = face_query.separation - capsule_b.radius
+    build_hull_face_and_capsule_contact(m, hull_a, capsule_b, transform_b_to_a, face_query)
+    if m.point_count == 2 {
+        face_separation = math.min_float(manifold_point(m, 0).separation, manifold_point(m, 1).separation)
+    }
+    if edge_query.index_a == NULL_INDEX { return }
+    // The face contact can be empty when it does not realise the axis of
+    // least penetration; the edge takes over then, or when clearly better.
+    edge_separation = edge_query.separation - capsule_b.radius
+    if m.point_count == 0 || edge_separation > face_separation + math.LINEAR_SLOP {
+        build_hull_and_capsule_edge_contact(m, capacity, hull_a, capsule_b, transform_b_to_a, edge_query)
+    }
+}
+
+// --- hull and hull -----------------------------------------------------------------------------
+
+// The separating axis test: A's faces against B's vertices, B's faces
+// against A's, then the edge pairs whose Gauss-map arcs cross (Gregorius),
+// with the axis from the arc intersection. Normals point from A to B in
+// frame A. With early_return the scan stops at the first axis past the
+// speculative distance. The reference's scalar path, exactly.
+compute_separating_axis(hull_a: *HullData, hull_b: *HullData, xf_b: Transform, early_return: bool) -> AxisQuery {
+    r = math.make_matrix_from_quat(xf_b.q)
+    inv_r = math.transpose(r)
+    res = AxisQuery {
+        face_a: SeparatingAxis { normal: math.vec3_zero(), separation: 0.0 - math.MAX_FLOAT, index_a: NULL_INDEX, index_b: NULL_INDEX, kind: AXIS_FACE_A },
+        face_b: SeparatingAxis { normal: math.vec3_zero(), separation: 0.0 - math.MAX_FLOAT, index_a: NULL_INDEX, index_b: NULL_INDEX, kind: AXIS_FACE_B },
+        edge: SeparatingAxis { normal: math.vec3_zero(), separation: 0.0 - math.MAX_FLOAT, index_a: NULL_INDEX, index_b: NULL_INDEX, kind: AXIS_EDGE_PAIR },
+        separated_feature: AXIS_INVALID
+    }
+    planes_a = hull.hull_planes(hull_a)
+    points_a = hull.hull_points(hull_a)
+    planes_b = hull.hull_planes(hull_b)
+    points_b = hull.hull_points(hull_b)
+    edges_a = hull.hull_edges(hull_a)
+    edges_b = hull.hull_edges(hull_b)
+
+    // A's face planes against B's vertices.
+    i = 0
+    while i < hull_a.face_count {
+        plane = planes_a[i]
+        direction = math.neg(math.mul_mv(inv_r, plane.normal))
+        plane_separation = math.dot(plane.normal, xf_b.p) - plane.offset
+        vertex_index = support_index(points_b, hull_b.vertex_count, direction)
+        support = math.dot(direction, points_b[vertex_index])
+        separation = plane_separation - support
+        if separation > res.face_a.separation {
+            res.face_a.normal = plane.normal
+            res.face_a.separation = separation
+            res.face_a.index_a = i
+            res.face_a.index_b = vertex_index
+            if separation > SPECULATIVE_DISTANCE && early_return {
+                res.separated_feature = AXIS_FACE_A
+                return res
+            }
+        }
+        i = i + 1
+    }
+
+    // B's face planes against A's vertices.
+    i = 0
+    while i < hull_b.face_count {
+        plane = planes_b[i]
+        direction = math.neg(math.mul_mv(r, plane.normal))
+        plane_separation = math.dot(direction, xf_b.p) - plane.offset
+        vertex_index = support_index(points_a, hull_a.vertex_count, direction)
+        support = math.dot(direction, points_a[vertex_index])
+        separation = plane_separation - support
+        if separation > res.face_b.separation {
+            res.face_b.normal = direction
+            res.face_b.separation = separation
+            res.face_b.index_a = vertex_index
+            res.face_b.index_b = i
+            if separation > SPECULATIVE_DISTANCE && early_return {
+                res.separated_feature = AXIS_FACE_B
+                return res
+            }
+        }
+        i = i + 1
+    }
+
+    // The edge pairs. B's data is taken into A's frame and negated once:
+    // C and D are its two face normals, DC its edge, bv0 its first vertex.
+    squared_tol = PARALLEL_EDGE_TOL * PARALLEL_EDGE_TOL
+    eps = 0.0 - 0.0001
+    j = 0
+    while j < hull_b.edge_count {
+        twin_b = j + 1
+        c = math.neg(math.mul_mv(r, planes_b[edges_b[j].face].normal))
+        d = math.neg(math.mul_mv(r, planes_b[edges_b[twin_b].face].normal))
+        bv0 = math.neg(math.add(math.mul_mv(r, points_b[edges_b[j].origin]), xf_b.p))
+        bv1 = math.neg(math.add(math.mul_mv(r, points_b[edges_b[twin_b].origin]), xf_b.p))
+        dc = math.sub(bv1, bv0)
+        i = 0
+        while i < hull_a.edge_count {
+            twin_a = i + 1
+            n0 = planes_a[edges_a[i].face].normal
+            n1 = planes_a[edges_a[twin_a].face].normal
+            av0 = points_a[edges_a[i].origin]
+            ad = math.sub(points_a[edges_a[twin_a].origin], av0)
+            cba = math.dot(c, ad)
+            dba = math.dot(d, ad)
+            if cba * dba < eps {
+                adc = math.dot(n0, dc)
+                bdc = math.dot(n1, dc)
+                if adc * bdc < eps && cba * bdc < eps {
+                    // Near-parallel edges are not an axis.
+                    max_cd = math.max_float(cba * cba, dba * dba)
+                    if max_cd > squared_tol * math.length_squared(ad) {
+                        t = (0.0 - cba) / (dba - cba)
+                        n = math.normalize(math.add(c, math.mul_sv(t, math.sub(d, c))))
+                        separation = 0.0 - math.dot(math.add(av0, bv0), n)
+                        if separation > res.edge.separation {
+                            res.edge.normal = n
+                            res.edge.separation = separation
+                            res.edge.index_a = i
+                            res.edge.index_b = j
+                            if separation > SPECULATIVE_DISTANCE && early_return {
+                                res.separated_feature = AXIS_EDGE_PAIR
+                                return res
+                            }
+                        }
+                    }
+                }
+            }
+            i = i + 2
+        }
+        j = j + 2
+    }
+    return res
+}
+
+// The vertex farthest along the direction.
+support_index(points: Vec3[], count: int, direction: Vec3) -> int {
+    best = 0
+    best_dot = math.dot(direction, points[0])
+    i = 1
+    while i < count {
+        d = math.dot(direction, points[i])
+        if d > best_dot {
+            best = i
+            best_dot = d
+        }
+        i = i + 1
+    }
+    return best
+}
+
+// The axis of least penetration among the three.
+get_best_axis(query: *AxisQuery) -> SeparatingAxis {
+    if query.face_a.separation > query.face_b.separation {
+        if query.edge.separation > query.face_a.separation { return query.edge }
+        return query.face_a
+    }
+    if query.edge.separation > query.face_b.separation { return query.edge }
+    return query.face_b
+}
+
+// The incident face of the hull, in frame A, as a clip polygon with each
+// vertex tagged by its edges; separations from the reference plane.
+build_polygon(out: ClipVertex[], transform: Transform, h: *HullData, inc_face: int, ref_plane: Plane) -> int {
+    faces = hull.hull_faces(h)
+    edges = hull.hull_edges(h)
+    points = hull.hull_points(h)
+    start = faces[inc_face]
+    edge_index = start
+    out_count = 0
+    m = math.make_matrix_from_quat(transform.q)
+    while true {
+        next_index = edges[edge_index].next
+        position = math.add(math.mul_mv(m, points[edges[next_index].origin]), transform.p)
+        out[out_count] = ClipVertex { position: position, separation: math.plane_separation(ref_plane, position),
+                                      pair: make_feature_pair(FEATURE_SHAPE_B, edge_index, FEATURE_SHAPE_B, next_index) }
+        out_count = out_count + 1
+        edge_index = next_index
+        if edge_index == start || out_count >= MAX_CLIP_POINTS { break }
+    }
+    return out_count
+}
+
+// The face contact with A's face as the reference: B's incident face
+// clipped to A's side planes, the points halfway between the surfaces,
+// reduced to four.
+build_face_a_contact(m: *LocalManifold, capacity: int, hull_a: *HullData, hull_b: *HullData, transform_b_to_a: Transform,
+                     query: SeparatingAxis, cache: *SATCache) -> bool {
+    faces_a = hull.hull_faces(hull_a)
+    edges_a = hull.hull_edges(hull_a)
+    planes_a = hull.hull_planes(hull_a)
+    points_a = hull.hull_points(hull_a)
+    ref_face = query.index_a
+    ref_plane = planes_a[ref_face]
+
+    ref_normal_in_b = math.inv_rotate_vector(transform_b_to_a.q, ref_plane.normal)
+    inc_face = find_incident_face(hull_b, ref_normal_in_b, query.index_b)
+
+    scratch_ready()
+    input = g_clip1 as ClipVertex[]
+    output = g_clip2 as ClipVertex[]
+    point_count = build_polygon(input, transform_b_to_a, hull_b, inc_face, ref_plane)
+
+    start = faces_a[ref_face]
+    edge_index = start
+    while true {
+        next_index = edges_a[edge_index].next
+        vertex1 = points_a[edges_a[edge_index].origin]
+        vertex2 = points_a[edges_a[next_index].origin]
+        tangent = math.normalize(math.sub(vertex2, vertex1))
+        binormal = math.cross(tangent, ref_plane.normal)
+        clip_plane = math.make_plane_from_normal_and_point(binormal, vertex1)
+        point_count = clip_polygon(output, input, point_count, clip_plane, edge_index, ref_plane)
+        swap = input
+        input = output
+        output = swap
+        if point_count < 3 {
+            clear_sat_cache(cache)
+            return false
+        }
+        edge_index = next_index
+        if edge_index == start { break }
+    }
+    point_count = math.min_int(point_count, MAX_CLIP_POINTS)
+
+    points = g_clip_points as LocalManifoldPoint[]
+    min_separation = math.MAX_FLOAT
+    m.normal = ref_plane.normal
+    i = 0
+    while i < point_count {
+        cp = input[i]
+        // Halfway between the surfaces, so the points stay put when the
+        // reference face swaps from A to B.
+        points[i] = LocalManifoldPoint { point: math.mul_sub(cp.position, 0.5 * cp.separation, ref_plane.normal),
+                                         separation: cp.separation, pair: cp.pair, triangle_index: NULL_INDEX }
+        min_separation = math.min_float(min_separation, cp.separation)
+        i = i + 1
+    }
+    if min_separation >= SPECULATIVE_DISTANCE {
+        clear_sat_cache(cache)
+        return false
+    }
+    reduce_manifold_points(m, capacity, points, point_count)
+    cache.separation = min_separation
+    cache.kind = AXIS_FACE_A
+    cache.index_a = query.index_a
+    cache.index_b = query.index_b
+    return true
+}
+
+// The same with B's face as the reference, built in B's frame and taken
+// back to A's, the normal flipped to point from A to B and the pairs flipped.
+build_face_b_contact(m: *LocalManifold, capacity: int, hull_a: *HullData, hull_b: *HullData, transform_b_to_a: Transform,
+                     query: SeparatingAxis, cache: *SATCache) -> bool {
+    transform_a_to_b = math.invert_transform(transform_b_to_a)
+    flipped = SeparatingAxis { normal: math.neg(query.normal), separation: query.separation, index_a: query.index_b,
+                               index_b: query.index_a, kind: AXIS_FACE_A }
+    if build_face_a_contact(m, capacity, hull_b, hull_a, transform_a_to_b, flipped, cache) == false {
+        clear_sat_cache(cache)
+        return false
+    }
+    matrix = math.make_matrix_from_quat(transform_b_to_a.q)
+    m.normal = math.neg(math.mul_mv(matrix, m.normal))
+    i = 0
+    while i < m.point_count {
+        p = manifold_point(m, i)
+        p.point = math.add(math.mul_mv(matrix, p.point), transform_b_to_a.p)
+        p.pair = flip_pair(p.pair)
+        set_manifold_point(m, i, p)
+        i = i + 1
+    }
+    cache.kind = AXIS_FACE_B
+    cache.index_a = query.index_a
+    cache.index_b = query.index_b
+    return true
+}
+
+// The edge contact: the closest points of the two edge lines, if within
+// both segments; halfway between them.
+build_edge_contact(m: *LocalManifold, hull_a: *HullData, hull_b: *HullData, transform_b_to_a: Transform,
+                   query: SeparatingAxis, cache: *SATCache) -> bool {
+    edges_a = hull.hull_edges(hull_a)
+    points_a = hull.hull_points(hull_a)
+    edges_b = hull.hull_edges(hull_b)
+    points_b = hull.hull_points(hull_b)
+    p_a = points_a[edges_a[query.index_a].origin]
+    q_a = points_a[edges_a[edges_a[query.index_a].twin].origin]
+    e_a = math.sub(q_a, p_a)
+    p_b = math.transform_point(transform_b_to_a, points_b[edges_b[query.index_b].origin])
+    q_b = math.transform_point(transform_b_to_a, points_b[edges_b[edges_b[query.index_b].twin].origin])
+    e_b = math.sub(q_b, p_b)
+    normal = query.normal
+    result = math.line_distance(p_a, e_a, p_b, e_b)
+    if is_within_segments(result) == false {
+        clear_sat_cache(cache)
+        return false
+    }
+    // From a cache this can have slid off the end.
+    separation = math.dot(normal, math.sub(result.point2, result.point1))
+    point = math.mul_sv(0.5, math.add(result.point1, result.point2))
+    one_point(m, normal, point, separation, make_feature_pair(FEATURE_SHAPE_A, query.index_a, FEATURE_SHAPE_B, query.index_b))
+    cache.separation = separation
+    cache.kind = AXIS_EDGE_PAIR
+    cache.index_a = query.index_a
+    cache.index_b = query.index_b
+    return true
+}
+
+// Two hulls, B in A's frame. The cache's last axis is tried first: if it
+// still separates, or still builds the same contact, that is the answer.
+// Otherwise the full axis test; a face contact by preference (a one-point
+// edge contact is weak for stacking), the edge contact when the face
+// finds nothing or the edge axis is clearly better.
+collide_hulls(m: *LocalManifold, capacity: int, hull_a: *HullData, hull_b: *HullData, transform_b_to_a: Transform, cache: *SATCache) {
+    m.point_count = 0
+    if capacity < 4 { return }
+    edges_a = hull.hull_edges(hull_a)
+    planes_a = hull.hull_planes(hull_a)
+    points_a = hull.hull_points(hull_a)
+    edges_b = hull.hull_edges(hull_b)
+    planes_b = hull.hull_planes(hull_b)
+    points_b = hull.hull_points(hull_b)
+    cache.hit = 0
+
+    if cache.kind == AXIS_FACE_A {
+        plane = planes_a[cache.index_a]
+        search_in_b = math.neg(math.inv_rotate_vector(transform_b_to_a.q, plane.normal))
+        vertex_index = hull.find_hull_support_vertex(hull_b, search_in_b)
+        support = math.transform_point(transform_b_to_a, points_b[vertex_index])
+        separation = math.plane_separation(plane, support)
+        if separation >= SPECULATIVE_DISTANCE {
+            cache.hit = 1
+            return
+        }
+        face_query = SeparatingAxis { normal: plane.normal, separation: 0.0, index_a: cache.index_a, index_b: vertex_index, kind: AXIS_FACE_A }
+        local_cache = empty_sat_cache()
+        touching = build_face_a_contact(m, capacity, hull_a, hull_b, transform_b_to_a, face_query, &local_cache)
+        if touching && math.abs_float(cache.separation - local_cache.separation) < math.LINEAR_SLOP {
+            cache.hit = 1
+            return
+        }
+    } else if cache.kind == AXIS_FACE_B {
+        plane = planes_b[cache.index_b]
+        search_in_a = math.neg(math.rotate_vector(transform_b_to_a.q, plane.normal))
+        vertex_index = hull.find_hull_support_vertex(hull_a, search_in_a)
+        support = math.inv_transform_point(transform_b_to_a, points_a[vertex_index])
+        separation = math.plane_separation(plane, support)
+        if separation >= SPECULATIVE_DISTANCE {
+            cache.hit = 1
+            return
+        }
+        face_query = SeparatingAxis { normal: math.neg(plane.normal), separation: 0.0, index_a: vertex_index, index_b: cache.index_b, kind: AXIS_FACE_B }
+        local_cache = empty_sat_cache()
+        touching = build_face_b_contact(m, capacity, hull_a, hull_b, transform_b_to_a, face_query, &local_cache)
+        if touching && math.abs_float(cache.separation - local_cache.separation) < math.LINEAR_SLOP {
+            cache.hit = 1
+            return
+        }
+    } else if cache.kind == AXIS_EDGE_PAIR {
+        index_a = cache.index_a
+        p_a = points_a[edges_a[index_a].origin]
+        q_a = points_a[edges_a[index_a + 1].origin]
+        e_a = math.sub(q_a, p_a)
+        u_a = planes_a[edges_a[index_a].face].normal
+        v_a = planes_a[edges_a[index_a + 1].face].normal
+        index_b = cache.index_b
+        p_b = math.transform_point(transform_b_to_a, points_b[edges_b[index_b].origin])
+        q_b = math.transform_point(transform_b_to_a, points_b[edges_b[index_b + 1].origin])
+        e_b = math.sub(q_b, p_b)
+        u_b = math.rotate_vector(transform_b_to_a.q, planes_b[edges_b[index_b].face].normal)
+        v_b = math.rotate_vector(transform_b_to_a.q, planes_b[edges_b[index_b + 1].face].normal)
+        cba = math.dot(u_b, e_a)
+        dba = math.dot(v_b, e_a)
+        adc = 0.0 - math.dot(u_a, e_b)
+        bdc = 0.0 - math.dot(v_a, e_b)
+        if cba * dba < 0.0 && adc * bdc < 0.0 && cba * bdc > 0.0 {
+            squared_tolerance = PARALLEL_EDGE_TOL * PARALLEL_EDGE_TOL
+            if math.max_float(cba * cba, dba * dba) >= squared_tolerance * math.length_squared(e_a) {
+                t = cba / (cba - dba)
+                axis = math.normalize(math.lerp(u_b, v_b, t))
+                separation = math.dot(axis, math.sub(q_a, q_b))
+                if separation > SPECULATIVE_DISTANCE {
+                    cache.hit = 1
+                    return
+                }
+                edge_query = SeparatingAxis { normal: math.neg(axis), separation: 0.0, index_a: cache.index_a, index_b: cache.index_b, kind: AXIS_EDGE_PAIR }
+                local_cache = empty_sat_cache()
+                touching = build_edge_contact(m, hull_a, hull_b, transform_b_to_a, edge_query, &local_cache)
+                if touching && math.abs_float(cache.separation - local_cache.separation) < math.LINEAR_SLOP {
+                    cache.hit = 1
+                    return
+                }
+            }
+        }
+    } else if cache.kind == AXIS_MANUAL_FACE_A {
+        axis_query = compute_separating_axis(hull_a, hull_b, transform_b_to_a, false)
+        build_face_a_contact(m, capacity, hull_a, hull_b, transform_b_to_a, axis_query.face_a, cache)
+        return
+    } else if cache.kind == AXIS_MANUAL_FACE_B {
+        axis_query = compute_separating_axis(hull_a, hull_b, transform_b_to_a, false)
+        build_face_b_contact(m, capacity, hull_a, hull_b, transform_b_to_a, axis_query.face_b, cache)
+        return
+    } else if cache.kind == AXIS_MANUAL_EDGE_PAIR {
+        axis_query = compute_separating_axis(hull_a, hull_b, transform_b_to_a, false)
+        if axis_query.edge.index_a != NULL_INDEX {
+            build_edge_contact(m, hull_a, hull_b, transform_b_to_a, axis_query.edge, cache)
+        }
+        return
+    }
+
+    m.point_count = 0
+    clear_sat_cache(cache)
+
+    axis_query = compute_separating_axis(hull_a, hull_b, transform_b_to_a, true)
+    if axis_query.separated_feature != AXIS_INVALID {
+        cache.kind = axis_query.separated_feature
+        if axis_query.separated_feature == AXIS_FACE_A {
+            cache.separation = axis_query.face_a.separation
+            cache.index_a = axis_query.face_a.index_a
+            cache.index_b = axis_query.face_a.index_b
+        } else if axis_query.separated_feature == AXIS_FACE_B {
+            cache.separation = axis_query.face_b.separation
+            cache.index_a = axis_query.face_b.index_a
+            cache.index_b = axis_query.face_b.index_b
+        } else {
+            cache.separation = axis_query.edge.separation
+            cache.index_a = axis_query.edge.index_a
+            cache.index_b = axis_query.edge.index_b
+        }
+        return
+    }
+
+    if axis_query.face_a.separation > axis_query.face_b.separation {
+        build_face_a_contact(m, capacity, hull_a, hull_b, transform_b_to_a, axis_query.face_a, cache)
+    } else {
+        build_face_b_contact(m, capacity, hull_a, hull_b, transform_b_to_a, axis_query.face_b, cache)
+    }
+
+    edge_query = axis_query.edge
+    if edge_query.index_a == NULL_INDEX { return }
+
+    clip_separation = cache.separation
+    if m.point_count == 0 || edge_query.separation > clip_separation + math.LINEAR_SLOP {
+        // The edge contact into its own point, kept only if it built one.
+        edge_block = core.alloc(sizeof(LocalManifoldPoint))
+        edge_manifold = local_manifold(edge_block)
+        edge_cache = empty_sat_cache()
+        build_edge_contact(&edge_manifold, hull_a, hull_b, transform_b_to_a, edge_query, &edge_cache)
+        if edge_manifold.point_count == 1 {
+            m.normal = edge_manifold.normal
+            m.point_count = 1
+            set_manifold_point(m, 0, manifold_point(&edge_manifold, 0))
+            copy_sat_cache(cache, edge_cache)
+        }
+        core.free_bytes(edge_block, sizeof(LocalManifoldPoint))
+    }
+}

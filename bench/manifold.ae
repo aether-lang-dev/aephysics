@@ -1,0 +1,114 @@
+// The contact manifolds on the same scenes as bench/manifold_box3d.c:
+// 20,000 hull-hull collisions of two rotated boxes along a sweep through
+// overlap, cold cache; the same 20,000 with the cache carried between
+// poses; 20,000 hull-capsule and 20,000 hull-sphere collisions along a
+// sweep. Single thread, wall time per phase, with the point counts and
+// separation sums as the checksum.
+import std.string
+import std.os
+import aephysics.math
+import aephysics.distance
+import aephysics.hull
+import aephysics.manifold
+
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+extern sin(x: float) -> float
+extern cos(x: float) -> float
+
+clock() -> long { return os.now_monotonic_ns() }
+ms(ns: long) -> float { return (ns as float) / 1000000.0 }
+
+const N = 20000
+
+exact_quat(axis: Vec3, radians: float) -> Quat {
+    h = 0.5 * radians
+    return Quat { v: math.mul_sv(sin(h), axis), s: cos(h) }
+}
+
+sum_separations(m: *LocalManifold) -> float {
+    s = 0.0
+    k = 0
+    while k < m.point_count {
+        s = s + manifold.manifold_point(m, k).separation
+        k = k + 1
+    }
+    return s
+}
+
+main() {
+    hull_a = hull.make_box_hull(1.0, 0.5, 0.75)
+    hull_b = hull.make_box_hull(0.6, 0.8, 0.4)
+    axis = math.normalize(math.vec3(1.0, 2.0, 0.5))
+    points = calloc(8, sizeof(LocalManifoldPoint))
+
+    points_cold = 0
+    sep_cold = 0.0
+    t0 = clock()
+    i = 0
+    while i < N {
+        t = (i as float) / (N as float)
+        xf = Transform { p: math.vec3(2.2 - 2.0 * t, 0.3 * sin(4.0 * t), 0.4 * cos(2.0 * t)), q: exact_quat(axis, 3.0 * t) }
+        m = manifold.local_manifold(points)
+        cache = manifold.empty_sat_cache()
+        manifold.collide_hulls(&m, 8, hull_a, hull_b, xf, &cache)
+        points_cold = points_cold + m.point_count
+        sep_cold = sep_cold + sum_separations(&m)
+        i = i + 1
+    }
+    t1 = clock()
+
+    points_warm = 0
+    hits = 0
+    sep_warm = 0.0
+    warm = manifold.empty_sat_cache()
+    i = 0
+    while i < N {
+        t = (i as float) / (N as float)
+        xf = Transform { p: math.vec3(2.2 - 2.0 * t, 0.3 * sin(4.0 * t), 0.4 * cos(2.0 * t)), q: exact_quat(axis, 3.0 * t) }
+        m = manifold.local_manifold(points)
+        manifold.collide_hulls(&m, 8, hull_a, hull_b, xf, &warm)
+        points_warm = points_warm + m.point_count
+        hits = hits + warm.hit
+        sep_warm = sep_warm + sum_separations(&m)
+        i = i + 1
+    }
+    t2 = clock()
+
+    points_capsule = 0
+    sep_capsule = 0.0
+    i = 0
+    while i < N {
+        t = (i as float) / (N as float)
+        c = manifold.capsule(math.vec3(0.0 - 0.4, 0.0, 0.0), math.vec3(0.4, 0.0, 0.0), 0.15)
+        xf = Transform { p: math.vec3(0.3 * sin(3.0 * t), 1.4 - 1.6 * t, 0.2), q: exact_quat(axis, 2.0 * t) }
+        m = manifold.local_manifold(points)
+        simplex_cache = distance.empty_cache()
+        manifold.collide_hull_and_capsule(&m, 8, hull_a, c, xf, &simplex_cache)
+        points_capsule = points_capsule + m.point_count
+        sep_capsule = sep_capsule + sum_separations(&m)
+        i = i + 1
+    }
+    t3 = clock()
+
+    points_sphere = 0
+    sep_sphere = 0.0
+    i = 0
+    while i < N {
+        t = (i as float) / (N as float)
+        s = manifold.sphere(math.vec3_zero(), 0.2)
+        xf = Transform { p: math.vec3(0.5 * sin(5.0 * t), 1.4 - 1.6 * t, 0.3 * cos(3.0 * t)), q: math.quat_identity() }
+        m = manifold.local_manifold(points)
+        simplex_cache = distance.empty_cache()
+        manifold.collide_hull_and_sphere(&m, 8, hull_a, s, xf, &simplex_cache)
+        points_sphere = points_sphere + m.point_count
+        sep_sphere = sep_sphere + sum_separations(&m)
+        i = i + 1
+    }
+    t4 = clock()
+
+    println("aephysics manifold: ${N} hull-hull cold ${ms(t1 - t0)} ms (${points_cold} points, sum ${sep_cold}), warm ${ms(t2 - t1)} ms (${points_warm} points, sum ${sep_warm}, ${hits} cache hits), ${N} hull-capsule ${ms(t3 - t2)} ms (${points_capsule} points, sum ${sep_capsule}), ${N} hull-sphere ${ms(t4 - t3)} ms (${points_sphere} points, sum ${sep_sphere})")
+    free(points)
+    hull.destroy_hull(hull_a)
+    hull.destroy_hull(hull_b)
+}
