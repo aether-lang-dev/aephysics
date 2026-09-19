@@ -1,0 +1,311 @@
+// aephysics.distance against the reference's (Box3D's) test_distance.c
+// (the segment distance, the square against a segment, the shape cast,
+// the time of impact), and beyond it: sphere and capsule proxies against
+// boxes at analytic distances, overlap, the warm-started cache agreeing
+// with a cold one over a sweep of poses, witness points inside their
+// shapes and as far apart as the distance, rotated sweeps in the time of
+// impact, and the hull's overlap and shape cast through it.
+
+import std.string
+import aephysics.math
+import aephysics.core
+import aephysics.distance
+import aephysics.hull
+
+extern calloc(count: int, size: int) -> ptr
+extern exit(code: int)
+extern free(p: ptr)
+extern sin(x: float) -> float
+extern cos(x: float) -> float
+extern sqrt(x: float) -> float
+
+var failures = 0
+var checks = 0
+
+ensure(name: string, ok: bool) {
+    checks = checks + 1
+    if !ok {
+        println("distance: FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+small(name: string, value: float, tolerance: float) {
+    ensure("${name} (${value})", math.abs_float(value) < tolerance)
+}
+
+const FLT_EPSILON = 0.00000011920929
+
+// A box of half widths as a point cloud.
+box_points(hx: float, hy: float, hz: float) -> ptr {
+    block = calloc(8, sizeof(Vec3))
+    p = block as Vec3[]
+    i = 0
+    while i < 8 {
+        x = hx
+        y = hy
+        z = hz
+        if (i & 1) != 0 { x = 0.0 - hx }
+        if (i & 2) != 0 { y = 0.0 - hy }
+        if (i & 4) != 0 { z = 0.0 - hz }
+        p[i] = math.vec3(x, y, z)
+        i = i + 1
+    }
+    return block
+}
+
+points4(x0: float, y0: float, x1: float, y1: float, x2: float, y2: float, x3: float, y3: float) -> ptr {
+    block = calloc(4, sizeof(Vec3))
+    p = block as Vec3[]
+    p[0] = math.vec3(x0, y0, 0.0)
+    p[1] = math.vec3(x1, y1, 0.0)
+    p[2] = math.vec3(x2, y2, 0.0)
+    p[3] = math.vec3(x3, y3, 0.0)
+    return block
+}
+
+points2(x0: float, y0: float, x1: float, y1: float) -> ptr {
+    block = calloc(2, sizeof(Vec3))
+    p = block as Vec3[]
+    p[0] = math.vec3(x0, y0, 0.0)
+    p[1] = math.vec3(x1, y1, 0.0)
+    return block
+}
+
+exact_quat(axis: Vec3, radians: float) -> Quat {
+    half = 0.5 * radians
+    return Quat { v: math.mul_sv(sin(half), axis), s: cos(half) }
+}
+
+// The reference's four.
+test_reference() {
+    r = math.segment_distance(math.vec3(0.0 - 1.0, 0.0 - 1.0, 0.0), math.vec3(0.0 - 1.0, 1.0, 0.0),
+                              math.vec3(2.0, 0.0, 0.0), math.vec3(1.0, 0.0, 0.0))
+    small("segment: fraction1", r.fraction1 - 0.5, FLT_EPSILON)
+    small("segment: fraction2", r.fraction2 - 1.0, FLT_EPSILON)
+    small("segment: point1 x", r.point1.x + 1.0, FLT_EPSILON)
+    small("segment: point1 y", r.point1.y, FLT_EPSILON)
+    small("segment: point2 x", r.point2.x - 1.0, FLT_EPSILON)
+    small("segment: point2 y", r.point2.y, FLT_EPSILON)
+
+    vas = points4(0.0 - 1.0, 0.0 - 1.0, 1.0, 0.0 - 1.0, 1.0, 1.0, 0.0 - 1.0, 1.0)
+    vbs = points2(2.0, 0.0 - 1.0, 2.0, 1.0)
+    input = DistanceInput { proxy_a: distance.shape_proxy(vas, 4, 0.0), proxy_b: distance.shape_proxy(vbs, 2, 0.0),
+                            transform: math.transform_identity(), use_radii: false }
+    cache = distance.empty_cache()
+    output = distance.shape_distance(&input, &cache, null, 0)
+    small("shape distance: the square to the segment", output.distance - 1.0, FLT_EPSILON)
+    ensure("shape distance: the cache was written", cache.count >= 1)
+
+    cast = ShapeCastPairInput { proxy_a: distance.shape_proxy(vas, 4, 0.0), proxy_b: distance.shape_proxy(vbs, 2, 0.0),
+                                transform: math.transform_identity(), translation_b: math.vec3(0.0 - 2.0, 0.0, 0.0),
+                                max_fraction: 1.0, can_encroach: false }
+    c = distance.shape_cast(&cast)
+    ensure("shape cast: hit", c.hit)
+    small("shape cast: fraction", c.fraction - 0.5, 0.005)
+    small("shape cast: normal x", c.normal.x - 1.0, 0.001)
+
+    toi = TOIInput { proxy_a: distance.shape_proxy(vas, 4, 0.0), proxy_b: distance.shape_proxy(vbs, 2, 0.0),
+                     sweep_a: Sweep { local_center: math.vec3_zero(), c1: math.vec3_zero(), c2: math.vec3_zero(), q1: math.quat_identity(), q2: math.quat_identity() },
+                     sweep_b: Sweep { local_center: math.vec3_zero(), c1: math.vec3_zero(), c2: math.vec3(0.0 - 2.0, 0.0, 0.0), q1: math.quat_identity(), q2: math.quat_identity() },
+                     max_fraction: 1.0 }
+    t = distance.time_of_impact(&toi)
+    ensure("toi: hit", t.state == distance.TOI_STATE_HIT)
+    small("toi: fraction", t.fraction - 0.5, 0.005)
+    free(vas)
+    free(vbs)
+}
+
+// Spheres and capsules against boxes, with the radii applied.
+test_rounded() {
+    box = box_points(1.0, 1.0, 1.0)
+    point = calloc(1, sizeof(Vec3))
+    pp = point as Vec3[]
+    pp[0] = math.vec3_zero()
+    // A sphere of radius 0.5 centred 3 m along x from a unit box: 1.5 m apart.
+    input = DistanceInput { proxy_a: distance.shape_proxy(box, 8, 0.0), proxy_b: distance.shape_proxy(point, 1, 0.5),
+                            transform: Transform { p: math.vec3(3.0, 0.0, 0.0), q: math.quat_identity() }, use_radii: true }
+    cache = distance.empty_cache()
+    o = distance.shape_distance(&input, &cache, null, 0)
+    small("sphere-box: distance", o.distance - 1.5, 0.00001)
+    small("sphere-box: normal x", o.normal.x - 1.0, 0.00001)
+    small("sphere-box: point on the box face", o.point_a.x - 1.0, 0.00001)
+    small("sphere-box: point on the sphere", o.point_b.x - 2.5, 0.00001)
+
+    // Along a diagonal the closest feature is a corner.
+    input.transform.p = math.vec3(3.0, 3.0, 3.0)
+    cache = distance.empty_cache()
+    o = distance.shape_distance(&input, &cache, null, 0)
+    small("sphere-box: corner distance", o.distance - (sqrt(12.0) - 0.5), 0.00001)
+    small("sphere-box: corner witness", o.point_a.x + o.point_a.y + o.point_a.z - 3.0, 0.00001)
+
+    // Overlapping: distance zero, no normal.
+    input.transform.p = math.vec3(0.5, 0.0, 0.0)
+    cache = distance.empty_cache()
+    o = distance.shape_distance(&input, &cache, null, 0)
+    ensure("sphere-box: overlap is zero", o.distance == 0.0)
+
+    // A capsule (radius 0.25) lying along z, 2 m above the box: 0.75 m apart.
+    capsule = calloc(2, sizeof(Vec3))
+    cp = capsule as Vec3[]
+    cp[0] = math.vec3(0.0, 0.0, 0.0 - 1.0)
+    cp[1] = math.vec3(0.0, 0.0, 1.0)
+    input.proxy_b = distance.shape_proxy(capsule, 2, 0.25)
+    input.transform.p = math.vec3(0.0, 3.0, 0.0)
+    cache = distance.empty_cache()
+    o = distance.shape_distance(&input, &cache, null, 0)
+    small("capsule-box: distance", o.distance - 1.75, 0.00001)
+    small("capsule-box: normal y", o.normal.y - 1.0, 0.00001)
+    // Without radii the distance is between the cores.
+    input.use_radii = false
+    cache = distance.empty_cache()
+    o = distance.shape_distance(&input, &cache, null, 0)
+    small("capsule-box: core distance", o.distance - 2.0, 0.00001)
+    free(box)
+    free(point)
+    free(capsule)
+}
+
+// Two rotated boxes over a sweep of poses: the warm cache agrees with a
+// cold one, the witness points are as far apart as the distance and lie
+// in their shapes, and no direction separates the shapes by more than it.
+test_sweep_and_cache() {
+    a = box_points(1.0, 0.5, 0.75)
+    b = box_points(0.6, 0.8, 0.4)
+    ap = a as Vec3[]
+    bp = b as Vec3[]
+    warm = distance.empty_cache()
+    worst = 0.0
+    hits = 0
+    step = 0
+    while step < 200 {
+        t = (step as float) / 200.0
+        angle = 3.0 * t
+        pos = math.vec3(3.0 - 4.0 * t, 0.5 * sin(4.0 * t), 1.5 * cos(2.0 * t))
+        xf = Transform { p: pos, q: exact_quat(math.normalize(math.vec3(1.0, 2.0, 0.5)), angle) }
+        input = DistanceInput { proxy_a: distance.shape_proxy(a, 8, 0.0), proxy_b: distance.shape_proxy(b, 8, 0.0),
+                                transform: xf, use_radii: false }
+        cold = distance.empty_cache()
+        o1 = distance.shape_distance(&input, &cold, null, 0)
+        o2 = distance.shape_distance(&input, &warm, null, 0)
+        d = math.abs_float(o1.distance - o2.distance)
+        if d > worst { worst = d }
+        ensure("sweep: iterations bounded", o1.iterations < distance.MAX_GJK_ITERATIONS && o2.iterations < distance.MAX_GJK_ITERATIONS)
+        if o1.distance > 0.0 {
+            hits = hits + 1
+            small("sweep: witnesses as far apart as the distance", math.distance(o1.point_a, o1.point_b) - o1.distance, 0.000001)
+            ensure("sweep: the normal is unit", math.is_normalized(o1.normal))
+            // The witness on A is inside A's box (with a little slack).
+            ensure("sweep: witness a inside a", math.abs_float(o1.point_a.x) <= 1.0001 && math.abs_float(o1.point_a.y) <= 0.5001 && math.abs_float(o1.point_a.z) <= 0.7501)
+            // The witness on B, taken back to B's frame, is inside B's box.
+            local_b = math.inv_transform_point(xf, o1.point_b)
+            ensure("sweep: witness b inside b", math.abs_float(local_b.x) <= 0.6001 && math.abs_float(local_b.y) <= 0.8001 && math.abs_float(local_b.z) <= 0.4001)
+            // The separation along the normal is the distance; along any axis, no more.
+            k = 0
+            while k < 8 {
+                axis = math.normalize(math.vec3(cos(1.7 * (k as float)), sin(2.3 * (k as float)), cos(0.9 * (k as float) + 1.0)))
+                ia = distance.get_proxy_support(input.proxy_a, axis)
+                ib = distance.get_proxy_support(input.proxy_b, math.inv_rotate_vector(xf.q, math.neg(axis)))
+                separation = math.dot(math.sub(math.transform_point(xf, bp[ib]), ap[ia]), axis)
+                ensure("sweep: no axis separates more than the distance", separation <= o1.distance + 0.000001)
+                k = k + 1
+            }
+        }
+        step = step + 1
+    }
+    small("sweep: warm and cold agree (worst ${worst})", worst, 0.0001)
+    ensure("sweep: some poses were apart (${hits})", hits > 50 && hits < 200)
+    free(a)
+    free(b)
+}
+
+// The time of impact of a rotating box falling on a box: the fraction
+// where they come within a slop, and the shapes are apart just before it
+// and not far apart at it.
+test_toi_rotating() {
+    a = box_points(2.0, 0.25, 2.0)
+    b = box_points(0.5, 0.5, 0.5)
+    sweep_a = Sweep { local_center: math.vec3_zero(), c1: math.vec3_zero(), c2: math.vec3_zero(), q1: math.quat_identity(), q2: math.quat_identity() }
+    q2 = exact_quat(math.vec3_axis_z(), 1.2)
+    sweep_b = Sweep { local_center: math.vec3_zero(), c1: math.vec3(0.0, 4.0, 0.0), c2: math.vec3(0.5, 0.0 - 1.0, 0.0), q1: math.quat_identity(), q2: q2 }
+    input = TOIInput { proxy_a: distance.shape_proxy(a, 8, 0.0), proxy_b: distance.shape_proxy(b, 8, 0.0),
+                       sweep_a: sweep_a, sweep_b: sweep_b, max_fraction: 1.0 }
+    t = distance.time_of_impact(&input)
+    ensure("toi rotating: hit", t.state == distance.TOI_STATE_HIT)
+    ensure("toi rotating: fraction in range (${t.fraction})", t.fraction > 0.4 && t.fraction < 0.8)
+    // At the fraction the shapes are within the target distance; a little earlier they are apart.
+    xf_a = distance.get_sweep_transform(sweep_a, t.fraction)
+    xf_b = distance.get_sweep_transform(sweep_b, t.fraction)
+    d_input = DistanceInput { proxy_a: input.proxy_a, proxy_b: input.proxy_b, transform: math.inv_mul_transforms(xf_a, xf_b), use_radii: false }
+    cache = distance.empty_cache()
+    at = distance.shape_distance(&d_input, &cache, null, 0)
+    ensure("toi rotating: within the slop at impact (${at.distance})", at.distance <= 1.25 * math.LINEAR_SLOP)
+    xf_b = distance.get_sweep_transform(sweep_b, t.fraction - 0.05)
+    d_input.transform = math.inv_mul_transforms(xf_a, xf_b)
+    cache = distance.empty_cache()
+    before = distance.shape_distance(&d_input, &cache, null, 0)
+    ensure("toi rotating: apart before impact (${before.distance})", before.distance > math.LINEAR_SLOP)
+    small("toi rotating: the normal points up", t.normal.y - 1.0, 0.01)
+
+    // A sweep that misses is separated at the end.
+    sweep_b.c2 = math.vec3(0.0, 3.0, 0.0)
+    input.sweep_b = sweep_b
+    m = distance.time_of_impact(&input)
+    ensure("toi miss: separated", m.state == distance.TOI_STATE_SEPARATED)
+    small("toi miss: fraction 1", m.fraction - 1.0, 0.000001)
+
+    // A sweep that starts overlapped says so.
+    sweep_b.c1 = math.vec3(0.0, 0.5, 0.0)
+    input.sweep_b = sweep_b
+    ov = distance.time_of_impact(&input)
+    ensure("toi overlapped: overlapped", ov.state == distance.TOI_STATE_OVERLAPPED)
+    free(a)
+    free(b)
+}
+
+// The hull's overlap and shape cast run through the distance layer.
+test_hull_queries() {
+    h = hull.make_box_hull(1.0, 1.0, 1.0)
+    point = calloc(1, sizeof(Vec3))
+    pp = point as Vec3[]
+    pp[0] = math.vec3(3.0, 0.0, 0.0)
+    sphere = distance.shape_proxy(point, 1, 0.5)
+    ensure("hull overlap: apart", hull.overlap_hull(h, math.transform_identity(), sphere) == false)
+    pp[0] = math.vec3(1.4, 0.0, 0.0)
+    ensure("hull overlap: touching", hull.overlap_hull(h, math.transform_identity(), sphere))
+    // The hull moved 2 m along x is 0.1 m from the sphere: apart.
+    pp[0] = math.vec3(3.6, 0.0, 0.0)
+    ensure("hull overlap: transformed apart", hull.overlap_hull(h, Transform { p: math.vec3(2.0, 0.0, 0.0), q: math.quat_identity() }, sphere) == false)
+    pp[0] = math.vec3(3.49, 0.0, 0.0)
+    ensure("hull overlap: transformed touching", hull.overlap_hull(h, Transform { p: math.vec3(2.0, 0.0, 0.0), q: math.quat_identity() }, sphere))
+
+    pp[0] = math.vec3(4.0, 0.0, 0.0)
+    c = hull.shape_cast_hull(h, sphere, math.vec3(0.0 - 6.0, 0.0, 0.0), 1.0, false)
+    ensure("hull cast: hit", c.hit)
+    // The sphere surface reaches the face after 2.5 m of 6: fraction ~0.417, minus the slop.
+    small("hull cast: fraction", c.fraction - 2.5 / 6.0, 0.002)
+    small("hull cast: normal", c.normal.x - 1.0, 0.001)
+    small("hull cast: point on the face", c.point.x - 1.0, 0.01)
+    miss = hull.shape_cast_hull(h, sphere, math.vec3(0.0, 6.0, 0.0), 1.0, false)
+    ensure("hull cast: miss", miss.hit == false)
+    free(point)
+    hull.destroy_hull(h)
+}
+
+main() {
+    before = core.alloc_count()
+    test_reference()
+    test_rounded()
+    test_sweep_and_cache()
+    test_toi_rotating()
+    test_hull_queries()
+    ensure("every counted allocation was freed", core.alloc_count() == before && core.bytes_in_use() == 0)
+
+    println("distance: ${checks} checks")
+    if failures == 0 {
+        println("distance: all checks passed")
+    } else {
+        println("distance: ${failures} failure(s)")
+        exit(1)
+    }
+}

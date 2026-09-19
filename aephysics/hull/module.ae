@@ -22,9 +22,10 @@
 import std.string
 import aephysics.math
 import aephysics.core
+import aephysics.distance
 
 exports (
-    HullData, HalfEdge, MassData, CastOutput, ShapeExtent, Point2D,
+    HullData, HalfEdge, MassData, ShapeExtent, Point2D,
     MAX_HULL_VERTICES, MAX_HULL_FACES, MAX_HULL_EDGES, HULL_VERSION, NULL_INDEX,
     hull_vertices, hull_points, hull_edges, hull_planes, hull_faces,
     create_hull, destroy_hull, clone_hull, clone_and_transform_hull, is_valid_hull,
@@ -34,6 +35,7 @@ exports (
     make_scaled_box_hull, scale_box,
     find_hull_support_vertex, find_hull_support_face,
     compute_hull_mass, compute_hull_aabb, compute_swept_hull_aabb, ray_cast_hull,
+    overlap_hull, shape_cast_hull, hull_proxy,
     compute_hull_extent, compute_hull_projected_area,
     hull_2d, simplify_hull_2d
 )
@@ -92,16 +94,6 @@ struct MassData {
     mass: float
     center: Vec3
     inertia: Matrix3
-}
-
-// A ray or shape cast's result.
-struct CastOutput {
-    normal: Vec3
-    point: Vec3
-    fraction: float
-    iterations: int
-    triangle_index: int
-    hit: bool
 }
 
 // The smallest sphere at the origin inside the shape and the largest box around it.
@@ -1885,7 +1877,7 @@ compute_swept_hull_aabb(h: *HullData, xf1: Transform, xf2: Transform) -> AABB {
 // the hull's planes: the entering face is the hit; a ray starting inside
 // hits at its origin with no normal.
 ray_cast_hull(h: *HullData, origin: Vec3, translation: Vec3, max_fraction: float) -> CastOutput {
-    output = CastOutput { normal: math.vec3_zero(), point: math.vec3_zero(), fraction: 0.0, iterations: 0, triangle_index: NULL_INDEX, hit: false }
+    output = distance.empty_cast_output()
     lower = 0.0
     upper = max_fraction
     best_face = NULL_INDEX
@@ -1920,6 +1912,28 @@ ray_cast_hull(h: *HullData, origin: Vec3, translation: Vec3, max_fraction: float
     }
     output.hit = true
     return output
+}
+
+// The hull's points as a GJK proxy, with no radius.
+hull_proxy(h: *HullData) -> ShapeProxy {
+    return distance.shape_proxy((h as ptr) + h.point_offset, h.vertex_count, 0.0)
+}
+
+// Whether the hull, under its transform, comes within the overlap slop
+// of a proxy given in world space.
+overlap_hull(h: *HullData, shape_transform: Transform, proxy: ShapeProxy) -> bool {
+    input = DistanceInput { proxy_a: hull_proxy(h), proxy_b: proxy,
+                            transform: math.inv_mul_transforms(shape_transform, math.transform_identity()), use_radii: true }
+    cache = distance.empty_cache()
+    output = distance.shape_distance(&input, &cache, null, 0)
+    return output.distance < 0.1 * math.LINEAR_SLOP
+}
+
+// A proxy swept against the hull, in the hull's frame.
+shape_cast_hull(h: *HullData, proxy: ShapeProxy, translation: Vec3, max_fraction: float, can_encroach: bool) -> CastOutput {
+    input = ShapeCastPairInput { proxy_a: hull_proxy(h), proxy_b: proxy, transform: math.transform_identity(),
+                                 translation_b: translation, max_fraction: max_fraction, can_encroach: can_encroach }
+    return distance.shape_cast(&input)
 }
 
 compute_hull_extent(h: *HullData, origin: Vec3) -> ShapeExtent {
