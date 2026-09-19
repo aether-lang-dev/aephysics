@@ -15,10 +15,14 @@ jolt_defines="$(grep -m1 'DEFINES = ' reference/jolt/out/build.ninja | sed 's/^ 
 jolt_flags="-O3 -fno-rtti -fno-exceptions -ffp-contract=off -mavx2 -mbmi -mpopcnt -mlzcnt -mf16c -mfma -mfpmath=sse"
 gcc -O3 -Ireference/box3d/include bench/bake_box3d.c -o target/bake_box3d -Lreference/box3d/out/src -lbox3d -lm || exit 1
 g++ -std=c++17 $jolt_flags $jolt_defines -Ireference/jolt bench/bake_jolt.cpp -o target/bake_jolt -Lreference/jolt/out -lJolt || exit 1
+box3d=target/bake_box3d; [ -x "$box3d" ] || box3d="$box3d.exe"
+jolt=target/bake_jolt; [ -x "$jolt" ] || jolt="$jolt.exe"
 for scene in pyramid pile chain; do
-    for engine in box3d jolt; do
-        exe="target/bake_$engine"
-        [ -x "$exe" ] || exe="$exe.exe"
-        "$exe" "$scene" "$steps"
-    done
+    # Each at its recommended setting, then each at the other's budget:
+    # Jolt with as many collision steps as Box3D takes sub-steps, and
+    # Box3D with the sub-steps that cost about what Jolt's default does.
+    "$box3d" "$scene" "$steps" 4
+    "$jolt" "$scene" "$steps" 1
+    "$jolt" "$scene" "$steps" 4
+    "$box3d" "$scene" "$steps" 16
 done

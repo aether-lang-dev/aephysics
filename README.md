@@ -8,8 +8,10 @@ is, in the language, not behind a binding. Rather than trust anyone's
 README, the candidates were built on one machine and run on identical
 scenes -- [`bench/RESULTS.md`](bench/RESULTS.md). By those numbers the
 engine follows the design of **Box3D** (Erin Catto, 2026, C17, MIT): its
-Soft Step solver held a 100-row pyramid at 9 ms a step where Jolt's
-collapsed at 37, and dropped ten thousand boxes at 10 ms a step against 33.
+Soft Step solver held a 100-row pyramid at 10 ms a step where Jolt's
+collapsed at 44, dropped ten thousand boxes at 10 ms a step against 43,
+and given the same budget as Jolt at its stiffest it was tighter on every
+scene.
 
 This is our implementation. Box3D and Jolt are fetched, unmodified, into an
 ignored `reference/` (`scripts/fetch_references.sh`) for two things only:

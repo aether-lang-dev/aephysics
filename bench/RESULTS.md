@@ -9,31 +9,54 @@ which design this engine follows.
 
 **Builds:** Box3D `f555ee4` (Release, SSE2, validation off); Jolt `v5.3.0`
 (Distribution: LTO, AVX2/FMA, no profiler, no debug renderer -- its
-shipping configuration).
+shipping configuration). Box3D's build here has neither AVX nor LTO, so
+if anything the table favours Jolt.
 
-**Settings:** a 1/60 s step. Box3D: 4 sub-steps (its own benchmark
-setting). Jolt: 1 collision step, 10 velocity + 2 position iterations (its
-defaults). Sleeping off on both, so every body is simulated every step.
-Timing excludes the first step (the structures are built there).
+**Settings:** a 1/60 s step. Each engine at its own recommended setting
+first -- Box3D: 4 sub-steps (its own benchmark setting); Jolt: 1 collision
+step, 10 velocity + 2 position iterations (its defaults) -- and then each at
+the other's budget: Jolt at 4 collision steps, Box3D at 16 sub-steps.
+Sleeping off on both, so every body is simulated every step. Timing
+excludes the first step (the structures are built there). The machine was
+also running a game, so the times wander by about 20% between runs; the
+ratios do not.
 
-| scene | bodies | Box3D ms/step | Jolt ms/step | how it held |
+### Each at its recommended setting
+
+| scene | bodies | Box3D 4 sub-steps | Jolt 1 step | how it held |
 |---|---|---|---|---|
-| pyramid, 100 rows of unit boxes | 5,050 | **8.9** | 36.7 | Box3D: worst drift 0.79 m after 300 steps, 0.72 m after 1,000 (the top wobbles, the stack stands). Jolt: 17.5 m after 300, 102 m after 1,000 -- the pyramid collapses. |
-| pile, 20 x 25 x 20 unit boxes dropped 2 m | 10,000 | **9.9** | 32.8 | lowest box after 300 steps: Box3D 0.498 m (2 mm into the ground), Jolt 0.473 m (27 mm) |
-| chain, a 100 x 100 grid of spheres on point joints, hung from its top row | 10,000 bodies, 19,800 joints | **11.1** | 11.6 | sag of the bottom corner below a taut 99-link chain: Box3D 0.94 m, Jolt 1.97 m |
+| pyramid, 100 rows of unit boxes | 5,050 | **9.6 ms/step** | 44.5 | Box3D: worst drift 0.79 m after 300 steps, 0.72 m after 1,000 (the top wobbles, the stack stands). Jolt: 17.5 m after 300, 102 m after 1,000 -- the pyramid collapses. |
+| pile, 20 x 25 x 20 unit boxes dropped 2 m | 10,000 | **10.2** | 42.5 | lowest box after 300 steps: Box3D 0.498 m (2 mm into the ground), Jolt 0.473 m (27 mm) |
+| chain, a 100 x 100 grid of spheres on point joints, hung from its top row | 10,000 bodies, 19,800 joints | **11.1** | 11.3 | sag of the bottom corner below a taut 99-link chain: Box3D 0.94 m, Jolt 1.97 m |
 
-`scripts/bake.sh 300` reproduces the table; `bench/bake_box3d.c` and
+### Each given the other's budget
+
+| scene | Jolt 4 steps | Box3D 16 sub-steps | how it held |
+|---|---|---|---|
+| pyramid | 157 ms/step | **28.2** | Jolt now stands: drift 0.05 m. Box3D 0.68 m (its contacts are soft, 30 Hz by default; see below). |
+| pile | 60.8 | **24.4** | Jolt 0.4995 m (0.5 mm in), Box3D 0.498 m (2 mm) |
+| chain | 42.8 | **39.1** | Jolt 0.094 m. Box3D 0.79 m at its default 60 Hz joints; **0.047 m** with the joints set to 240 Hz (`BAKE_JOINT_HERTZ=240`), same 39 ms. |
+
+`scripts/bake.sh 300` reproduces both tables; `bench/bake_box3d.c` and
 `bench/bake_jolt.cpp` are the scenes.
 
 ## Reading it
 
-- On contact-heavy scenes (the pile, the pyramid) Box3D's Soft Step solver
-  is three to four times faster than Jolt's sequential impulse solver at
-  its defaults, and it is the one that holds a tall stack: sub-stepping
-  with soft constraints converges where iterating a single step does not.
-  Jolt can hold the pyramid with more iterations, at more cost; the point
-  is that Box3D holds it at the speed it already has.
-- On the joint grid the two are level in speed and Box3D sags half as much.
+- At its recommended setting Box3D's Soft Step solver is four times faster
+  than Jolt's sequential impulse solver on the contact-heavy scenes, and it
+  is the one that holds a tall stack at that speed: sub-stepping with soft
+  constraints converges where iterating a single step does not.
+- Given four times the collision steps Jolt holds everything too, at four
+  to sixteen times Box3D's cost. Box3D at sixteen sub-steps -- about a
+  third to two-thirds of Jolt's 4-step time -- matches or beats it on every
+  scene.
+- The residual drift and sag in Box3D are its soft constraints, not a
+  convergence limit: the joint stiffness is a per-joint hertz (default
+  60 Hz, capped at a quarter of the sub-step rate), and raising it with the
+  sub-step count took the chain's sag from 0.79 m to 0.047 m at no extra
+  cost. The same knob exists for contacts (`contactHertz`, 30 Hz). This is
+  the design working as intended: stiffness is a choice made per scene,
+  bounded by the sub-step rate, rather than an iteration count.
 - Both scale across threads (Box3D's own records show 7x at 8 threads on a
   7950X; Jolt is known to scale); the port is single-threaded first, so
   the single-thread numbers are the ones that matter for it.

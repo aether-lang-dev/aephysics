@@ -3,7 +3,7 @@
 // reference's own benchmark setting), no sleeping, and every scene reports
 // its wall time over the steps and one number for how it held together.
 //
-//   bake_box3d pile|pyramid|chain [steps]
+//   bake_box3d pile|pyramid|chain [steps] [sub-steps]
 #include "box3d/box3d.h"
 #include "box3d/collision.h"
 #include "box3d/math_functions.h"
@@ -121,6 +121,10 @@ static void create_chain( b3WorldId world )
 	shapeDef.filter.maskBits = ~2u;
 	b3Sphere sphere = { { 0.0f, 0.0f, 0.0f }, 0.4f };
 	b3SphericalJointDef jointDef = b3DefaultSphericalJointDef();
+	// The joint stiffness (default 60 Hz, clamped to a quarter of the sub-step
+	// rate) is what the sag measures; BAKE_JOINT_HERTZ tries another.
+	const char* hertz = getenv( "BAKE_JOINT_HERTZ" );
+	if ( hertz ) jointDef.base.constraintHertz = (float)atof( hertz );
 	b3BodyDef bodyDef = b3DefaultBodyDef();
 	bodyDef.enableSleep = false;
 	for ( int k = 0; k < n; ++k )
@@ -177,13 +181,13 @@ int main( int argc, char** argv )
 	else { fprintf( stderr, "scene?\n" ); return 2; }
 
 	float dt = 1.0f / 60.0f;
-	int substeps = 4;
+	int substeps = argc > 3 ? atoi( argv[3] ) : 4;
 	// The first step builds structures and is not the steady cost.
 	b3World_Step( world, dt, substeps );
 	double start = now_ms();
 	for ( int i = 1; i < steps; ++i ) b3World_Step( world, dt, substeps );
 	double ms = now_ms() - start;
-	printf( "box3d %s: %d steps in %.1f ms, %.3f ms/step, measure %.4f\n", scene, steps, ms, ms / ( steps - 1 ), measure() );
+	printf( "box3d %s, %d sub-steps: %d steps in %.1f ms, %.3f ms/step, measure %.4f\n", scene, substeps, steps, ms, ms / ( steps - 1 ), measure() );
 	b3DestroyWorld( world );
 	return 0;
 }

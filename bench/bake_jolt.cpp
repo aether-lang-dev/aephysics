@@ -4,7 +4,7 @@
 // four sub-steps. Each engine runs at its own recommended setting for a
 // game's 60 Hz step, which is the comparison a game cares about.
 //
-//   bake_jolt pile|pyramid|chain [steps]
+//   bake_jolt pile|pyramid|chain [steps] [collision steps]
 #include <Jolt/Jolt.h>
 #include <Jolt/RegisterTypes.h>
 #include <Jolt/Core/Factory.h>
@@ -222,12 +222,12 @@ int main( int argc, char** argv )
 	system.OptimizeBroadPhase();
 
 	float dt = 1.0f / 60.0f;
-	int collisionSteps = 1;
+	int collisionSteps = argc > 3 ? atoi( argv[3] ) : 1;
 	system.Update( dt, collisionSteps, &temp_allocator, &job_system );
 	double start = now_ms();
 	for ( int i = 1; i < steps; ++i ) system.Update( dt, collisionSteps, &temp_allocator, &job_system );
 	double ms = now_ms() - start;
-	printf( "jolt %s: %d steps in %.1f ms, %.3f ms/step, measure %.4f\n", scene, steps, ms, ms / ( steps - 1 ), measure() );
+	printf( "jolt %s, %d collision steps: %d steps in %.1f ms, %.3f ms/step, measure %.4f\n", scene, collisionSteps, steps, ms, ms / ( steps - 1 ), measure() );
 
 	UnregisterTypes();
 	delete Factory::sInstance;
