@@ -1,0 +1,176 @@
+// The scalar contact solver's passes on 5,000 cubes resting on a slab
+// and 1,000 cubes stacked in pairs (a dynamic pair each), collided once
+// and then solved by hand ten times as one step does: the colours'
+// constraints prepared, warm started, four sub-steps of a biased solve
+// and a relax, the restitution pass and the impulses stored. No solve
+// exists free-standing in the reference (its step integrates as well),
+// so this runs ours alone; the step's pair comes with the world layer.
+// Single thread, wall time per pass, the normal impulses stored over the
+// steps as the checksum.
+import std.string
+import std.os
+import aephysics.math
+import aephysics.core
+import aephysics.hull
+import aephysics.manifold
+import aephysics.shape
+import aephysics.broad_phase
+import aephysics.dynamics
+import aephysics.contact_solver
+
+clock() -> long { return os.now_monotonic_ns() }
+ms(ns: long) -> float { return (ns as float) / 1000000.0 }
+
+const RESTING = 5000
+const STACKED = 1000
+const STEPS = 10
+
+main() {
+    box = hull.make_box_hull(0.5, 0.5, 0.5)
+    slab = hull.make_box_hull(110.0, 0.5, 60.0)
+    world_def = dynamics.default_world_def()
+    world_id = dynamics.create_world(&world_def)
+    w = dynamics.get_world(world_id.index1 - 1)
+    shape_def = dynamics.default_shape_def()
+    shape_def.density = 1.0
+    ground_def = dynamics.default_body_def()
+    ground_def.position = math.vec3(100.0, 0.0 - 0.5, 50.0)
+    ground = dynamics.create_body(world_id, &ground_def)
+    dynamics.create_hull_shape(ground, &shape_def, slab)
+    i = 0
+    while i < RESTING {
+        body_def = dynamics.default_body_def()
+        body_def.kind = dynamics.BODY_DYNAMIC
+        body_def.position = math.vec3((2 * (i % 100)) as float, 0.49, (2 * (i / 100)) as float)
+        body_def.linear_velocity = math.vec3(0.5, 0.0 - 1.0, 0.0)
+        id = dynamics.create_body(world_id, &body_def)
+        dynamics.create_hull_shape(id, &shape_def, box)
+        i = i + 1
+    }
+    i = 0
+    while i < STACKED {
+        body_def = dynamics.default_body_def()
+        body_def.kind = dynamics.BODY_DYNAMIC
+        body_def.position = math.vec3((2 * (i % 100)) as float, 1.48, (2 * (i / 100)) as float)
+        body_def.linear_velocity = math.vec3(0.0, 0.0 - 1.0, 0.0)
+        id = dynamics.create_body(world_id, &body_def)
+        dynamics.create_hull_shape(id, &shape_def, box)
+        i = i + 1
+    }
+    dynamics.update_pairs(w)
+    dynamics.collide(w)
+
+    ctx = contact_solver.default_step_context(w)
+    ctx.dt = 1.0 / 60.0
+    ctx.inv_dt = 60.0
+    ctx.sub_step_count = 4
+    ctx.h = ctx.dt / 4.0
+    ctx.inv_h = 240.0
+    ctx.contact_softness = dynamics.make_soft(2.0 * w.contact_hertz, w.contact_damping_ratio, ctx.h)
+    ctx.static_softness = dynamics.make_soft(2.0 * w.contact_hertz, w.contact_damping_ratio, ctx.h)
+    awake = dynamics.get_solver_set(w, dynamics.AWAKE_SET)
+    ctx.states = awake.body_states.data
+    ctx.sims = awake.body_sims.data
+    // The colours' scratch, sized once.
+    contact_total = 0
+    c = 0
+    while c < dynamics.GRAPH_COLOR_COUNT {
+        color = dynamics.graph_color(w, c)
+        contact_solver.count_color_constraints(color)
+        color.contact_constraints = core.alloc(math.max_int(1, color.contact_constraint_count) * sizeof(ContactConstraint))
+        color.manifold_constraints = core.alloc(math.max_int(1, color.manifold_constraint_count) * sizeof(ManifoldConstraint))
+        contact_total = contact_total + color.contact_constraint_count
+        c = c + 1
+    }
+    hit_bits = core.bitset_create(dynamics.world_contact_count(w))
+    total_impulse = 0.0
+    prepare_ns = 0 as long
+    warm_ns = 0 as long
+    solve_ns = 0 as long
+    relax_ns = 0 as long
+    restitution_ns = 0 as long
+    store_ns = 0 as long
+    step = 0
+    while step < STEPS {
+        t0 = clock()
+        c = 0
+        while c < dynamics.GRAPH_COLOR_COUNT { contact_solver.prepare_contacts(&ctx, dynamics.graph_color(w, c)); c = c + 1 }
+        t1 = clock()
+        c = 0
+        while c < dynamics.GRAPH_COLOR_COUNT {
+            color = dynamics.graph_color(w, c)
+            contact_solver.warm_start_contacts(&ctx, color.contact_constraints, color.contact_constraint_count)
+            c = c + 1
+        }
+        t2 = clock()
+        sub = 0
+        while sub < 4 {
+            c = 0
+            while c < dynamics.GRAPH_COLOR_COUNT {
+                color = dynamics.graph_color(w, c)
+                contact_solver.solve_contacts(&ctx, color.contact_constraints, color.contact_constraint_count, true)
+                c = c + 1
+            }
+            sub = sub + 1
+        }
+        t3 = clock()
+        sub = 0
+        while sub < 4 {
+            c = 0
+            while c < dynamics.GRAPH_COLOR_COUNT {
+                color = dynamics.graph_color(w, c)
+                contact_solver.solve_contacts(&ctx, color.contact_constraints, color.contact_constraint_count, false)
+                c = c + 1
+            }
+            sub = sub + 1
+        }
+        t4 = clock()
+        c = 0
+        while c < dynamics.GRAPH_COLOR_COUNT {
+            color = dynamics.graph_color(w, c)
+            contact_solver.apply_restitution(&ctx, color.contact_constraints, color.contact_constraint_count)
+            c = c + 1
+        }
+        t5 = clock()
+        c = 0
+        while c < dynamics.GRAPH_COLOR_COUNT {
+            color = dynamics.graph_color(w, c)
+            contact_solver.store_impulses(&ctx, color.contact_constraints, color.contact_constraint_count, &hit_bits)
+            c = c + 1
+        }
+        t6 = clock()
+        prepare_ns = prepare_ns + (t1 - t0)
+        warm_ns = warm_ns + (t2 - t1)
+        solve_ns = solve_ns + (t3 - t2)
+        relax_ns = relax_ns + (t4 - t3)
+        restitution_ns = restitution_ns + (t5 - t4)
+        store_ns = store_ns + (t6 - t5)
+        // The impulses stored this step (the first carries the momentum, the rest the push-out).
+        i = 0
+        while i < w.contacts.count {
+            contact = dynamics.contact_at(w, i)
+            if contact.contact_id != dynamics.NULL_INDEX && contact.manifold_count > 0 {
+                m = dynamics.manifold_at(contact, 0)
+                j = 0
+                while j < m.point_count {
+                    total_impulse = total_impulse + dynamics.manifold_point_at(m, j).normal_impulse
+                    j = j + 1
+                }
+            }
+            i = i + 1
+        }
+        step = step + 1
+    }
+    println("aephysics contact_solver: ${STEPS} steps of ${contact_total} contacts (${RESTING} resting, ${STACKED} stacked): prepare ${ms(prepare_ns)} ms, warm start ${ms(warm_ns)} ms, 4 biased solves ${ms(solve_ns)} ms, 4 relaxes ${ms(relax_ns)} ms, restitution ${ms(restitution_ns)} ms, store ${ms(store_ns)} ms (total normal impulse ${total_impulse})")
+    c = 0
+    while c < dynamics.GRAPH_COLOR_COUNT {
+        color = dynamics.graph_color(w, c)
+        core.free_bytes(color.contact_constraints, math.max_int(1, color.contact_constraint_count) * sizeof(ContactConstraint))
+        core.free_bytes(color.manifold_constraints, math.max_int(1, color.manifold_constraint_count) * sizeof(ManifoldConstraint))
+        c = c + 1
+    }
+    core.bitset_destroy(&hit_bits)
+    dynamics.destroy_world(world_id)
+    hull.destroy_hull(slab)
+    hull.destroy_hull(box)
+}

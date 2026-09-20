@@ -23,7 +23,7 @@
 import std.string
 
 exports (
-    Vec2, Vec3, CosSin, Quat, Transform, Matrix3, AABB, Plane, SegmentDistanceResult,
+    Vec2, Vec3, CosSin, Quat, Transform, Matrix2, Matrix3, AABB, Plane, SegmentDistanceResult,
     PI, TWO_PI, PI_OVER_TWO, PI_OVER_FOUR, SQRT3, DEG_TO_RAD, RAD_TO_DEG, MIN_SCALE,
     EPSILON, TINY, MAX_FLOAT, HUGE,
     vec2, vec3, quat, transform, matrix3, aabb, plane,
@@ -43,6 +43,7 @@ exports (
     transform_world_point, inv_transform_world_point, mul_world_transforms,
     inv_mul_world_transforms, to_relative_transform, make_world_transform, offset_aabb,
     det, mul_mv, negate_mat3, add_mm, sub_mm, mul_sm, mul_mm, transpose, invert_matrix,
+    matrix2, dot2, add2, sub2, mul_sv2, mul_add2, mul_mv2, det2, invert2, solve2,
     solve3, invert_t, abs_matrix3, make_matrix_from_quat, make_diagonal_matrix, steiner,
     sphere_inertia, cylinder_inertia, box_inertia,
     make_aabb, aabb_contains, aabb_area, aabb_center, aabb_extents, aabb_union, aabb_inflate,
@@ -84,6 +85,12 @@ const LINEAR_SLOP = 0.005
 struct Vec2 {
     x: float
     y: float
+}
+
+// A 2x2 matrix by columns.
+struct Matrix2 {
+    cx: Vec2
+    cy: Vec2
 }
 
 struct Vec3 {
@@ -558,6 +565,37 @@ mul_mv(m: Matrix3, a: Vec3) -> Vec3 {
 }
 
 negate_mat3(a: Matrix3) -> Matrix3 { return Matrix3 { cx: neg(a.cx), cy: neg(a.cy), cz: neg(a.cz) } }
+// --- 2D -----------------------------------------------------------------------------------------------
+
+matrix2(cx: Vec2, cy: Vec2) -> Matrix2 { return Matrix2 { cx: cx, cy: cy } }
+dot2(a: Vec2, b: Vec2) -> float { return a.x * b.x + a.y * b.y }
+add2(a: Vec2, b: Vec2) -> Vec2 { return Vec2 { x: a.x + b.x, y: a.y + b.y } }
+sub2(a: Vec2, b: Vec2) -> Vec2 { return Vec2 { x: a.x - b.x, y: a.y - b.y } }
+mul_sv2(s: float, a: Vec2) -> Vec2 { return Vec2 { x: s * a.x, y: s * a.y } }
+mul_add2(a: Vec2, s: float, b: Vec2) -> Vec2 { return Vec2 { x: a.x + s * b.x, y: a.y + s * b.y } }
+mul_mv2(m: Matrix2, a: Vec2) -> Vec2 { return Vec2 { x: m.cx.x * a.x + m.cy.x * a.y, y: m.cx.y * a.x + m.cy.y * a.y } }
+det2(m: Matrix2) -> float { return m.cx.x * m.cy.y - m.cx.y * m.cy.x }
+
+// The inverse, or zero when singular.
+invert2(m: Matrix2) -> Matrix2 {
+    d = det2(m)
+    if abs_float(d) > 1000.0 * TINY {
+        inv = 1.0 / d
+        return Matrix2 { cx: Vec2 { x: inv * m.cy.y, y: 0.0 - inv * m.cx.y }, cy: Vec2 { x: 0.0 - inv * m.cy.x, y: inv * m.cx.x } }
+    }
+    return Matrix2 { cx: Vec2 { x: 0.0, y: 0.0 }, cy: Vec2 { x: 0.0, y: 0.0 } }
+}
+
+// m x = b for a positive semi-definite m; zero when singular.
+solve2(m: Matrix2, b: Vec2) -> Vec2 {
+    d = det2(m)
+    if d > 1000.0 * TINY {
+        inv = 1.0 / d
+        return Vec2 { x: inv * m.cy.y * b.x - inv * m.cy.x * b.y, y: 0.0 - inv * m.cx.y * b.x + inv * m.cx.x * b.y }
+    }
+    return Vec2 { x: 0.0, y: 0.0 }
+}
+
 add_mm(a: Matrix3, b: Matrix3) -> Matrix3 { return Matrix3 { cx: add(a.cx, b.cx), cy: add(a.cy, b.cy), cz: add(a.cz, b.cz) } }
 sub_mm(a: Matrix3, b: Matrix3) -> Matrix3 { return Matrix3 { cx: sub(a.cx, b.cx), cy: sub(a.cy, b.cy), cz: sub(a.cz, b.cz) } }
 mul_sm(s: float, a: Matrix3) -> Matrix3 { return Matrix3 { cx: mul_sv(s, a.cx), cy: mul_sv(s, a.cy), cz: mul_sv(s, a.cz) } }

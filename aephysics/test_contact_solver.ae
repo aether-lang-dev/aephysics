@@ -1,0 +1,341 @@
+// aephysics.contact_solver on a cube resting on a slab, the passes run
+// by hand with the step's softness (the reference's numbers: contact
+// hertz 30, damping 10, four sub-steps of 1/60): the constraint
+// prepared from the manifold (anchors, base separations, masses, the
+// friction centre at the manifold's centre), a falling cube stopped by
+// the normal impulses (the impulse equal to its momentum, split over the
+// four points), a sliding cube slowed by the friction bound, a spinning
+// cube slowed by the twist bound, a cube pressed into the slab pushed
+// out no faster than the contact speed, the relax pass keeping the
+// velocity without bias, the bounce of restitution above and below the
+// threshold, the warm start reapplying stored impulses, and the store
+// with the hit event.
+import std.string
+import aephysics.math
+import aephysics.core
+import aephysics.hull
+import aephysics.manifold
+import aephysics.shape
+import aephysics.broad_phase
+import aephysics.dynamics
+import aephysics.contact_solver
+
+extern exit(code: int)
+
+var failures = 0
+var checks = 0
+
+ensure(name: string, ok: bool) {
+    checks = checks + 1
+    if !ok {
+        println("contact_solver: FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+small(name: string, value: float, tolerance: float) {
+    ensure("${name} (${value})", math.abs_float(value) < tolerance)
+}
+
+// A world with a static slab, its top at y = 0, and a dynamic unit cube
+// resting a hundredth into it, collided so its contact is touching.
+struct Scene {
+    world_id: WorldId
+    w: *World
+    cube_id: BodyId
+    contact: *Contact
+    ctx: StepContext
+    constraints: ptr
+    manifolds: ptr
+}
+
+var g_slab: ptr = null
+var g_cube: ptr = null
+
+scene(friction: float, restitution: float, events: bool) -> Scene {
+    if g_slab == null {
+        g_slab = hull.make_box_hull(5.0, 0.5, 5.0) as ptr
+        g_cube = hull.make_box_hull(0.5, 0.5, 0.5) as ptr
+    }
+    wdef = dynamics.default_world_def()
+    world_id = dynamics.create_world(&wdef)
+    w = dynamics.get_world(world_id.index1 - 1)
+    gdef = dynamics.default_body_def()
+    gdef.position = math.vec3(0.0, 0.0 - 0.5, 0.0)
+    ground = dynamics.create_body(world_id, &gdef)
+    sdef = dynamics.default_shape_def()
+    sdef.base_material.friction = friction
+    sdef.base_material.restitution = restitution
+    sdef.enable_hit_events = events
+    dynamics.create_hull_shape(ground, &sdef, g_slab as *HullData)
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.position = math.vec3(0.0, 0.49, 0.0)
+    cube_id = dynamics.create_body(world_id, &bdef)
+    sdef.density = 1.0
+    dynamics.create_hull_shape(cube_id, &sdef, g_cube as *HullData)
+    dynamics.update_pairs(w)
+    dynamics.collide(w)
+    c = dynamics.contact_at(w, 0)
+    ctx = contact_solver.default_step_context(w)
+    ctx.dt = 1.0 / 60.0
+    ctx.inv_dt = 60.0
+    ctx.sub_step_count = 4
+    ctx.h = ctx.dt / 4.0
+    ctx.inv_h = 240.0
+    ctx.contact_softness = dynamics.make_soft(2.0 * w.contact_hertz, w.contact_damping_ratio, ctx.h)
+    ctx.static_softness = dynamics.make_soft(2.0 * w.contact_hertz, w.contact_damping_ratio, ctx.h)
+    awake = dynamics.get_solver_set(w, dynamics.AWAKE_SET)
+    ctx.states = awake.body_states.data
+    ctx.sims = awake.body_sims.data
+    color = dynamics.graph_color(w, c.color_index)
+    contact_solver.count_color_constraints(color)
+    constraints = core.alloc(color.contact_constraint_count * sizeof(ContactConstraint))
+    manifolds = core.alloc(color.manifold_constraint_count * sizeof(ManifoldConstraint))
+    color.contact_constraints = constraints
+    color.manifold_constraints = manifolds
+    return Scene { world_id: world_id, w: w, cube_id: cube_id, contact: c, ctx: ctx, constraints: constraints, manifolds: manifolds }
+}
+
+finish(s: *Scene) {
+    color = dynamics.graph_color(s.w, s.contact.color_index)
+    core.free_bytes(s.constraints, color.contact_constraint_count * sizeof(ContactConstraint))
+    core.free_bytes(s.manifolds, color.manifold_constraint_count * sizeof(ManifoldConstraint))
+    dynamics.destroy_world(s.world_id)
+}
+
+cube_state(s: *Scene) -> *BodyState { return dynamics.get_body_state(s.w, dynamics.get_body_full_id(s.w, s.cube_id)) }
+
+prepare(s: *Scene) {
+    color = dynamics.graph_color(s.w, s.contact.color_index)
+    contact_solver.prepare_contacts(&s.ctx, color)
+}
+
+// The solve of one sub-step as the solver runs it: biased, then relaxed.
+solve(s: *Scene, use_bias: bool) { contact_solver.solve_contacts(&s.ctx, s.constraints, 1, use_bias) }
+
+test_prepare() {
+    s = scene(0.6, 0.0, false)
+    ensure("one convex contact in the colour", dynamics.graph_color(s.w, s.contact.color_index).contact_constraint_count == 1 &&
+                                                 dynamics.graph_color(s.w, s.contact.color_index).manifold_constraint_count == 1)
+    prepare(&s)
+    cc = contact_solver.contact_constraint_at(s.constraints, 0)
+    ensure("the slab is static, the cube is body 0 of the awake set", cc.index_a == dynamics.NULL_INDEX && cc.index_b == 0)
+    ensure("the constraint points at the contact", cc.contact == s.contact && cc.manifold_count == 1)
+    ensure("static masses are zero", cc.inv_mass_a == 0.0 && cc.inv_inertia_a.cx.x == 0.0)
+    small("the cube's inverse mass", cc.inv_mass_b - 1.0, 0.000001)
+    small("the cube's inverse inertia (1/6 per axis)", cc.inv_inertia_b.cy.y - 6.0, 0.00001)
+    ensure("a static contact takes the static softness", cc.softness.bias_rate == s.ctx.static_softness.bias_rate)
+    ensure("the materials", cc.friction == 0.6 && cc.restitution == 0.0 && cc.rolling_resistance == 0.0)
+    m = contact_solver.manifold_constraint_at(cc.constraints, 0)
+    ensure("four points", m.point_count == 4)
+    small("normal up", m.normal.y - 1.0, 0.000001)
+    small("tangents perpendicular", math.dot(m.tangent1, m.normal) + math.dot(m.tangent2, m.normal) + math.dot(m.tangent1, m.tangent2), 0.000001)
+    small("the friction centre is under the cube's centre", math.abs_float(m.center_b.x) + math.abs_float(m.center_b.z), 0.0001)
+    small("the friction centre on the cube's bottom", m.center_b.y + 0.5, 0.011)
+    p = contact_solver.constraint_point_at(m, 0)
+    small("base separation removes the anchors' part", p.base_separation - (0.0 - 0.01 - (p.r_b.y - p.r_a.y)), 0.001)
+    small("normal mass of a corner (1/(1 + 3 r^2))", p.normal_mass - 1.0 / (1.0 + 6.0 * 0.5), 0.05)
+    small("lever arm is the corner's distance", p.lever_arm - 0.7071, 0.02)
+    ensure("no impulses yet", p.normal_impulse == 0.0 && m.friction_impulse.x == 0.0 && m.twist_impulse == 0.0)
+    small("relative velocity at rest", p.relative_velocity, 0.000001)
+    small("twist mass (1/(6+6+6..) about y: 1/6)", m.twist_mass - 1.0 / 6.0, 0.000001)
+    ensure("tangent mass is symmetric positive", m.tangent_mass.cx.y == m.tangent_mass.cy.x && m.tangent_mass.cx.x > 0.0)
+    finish(&s)
+}
+
+test_normal() {
+    // Falling at 2 m/s: the biased solve stops it (the bias pushes a hundredth out, slowly), the total impulse is 2.
+    s = scene(0.6, 0.0, false)
+    state = cube_state(&s)
+    state.linear_velocity = math.vec3(0.0, 0.0 - 2.0, 0.0)
+    prepare(&s)
+    cc = contact_solver.contact_constraint_at(s.constraints, 0)
+    m = contact_solver.manifold_constraint_at(cc.constraints, 0)
+    small("relative velocity recorded", contact_solver.constraint_point_at(m, 0).relative_velocity + 2.0, 0.000001)
+    i = 0
+    while i < 8 { solve(&s, true); i = i + 1 }
+    ensure("falling stopped, pushed out gently (${state.linear_velocity.y})", state.linear_velocity.y > 0.0 && state.linear_velocity.y < 0.3)
+    total = 0.0
+    j = 0
+    while j < 4 {
+        total = total + contact_solver.constraint_point_at(m, j).normal_impulse
+        j = j + 1
+    }
+    small("impulse equals the momentum plus the push-out", total - 2.0 - state.linear_velocity.y, 0.001)
+    ensure("spread over the four points", contact_solver.constraint_point_at(m, 0).normal_impulse > 0.3 && contact_solver.constraint_point_at(m, 3).normal_impulse > 0.3)
+    ensure("no spin to speak of (${math.length(state.angular_velocity)})", math.length(state.angular_velocity) < 0.05)
+    // The relax pass keeps a resting cube at rest.
+    solve(&s, false)
+    small("relaxed: the push-out speed removed", state.linear_velocity.y, 0.01)
+    total2 = 0.0
+    j = 0
+    while j < 4 {
+        total2 = total2 + contact_solver.constraint_point_at(m, j).normal_impulse
+        j = j + 1
+    }
+    small("relaxed: the impulse is the momentum", total2 - 2.0, 0.01)
+    finish(&s)
+
+    // Pressed in a tenth: the biased solve pushes out, capped by the contact speed (3 m/s).
+    s = scene(0.6, 0.0, false)
+    dynamics.body_set_transform(s.cube_id, math.vec3(0.0, 0.4, 0.0), math.quat_identity())
+    dynamics.update_pairs(s.w)
+    dynamics.collide(s.w)
+    state = cube_state(&s)
+    prepare(&s)
+    solve(&s, true)
+    ensure("pushed out (${state.linear_velocity.y})", state.linear_velocity.y > 0.5 && state.linear_velocity.y <= 3.0001)
+    finish(&s)
+
+    // Apart by a centimetre: the speculative bias lets the cube fall the gap and no further in one sub-step.
+    s = scene(0.6, 0.0, false)
+    dynamics.body_set_transform(s.cube_id, math.vec3(0.0, 0.51, 0.0), math.quat_identity())
+    dynamics.update_pairs(s.w)
+    dynamics.collide(s.w)
+    state = cube_state(&s)
+    state.linear_velocity = math.vec3(0.0, 0.0 - 10.0, 0.0)
+    prepare(&s)
+    i = 0
+    while i < 8 { solve(&s, true); i = i + 1 }
+    gap = dynamics.manifold_point_at(dynamics.manifold_at(s.contact, 0), 0).separation
+    ensure("speculative: a gap of about a centimetre", gap > 0.009 && gap < 0.012)
+    small("speculative: falls the gap in the sub-step", state.linear_velocity.y + gap * 240.0, 0.01)
+    finish(&s)
+}
+
+test_friction() {
+    // Sliding at 10 m/s with the weight's impulse: friction takes what it may (mu * N).
+    s = scene(0.6, 0.0, false)
+    state = cube_state(&s)
+    state.linear_velocity = math.vec3(10.0, 0.0 - 2.0, 0.0)
+    prepare(&s)
+    cc = contact_solver.contact_constraint_at(s.constraints, 0)
+    m = contact_solver.manifold_constraint_at(cc.constraints, 0)
+    i = 0
+    while i < 8 { solve(&s, true); i = i + 1 }
+    ensure("biased passes apply no friction", m.friction_impulse.x == 0.0 && m.friction_impulse.y == 0.0 && math.abs_float(state.linear_velocity.x - 10.0) < 0.000001)
+    solve(&s, false)
+    total = 0.0
+    j = 0
+    while j < 4 {
+        total = total + contact_solver.constraint_point_at(m, j).normal_impulse
+        j = j + 1
+    }
+    fmag = math.sqrt_float(math.dot2(m.friction_impulse, m.friction_impulse))
+    ensure("friction impulse at the bound mu N (${fmag} of ${0.6 * total})", math.abs_float(fmag - 0.6 * total) < 0.001 && fmag < 1.5)
+    small("slowed by the bound", state.linear_velocity.x - (10.0 - 0.6 * total), 0.01)
+    ensure("the friction at the bottom makes it tumble forward", state.angular_velocity.z < 0.0 && state.angular_velocity.z > 0.0 - 5.0)
+    finish(&s)
+
+    // A slow slide: one relax pass zeroes the velocity at the friction centre (mu N is not reached).
+    s = scene(0.6, 0.0, false)
+    state = cube_state(&s)
+    state.linear_velocity = math.vec3(0.1, 0.0 - 2.0, 0.0)
+    prepare(&s)
+    cc = contact_solver.contact_constraint_at(s.constraints, 0)
+    m = contact_solver.manifold_constraint_at(cc.constraints, 0)
+    i = 0
+    while i < 8 { solve(&s, true); i = i + 1 }
+    solve(&s, false)
+    at_center = math.add(state.linear_velocity, math.cross(state.angular_velocity, m.center_b))
+    small("slow slide: the friction centre stops", at_center.x, 0.000001)
+    ensure("slow slide: under the bound", math.sqrt_float(math.dot2(m.friction_impulse, m.friction_impulse)) < 0.6 * 2.0)
+    finish(&s)
+
+    // Spinning about the normal: the twist bound (mu * sum(arm * impulse)) slows it.
+    s = scene(0.6, 0.0, false)
+    state = cube_state(&s)
+    state.linear_velocity = math.vec3(0.0, 0.0 - 2.0, 0.0)
+    state.angular_velocity = math.vec3(0.0, 10.0, 0.0)
+    prepare(&s)
+    cc = contact_solver.contact_constraint_at(s.constraints, 0)
+    m = contact_solver.manifold_constraint_at(cc.constraints, 0)
+    i = 0
+    while i < 8 { solve(&s, true); i = i + 1 }
+    solve(&s, false)
+    ensure("twist impulse against the spin", m.twist_impulse < 0.0)
+    ensure("spin slowed (${state.angular_velocity.y})", state.angular_velocity.y < 10.0 && state.angular_velocity.y > 0.0)
+    finish(&s)
+
+    // Frictionless: nothing slows the slide.
+    s = scene(0.0, 0.0, false)
+    state = cube_state(&s)
+    state.linear_velocity = math.vec3(1.0, 0.0 - 2.0, 0.0)
+    prepare(&s)
+    i = 0
+    while i < 8 { solve(&s, true); i = i + 1 }
+    solve(&s, false)
+    small("frictionless slide", state.linear_velocity.x - 1.0, 0.000001)
+    finish(&s)
+}
+
+test_restitution_and_store() {
+    // Falling at 2 m/s onto a bouncy slab: after the solve the restitution pass reflects the recorded approach.
+    s = scene(0.6, 0.5, true)
+    state = cube_state(&s)
+    state.linear_velocity = math.vec3(0.0, 0.0 - 2.0, 0.0)
+    prepare(&s)
+    i = 0
+    while i < 8 { solve(&s, true); i = i + 1 }
+    solve(&s, false)
+    contact_solver.apply_restitution(&s.ctx, s.constraints, 1)
+    small("bounces up at half the approach", state.linear_velocity.y - 1.0, 0.05)
+    // Stored: the manifold carries the impulses and the approach velocity; a hit event is flagged.
+    bits = core.bitset_create(8)
+    hit = contact_solver.store_impulses(&s.ctx, s.constraints, 1, &bits)
+    m = dynamics.manifold_at(s.contact, 0)
+    p = dynamics.manifold_point_at(m, 0)
+    ensure("stored impulses", p.normal_impulse > 0.0 && p.total_normal_impulse >= p.normal_impulse)
+    small("stored approach velocity", p.normal_velocity + 2.0, 0.000001)
+    ensure("hit event flagged (2 m/s over the 1 m/s threshold)", hit && core.bitset_get(&bits, s.contact.contact_id))
+    core.bitset_destroy(&bits)
+    // Warm start: the next prepare takes the stored impulses and applies them at once.
+    state.linear_velocity = math.vec3_zero()
+    state.angular_velocity = math.vec3_zero()
+    prepare(&s)
+    cc = contact_solver.contact_constraint_at(s.constraints, 0)
+    mc = contact_solver.manifold_constraint_at(cc.constraints, 0)
+    ensure("warm started impulses", contact_solver.constraint_point_at(mc, 0).normal_impulse == p.normal_impulse)
+    contact_solver.warm_start_contacts(&s.ctx, s.constraints, 1)
+    ensure("warm start pushed the cube up", state.linear_velocity.y > 2.0)
+    // Warm starting off: nothing carried.
+    s.ctx.enable_warm_starting = false
+    prepare(&s)
+    ensure("no warm start when disabled", contact_solver.constraint_point_at(mc, 0).normal_impulse == 0.0 && mc.friction_impulse.x == 0.0)
+    finish(&s)
+
+    // Below the threshold (0.5 m/s of 1): no bounce, and no hit event.
+    s = scene(0.6, 0.5, true)
+    state = cube_state(&s)
+    state.linear_velocity = math.vec3(0.0, 0.0 - 0.5, 0.0)
+    prepare(&s)
+    i = 0
+    while i < 8 { solve(&s, true); i = i + 1 }
+    solve(&s, false)
+    contact_solver.apply_restitution(&s.ctx, s.constraints, 1)
+    ensure("no bounce under the threshold", state.linear_velocity.y < 0.01)
+    bits = core.bitset_create(8)
+    ensure("no hit event under the threshold", contact_solver.store_impulses(&s.ctx, s.constraints, 1, &bits) == false)
+    core.bitset_destroy(&bits)
+    finish(&s)
+}
+
+main() {
+    before = core.alloc_count()
+    test_prepare()
+    test_normal()
+    test_friction()
+    test_restitution_and_store()
+    hull.destroy_hull(g_cube as *HullData)
+    hull.destroy_hull(g_slab as *HullData)
+    // The scratch stays allocated: the worlds' block, the masses, the contact and hull scratch (seven), the dummy state.
+    ensure("every other counted allocation was freed (${core.alloc_count() - before})", core.alloc_count() == before + 10)
+    println("contact_solver: ${checks} checks")
+    if failures == 0 {
+        println("contact_solver: all checks passed")
+    } else {
+        println("contact_solver: ${failures} failure(s)")
+        exit(1)
+    }
+}
