@@ -472,19 +472,21 @@ cubes dropped from a metre onto a slab in a 100 by 50 grid (they land,
 slide and settle), and 100 stacks of 10 cubes (dynamic pairs in every
 colour).
 
-| scene, 120 steps | aephysics | Box3D |
-|---|---|---|
-| 5,000 cubes falling onto a slab | 245 ms | **157** |
-| 100 stacks of 10 cubes | 50 | **28** |
+| scene, 120 steps | scalar | lanes in Aether | native lanes | Box3D |
+|---|---|---|---|---|
+| 5,000 cubes falling onto a slab | 252 ms | 230 | 187 | **157** |
+| 100 stacks of 10 cubes | 50 | 46 | 40 | **28** |
 
 The same height sums (2,499.65 and 4,983.87), every body asleep at the
-end, the same contact counts (5,000 and 1,000). We are 1.6-1.8x (1.9-2.0x
-before the [build flags](#build-flags-inlining)): the reference solves
-its convex contacts four at a time in SIMD lanes and computes in single
-precision, and this engine solves them one at a time in doubles
-(Aether's float). The wide contact path, laid over the same constraint
-data, is the next performance layer (issue #22); the narrow phase's
-1.7x (issue #17) is the rest.
+end, the same contact counts (5,000 and 1,000), in every column. The
+convex contacts three ways (issue #22's measure): solved one at a time
+through `contact_solver` (scalar; 308 and 61 ms before the [build
+flags](#build-flags-inlining)); four at a time through
+`contact_solver_wide`'s lanes in Aether, the reference's layout as
+plain code (the layout alone: 10%); and through the same lanes in
+`lanes.c`, GCC vector code in single precision (another 20-30%). The
+falling grid is mostly the narrow phase and the pairs (the cubes land
+and settle); the stacks are the solver's, 1.4x.
 
 ## physics_world
 
@@ -495,20 +497,36 @@ sleeping off as the reference runs them.
 
 | scene | aephysics per step | Box3D per step |
 |---|---|---|
-| large pyramid: 5,050 cubes on a base of 100, 200 steps | 21.2 ms | **9.1** |
-| many pyramids: 196 pyramids of base 10, 10,780 cubes, 100 steps | 45.5 | **20.3** |
-| joint grid: 10,000 spheres on 19,800 spherical joints, 100 steps | 12.9 | **11.0** |
+| large pyramid: 5,050 cubes on a base of 100, 200 steps | 17.1 ms | **10.5** |
+| many pyramids: 196 pyramids of base 10, 10,780 cubes, 100 steps | 41.5 | **27.0** |
+| joint grid: 10,000 spheres on 19,800 spherical joints, 100 steps | 14.1 | **11.8** |
 
 The same height sums (167,556, 37,695 and -496,893), contact counts
-(14,950 and 28,420) and joint count. The joint grid, no contacts, is
-within 1.2x (1.8x before the [build flags](#build-flags-inlining)):
-joints are scalar in both, so this is what single against double
-precision and the remaining codegen differences cost. The pyramids
-are 2.2-2.3x, and `scripts/profile.sh bench/physics_world.ae` says
-where: 75% of the pyramids' step is the contact solver (solve 44%,
-prepare 12%, warm start 10%, store 3%), which the reference runs four
-contacts at a time in SIMD lanes (issue #22); contact recycling is 7%,
-the narrow phase 3%, everything else under 4% each.
+(14,950 and 28,420) and joint count. One run of the pair, on a machine
+whose other work moves both columns by 10-20% between runs (the joint
+grid has measured 11.1 to 14.1 ms, the reference 9.1 to 11.8): the
+ratios hold, 1.2x on the joint grid (no contacts: single against
+double precision and what the emitted C still loses) and 1.5-1.6x on
+the pyramids (24.5 and 53.0 ms before the wide path and the flags,
+2.2-2.4x). `scripts/profile.sh bench/physics_world.ae` on the large
+pyramid alone, and the reference's benchmark under the same sampler
+(`tools/sampler.c` linked into its C), ms per step at 60 steps:
+
+| stage | aephysics | Box3D |
+|---|---|---|
+| contact solve (with the gather and scatter) | 4.5 | 4.5 |
+| contact prepare | 2.5 | 1.3 |
+| narrow phase and recycling | 1.9 | 1.2 |
+| warm start | 1.0 | 0.7 |
+| pack to floats and unpack | 1.0 | -- |
+| the solver's own stages (integrate, finalize, blocks) | 1.9 | 1.0 |
+| store | 0.3 | 0.5 |
+| step | 14.7 | 9.7 |
+
+The solve is at parity: the same lanes, the same precision. What is
+left is the prepare (Aether writing a lane at a time into a
+double-sized structure), the packing the doubles need, and a narrow
+phase in doubles (issue #17).
 
 ## Build flags (inlining)
 

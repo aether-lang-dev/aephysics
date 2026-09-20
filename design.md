@@ -228,8 +228,22 @@ started until its tests pass.
      cube stopped with its momentum spread over four points, the push-out
      capped by the contact speed, the speculative gap, the friction bound
      mu N and the friction centre, the twist bound, restitution above and
-     below its threshold, the warm start and the hit event. The wide
-     (SIMD) path for convex contacts is a later, measured layer.
+     below its threshold, the warm start and the hit event.
+   - `aephysics.contact_solver_wide` (done, PR #25): the reference's
+     wide path (b3ContactConstraintWide, b3PrepareContacts_Convex and
+     its siblings) for a colour's convex contacts: FloatW lanes of four,
+     the constraint as a structure of arrays, gather and scatter of the
+     bodies' states, prepare, warm start, solve, restitution and store;
+     the mesh and overflow contacts stay scalar. The lanes are written
+     twice: in Aether (plain code, what the reference's non-SIMD build
+     is) and in lanes.c beside the module as GCC vector code in single
+     precision (SSE or NEON, baseline), which packs the module's doubles
+     for the step and hands the impulses back; a switch per path, both
+     tested against the scalar solve on one scene. Measured, issue #22:
+     the layout alone buys 10%, the native lanes another 20-30%; the
+     solve itself is then at parity with the reference's (profiles of
+     both, same sampler), the remaining 1.2-1.6x is the prepare, the
+     pack, the narrow phase and the doubles elsewhere.
    - `aephysics.joint_solver` (done, PR #20): the seven joints' prepare,
      warm start and solve (distance, motor, parallel, prismatic,
      revolute, spherical, weld, wheel: distance_joint.c and its
@@ -271,10 +285,10 @@ started until its tests pass.
      worlds of twenty cubes alike bit for bit after two seconds. Found on
      the way: putting islands to sleep creates solver sets and can move
      the sets' array, so the awake set is looked up again in that loop.
-     The bench pair against b3World_Step lands at 1.9-2.0x with the same
-     heights, awake and contact counts: the reference's convex contacts
-     go four wide in SIMD and it computes in floats; ours are scalar
-     doubles. The wide path is the next performance layer (issue #22).
+     The bench pair against b3World_Step landed at 1.9-2.0x with the
+     same heights, awake and contact counts (the reference's convex
+     contacts go four wide in SIMD and it computes in floats; ours were
+     scalar doubles), 1.2-1.4x once contact_solver_wide took them.
    - `aephysics.physics_world` (done, PR #23): the step (the events
      cleared, the pairs, the context with the contact hertz reduced for
      large steps, the narrow phase, the solve when time passes, the

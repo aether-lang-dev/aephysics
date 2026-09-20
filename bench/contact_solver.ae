@@ -76,7 +76,7 @@ main() {
     c = 0
     while c < dynamics.GRAPH_COLOR_COUNT {
         color = dynamics.graph_color(w, c)
-        contact_solver.count_color_constraints(color)
+        contact_solver.count_color_constraints(color, true)
         color.contact_constraints = core.alloc(math.max_int(1, color.contact_constraint_count) * sizeof(ContactConstraint))
         color.manifold_constraints = core.alloc(math.max_int(1, color.manifold_constraint_count) * sizeof(ManifoldConstraint))
         contact_total = contact_total + color.contact_constraint_count
@@ -94,7 +94,7 @@ main() {
     while step < STEPS {
         t0 = clock()
         c = 0
-        while c < dynamics.GRAPH_COLOR_COUNT { contact_solver.prepare_contacts(&ctx, dynamics.graph_color(w, c)); c = c + 1 }
+        while c < dynamics.GRAPH_COLOR_COUNT { contact_solver.prepare_contacts(&ctx, dynamics.graph_color(w, c), true); c = c + 1 }
         t1 = clock()
         c = 0
         while c < dynamics.GRAPH_COLOR_COUNT {

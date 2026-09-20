@@ -28,10 +28,11 @@ import aephysics.shape
 import aephysics.broad_phase
 import aephysics.dynamics
 import aephysics.contact_solver
+import aephysics.contact_solver_wide
 import aephysics.joint_solver
 
 exports (
-    solve, integrate_velocities, integrate_positions, finalize_bodies, solve_continuous,
+    solve, integrate_velocities, integrate_positions, finalize_bodies, solve_continuous, set_wide_contacts, wide_contacts_enabled,
     MAX_ROTATION, GYROSCOPIC_ITERATIONS, RESTITUTION_ITERATIONS
 )
 
@@ -39,6 +40,14 @@ const NULL_INDEX = 0 - 1
 const MAX_ROTATION = 0.78539816339744830962   // a quarter turn per step at most
 const GYROSCOPIC_ITERATIONS = 1
 const RESTITUTION_ITERATIONS = 1
+
+// Whether a colour's convex contacts go through the wide solver (the
+// reference's way) or the scalar one with the mesh contacts; the
+// benchmark switches it to measure what the lanes buy.
+var g_wide_contacts = true
+
+set_wide_contacts(enabled: bool) { g_wide_contacts = enabled }
+wide_contacts_enabled() -> bool { return g_wide_contacts }
 const MAX_CONTINUOUS_SENSOR_HITS = 8
 
 state_at(base: ptr, index: int) -> *BodyState { return (base + index * sizeof(BodyState)) as *BodyState }
@@ -526,50 +535,65 @@ solve(w: *World, ctx: *StepContext) {
     ctx.states = awake.body_states.data
     resize_move_events(w, awake_body_count)
 
-    // The constraints' scratch: one block over the active colours, the overflow's own.
+    // The constraints' scratch: one block each over the active colours (the
+    // wide constraints of the convex contacts, the scalar ones of the mesh
+    // contacts), the overflow's own (scalar throughout).
+    wide = g_wide_contacts
+    scalar_convex = wide == false
+    wide_total = 0
     contact_total = 0
     manifold_total = 0
     active_count = 0
     c = 0
     while c < dynamics.OVERFLOW_INDEX {
         color = dynamics.graph_color(w, c)
-        contact_solver.count_color_constraints(color)
+        contact_solver.count_color_constraints(color, scalar_convex)
+        color.wide_constraint_count = 0
+        if wide { color.wide_constraint_count = contact_solver_wide.wide_constraint_count(color.convex_contacts.count) }
+        wide_total = wide_total + color.wide_constraint_count
         contact_total = contact_total + color.contact_constraint_count
         manifold_total = manifold_total + color.manifold_constraint_count
-        if color.contact_constraint_count + color.joint_sims.count > 0 { active_count = active_count + 1 }
+        if color.wide_constraint_count + color.contact_constraint_count + color.joint_sims.count > 0 { active_count = active_count + 1 }
         c = c + 1
     }
     ctx.active_color_count = active_count
+    wide_block = core.stack_alloc(stack, wide_total * sizeof(WideConstraint))
     contact_block = core.stack_alloc(stack, contact_total * sizeof(ContactConstraint))
     manifold_block = core.stack_alloc(stack, manifold_total * sizeof(ManifoldConstraint))
+    wide_base = 0
     contact_base = 0
     manifold_base = 0
     c = 0
     while c < dynamics.OVERFLOW_INDEX {
         color = dynamics.graph_color(w, c)
+        color.wide_constraints = wide_block + wide_base * sizeof(WideConstraint)
         color.contact_constraints = contact_block + contact_base * sizeof(ContactConstraint)
         color.manifold_constraints = manifold_block + manifold_base * sizeof(ManifoldConstraint)
+        wide_base = wide_base + color.wide_constraint_count
         contact_base = contact_base + color.contact_constraint_count
         manifold_base = manifold_base + color.manifold_constraint_count
         c = c + 1
     }
     overflow = dynamics.graph_color(w, dynamics.OVERFLOW_INDEX)
-    contact_solver.count_color_constraints(overflow)
+    contact_solver.count_color_constraints(overflow, true)
     overflow.contact_constraints = core.stack_alloc(stack, overflow.contact_constraint_count * sizeof(ContactConstraint))
     overflow.manifold_constraints = core.stack_alloc(stack, overflow.manifold_constraint_count * sizeof(ManifoldConstraint))
     core.bitset_set_count_and_clear(&w.joint_state_bits, core.idpool_capacity(&w.joint_id_pool))
     core.bitset_set_count_and_clear(&w.hit_event_bits, core.idpool_capacity(&w.contact_id_pool))
 
-    // Prepare: joints then contacts, the overflow after the colours (the reference's order).
+    // Prepare: joints then contacts (wide before scalar), the overflow after
+    // the colours (the reference's order).
     c = 0
     while c < dynamics.OVERFLOW_INDEX {
         color = dynamics.graph_color(w, c)
         joint_solver.prepare_joints(ctx, color)
-        contact_solver.prepare_contacts(ctx, color)
+        if wide { contact_solver_wide.prepare_wide_contacts(ctx, color) }
+        contact_solver.prepare_contacts(ctx, color, scalar_convex)
         c = c + 1
     }
     joint_solver.prepare_joints(ctx, overflow)
-    contact_solver.prepare_contacts(ctx, overflow)
+    contact_solver.prepare_contacts(ctx, overflow, true)
+    contact_solver_wide.begin_wide_step(wide_block, wide_total)
 
     sub = 0
     while sub < ctx.sub_step_count {
@@ -581,6 +605,7 @@ solve(w: *World, ctx: *StepContext) {
         while c < dynamics.OVERFLOW_INDEX {
             color = dynamics.graph_color(w, c)
             joint_solver.warm_start_joints(ctx, color)
+            contact_solver_wide.warm_start_wide_contacts(ctx, color.wide_constraints, color.wide_constraint_count)
             contact_solver.warm_start_contacts(ctx, color.contact_constraints, color.contact_constraint_count)
             c = c + 1
         }
@@ -591,6 +616,7 @@ solve(w: *World, ctx: *StepContext) {
         while c < dynamics.OVERFLOW_INDEX {
             color = dynamics.graph_color(w, c)
             solve_joints_flagging(ctx, color, true)
+            contact_solver_wide.solve_wide_contacts(ctx, color.wide_constraints, color.wide_constraint_count, true)
             contact_solver.solve_contacts(ctx, color.contact_constraints, color.contact_constraint_count, true)
             c = c + 1
         }
@@ -602,6 +628,7 @@ solve(w: *World, ctx: *StepContext) {
         while c < dynamics.OVERFLOW_INDEX {
             color = dynamics.graph_color(w, c)
             solve_joints_flagging(ctx, color, false)
+            contact_solver_wide.solve_wide_contacts(ctx, color.wide_constraints, color.wide_constraint_count, false)
             contact_solver.solve_contacts(ctx, color.contact_constraints, color.contact_constraint_count, false)
             c = c + 1
         }
@@ -614,16 +641,19 @@ solve(w: *World, ctx: *StepContext) {
         c = 0
         while c < dynamics.OVERFLOW_INDEX {
             color = dynamics.graph_color(w, c)
+            contact_solver_wide.apply_wide_restitution(ctx, color.wide_constraints, color.wide_constraint_count)
             contact_solver.apply_restitution(ctx, color.contact_constraints, color.contact_constraint_count)
             c = c + 1
         }
         iteration = iteration + 1
     }
     // Store.
+    contact_solver_wide.end_wide_step(wide_block, wide_total)
     has_hits = contact_solver.store_impulses(ctx, overflow.contact_constraints, overflow.contact_constraint_count, &w.hit_event_bits)
     c = 0
     while c < dynamics.OVERFLOW_INDEX {
         color = dynamics.graph_color(w, c)
+        if wide && contact_solver_wide.store_wide_impulses(ctx, color, &w.hit_event_bits) { has_hits = true }
         if contact_solver.store_impulses(ctx, color.contact_constraints, color.contact_constraint_count, &w.hit_event_bits) { has_hits = true }
         c = c + 1
     }
@@ -644,11 +674,14 @@ solve(w: *World, ctx: *StepContext) {
     core.stack_free(stack, overflow.contact_constraints)
     core.stack_free(stack, manifold_block)
     core.stack_free(stack, contact_block)
+    core.stack_free(stack, wide_block)
     c = 0
     while c < dynamics.GRAPH_COLOR_COUNT {
         color = dynamics.graph_color(w, c)
         color.contact_constraints = null
         color.manifold_constraints = null
+        color.wide_constraints = null
+        color.wide_constraint_count = 0
         c = c + 1
     }
 

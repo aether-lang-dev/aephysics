@@ -89,7 +89,7 @@ scene(friction: float, restitution: float, events: bool) -> Scene {
     ctx.states = awake.body_states.data
     ctx.sims = awake.body_sims.data
     color = dynamics.graph_color(w, c.color_index)
-    contact_solver.count_color_constraints(color)
+    contact_solver.count_color_constraints(color, true)
     constraints = core.alloc(color.contact_constraint_count * sizeof(ContactConstraint))
     manifolds = core.alloc(color.manifold_constraint_count * sizeof(ManifoldConstraint))
     color.contact_constraints = constraints
@@ -108,7 +108,7 @@ cube_state(s: *Scene) -> *BodyState { return dynamics.get_body_state(s.w, dynami
 
 prepare(s: *Scene) {
     color = dynamics.graph_color(s.w, s.contact.color_index)
-    contact_solver.prepare_contacts(&s.ctx, color)
+    contact_solver.prepare_contacts(&s.ctx, color, true)
 }
 
 // The solve of one sub-step as the solver runs it: biased, then relaxed.

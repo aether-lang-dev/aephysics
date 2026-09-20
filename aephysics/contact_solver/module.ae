@@ -9,12 +9,12 @@
 //
 // This is Box3D's contact_solver.c (Erin Catto, MIT), the reference
 // this engine is measured against, in its scalar form: the reference
-// solves mesh and overflow contacts this way and convex contacts eight
-// at a time in SIMD lanes; here every contact goes through the one
-// scalar constraint (the wide path is a later, measured layer). Names
-// are the reference's without its prefix, in snake case:
-// b3PrepareContacts_Mesh is prepare_contacts, b3StoreImpulses_Mesh is
-// store_impulses.
+// solves mesh and overflow contacts this way and convex contacts four
+// at a time in lanes, which aephysics.contact_solver_wide does here;
+// the colour functions take the convex contacts too when asked, so a
+// scene can be solved scalar throughout to compare. Names are the
+// reference's without its prefix, in snake case: b3PrepareContacts_Mesh
+// is prepare_contacts, b3StoreImpulses_Mesh is store_impulses.
 //
 // The step context (b3StepContext) is defined here, as the first of the
 // solver layers; the joint solver and the solver share it.
@@ -26,7 +26,7 @@ import aephysics.dynamics
 exports (
     StepContext, ManifoldConstraintPoint, ManifoldConstraint, ContactConstraint,
     MIN_FRICTION_WEIGHT,
-    default_step_context, contact_constraint_at, manifold_constraint_at, constraint_point_at,
+    default_step_context, contact_constraint_at, manifold_constraint_at, constraint_point_at, state_at, sim_at, dummy_state,
     prepare_contact, prepare_contacts, warm_start_contacts, solve_contacts, apply_restitution, store_impulses,
     color_constraint_counts, count_color_constraints
 )
@@ -146,12 +146,15 @@ dummy_state() -> *BodyState {
     return g_dummy as *BodyState
 }
 
-// A colour's constraint counts: one constraint per convex contact and
-// per spec, one manifold constraint per convex contact and per spec
-// manifold. Returned as a Vec2 of counts (contacts, manifolds).
-color_constraint_counts(color: *GraphColor) -> Vec2 {
-    contacts = color.convex_contacts.count + color.contacts.count
-    manifolds = color.convex_contacts.count
+// A colour's scalar constraint counts: one constraint per spec and per
+// spec manifold, plus one of each per convex contact when the scalar
+// path takes those too (with_convex; else the wide path has them).
+// Returned as a Vec2 of counts (contacts, manifolds).
+color_constraint_counts(color: *GraphColor, with_convex: bool) -> Vec2 {
+    convex = 0
+    if with_convex { convex = color.convex_contacts.count }
+    contacts = convex + color.contacts.count
+    manifolds = convex
     i = 0
     while i < color.contacts.count {
         manifolds = manifolds + dynamics.contact_spec_at(color, i).manifold_count
@@ -161,12 +164,13 @@ color_constraint_counts(color: *GraphColor) -> Vec2 {
 }
 
 // The counts recorded on the colour, and the specs' manifold starts laid
-// out after the convex contacts' single manifolds.
-count_color_constraints(color: *GraphColor) {
-    counts = color_constraint_counts(color)
+// out after the convex contacts' single manifolds when those are taken.
+count_color_constraints(color: *GraphColor, with_convex: bool) {
+    counts = color_constraint_counts(color, with_convex)
     color.contact_constraint_count = counts.x as int
     color.manifold_constraint_count = counts.y as int
-    start = color.convex_contacts.count
+    start = 0
+    if with_convex { start = color.convex_contacts.count }
     i = 0
     while i < color.contacts.count {
         spec = dynamics.contact_spec_at(color, i)
@@ -304,12 +308,14 @@ prepare_contact(ctx: *StepContext, c: *Contact, cc: *ContactConstraint, manifold
 }
 
 // A colour's constraints prepared into its scratch arrays: the convex
-// contacts first (one manifold each), then the specs' at their manifold starts.
-prepare_contacts(ctx: *StepContext, color: *GraphColor) {
+// contacts first (one manifold each) when taken, then the specs' at
+// their manifold starts.
+prepare_contacts(ctx: *StepContext, color: *GraphColor, with_convex: bool) {
     w = ctx.world
     base = color.contact_constraints
     manifolds = color.manifold_constraints
-    convex_count = color.convex_contacts.count
+    convex_count = 0
+    if with_convex { convex_count = color.convex_contacts.count }
     i = 0
     while i < convex_count {
         c = dynamics.contact_at(w, core.ints_get(&color.convex_contacts, i))

@@ -5,7 +5,11 @@
 // sub-steps; then 100 stacks of 10 cubes for 120 steps (the stacking
 // stress: dynamic pairs in every colour). Single thread, wall time of
 // the steps, the sum of the cubes' heights and the awake count as the
-// checksums.
+// checksums. Each scene runs three ways: the convex contacts solved
+// one at a time (scalar), four at a time in Aether's lanes, and four
+// at a time in the native lanes (lanes.c), which is what the step does
+// by default; the layout alone against the lanes is the measure issue
+// #22 asked for.
 import std.string
 import std.os
 import aephysics.math
@@ -16,6 +20,7 @@ import aephysics.shape
 import aephysics.broad_phase
 import aephysics.dynamics
 import aephysics.contact_solver
+import aephysics.contact_solver_wide
 import aephysics.joint_solver
 import aephysics.solver
 
@@ -47,7 +52,7 @@ step(w: *World, dt: float, sub_steps: int) {
     core.stack_grow(&w.stack)
 }
 
-run(name: string, count: int, columns: int, rows: int, spacing: float, base_height: float, layer_height: float, box: *HullData, slab: *HullData) {
+run(name: string, mode: string, count: int, columns: int, rows: int, spacing: float, base_height: float, layer_height: float, box: *HullData, slab: *HullData) {
     world_def = dynamics.default_world_def()
     world_id = dynamics.create_world(&world_def)
     w = dynamics.get_world(world_id.index1 - 1)
@@ -83,7 +88,7 @@ run(name: string, count: int, columns: int, rows: int, spacing: float, base_heig
         height_sum = height_sum + dynamics.body_get_position(ids[i]).y
         i = i + 1
     }
-    println("aephysics solver: ${name}: ${STEPS} steps of ${count} cubes ${ms(t1 - t0)} ms (height sum ${height_sum}, ${dynamics.world_awake_body_count(w)} awake, ${dynamics.world_contact_count(w)} contacts)")
+    println("aephysics solver: ${name}, ${mode}: ${STEPS} steps of ${count} cubes ${ms(t1 - t0)} ms (height sum ${height_sum}, ${dynamics.world_awake_body_count(w)} awake, ${dynamics.world_contact_count(w)} contacts)")
     free(ids_block)
     dynamics.destroy_world(world_id)
 }
@@ -91,8 +96,17 @@ run(name: string, count: int, columns: int, rows: int, spacing: float, base_heig
 main() {
     box = hull.make_box_hull(0.5, 0.5, 0.5)
     slab = hull.make_box_hull(110.0, 0.5, 60.0)
-    run("falling grid", 5000, 100, 50, 2.0, 1.5, 0.0, box, slab)
-    run("stacks of ten", 1000, 10, 10, 4.0, 0.5, 1.0, box, slab)
+    mode = 0
+    while mode < 3 {
+        solver.set_wide_contacts(mode > 0)
+        contact_solver_wide.set_native_lanes(mode == 2)
+        label = "scalar"
+        if mode == 1 { label = "lanes in Aether" }
+        if mode == 2 { label = "native lanes" }
+        run("falling grid", label, 5000, 100, 50, 2.0, 1.5, 0.0, box, slab)
+        run("stacks of ten", label, 1000, 10, 10, 4.0, 0.5, 1.0, box, slab)
+        mode = mode + 1
+    }
     hull.destroy_hull(slab)
     hull.destroy_hull(box)
 }

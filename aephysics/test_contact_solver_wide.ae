@@ -1,0 +1,221 @@
+// aephysics.contact_solver_wide's checks: the native lanes' layout is
+// the module's; one scene stepped three ways (the convex contacts
+// solved one at a time, four at a time in Aether's lanes, four at a
+// time in the native lanes) lands in the same place: a stack of boxes
+// (contacts in colours with a tail slot, dynamic pairs and static
+// ones), a bouncing ball with restitution and hit events, a rolling
+// sphere with rolling resistance, a box on a conveyor's tangent
+// velocity, a box sliding to rest under friction. The lanes are the
+// scalar solve's arithmetic in another order and (natively) in single
+// precision, so the paths agree to a tolerance, not to the bit; the
+// same path twice agrees to the bit.
+import std.string
+import aephysics.math
+import aephysics.core
+import aephysics.hull
+import aephysics.manifold
+import aephysics.shape
+import aephysics.dynamics
+import aephysics.contact_solver_wide
+import aephysics.solver
+import aephysics.physics_world
+
+extern exit(code: int)
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+
+var failures = 0
+var checks = 0
+
+ensure(name: string, ok: bool) {
+    checks = checks + 1
+    if !ok {
+        println("contact_solver_wide: FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+const BODY_COUNT = 12
+const STEPS = 120
+
+// The scene's outcome: every body's position after the steps, the hit
+// events counted, the speed of the rolling sphere and the conveyor box.
+struct Outcome {
+    positions: ptr                 // Vec3[BODY_COUNT]
+    hits: int
+    rolling_speed: float
+    conveyor_speed: float
+    slid_x: float
+}
+
+var g_box: ptr = null
+
+run_scene() -> Outcome {
+    wdef = dynamics.default_world_def()
+    world_id = dynamics.create_world(&wdef)
+    box = g_box as *HullData
+    ids_block = calloc(BODY_COUNT, sizeof(BodyId))
+    ids = ids_block as BodyId[]
+    n = 0
+    // The ground: half of it a conveyor.
+    bdef = dynamics.default_body_def()
+    bdef.position = math.vec3(0.0, 0.0 - 0.5, 0.0)
+    ground = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    slab = hull.make_box_hull(20.0, 0.5, 20.0)
+    dynamics.create_hull_shape(ground, &sdef, slab)
+    belt = hull.make_box_hull(2.0, 0.5, 2.0)
+    bdef.position = math.vec3(10.0, 0.0 - 0.4, 0.0)
+    belt_body = dynamics.create_body(world_id, &bdef)
+    belt_def = dynamics.default_shape_def()
+    belt_def.base_material.tangent_velocity = math.vec3(0.0 - 1.0, 0.0, 0.0)
+    dynamics.create_hull_shape(belt_body, &belt_def, belt)
+    // A stack of six boxes: five dynamic pairs and a static one, so a
+    // colour holds a tail slot with spare lanes.
+    bdef.kind = dynamics.BODY_DYNAMIC
+    i = 0
+    while i < 6 {
+        bdef.position = math.vec3(0.0, 0.5 + (i as float) * 1.0 + 0.01 * (i as float), 0.0)
+        ids[n] = dynamics.create_body(world_id, &bdef)
+        dynamics.create_hull_shape(ids[n], &sdef, box)
+        n = n + 1
+        i = i + 1
+    }
+    // A bouncing ball with hit events.
+    bdef.position = math.vec3(4.0, 3.0, 0.0)
+    ids[n] = dynamics.create_body(world_id, &bdef)
+    ball_def = dynamics.default_shape_def()
+    ball_def.base_material.restitution = 0.8
+    ball_def.enable_hit_events = true
+    dynamics.create_sphere_shape(ids[n], &ball_def, manifold.sphere(math.vec3_zero(), 0.5))
+    n = n + 1
+    // A rolling sphere with rolling resistance.
+    bdef.position = math.vec3(0.0 - 4.0, 0.5, 0.0)
+    bdef.linear_velocity = math.vec3(0.0, 0.0, 3.0)
+    bdef.angular_velocity = math.vec3(0.0 - 6.0, 0.0, 0.0)
+    ids[n] = dynamics.create_body(world_id, &bdef)
+    roll_def = dynamics.default_shape_def()
+    roll_def.base_material.rolling_resistance = 0.05
+    dynamics.create_sphere_shape(ids[n], &roll_def, manifold.sphere(math.vec3_zero(), 0.5))
+    rolling = ids[n]
+    n = n + 1
+    bdef.linear_velocity = math.vec3_zero()
+    bdef.angular_velocity = math.vec3_zero()
+    // A box on the conveyor.
+    bdef.position = math.vec3(10.0, 0.6, 0.0)
+    ids[n] = dynamics.create_body(world_id, &bdef)
+    dynamics.create_hull_shape(ids[n], &sdef, box)
+    conveyor = ids[n]
+    n = n + 1
+    // A box sliding to rest.
+    bdef.position = math.vec3(0.0 - 8.0, 0.5, 4.0)
+    bdef.linear_velocity = math.vec3(4.0, 0.0, 0.0)
+    ids[n] = dynamics.create_body(world_id, &bdef)
+    dynamics.create_hull_shape(ids[n], &sdef, box)
+    slider = ids[n]
+    n = n + 1
+    bdef.linear_velocity = math.vec3_zero()
+    // Two boxes leaning on each other.
+    bdef.position = math.vec3(6.0, 0.5, 6.0)
+    ids[n] = dynamics.create_body(world_id, &bdef)
+    dynamics.create_hull_shape(ids[n], &sdef, box)
+    n = n + 1
+    bdef.position = math.vec3(6.6, 1.55, 6.0)
+    ids[n] = dynamics.create_body(world_id, &bdef)
+    dynamics.create_hull_shape(ids[n], &sdef, box)
+    n = n + 1
+    ensure("the scene has ${BODY_COUNT} bodies (${n})", n == BODY_COUNT)
+
+    hits = 0
+    s = 0
+    while s < STEPS {
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        hits = hits + physics_world.contact_hit_event_count(world_id)
+        s = s + 1
+    }
+    positions_block = calloc(BODY_COUNT, sizeof(Vec3))
+    positions = positions_block as Vec3[]
+    i = 0
+    while i < BODY_COUNT {
+        positions[i] = dynamics.body_get_position(ids[i])
+        i = i + 1
+    }
+    outcome = Outcome { positions: positions_block, hits: hits,
+                        rolling_speed: math.length(dynamics.body_get_linear_velocity(rolling)),
+                        conveyor_speed: dynamics.body_get_linear_velocity(conveyor).x,
+                        slid_x: dynamics.body_get_position(slider).x }
+    free(ids_block)
+    hull.destroy_hull(slab)
+    hull.destroy_hull(belt)
+    dynamics.destroy_world(world_id)
+    return outcome
+}
+
+// The largest distance between two outcomes' bodies.
+farthest(a: Outcome, b: Outcome) -> float {
+    pa = a.positions as Vec3[]
+    pb = b.positions as Vec3[]
+    worst = 0.0
+    i = 0
+    while i < BODY_COUNT {
+        d = math.distance(pa[i], pb[i])
+        if d > worst { worst = d }
+        i = i + 1
+    }
+    return worst
+}
+
+run_mode(wide: bool, native: bool) -> Outcome {
+    solver.set_wide_contacts(wide)
+    contact_solver_wide.set_native_lanes(native)
+    return run_scene()
+}
+
+main() {
+    g_box = hull.make_box_hull(0.5, 0.5, 0.5) as ptr
+
+    ensure("wide_constraint_count: 0 -> 0", contact_solver_wide.wide_constraint_count(0) == 0)
+    ensure("wide_constraint_count: 1 -> 1, 4 -> 1, 5 -> 2, 8 -> 2, 9 -> 3",
+           contact_solver_wide.wide_constraint_count(1) == 1 && contact_solver_wide.wide_constraint_count(4) == 1 &&
+           contact_solver_wide.wide_constraint_count(5) == 2 && contact_solver_wide.wide_constraint_count(8) == 2 &&
+           contact_solver_wide.wide_constraint_count(9) == 3)
+    ensure("the native lanes were built against this layout", contact_solver_wide.native_layout_matches())
+    ensure("the wide path and the native lanes are on by default", solver.wide_contacts_enabled() && contact_solver_wide.native_lanes_enabled())
+
+    scalar = run_mode(false, false)
+    lanes = run_mode(true, false)
+    native = run_mode(true, true)
+    native_again = run_mode(true, true)
+
+    // The scene did what it was built to do.
+    ensure("the ball bounced and reported hits (${scalar.hits})", scalar.hits >= 2)
+    ensure("the rolling sphere slowed under rolling resistance (${scalar.rolling_speed})", scalar.rolling_speed > 0.1 && scalar.rolling_speed < 2.5)
+    ensure("the conveyor carried its box (${scalar.conveyor_speed})", scalar.conveyor_speed < 0.0 - 0.9)
+    ensure("the slider slid and stopped (${scalar.slid_x})", scalar.slid_x > 0.0 - 7.5 && scalar.slid_x < 0.0 - 5.0)
+    stack = scalar.positions as Vec3[]
+    ensure("the stack stands (${stack[5].y})", stack[5].y > 5.3 && stack[5].y < 5.7)
+
+    // The three paths land in the same place; the same path twice, to the bit.
+    println("contact_solver_wide: lanes vs scalar ${farthest(lanes, scalar)}, native vs lanes ${farthest(native, lanes)}, native twice ${farthest(native, native_again)}")
+    ensure("the Aether lanes agree with the scalar solve", farthest(lanes, scalar) < 0.001)
+    ensure("the native lanes agree with the Aether lanes", farthest(native, lanes) < 0.01)
+    ensure("the native lanes repeat to the bit", farthest(native, native_again) == 0.0)
+    ensure("hit events agree (${scalar.hits}, ${lanes.hits}, ${native.hits})", scalar.hits == lanes.hits && lanes.hits == native.hits)
+    ensure("the rolling speeds agree", math.abs_float(lanes.rolling_speed - scalar.rolling_speed) < 0.001 && math.abs_float(native.rolling_speed - lanes.rolling_speed) < 0.01)
+    ensure("the conveyor speeds agree", math.abs_float(lanes.conveyor_speed - scalar.conveyor_speed) < 0.001 && math.abs_float(native.conveyor_speed - lanes.conveyor_speed) < 0.01)
+
+    free(scalar.positions)
+    free(lanes.positions)
+    free(native.positions)
+    free(native_again.positions)
+    hull.destroy_hull(g_box as *HullData)
+    solver.set_wide_contacts(true)
+    contact_solver_wide.set_native_lanes(true)
+    println("contact_solver_wide: ${checks} checks")
+    if failures == 0 {
+        println("contact_solver_wide: all checks passed")
+    } else {
+        println("contact_solver_wide: ${failures} failure(s)")
+        exit(1)
+    }
+}
