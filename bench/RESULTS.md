@@ -351,3 +351,26 @@ signed longs, which is undefined in the C underneath, and gcc at -O2
 made two inlined copies of it disagree, so a key stored by one copy was
 not found by the other. The new mixer stays in 32-bit products; the
 mesh builds above moved from 199 to 221 ms and 316 to 335 ms with it.
+
+## mesh_contact
+
+`bench/mesh_contact.ae`: a box, a sphere and a capsule each dragged
+100,000 steps across a 100 x 100 wave mesh, riding a hundredth inside
+the surface with a small move each step, the manifolds computed every
+step. The reference's mesh contact lives inside its world (it needs a
+contact, a worker context and the world's material callbacks), so it
+has no free-standing counterpart; it is measured against ours through
+the world benchmarks once the world steps.
+
+| shape, 100,000 steps | aephysics | per step |
+|---|---|---|
+| box (0.8 wide): 876,526 clusters, 3.17 M points, 910,432 cache hits | 322 ms | 3.2 us |
+| sphere: 127,842 clusters, 129,088 points | 69 ms | 0.7 us |
+| capsule: 797,124 clusters, 1.35 M points | 371 ms | 3.7 us |
+
+The wave's cells are half the box's width, so a box straddles several
+triangles of different normals and the clusters stay many (the cluster
+threshold is cos 5 degrees); the far clip points of a hull face are
+kept as speculative ones, as the reference keeps them. The test checks
+the seams (a sphere on an interior edge or vertex gives one point), the
+cache's persistence and the cull.
