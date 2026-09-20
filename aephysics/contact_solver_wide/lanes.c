@@ -186,9 +186,9 @@ int aephysics_wide_body_state_size(void) { return (int)sizeof(body_state); }
 
 static inline v4 splat(float s) { return (v4){ s, s, s, s }; }
 // Per lane: b where the comparison held, a elsewhere.
-static inline v4 select(v4 a, v4 b, m4 m) { return (v4)(((m4)b & m) | ((m4)a & ~m)); }
-static inline v4 vmax(v4 a, v4 b) { return select(b, a, a >= b); }
-static inline v4 vmin(v4 a, v4 b) { return select(b, a, a <= b); }
+static inline v4 pick(v4 a, v4 b, m4 m) { return (v4)(((m4)b & m) | ((m4)a & ~m)); }
+static inline v4 vmax(v4 a, v4 b) { return pick(b, a, a >= b); }
+static inline v4 vmin(v4 a, v4 b) { return pick(b, a, a <= b); }
 static inline v4 vsqrt(v4 a) { return (v4){ sqrtf(a[0]), sqrtf(a[1]), sqrtf(a[2]), sqrtf(a[3]) }; }
 static inline vec3w mul_sv(v4 s, vec3w a) { return (vec3w){ s * a.x, s * a.y, s * a.z }; }
 static inline vec3w add_v(vec3w a, vec3w b) { return (vec3w){ a.x + b.x, a.y + b.y, a.z + b.z }; }
@@ -217,7 +217,7 @@ static inline vec3w rotate(quatw q, vec3w a)
 static inline v4 greater(v4 a, v4 b) { return (v4)((a > b) & (m4)splat(1.0f)); }
 static inline v4 equals(v4 a, v4 b) { return (v4)((a == b) & (m4)splat(1.0f)); }
 static inline v4 or_mask(v4 a, v4 b) { return (v4)(((a != splat(0.0f)) | (b != splat(0.0f))) & (m4)splat(1.0f)); }
-static inline v4 blend(v4 a, v4 b, v4 m) { return select(a, b, m != splat(0.0f)); }
+static inline v4 blend(v4 a, v4 b, v4 m) { return pick(a, b, m != splat(0.0f)); }
 static inline int all_zero(v4 a) { return a[0] == 0.0f && a[1] == 0.0f && a[2] == 0.0f && a[3] == 0.0f; }
 static inline int max_point_count(const wide_constraint* c)
 {
