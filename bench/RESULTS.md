@@ -420,3 +420,28 @@ b3CreateJoint records the call for its replay and validates the joint
 definition's cookie; the destruction is 2x on a tenth of a millisecond.
 The sensor passes are 1.2-1.4x: each pass queries the three trees per
 sensor and runs GJK on every candidate, the distance layer's gap.
+
+## contact_solver
+
+`bench/contact_solver.ae` (ours alone: the reference has no solve
+without its step, which integrates too; the step's pair comes with the
+world layer): 5,000 cubes resting on a slab and 1,000 stacked in pairs,
+collided once, then ten steps of the passes as the solver runs them:
+the colours' constraints prepared, warm started, four sub-steps of a
+biased solve and four relaxes (the relax carries the friction, twist
+and rolling), the restitution pass and the impulses stored.
+
+| pass, 10 steps of 6,000 contacts | aephysics |
+|---|---|
+| prepare | 7.0 ms |
+| warm start | 1.9 |
+| 4 biased solves | 20.1 |
+| 4 relaxes (with friction) | 27.6 |
+| restitution | 0.13 |
+| store | 2.5 |
+
+About 85 ns per contact per biased solve and 115 ns with friction, on
+one core, scalar. The reference solves its convex contacts eight at a
+time in SIMD lanes (b3ContactConstraintWide); that path is the layer
+to add and measure once the step exists to compare against.
+

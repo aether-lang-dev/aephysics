@@ -217,9 +217,19 @@ started until its tests pass.
      sets of one body). The solving of the kinds (prepare, warm start,
      solve, the per-kind accessors and constraint forces) comes with
      joint_solver.
-   - `aephysics.contact_solver`: contact_solver.c scalar (the prepare,
-     warm start, solve, restitution and store passes; the wide SIMD path
-     later, measured).
+   - `aephysics.contact_solver` (done, PR #19): contact_solver.c in its
+     scalar form (the reference's mesh and overflow path) for every
+     contact: ContactConstraint and ManifoldConstraint over a colour's
+     convex contacts and specs, the step context (b3StepContext, one
+     worker), prepare (the split separation, friction centre decay,
+     tangent/twist/rolling masses), warm start, the merged normal and
+     friction solve with the relax pass, restitution, store with the hit
+     events. 49 checks by hand on a cube on a slab: masses, the falling
+     cube stopped with its momentum spread over four points, the push-out
+     capped by the contact speed, the speculative gap, the friction bound
+     mu N and the friction centre, the twist bound, restitution above and
+     below its threshold, the warm start and the hit event. The wide
+     (SIMD) path for convex contacts is a later, measured layer.
    - `aephysics.joint_solver`: the seven joints' prepare, warm start,
      solve and reaction (distance, motor, prismatic, revolute, spherical,
      weld, wheel) with joint.c's dispatch.

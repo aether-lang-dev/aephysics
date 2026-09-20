@@ -1,0 +1,625 @@
+// aephysics.contact_solver -- the contact constraints of one step: for
+// each touching contact of a graph colour, the constraint prepared from
+// its manifolds (anchors, base separations, normal masses, the friction
+// centre and its tangent mass, the twist mass, the rolling mass), the
+// warm start from last step's impulses, the sequential impulse solve of
+// a sub-step (soft normal constraints with speculative bias, central
+// friction, twist friction, rolling resistance), the restitution pass
+// and the impulses stored back into the manifolds with the hit events.
+//
+// This is Box3D's contact_solver.c (Erin Catto, MIT), the reference
+// this engine is measured against, in its scalar form: the reference
+// solves mesh and overflow contacts this way and convex contacts eight
+// at a time in SIMD lanes; here every contact goes through the one
+// scalar constraint (the wide path is a later, measured layer). Names
+// are the reference's without its prefix, in snake case:
+// b3PrepareContacts_Mesh is prepare_contacts, b3StoreImpulses_Mesh is
+// store_impulses.
+//
+// The step context (b3StepContext) is defined here, as the first of the
+// solver layers; the joint solver and the solver share it.
+import std.string
+import aephysics.math
+import aephysics.core
+import aephysics.dynamics
+
+exports (
+    StepContext, ManifoldConstraintPoint, ManifoldConstraint, ContactConstraint,
+    MIN_FRICTION_WEIGHT,
+    default_step_context, contact_constraint_at, manifold_constraint_at, constraint_point_at,
+    prepare_contact, prepare_contacts, warm_start_contacts, solve_contacts, apply_restitution, store_impulses,
+    color_constraint_counts, count_color_constraints
+)
+
+extern sqrt(x: float) -> float
+
+const MIN_FRICTION_WEIGHT = 0.0000000001
+const NULL_INDEX = 0 - 1
+
+// The context of one step (b3StepContext, single worker): the time
+// steps, the softness of contacts, the world and shortcuts into the
+// awake set, and the solver's scratch.
+struct StepContext {
+    dt: float
+    inv_dt: float                  // zero when dt is
+    h: float                       // the sub-step
+    inv_h: float
+    sub_step_count: int
+    contact_softness: Softness
+    static_softness: Softness      // stiffer, so bodies are not pushed through the ground
+    restitution_threshold: float
+    max_linear_velocity: float
+    world: *World
+    states: ptr                    // BodyState[], the awake set's
+    sims: ptr                      // BodySim[], the awake set's
+    enlarged_shapes: ptr           // int[], the shapes whose bounds grew this step
+    enlarged_shape_count: int
+    bullet_bodies: ptr             // int[], the bullets needing continuous collision
+    bullet_body_count: int
+    awake_contact_indices: ptr     // int[], the awake set's contacts for the narrow phase
+    awake_contact_count: int
+    active_color_count: int
+    enable_warm_starting: bool
+}
+
+default_step_context(w: *World) -> StepContext {
+    zero = Softness { bias_rate: 0.0, mass_scale: 0.0, impulse_scale: 0.0 }
+    return StepContext { dt: 0.0, inv_dt: 0.0, h: 0.0, inv_h: 0.0, sub_step_count: 1, contact_softness: zero, static_softness: zero,
+                         restitution_threshold: w.restitution_threshold, max_linear_velocity: w.max_linear_speed, world: w,
+                         states: null, sims: null, enlarged_shapes: null, enlarged_shape_count: 0, bullet_bodies: null, bullet_body_count: 0,
+                         awake_contact_indices: null, awake_contact_count: 0, active_color_count: 0, enable_warm_starting: w.enable_warm_starting }
+}
+
+// One manifold point's constraint: the anchors relative to the centres
+// of mass, the separation with the anchors' contribution removed (so
+// the current separation follows from the bodies' deltas), the
+// impulses, the effective mass, and the arm for the twist limit.
+struct ManifoldConstraintPoint {
+    r_a: Vec3
+    r_b: Vec3
+    base_separation: float
+    relative_velocity: float       // the normal velocity before the solve, for restitution
+    normal_impulse: float
+    total_normal_impulse: float
+    normal_mass: float
+    lever_arm: float
+}
+
+// One manifold's constraint: its points, the normal and tangents, the
+// friction centres, the masses and impulses of twist, friction and rolling.
+struct ManifoldConstraint {
+    point0: ManifoldConstraintPoint
+    point1: ManifoldConstraintPoint
+    point2: ManifoldConstraintPoint
+    point3: ManifoldConstraintPoint
+    point_count: int
+    normal: Vec3
+    tangent1: Vec3
+    tangent2: Vec3
+    center_a: Vec3
+    center_b: Vec3
+    twist_mass: float
+    twist_impulse: float
+    tangent_mass: Matrix2
+    friction_impulse: Vec2
+    rolling_impulse: Vec3
+    tangent_velocity1: float
+    tangent_velocity2: float
+}
+
+// One contact's constraint: its manifolds' constraints, the bodies'
+// solver indices and inverse masses, the softness, the materials.
+struct ContactConstraint {
+    constraints: ptr               // ManifoldConstraint[manifold_count]
+    contact: *Contact
+    index_a: int                   // into the awake set's states; NULL_INDEX for a static body
+    index_b: int
+    inv_mass_a: float
+    inv_mass_b: float
+    inv_inertia_a: Matrix3
+    inv_inertia_b: Matrix3
+    softness: Softness
+    rolling_mass: Matrix3
+    friction: float
+    restitution: float
+    rolling_resistance: float
+    manifold_count: int
+}
+
+contact_constraint_at(base: ptr, index: int) -> *ContactConstraint { return (base + index * sizeof(ContactConstraint)) as *ContactConstraint }
+manifold_constraint_at(base: ptr, index: int) -> *ManifoldConstraint { return (base + index * sizeof(ManifoldConstraint)) as *ManifoldConstraint }
+constraint_point_at(m: *ManifoldConstraint, index: int) -> *ManifoldConstraintPoint {
+    return ((m as ptr) + index * sizeof(ManifoldConstraintPoint)) as *ManifoldConstraintPoint
+}
+
+state_at(base: ptr, index: int) -> *BodyState { return (base + index * sizeof(BodyState)) as *BodyState }
+sim_at(base: ptr, index: int) -> *BodySim { return (base + index * sizeof(BodySim)) as *BodySim }
+
+var g_dummy: ptr = null   // BodyState: a static body's, identity, never written
+
+dummy_state() -> *BodyState {
+    if g_dummy == null {
+        g_dummy = core.alloc(sizeof(BodyState))
+        d = g_dummy as *BodyState
+        d.delta_rotation = math.quat_identity()
+    }
+    return g_dummy as *BodyState
+}
+
+// A colour's constraint counts: one constraint per convex contact and
+// per spec, one manifold constraint per convex contact and per spec
+// manifold. Returned as a Vec2 of counts (contacts, manifolds).
+color_constraint_counts(color: *GraphColor) -> Vec2 {
+    contacts = color.convex_contacts.count + color.contacts.count
+    manifolds = color.convex_contacts.count
+    i = 0
+    while i < color.contacts.count {
+        manifolds = manifolds + dynamics.contact_spec_at(color, i).manifold_count
+        i = i + 1
+    }
+    return Vec2 { x: contacts as float, y: manifolds as float }
+}
+
+// The counts recorded on the colour, and the specs' manifold starts laid
+// out after the convex contacts' single manifolds.
+count_color_constraints(color: *GraphColor) {
+    counts = color_constraint_counts(color)
+    color.contact_constraint_count = counts.x as int
+    color.manifold_constraint_count = counts.y as int
+    start = color.convex_contacts.count
+    i = 0
+    while i < color.contacts.count {
+        spec = dynamics.contact_spec_at(color, i)
+        spec.manifold_start = start
+        start = start + spec.manifold_count
+        i = i + 1
+    }
+}
+
+// One contact's constraint from its manifolds (b3PrepareContacts_Mesh's body).
+// The separation is split: s = base + dot(cB + rB - cA - rA, normal) with the
+// normal held fixed, so the sub-steps only need the bodies' deltas.
+prepare_contact(ctx: *StepContext, c: *Contact, cc: *ContactConstraint, manifolds: ptr) {
+    w = ctx.world
+    warm_start_scale = 0.0
+    if ctx.enable_warm_starting { warm_start_scale = 1.0 }
+    inv_tau = 1.0 / dynamics.SPECULATIVE_DISTANCE
+    index_a = c.body_sim_index_a
+    index_b = c.body_sim_index_b
+    m_a = 0.0
+    i_a = math.mat3_zero()
+    v_a = math.vec3_zero()
+    w_a = math.vec3_zero()
+    if index_a != NULL_INDEX {
+        sim_a = sim_at(ctx.sims, index_a)
+        m_a = sim_a.inv_mass
+        i_a = sim_a.inv_inertia_world
+        state_a = state_at(ctx.states, index_a)
+        v_a = state_a.linear_velocity
+        w_a = state_a.angular_velocity
+    }
+    m_b = 0.0
+    i_b = math.mat3_zero()
+    v_b = math.vec3_zero()
+    w_b = math.vec3_zero()
+    if index_b != NULL_INDEX {
+        sim_b = sim_at(ctx.sims, index_b)
+        m_b = sim_b.inv_mass
+        i_b = sim_b.inv_inertia_world
+        state_b = state_at(ctx.states, index_b)
+        v_b = state_b.linear_velocity
+        w_b = state_b.angular_velocity
+    }
+    manifold_count = c.manifold_count
+    cc.contact = c
+    cc.manifold_count = manifold_count
+    cc.index_a = index_a
+    cc.index_b = index_b
+    cc.inv_inertia_a = i_a
+    cc.inv_mass_a = m_a
+    cc.inv_inertia_b = i_b
+    cc.inv_mass_b = m_b
+    cc.rolling_mass = math.invert_matrix(math.add_mm(i_a, i_b))
+    cc.softness = ctx.contact_softness
+    if (c.flags & dynamics.CONTACT_STATIC) != 0 { cc.softness = ctx.static_softness }
+    cc.friction = c.friction
+    cc.restitution = c.restitution
+    cc.rolling_resistance = c.rolling_resistance
+    cc.constraints = manifolds
+    manifold_index = 0
+    while manifold_index < manifold_count {
+        manifold = dynamics.manifold_at(c, manifold_index)
+        constraint = manifold_constraint_at(manifolds, manifold_index)
+        point_count = manifold.point_count
+        normal = manifold.normal
+        tangent1 = math.perp(normal)
+        tangent2 = math.cross(tangent1, normal)
+        constraint.point_count = point_count
+        constraint.normal = normal
+        constraint.tangent1 = tangent1
+        constraint.tangent2 = tangent2
+        constraint.tangent_velocity1 = math.dot(c.tangent_velocity, tangent1)
+        constraint.tangent_velocity2 = math.dot(c.tangent_velocity, tangent2)
+        center_a = math.vec3_zero()
+        center_b = math.vec3_zero()
+        total_weight = 0.0
+        point_index = 0
+        while point_index < point_count {
+            cp = constraint_point_at(constraint, point_index)
+            mp = dynamics.manifold_point_at(manifold, point_index)
+            cp.r_a = mp.anchor_a
+            cp.r_b = mp.anchor_b
+            s = mp.separation
+            cp.base_separation = s - math.dot(math.sub(cp.r_b, cp.r_a), normal)
+            cp.normal_impulse = warm_start_scale * mp.normal_impulse
+            cp.total_normal_impulse = 0.0
+            r_a = cp.r_a
+            r_b = cp.r_b
+            rn_a = math.cross(r_a, normal)
+            rn_b = math.cross(r_b, normal)
+            k_normal = m_a + m_b + math.dot(rn_a, math.mul_mv(i_a, rn_a)) + math.dot(rn_b, math.mul_mv(i_b, rn_b))
+            cp.normal_mass = 0.0
+            if k_normal > 0.0 { cp.normal_mass = 1.0 / k_normal }
+            vr_a = math.add(v_a, math.cross(w_a, r_a))
+            vr_b = math.add(v_b, math.cross(w_b, r_b))
+            cp.relative_velocity = math.dot(normal, math.sub(vr_b, vr_a))
+            // The friction centre decays with separation: far speculative
+            // points only matter for continuous collision, and near points
+            // that touch on and off must move it smoothly.
+            weight = math.clamp_float(2.0 - s * inv_tau, MIN_FRICTION_WEIGHT, 1.0)
+            center_a = math.mul_add(center_a, weight, r_a)
+            center_b = math.mul_add(center_b, weight, r_b)
+            total_weight = total_weight + weight
+            point_index = point_index + 1
+        }
+        inv_weight = 1.0 / total_weight
+        center_a = math.mul_sv(inv_weight, center_a)
+        center_b = math.mul_sv(inv_weight, center_b)
+        constraint.center_a = center_a
+        constraint.center_b = center_b
+        point_index = 0
+        while point_index < point_count {
+            cp = constraint_point_at(constraint, point_index)
+            cp.lever_arm = math.distance(cp.r_a, center_a)
+            point_index = point_index + 1
+        }
+        rt_a1 = math.cross(center_a, tangent1)
+        rt_a2 = math.cross(center_a, tangent2)
+        rt_b1 = math.cross(center_b, tangent1)
+        rt_b2 = math.cross(center_b, tangent2)
+        kxx = m_a + m_b + math.dot(rt_a1, math.mul_mv(i_a, rt_a1)) + math.dot(rt_b1, math.mul_mv(i_b, rt_b1))
+        kyy = m_a + m_b + math.dot(rt_a2, math.mul_mv(i_a, rt_a2)) + math.dot(rt_b2, math.mul_mv(i_b, rt_b2))
+        kxy = math.dot(rt_a1, math.mul_mv(i_a, rt_a2)) + math.dot(rt_b1, math.mul_mv(i_b, rt_b2))
+        k = Matrix2 { cx: Vec2 { x: kxx, y: kxy }, cy: Vec2 { x: kxy, y: kyy } }
+        constraint.tangent_mass = math.invert2(k)
+        constraint.friction_impulse = Vec2 { x: warm_start_scale * math.dot(manifold.friction_impulse, tangent1),
+                                             y: warm_start_scale * math.dot(manifold.friction_impulse, tangent2) }
+        k_twist = math.dot(normal, math.mul_mv(math.add_mm(i_a, i_b), normal))
+        constraint.twist_mass = 0.0
+        if k_twist > 0.0 { constraint.twist_mass = 1.0 / k_twist }
+        constraint.twist_impulse = warm_start_scale * manifold.twist_impulse
+        constraint.rolling_impulse = math.mul_sv(warm_start_scale, manifold.rolling_impulse)
+        manifold_index = manifold_index + 1
+    }
+}
+
+// A colour's constraints prepared into its scratch arrays: the convex
+// contacts first (one manifold each), then the specs' at their manifold starts.
+prepare_contacts(ctx: *StepContext, color: *GraphColor) {
+    w = ctx.world
+    base = color.contact_constraints
+    manifolds = color.manifold_constraints
+    convex_count = color.convex_contacts.count
+    i = 0
+    while i < convex_count {
+        c = dynamics.contact_at(w, core.ints_get(&color.convex_contacts, i))
+        prepare_contact(ctx, c, contact_constraint_at(base, i), manifolds + i * sizeof(ManifoldConstraint))
+        i = i + 1
+    }
+    i = 0
+    while i < color.contacts.count {
+        spec = dynamics.contact_spec_at(color, i)
+        c = dynamics.contact_at(w, spec.contact_id)
+        prepare_contact(ctx, c, contact_constraint_at(base, convex_count + i), manifolds + spec.manifold_start * sizeof(ManifoldConstraint))
+        i = i + 1
+    }
+}
+
+// Last step's impulses applied before solving.
+warm_start_contacts(ctx: *StepContext, constraints: ptr, count: int) {
+    states = ctx.states
+    dummy = dummy_state()
+    index = 0
+    while index < count {
+        cc = contact_constraint_at(constraints, index)
+        state_a = dummy
+        if cc.index_a != NULL_INDEX { state_a = state_at(states, cc.index_a) }
+        state_b = dummy
+        if cc.index_b != NULL_INDEX { state_b = state_at(states, cc.index_b) }
+        v_a = state_a.linear_velocity
+        w_a = state_a.angular_velocity
+        v_b = state_b.linear_velocity
+        w_b = state_b.angular_velocity
+        m_a = cc.inv_mass_a
+        i_a = cc.inv_inertia_a
+        m_b = cc.inv_mass_b
+        i_b = cc.inv_inertia_b
+        manifold_index = 0
+        while manifold_index < cc.manifold_count {
+            constraint = manifold_constraint_at(cc.constraints, manifold_index)
+            normal = constraint.normal
+            j = 0
+            while j < constraint.point_count {
+                cp = constraint_point_at(constraint, j)
+                impulse = math.mul_sv(cp.normal_impulse, normal)
+                w_a = math.sub(w_a, math.mul_mv(i_a, math.cross(cp.r_a, impulse)))
+                v_a = math.mul_sub(v_a, m_a, impulse)
+                w_b = math.add(w_b, math.mul_mv(i_b, math.cross(cp.r_b, impulse)))
+                v_b = math.mul_add(v_b, m_b, impulse)
+                j = j + 1
+            }
+            // Central friction.
+            friction = math.blend2(constraint.friction_impulse.x, constraint.tangent1, constraint.friction_impulse.y, constraint.tangent2)
+            w_a = math.sub(w_a, math.mul_mv(i_a, math.cross(constraint.center_a, friction)))
+            v_a = math.mul_sub(v_a, m_a, friction)
+            w_b = math.add(w_b, math.mul_mv(i_b, math.cross(constraint.center_b, friction)))
+            v_b = math.mul_add(v_b, m_b, friction)
+            // Twist friction and rolling resistance.
+            twist = math.mul_sv(constraint.twist_impulse, normal)
+            w_a = math.sub(w_a, math.mul_mv(i_a, twist))
+            w_b = math.add(w_b, math.mul_mv(i_b, twist))
+            w_a = math.sub(w_a, math.mul_mv(i_a, constraint.rolling_impulse))
+            w_b = math.add(w_b, math.mul_mv(i_b, constraint.rolling_impulse))
+            manifold_index = manifold_index + 1
+        }
+        if (state_a.flags & dynamics.DYNAMIC_FLAG) != 0 {
+            state_a.linear_velocity = v_a
+            state_a.angular_velocity = w_a
+        }
+        if (state_b.flags & dynamics.DYNAMIC_FLAG) != 0 {
+            state_b.linear_velocity = v_b
+            state_b.angular_velocity = w_b
+        }
+        index = index + 1
+    }
+}
+
+// One sequential impulse pass over the constraints (the normal and
+// friction loops merged, the reference's cure for the Jenga stack):
+// the current separation from the bodies' deltas; a speculative bias
+// when apart, the soft constraint's bias when penetrating and asked
+// for (the relax pass asks for none); then, without bias only, the
+// twist friction, rolling resistance and central friction, each
+// bounded by the normal impulses.
+solve_contacts(ctx: *StepContext, constraints: ptr, count: int, use_bias: bool) {
+    states = ctx.states
+    dummy = dummy_state()
+    inv_h = ctx.inv_h
+    contact_speed = ctx.world.contact_speed
+    index = 0
+    while index < count {
+        cc = contact_constraint_at(constraints, index)
+        m_a = cc.inv_mass_a
+        i_a = cc.inv_inertia_a
+        m_b = cc.inv_mass_b
+        i_b = cc.inv_inertia_b
+        state_a = dummy
+        if cc.index_a != NULL_INDEX { state_a = state_at(states, cc.index_a) }
+        state_b = dummy
+        if cc.index_b != NULL_INDEX { state_b = state_at(states, cc.index_b) }
+        v_a = state_a.linear_velocity
+        w_a = state_a.angular_velocity
+        dq_a = state_a.delta_rotation
+        v_b = state_b.linear_velocity
+        w_b = state_b.angular_velocity
+        dq_b = state_b.delta_rotation
+        dp = math.sub(state_b.delta_position, state_a.delta_position)
+        softness = cc.softness
+        friction = cc.friction
+        rolling_resistance = cc.rolling_resistance
+        manifold_index = 0
+        while manifold_index < cc.manifold_count {
+            constraint = manifold_constraint_at(cc.constraints, manifold_index)
+            point_count = constraint.point_count
+            normal = constraint.normal
+            total_normal_impulse = 0.0
+            total_twist_limit = 0.0
+            point_index = 0
+            while point_index < point_count {
+                cp = constraint_point_at(constraint, point_index)
+                r_a = cp.r_a
+                r_b = cp.r_b
+                ds = math.add(dp, math.sub(math.rotate_vector(dq_b, r_b), math.rotate_vector(dq_a, r_a)))
+                s = math.dot(ds, normal) + cp.base_separation
+                velocity_bias = 0.0
+                mass_scale = 1.0
+                impulse_scale = 0.0
+                if s > 0.0 {
+                    velocity_bias = s * inv_h
+                } else if use_bias {
+                    velocity_bias = math.max_float(softness.mass_scale * softness.bias_rate * s, 0.0 - contact_speed)
+                    mass_scale = softness.mass_scale
+                    impulse_scale = softness.impulse_scale
+                }
+                vr_a = math.add(v_a, math.cross(w_a, r_a))
+                vr_b = math.add(v_b, math.cross(w_b, r_b))
+                vn = math.dot(math.sub(vr_b, vr_a), normal)
+                delta_impulse = 0.0 - cp.normal_mass * (mass_scale * vn + velocity_bias) - impulse_scale * cp.normal_impulse
+                new_impulse = math.max_float(cp.normal_impulse + delta_impulse, 0.0)
+                delta_impulse = new_impulse - cp.normal_impulse
+                cp.normal_impulse = new_impulse
+                cp.total_normal_impulse = cp.total_normal_impulse + new_impulse
+                total_normal_impulse = total_normal_impulse + new_impulse
+                total_twist_limit = total_twist_limit + cp.lever_arm * cp.normal_impulse
+                p = math.mul_sv(delta_impulse, normal)
+                v_a = math.mul_sub(v_a, m_a, p)
+                w_a = math.sub(w_a, math.mul_mv(i_a, math.cross(r_a, p)))
+                v_b = math.mul_add(v_b, m_b, p)
+                w_b = math.add(w_b, math.mul_mv(i_b, math.cross(r_b, p)))
+                point_index = point_index + 1
+            }
+            if use_bias == false {
+                // Central twist friction.
+                twist_speed = math.dot(normal, math.sub(w_b, w_a))
+                max_twist = friction * total_twist_limit
+                old_twist = constraint.twist_impulse
+                constraint.twist_impulse = math.clamp_float(old_twist - constraint.twist_mass * twist_speed, 0.0 - max_twist, max_twist)
+                delta_twist = constraint.twist_impulse - old_twist
+                w_a = math.sub(w_a, math.mul_mv(i_a, math.mul_sv(delta_twist, normal)))
+                w_b = math.add(w_b, math.mul_mv(i_b, math.mul_sv(delta_twist, normal)))
+                // Rolling resistance.
+                if rolling_resistance > 0.0 {
+                    old_rolling = constraint.rolling_impulse
+                    constraint.rolling_impulse = math.sub(old_rolling, math.mul_mv(cc.rolling_mass, math.sub(w_b, w_a)))
+                    max_rolling = rolling_resistance * total_normal_impulse
+                    mag_sqr = math.dot(constraint.rolling_impulse, constraint.rolling_impulse)
+                    if mag_sqr > max_rolling * max_rolling + math.EPSILON {
+                        constraint.rolling_impulse = math.mul_sv(max_rolling / sqrt(mag_sqr), constraint.rolling_impulse)
+                    }
+                    delta_rolling = math.sub(constraint.rolling_impulse, old_rolling)
+                    w_a = math.sub(w_a, math.mul_mv(i_a, delta_rolling))
+                    w_b = math.add(w_b, math.mul_mv(i_b, delta_rolling))
+                }
+                // Central friction.
+                tangent1 = constraint.tangent1
+                tangent2 = constraint.tangent2
+                c_a = constraint.center_a
+                c_b = constraint.center_b
+                vr_a = math.add(v_a, math.cross(w_a, c_a))
+                vr_b = math.add(v_b, math.cross(w_b, c_b))
+                vr = math.sub(vr_b, vr_a)
+                vt = Vec2 { x: math.dot(vr, tangent1) - constraint.tangent_velocity1, y: math.dot(vr, tangent2) - constraint.tangent_velocity2 }
+                tm = math.mul_mv2(constraint.tangent_mass, vt)
+                new_friction = Vec2 { x: constraint.friction_impulse.x - tm.x, y: constraint.friction_impulse.y - tm.y }
+                max_friction = friction * total_normal_impulse
+                length_squared = math.dot2(new_friction, new_friction)
+                if length_squared > max_friction * max_friction {
+                    scale = max_friction / sqrt(length_squared)
+                    new_friction = math.mul_sv2(scale, new_friction)
+                }
+                delta_friction = math.sub2(new_friction, constraint.friction_impulse)
+                constraint.friction_impulse = new_friction
+                p = math.blend2(delta_friction.x, tangent1, delta_friction.y, tangent2)
+                v_a = math.mul_sub(v_a, m_a, p)
+                w_a = math.sub(w_a, math.mul_mv(i_a, math.cross(c_a, p)))
+                v_b = math.mul_add(v_b, m_b, p)
+                w_b = math.add(w_b, math.mul_mv(i_b, math.cross(c_b, p)))
+            }
+            manifold_index = manifold_index + 1
+        }
+        if (state_a.flags & dynamics.DYNAMIC_FLAG) != 0 {
+            state_a.linear_velocity = v_a
+            state_a.angular_velocity = w_a
+        }
+        if (state_b.flags & dynamics.DYNAMIC_FLAG) != 0 {
+            state_b.linear_velocity = v_b
+            state_b.angular_velocity = w_b
+        }
+        index = index + 1
+    }
+}
+
+// The bounce: points that approached faster than the threshold and
+// carried an impulse get their approach velocity reflected by the
+// restitution.
+apply_restitution(ctx: *StepContext, constraints: ptr, count: int) {
+    states = ctx.states
+    dummy = dummy_state()
+    threshold = ctx.restitution_threshold
+    index = 0
+    while index < count {
+        cc = contact_constraint_at(constraints, index)
+        restitution = cc.restitution
+        if restitution != 0.0 {
+            state_a = dummy
+            if cc.index_a != NULL_INDEX { state_a = state_at(states, cc.index_a) }
+            state_b = dummy
+            if cc.index_b != NULL_INDEX { state_b = state_at(states, cc.index_b) }
+            v_a = state_a.linear_velocity
+            w_a = state_a.angular_velocity
+            v_b = state_b.linear_velocity
+            w_b = state_b.angular_velocity
+            m_a = cc.inv_mass_a
+            i_a = cc.inv_inertia_a
+            m_b = cc.inv_mass_b
+            i_b = cc.inv_inertia_b
+            manifold_index = 0
+            while manifold_index < cc.manifold_count {
+                constraint = manifold_constraint_at(cc.constraints, manifold_index)
+                normal = constraint.normal
+                point_index = 0
+                while point_index < constraint.point_count {
+                    cp = constraint_point_at(constraint, point_index)
+                    if cp.relative_velocity <= 0.0 - threshold && cp.total_normal_impulse != 0.0 {
+                        r_a = cp.r_a
+                        r_b = cp.r_b
+                        vr_b = math.add(v_b, math.cross(w_b, r_b))
+                        vr_a = math.add(v_a, math.cross(w_a, r_a))
+                        vn = math.dot(math.sub(vr_b, vr_a), normal)
+                        impulse = 0.0 - cp.normal_mass * (vn + restitution * cp.relative_velocity)
+                        new_impulse = math.max_float(cp.normal_impulse + impulse, 0.0)
+                        impulse = new_impulse - cp.normal_impulse
+                        cp.normal_impulse = new_impulse
+                        cp.total_normal_impulse = cp.total_normal_impulse + impulse
+                        p = math.mul_sv(impulse, normal)
+                        v_a = math.mul_sub(v_a, m_a, p)
+                        w_a = math.sub(w_a, math.mul_mv(i_a, math.cross(r_a, p)))
+                        v_b = math.mul_add(v_b, m_b, p)
+                        w_b = math.add(w_b, math.mul_mv(i_b, math.cross(r_b, p)))
+                    }
+                    point_index = point_index + 1
+                }
+                if (state_a.flags & dynamics.DYNAMIC_FLAG) != 0 {
+                    state_a.linear_velocity = v_a
+                    state_a.angular_velocity = w_a
+                }
+                if (state_b.flags & dynamics.DYNAMIC_FLAG) != 0 {
+                    state_b.linear_velocity = v_b
+                    state_b.angular_velocity = w_b
+                }
+                manifold_index = manifold_index + 1
+            }
+        }
+        index = index + 1
+    }
+}
+
+// The impulses back into the manifolds for next step's warm start and
+// the user's queries; a contact that wants hit events and closed faster
+// than the threshold with an impulse sets its bit. Whether any did.
+store_impulses(ctx: *StepContext, constraints: ptr, count: int, hit_bits: *BitSet) -> bool {
+    has_hits = false
+    neg_threshold = 0.0 - ctx.world.hit_event_threshold
+    index = 0
+    while index < count {
+        cc = contact_constraint_at(constraints, index)
+        c = cc.contact
+        check_hits = (c.flags & dynamics.SIM_ENABLE_HIT_EVENT) != 0
+        flagged = false
+        manifold_index = 0
+        while manifold_index < cc.manifold_count {
+            manifold = dynamics.manifold_at(c, manifold_index)
+            constraint = manifold_constraint_at(cc.constraints, manifold_index)
+            manifold.twist_impulse = constraint.twist_impulse
+            manifold.friction_impulse = math.blend2(constraint.friction_impulse.x, constraint.tangent1, constraint.friction_impulse.y, constraint.tangent2)
+            manifold.rolling_impulse = constraint.rolling_impulse
+            point_index = 0
+            while point_index < constraint.point_count {
+                cp = constraint_point_at(constraint, point_index)
+                mp = dynamics.manifold_point_at(manifold, point_index)
+                mp.normal_impulse = cp.normal_impulse
+                mp.total_normal_impulse = cp.total_normal_impulse
+                mp.normal_velocity = cp.relative_velocity
+                if check_hits && flagged == false && mp.normal_velocity < neg_threshold && mp.total_normal_impulse > 0.0 {
+                    core.bitset_set_grow(hit_bits, c.contact_id)
+                    has_hits = true
+                    flagged = true
+                }
+                point_index = point_index + 1
+            }
+            manifold_index = manifold_index + 1
+        }
+        index = index + 1
+    }
+    return has_hits
+}

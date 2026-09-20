@@ -55,7 +55,7 @@ exports (
     WorldDef, BodyDef, ShapeDef, MotionLocks, WorldId, BodyId, ShapeId,
     World, Body, BodySim, BodyState, WorldShape, Contact, ContactEdge, Joint, JointEdge,
     SolverSet, Island, IslandSim, ContactLink, JointLink,
-    NULL_INDEX, MAX_WORLDS, STATIC_SET, DISABLED_SET, AWAKE_SET, FIRST_SLEEPING_SET,
+    NULL_INDEX, MAX_WORLDS, STATIC_SET, DISABLED_SET, AWAKE_SET, FIRST_SLEEPING_SET, SPECULATIVE_DISTANCE,
     BODY_STATIC, BODY_KINEMATIC, BODY_DYNAMIC,
     LOCK_LINEAR_X, LOCK_LINEAR_Y, LOCK_LINEAR_Z, LOCK_ANGULAR_X, LOCK_ANGULAR_Y, LOCK_ANGULAR_Z,
     IS_FAST, IS_BULLET, IS_SPEED_CAPPED, HAD_TIME_OF_IMPACT, ALLOW_FAST_ROTATION, ENLARGE_BOUNDS,
@@ -953,6 +953,10 @@ struct GraphColor {
     joint_sims: Buffer             // JointSim
     convex_contacts: IntArray      // contact ids (the wide solver's)
     contacts: Buffer               // ContactSpec (mesh contacts and the overflow's)
+    contact_constraints: ptr       // the solver's ContactConstraint[contact_constraint_count] for the step
+    manifold_constraints: ptr      // its ManifoldConstraint[manifold_constraint_count]
+    contact_constraint_count: int
+    manifold_constraint_count: int
 }
 
 struct ConstraintGraph {
