@@ -216,3 +216,32 @@ positives the query permits). The build is 1.2-1.5x, with the welding
 map and the edge map through core's LongMap; the traversals are 1.7-2x,
 the reference's SIMD box tests against scalar ones on 48-byte double
 boxes, the same gap the dynamic tree's ray cast showed.
+
+## height_field
+
+`bench/height_field.ae` and `bench/height_field_box3d.c`: a 512 x 512
+wave field of 522,242 triangles with a hole every sixteenth cell, built
+ten times; 100,000 rays cast down onto it at slight angles; 100,000 box
+queries over it; 10,000 sphere shape casts onto it; 10,000 sphere
+overlaps at its surface.
+
+| phase | aephysics | Box3D |
+|---|---|---|
+| 10 builds (522,242 triangles) | 200 ms | **131** |
+| 100,000 ray casts | 16.0 | **11.3** |
+| 100,000 box queries | **8.3** | 9.0 |
+| 10,000 shape casts | 49.5 | **23.5** |
+| 10,000 overlaps | 3.7 | **2.0** |
+
+The same fields come out: every ray hits on both (94,058, the sum of hit
+heights within 0.1%, the quantised heights held as doubles here and
+floats there), every shape cast hits on both with equal fraction sums,
+the overlaps agree (3,160), the box query reports 2,171,942 triangles
+here against 2,171,914 there (0.001% more, boundary cases of the cell
+bounds test). The build is 1.5x, the quantisation and the edge flags of
+half a million triangles; the ray walk 1.4x; the box query at parity
+(no SIMD in the reference's); the shape cast 2.1x, the GJK cast per
+straddled cell on top of distance's 1.3-1.5x; the overlap 1.85x. The
+field is 4.2 MB here against 1.3 MB there: the reference packs 16-bit
+heights and 8-bit materials and flags, which Aether cannot yet address,
+so they are ints.

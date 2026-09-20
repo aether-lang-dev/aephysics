@@ -1,0 +1,807 @@
+// aephysics.height_field -- the height field: a grid of quantised
+// heights on a fixed diagonal, with a material per cell (a hole is a
+// material), edge flags per triangle for the ghost-collision reduction,
+// and the queries over it: overlap, bounds, ray cast and shape cast by a
+// walk along the grid, the character mover's planes, and a box query.
+//
+// The shape is Box3D's height_field.c (Erin Catto, MIT), the reference
+// this engine is measured against: the convention that the index is
+// row * column_count + column with x along the columns and z along the
+// rows, the quantisation to a global height range so neighbouring fields
+// line up, the two triangles of a cell {11, 21, 12} and {22, 12, 21}, the
+// cast that rasterises the swept box's leading corner through the cells
+// (DDA) and casts against every cell the box straddles, and the front
+// side chosen by the winding. Names are the reference's without its
+// prefix, in snake case: b3CreateHeightField is create_height_field.
+//
+// Differences: the heights are ints holding the 16-bit quantised values
+// (Aether has no 16-bit type), the materials and flags ints; the debug
+// file dump and load are not ported; the reference's SIMD tests are the
+// mesh module's scalar ones.
+import std.string
+import aephysics.math
+import aephysics.core
+import aephysics.distance
+import aephysics.manifold
+import aephysics.triangle_manifold
+import aephysics.mesh
+
+exports (
+    HeightFieldDef, HeightFieldData,
+    HEIGHT_FIELD_VERSION, HEIGHT_FIELD_HOLE, NULL_INDEX,
+    height_field_def, height_field_heights, height_field_material_indices, height_field_flags,
+    height_field_triangle_count, height_field_height,
+    create_height_field, destroy_height_field, create_grid, create_wave,
+    get_height_field_triangle, get_height_field_material, compute_height_field_aabb,
+    ray_cast_height_field, shape_cast_height_field, overlap_height_field, query_height_field,
+    collide_mover_and_height_field
+)
+
+extern memset(block: ptr, value: int, size: int) -> ptr
+extern floor(x: float) -> float
+
+const NULL_INDEX = 0 - 1
+const HEIGHT_FIELD_VERSION = 0x0E41E5FB
+const HEIGHT_FIELD_HOLE = 255
+const MAX_QUANTUM = 65535
+const MAX_AABB_MARGIN = 0.05
+
+// What a height field is made from. No pointers into it are kept.
+struct HeightFieldDef {
+    heights: ptr             // float[count_x * count_z], the grid point heights, unscaled
+    material_indices: ptr    // int[(count_x - 1) * (count_z - 1)] per cell, HEIGHT_FIELD_HOLE for a hole, or null
+    scale: Vec3              // every component positive
+    count_x: int             // grid lines along x
+    count_z: int             // grid lines along z
+    global_minimum_height: float   // the quantisation range, shared by fields that must line up
+    global_maximum_height: float
+    clockwise_winding: bool  // inverts the field along y
+}
+
+// The field: one block, with the arrays at byte offsets.
+struct HeightFieldData {
+    version: int
+    hash: long
+    byte_count: int
+    aabb: AABB
+    min_height: float
+    max_height: float
+    height_scale: float      // the quantum
+    scale: Vec3
+    column_count: int        // along x
+    row_count: int           // along z
+    heights_offset: int      // int[] of quantised heights, one per grid point
+    material_offset: int     // int[] per cell
+    flags_offset: int        // int[] per triangle
+    clockwise: bool
+}
+
+height_field_def() -> HeightFieldDef {
+    return HeightFieldDef { heights: null, material_indices: null, scale: math.vec3_one(), count_x: 0, count_z: 0,
+                            global_minimum_height: 0.0 - 1.0, global_maximum_height: 1.0, clockwise_winding: false }
+}
+
+height_field_heights(h: *HeightFieldData) -> int[] { return ((h as ptr) + h.heights_offset) as int[] }
+height_field_material_indices(h: *HeightFieldData) -> int[] { return ((h as ptr) + h.material_offset) as int[] }
+height_field_flags(h: *HeightFieldData) -> int[] { return ((h as ptr) + h.flags_offset) as int[] }
+height_field_triangle_count(h: *HeightFieldData) -> int { return 2 * (h.column_count - 1) * (h.row_count - 1) }
+
+// The unscaled height of a grid point.
+height_field_height(h: *HeightFieldData, index: int) -> float {
+    heights = height_field_heights(h)
+    return h.min_height + h.height_scale * (heights[index] as float)
+}
+
+align8(x: int) -> int { return (x + 7) & (0 - 8) }
+
+// --- scratch ---------------------------------------------------------------------
+
+var g_triangle: ptr = null   // Vec3[3]
+var g_local: ptr = null      // Vec3[128]
+
+scratch_ready() {
+    if g_triangle == null {
+        g_triangle = core.alloc(3 * sizeof(Vec3))
+        g_local = core.alloc(128 * sizeof(Vec3))
+    }
+}
+
+// --- creation --------------------------------------------------------------------
+
+// A scaled grid point from a column, a row and an unscaled height.
+grid_point(scale: Vec3, column: int, row: int, height: float) -> Vec3 {
+    return math.mul(scale, math.vec3(column as float, height, row as float))
+}
+
+// The concavity of the edge between a triangle's plane and a neighbouring
+// triangle (its normal, a vertex on it): concave, or flat (both flags).
+edge_flags(plane: Plane, other_normal: Vec3, other_vertex: Vec3, edge: int) -> int {
+    cos_5_deg = 0.9962
+    separation = math.plane_separation(plane, other_vertex)
+    cos_angle = math.dot(plane.normal, other_normal)
+    flags = 0
+    if separation > 0.0 || cos_angle > cos_5_deg { flags = flags | (1 << edge) }
+    if separation < 0.0 || cos_angle > cos_5_deg { flags = flags | ((1 << edge) << 4) }
+    return flags
+}
+
+// The field from its definition: the heights quantised to the global
+// range, the bounds, and the edge flags of every triangle against its
+// three neighbours (across the diagonal, and the cells above, below,
+// left and right that are not holes).
+create_height_field(def: *HeightFieldDef) -> *HeightFieldData {
+    column_count = def.count_x
+    row_count = def.count_z
+    height_count = column_count * row_count
+    if column_count < 2 || row_count < 2 || def.heights == null { return null }
+    cell_count = (column_count - 1) * (row_count - 1)
+    triangle_count = 2 * cell_count
+
+    byte_count = align8(sizeof(HeightFieldData))
+    heights_offset = byte_count
+    byte_count = byte_count + align8(height_count * 4)
+    material_offset = byte_count
+    byte_count = byte_count + align8(cell_count * 4)
+    flags_offset = byte_count
+    byte_count = byte_count + align8(triangle_count * 4)
+    h = core.alloc(byte_count) as *HeightFieldData
+    h.version = HEIGHT_FIELD_VERSION
+    h.byte_count = byte_count
+    h.scale = def.scale
+    h.column_count = column_count
+    h.row_count = row_count
+    h.heights_offset = heights_offset
+    h.material_offset = material_offset
+    h.flags_offset = flags_offset
+    h.clockwise = def.clockwise_winding
+
+    quantised = height_field_heights(h)
+    materials = height_field_material_indices(h)
+    flags = height_field_flags(h)
+    source = def.heights as float[]
+    h.min_height = def.global_minimum_height
+    h.max_height = def.global_maximum_height
+    range = math.max_float(h.max_height - h.min_height, math.LINEAR_SLOP)
+    h.height_scale = range / (MAX_QUANTUM as float)
+    lower_bound = h.max_height
+    upper_bound = h.min_height
+    inv_quantum = 1.0 / h.height_scale
+    i = 0
+    while i < height_count {
+        clamped = math.clamp_float(source[i], h.min_height, h.max_height)
+        scaled = (clamped - h.min_height) * inv_quantum
+        quantised[i] = math.min_float(scaled, MAX_QUANTUM as float) as int
+        lower_bound = math.min_float(lower_bound, clamped)
+        upper_bound = math.max_float(upper_bound, clamped)
+        i = i + 1
+    }
+    // The decompressed heights give the flags their true convexity.
+    heights_block = core.alloc(height_count * 8)
+    heights = heights_block as float[]
+    i = 0
+    while i < height_count {
+        heights[i] = h.min_height + h.height_scale * (quantised[i] as float)
+        i = i + 1
+    }
+    source_materials = def.material_indices as int[]
+    i = 0
+    while i < cell_count {
+        materials[i] = 0
+        if def.material_indices != null { materials[i] = source_materials[i] }
+        i = i + 1
+    }
+    h.aabb = AABB { lower: math.vec3(0.0, h.scale.y * lower_bound, 0.0),
+                    upper: math.vec3(h.scale.x * ((column_count - 1) as float), h.scale.y * upper_bound, h.scale.z * ((row_count - 1) as float)) }
+
+    scale = h.scale
+    triangle_index = 0
+    row = 0
+    while row < row_count - 1 {
+        column = 0
+        while column < column_count - 1 {
+            triangle1 = triangle_index
+            triangle2 = triangle_index + 1
+            triangle_index = triangle_index + 2
+            flags[triangle1] = 0
+            flags[triangle2] = 0
+            cell = row * (column_count - 1) + column
+            if materials[cell] != HEIGHT_FIELD_HOLE {
+                index11 = row * column_count + column
+                index12 = index11 + 1
+                index21 = (row + 1) * column_count + column
+                index22 = index21 + 1
+                p11 = grid_point(scale, column, row, heights[index11])
+                p12 = grid_point(scale, column + 1, row, heights[index12])
+                p21 = grid_point(scale, column, row + 1, heights[index21])
+                p22 = grid_point(scale, column + 1, row + 1, heights[index22])
+                // Triangle 0: 11, 21, 12. Triangle 1: 22, 12, 21.
+                plane1 = math.make_plane_from_points(p11, p21, p12)
+                plane2 = math.make_plane_from_points(p22, p12, p21)
+                flags1 = 0
+                flags2 = 0
+                // Across the diagonal (edge 2 of both).
+                diagonal = edge_flags(plane1, plane2.normal, p22, 1)
+                flags1 = flags1 | diagonal
+                flags2 = flags2 | diagonal
+                // The cell above (row - 1): its triangle 1 against triangle 0's edge 3.
+                if row > 0 && materials[cell - (column_count - 1)] != HEIGHT_FIELD_HOLE {
+                    r = row - 1
+                    q22 = grid_point(scale, column + 1, r + 1, heights[(r + 1) * column_count + column + 1])
+                    q12 = grid_point(scale, column + 1, r, heights[r * column_count + column + 1])
+                    q21 = grid_point(scale, column, r + 1, heights[(r + 1) * column_count + column])
+                    n = math.make_normal_from_points(q22, q12, q21)
+                    flags1 = flags1 | edge_flags(plane1, n, q12, 2)
+                }
+                // The cell below (row + 1): its triangle 0 against triangle 1's edge 3.
+                if row + 1 < row_count - 1 && materials[cell + (column_count - 1)] != HEIGHT_FIELD_HOLE {
+                    r = row + 1
+                    q11 = grid_point(scale, column, r, heights[r * column_count + column])
+                    q21 = grid_point(scale, column, r + 1, heights[(r + 1) * column_count + column])
+                    q12 = grid_point(scale, column + 1, r, heights[r * column_count + column + 1])
+                    n = math.make_normal_from_points(q11, q21, q12)
+                    flags2 = flags2 | edge_flags(plane2, n, q21, 2)
+                }
+                // The cell to the left: its triangle 1 against triangle 0's edge 1.
+                if column > 0 && materials[cell - 1] != HEIGHT_FIELD_HOLE {
+                    c = column - 1
+                    q22 = grid_point(scale, c + 1, row + 1, heights[(row + 1) * column_count + c + 1])
+                    q12 = grid_point(scale, c + 1, row, heights[row * column_count + c + 1])
+                    q21 = grid_point(scale, c, row + 1, heights[(row + 1) * column_count + c])
+                    n = math.make_normal_from_points(q22, q12, q21)
+                    flags1 = flags1 | edge_flags(plane1, n, q21, 0)
+                }
+                // The cell to the right: its triangle 0 against triangle 1's edge 1.
+                if column + 1 < column_count - 1 && materials[cell + 1] != HEIGHT_FIELD_HOLE {
+                    c = column + 1
+                    q11 = grid_point(scale, c, row, heights[row * column_count + c])
+                    q21 = grid_point(scale, c, row + 1, heights[(row + 1) * column_count + c])
+                    q12 = grid_point(scale, c + 1, row, heights[row * column_count + c + 1])
+                    n = math.make_normal_from_points(q11, q21, q12)
+                    flags2 = flags2 | edge_flags(plane2, n, q12, 0)
+                }
+                flags[triangle1] = flags1
+                flags[triangle2] = flags2
+            }
+            column = column + 1
+        }
+        row = row + 1
+    }
+    core.free_bytes(heights_block, height_count * 8)
+    h.hash = 0 as long
+    h.hash = core.hash_bytes(h as ptr, h.byte_count)
+    return h
+}
+
+destroy_height_field(h: *HeightFieldData) { core.free_bytes(h as ptr, h.byte_count) }
+
+// A flat field, with a hole every sixteenth cell when asked.
+create_grid(row_count: int, column_count: int, scale: Vec3, make_holes: bool) -> *HeightFieldData {
+    height_count = row_count * column_count
+    heights_block = core.alloc(height_count * 8)
+    cell_count = (row_count - 1) * (column_count - 1)
+    materials_block = core.alloc(cell_count * 4)
+    materials = materials_block as int[]
+    k = 0
+    while k < cell_count {
+        if make_holes && k > 0 && k % 16 == 0 { materials[k] = HEIGHT_FIELD_HOLE }
+        k = k + 1
+    }
+    def = HeightFieldDef { heights: heights_block, material_indices: materials_block, scale: scale, count_x: column_count,
+                           count_z: row_count, global_minimum_height: 0.0 - 256.0, global_maximum_height: 256.0, clockwise_winding: false }
+    h = create_height_field(&def)
+    core.free_bytes(heights_block, height_count * 8)
+    core.free_bytes(materials_block, cell_count * 4)
+    return h
+}
+
+// A field rippled by the product of two sines.
+create_wave(row_count: int, column_count: int, scale: Vec3, row_frequency: float, column_frequency: float, make_holes: bool) -> *HeightFieldData {
+    height_count = row_count * column_count
+    heights_block = core.alloc(height_count * 8)
+    heights = heights_block as float[]
+    omega_z = 2.0 * math.PI * row_frequency
+    omega_x = 2.0 * math.PI * column_frequency
+    i = 0
+    while i < row_count {
+        row_height = math.compute_cos_sin(omega_z * (i as float)).sine
+        j = 0
+        while j < column_count {
+            heights[i * column_count + j] = row_height * math.compute_cos_sin(omega_x * (j as float)).sine
+            j = j + 1
+        }
+        i = i + 1
+    }
+    cell_count = (row_count - 1) * (column_count - 1)
+    materials_block = core.alloc(cell_count * 4)
+    materials = materials_block as int[]
+    k = 0
+    while k < cell_count {
+        if make_holes && k > 0 && k % 16 == 0 { materials[k] = HEIGHT_FIELD_HOLE }
+        k = k + 1
+    }
+    def = HeightFieldDef { heights: heights_block, material_indices: materials_block, scale: scale, count_x: column_count,
+                           count_z: row_count, global_minimum_height: 0.0 - 256.0, global_maximum_height: 256.0, clockwise_winding: false }
+    h = create_height_field(&def)
+    core.free_bytes(heights_block, height_count * 8)
+    core.free_bytes(materials_block, cell_count * 4)
+    return h
+}
+
+// --- cells and triangles --------------------------------------------------------------
+
+// The four corners of a cell, scaled: 11 (column, row), 12 (column + 1,
+// row), 21 (column, row + 1), 22 (column + 1, row + 1), into corners[0..3].
+cell_corners(h: *HeightFieldData, row: int, column: int, corners: Vec3[]) {
+    column_count = h.column_count
+    index11 = row * column_count + column
+    index21 = (row + 1) * column_count + column
+    corners[0] = grid_point(h.scale, column, row, height_field_height(h, index11))
+    corners[1] = grid_point(h.scale, column + 1, row, height_field_height(h, index11 + 1))
+    corners[2] = grid_point(h.scale, column, row + 1, height_field_height(h, index21))
+    corners[3] = grid_point(h.scale, column + 1, row + 1, height_field_height(h, index21 + 1))
+}
+
+var g_corners: ptr = null
+
+corners_ready() -> Vec3[] {
+    if g_corners == null { g_corners = core.alloc(4 * sizeof(Vec3)) }
+    return g_corners as Vec3[]
+}
+
+// A triangle of the field, wound counter-clockwise about its front (down
+// for a clockwise field), with its flags made to match.
+get_height_field_triangle(h: *HeightFieldData, triangle_index: int) -> Triangle {
+    flags = height_field_flags(h)
+    column_count = h.column_count
+    quad = triangle_index >> 1
+    row = quad / (column_count - 1)
+    column = quad - row * (column_count - 1)
+    index11 = row * column_count + column
+    index12 = index11 + 1
+    index21 = (row + 1) * column_count + column
+    index22 = index21 + 1
+    corners = corners_ready()
+    cell_corners(h, row, column, corners)
+    t = Triangle { v1: corners[0], v2: corners[2], v3: corners[1], i1: index11, i2: index21, i3: index12, flags: flags[triangle_index] }
+    if (triangle_index & 1) != 0 {
+        t = Triangle { v1: corners[3], v2: corners[1], v3: corners[2], i1: index22, i2: index12, i3: index21, flags: flags[triangle_index] }
+    }
+    if h.clockwise {
+        // Reversing the winding swaps edges 1 and 3; the diagonal (edge 2) stays.
+        f = t.flags
+        edge1_bits = f & 0x11
+        edge3_bits = f & 0x44
+        f = f & (255 - 0x55)
+        f = f | (edge1_bits << 2) | (edge3_bits >> 2)
+        return Triangle { v1: t.v1, v2: t.v3, v3: t.v2, i1: t.i1, i2: t.i3, i3: t.i2, flags: f }
+    }
+    return t
+}
+
+get_height_field_material(h: *HeightFieldData, triangle_index: int) -> int {
+    materials = height_field_material_indices(h)
+    return materials[triangle_index >> 1]
+}
+
+compute_height_field_aabb(h: *HeightFieldData, t: Transform) -> AABB { return math.aabb_transform(t, h.aabb) }
+
+// --- casts ---------------------------------------------------------------------------
+
+// A ray is a shape cast of a point with no radius.
+ray_cast_height_field(h: *HeightFieldData, origin: Vec3, translation: Vec3, max_fraction: float) -> CastOutput {
+    scratch_ready()
+    point = g_local as Vec3[]
+    point[0] = origin
+    return shape_cast_height_field(h, distance.shape_proxy(g_local, 1, 0.0), translation, max_fraction, false)
+}
+
+// The proxy swept through the field: its box's leading corner is walked
+// through the cells (a DDA on rows and columns), and every cell the box
+// straddles at each step is cast against, front faces only, keeping the
+// nearest hit. A point with no radius is a ray, tested exactly.
+shape_cast_height_field(h: *HeightFieldData, proxy: ShapeProxy, translation: Vec3, max_fraction: float, can_encroach: bool) -> CastOutput {
+    shape_bounds = mesh.compute_proxy_aabb(proxy)
+    scale = h.scale
+    shape_start = math.aabb_center(shape_bounds)
+    shape_delta = math.mul_sv(max_fraction, translation)
+    shape_end = math.add(shape_start, shape_delta)
+    result = distance.empty_cast_output()
+    shape_extents = math.aabb_extents(shape_bounds)
+    margin = math.vec3(MAX_AABB_MARGIN, MAX_AABB_MARGIN, MAX_AABB_MARGIN)
+    combined = AABB { lower: math.sub(math.sub(h.aabb.lower, shape_extents), margin), upper: math.add(math.add(h.aabb.upper, shape_extents), margin) }
+    fractions_block = core.alloc(16)
+    fractions = fractions_block as float[]
+    fractions[0] = 0.0
+    fractions[1] = 1.0
+    intersects = math.ray_cast_aabb(combined, shape_start, shape_end, fractions)
+    min_fraction = fractions[0]
+    max_fraction_clamped = fractions[1]
+    core.free_bytes(fractions_block, 16)
+    if intersects == false { return result }
+
+    // The clamped sweep walks the grid; the triangle casts use the whole one.
+    clamped_start = math.mul_add(shape_start, min_fraction, shape_delta)
+    clamped_delta = math.mul_sv(max_fraction_clamped - min_fraction, shape_delta)
+    clamped_end = math.add(clamped_start, clamped_delta)
+    center_start = clamped_start
+    center_end = clamped_end
+    // The walk starts from the leading corner of the shape's box.
+    sign_x = 1.0
+    if translation.x >= 0.0 { clamped_start.x = clamped_start.x + shape_extents.x } else {
+        clamped_start.x = clamped_start.x - shape_extents.x
+        sign_x = 0.0 - 1.0
+    }
+    sign_z = 1.0
+    if translation.z >= 0.0 { clamped_start.z = clamped_start.z + shape_extents.z } else {
+        clamped_start.z = clamped_start.z - shape_extents.z
+        sign_z = 0.0 - 1.0
+    }
+    clamped_end = math.add(clamped_start, clamped_delta)
+    column_start = floor(clamped_start.x / scale.x) as int
+    column_end = floor(clamped_end.x / scale.x) as int
+    row_start = floor(clamped_start.z / scale.z) as int
+    row_end = floor(clamped_end.z / scale.z) as int
+    abs_delta = math.abs_vec3(clamped_delta)
+
+    delta_alpha_x = 0.0
+    next_fraction_x = math.MAX_FLOAT
+    delta_column = 0
+    if column_start < column_end {
+        delta_alpha_x = scale.x / abs_delta.x
+        next_fraction_x = (scale.x * ((column_start + 1) as float) - clamped_start.x) / abs_delta.x
+        delta_column = 1
+    } else if column_end < column_start {
+        delta_alpha_x = scale.x / abs_delta.x
+        next_fraction_x = (clamped_start.x - scale.x * (column_start as float)) / abs_delta.x
+        delta_column = 0 - 1
+    }
+    delta_alpha_z = 0.0
+    next_fraction_z = math.MAX_FLOAT
+    delta_row = 0
+    if row_start < row_end {
+        delta_alpha_z = scale.z / abs_delta.z
+        next_fraction_z = (scale.z * ((row_start + 1) as float) - clamped_start.z) / abs_delta.z
+        delta_row = 1
+    } else if row_end < row_start {
+        delta_alpha_z = scale.z / abs_delta.z
+        next_fraction_z = (clamped_start.z - scale.z * (row_start as float)) / abs_delta.z
+        delta_row = 0 - 1
+    }
+
+    // The columns and rows the shape's box covers at the start.
+    box_column_head = column_start
+    box_row_head = row_start
+    box_column_tail = floor((clamped_start.x - 2.0 * sign_x * shape_extents.x) / scale.x) as int
+    box_row_tail = floor((clamped_start.z - 2.0 * sign_z * shape_extents.z) / scale.z) as int
+    best_fraction = max_fraction
+    // The walk's fractions are of the clamped sweep; the hits are of the
+    // whole translation. The affine map between them, so the exit test
+    // compares like with like.
+    grid_fraction_scale = max_fraction * (max_fraction_clamped - min_fraction)
+    grid_fraction_offset = max_fraction * min_fraction
+    row_count = h.row_count
+    column_count = h.column_count
+    materials = height_field_material_indices(h)
+    scratch_ready()
+    corners = corners_ready()
+    is_ray = proxy.count == 1 && proxy.radius == 0.0
+    cast_bounds = AABB { lower: math.sub(math.min_vec3(center_start, center_end), shape_extents),
+                         upper: math.add(math.max_vec3(center_start, center_end), shape_extents) }
+    clockwise = h.clockwise
+
+    while true {
+        column1 = box_column_head
+        column2 = box_column_tail
+        if box_column_tail < box_column_head {
+            column1 = box_column_tail
+            column2 = box_column_head
+        }
+        row1 = box_row_head
+        row2 = box_row_tail
+        if box_row_tail < box_row_head {
+            row1 = box_row_tail
+            row2 = box_row_head
+        }
+        row = row1
+        while row <= row2 {
+            if row >= 0 && row < row_count - 1 {
+                column = column1
+                while column <= column2 {
+                    if column >= 0 && column < column_count - 1 {
+                        cell = row * (column_count - 1) + column
+                        material = materials[cell]
+                        if material != HEIGHT_FIELD_HOLE {
+                            cell_corners(h, row, column, corners)
+                            p11 = corners[0]
+                            p12 = corners[1]
+                            p21 = corners[2]
+                            p22 = corners[3]
+                            if clockwise {
+                                swap = p12
+                                p12 = p21
+                                p21 = swap
+                            }
+                            bounds = AABB { lower: math.min_vec3(math.min_vec3(p11, p12), math.min_vec3(p21, p22)),
+                                            upper: math.max_vec3(math.max_vec3(p11, p12), math.max_vec3(p21, p22)) }
+                            if math.aabb_overlaps(cast_bounds, bounds) {
+                                triangle1 = 2 * cell
+                                triangle2 = triangle1 + 1
+                                if is_ray {
+                                    alpha = mesh.intersect_ray_triangle(shape_start, translation, p11, p21, p12)
+                                    if alpha < best_fraction {
+                                        result.point = math.mul_add(shape_start, alpha, translation)
+                                        result.normal = math.normalize(math.cross(math.sub(p21, p11), math.sub(p12, p11)))
+                                        result.fraction = alpha
+                                        result.triangle_index = triangle1
+                                        result.material_index = material
+                                        result.hit = true
+                                        best_fraction = alpha
+                                    }
+                                    alpha = mesh.intersect_ray_triangle(shape_start, translation, p22, p12, p21)
+                                    if alpha < best_fraction {
+                                        result.point = math.mul_add(shape_start, alpha, translation)
+                                        result.normal = math.normalize(math.cross(math.sub(p22, p21), math.sub(p12, p21)))
+                                        result.fraction = alpha
+                                        result.triangle_index = triangle2
+                                        result.material_index = material
+                                        result.hit = true
+                                        best_fraction = alpha
+                                    }
+                                } else {
+                                    if math.signed_volume(p11, p21, p12, shape_start) >= 0.0 {
+                                        best_fraction = cast_triangle(&result, proxy, translation, can_encroach, p11, p21, p12, best_fraction, triangle1, material)
+                                    }
+                                    if math.signed_volume(p21, p22, p12, shape_start) >= 0.0 {
+                                        best_fraction = cast_triangle(&result, proxy, translation, can_encroach, p21, p22, p12, best_fraction, triangle2, material)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    column = column + 1
+                }
+            }
+            row = row + 1
+        }
+
+        // The walk's fractions only grow, so this ends.
+        input_fraction_x = math.MAX_FLOAT
+        if next_fraction_x != math.MAX_FLOAT { input_fraction_x = grid_fraction_offset + next_fraction_x * grid_fraction_scale }
+        input_fraction_z = math.MAX_FLOAT
+        if next_fraction_z != math.MAX_FLOAT { input_fraction_z = grid_fraction_offset + next_fraction_z * grid_fraction_scale }
+        if input_fraction_x > best_fraction && input_fraction_z > best_fraction { break }
+
+        if next_fraction_x <= next_fraction_z {
+            if box_column_head == column_end { break }
+            box_column_head = box_column_head + delta_column
+            box_column_tail = box_column_head
+            if shape_extents.z == 0.0 {
+                box_row_tail = box_row_head
+            } else {
+                row_intercept = clamped_start.z + next_fraction_x * clamped_delta.z
+                box_row_tail = floor((row_intercept - 2.0 * sign_z * shape_extents.z) / scale.z) as int
+            }
+            next_fraction_x = next_fraction_x + delta_alpha_x
+        } else {
+            if box_row_head == row_end { break }
+            box_row_head = box_row_head + delta_row
+            box_row_tail = box_row_head
+            if shape_extents.x == 0.0 {
+                box_column_tail = box_column_head
+            } else {
+                column_intercept = clamped_start.x + next_fraction_z * clamped_delta.x
+                box_column_tail = floor((column_intercept - 2.0 * sign_x * shape_extents.x) / scale.x) as int
+            }
+            next_fraction_z = next_fraction_z + delta_alpha_z
+        }
+    }
+    return result
+}
+
+// One triangle of the field against the swept proxy, in the triangle's
+// frame at its first vertex; the result taken if nearer. Returns the
+// best fraction after.
+cast_triangle(result: *CastOutput, proxy: ShapeProxy, translation: Vec3, can_encroach: bool, a: Vec3, b: Vec3, c: Vec3,
+              best_fraction: float, triangle_index: int, material: int) -> float {
+    tri = g_triangle as Vec3[]
+    tri[0] = math.vec3_zero()
+    tri[1] = math.sub(b, a)
+    tri[2] = math.sub(c, a)
+    pair = ShapeCastPairInput { proxy_a: distance.shape_proxy(g_triangle, 3, 0.0), proxy_b: proxy,
+                                transform: Transform { p: math.neg(a), q: math.quat_identity() },
+                                translation_b: translation, max_fraction: best_fraction, can_encroach: can_encroach }
+    output = distance.shape_cast(&pair)
+    if output.hit {
+        result.normal = output.normal
+        result.point = math.add(output.point, a)
+        result.fraction = output.fraction
+        result.iterations = output.iterations
+        result.triangle_index = triangle_index
+        result.child_index = NULL_INDEX
+        result.material_index = material
+        result.hit = true
+        return output.fraction
+    }
+    return best_fraction
+}
+
+// --- overlap, query, mover ----------------------------------------------------------------
+
+// The cells a box covers, clamped to the field; false when none.
+struct CellRange {
+    min_row: int
+    max_row: int
+    min_column: int
+    max_column: int
+}
+
+cell_range(h: *HeightFieldData, bounds: AABB) -> CellRange {
+    scale = h.scale
+    return CellRange { min_row: floor(bounds.lower.z / scale.z) as int, max_row: floor(bounds.upper.z / scale.z) as int,
+                       min_column: floor(bounds.lower.x / scale.x) as int, max_column: floor(bounds.upper.x / scale.x) as int }
+}
+
+// Whether a proxy in world space comes within the overlap slop of any
+// triangle under the field's transform.
+overlap_height_field(h: *HeightFieldData, shape_transform: Transform, proxy: ShapeProxy) -> bool {
+    scratch_ready()
+    local_proxy = mesh.make_local_proxy(proxy, shape_transform, g_local)
+    bounds = mesh.compute_proxy_aabb(local_proxy)
+    range = cell_range(h, bounds)
+    center = math.aabb_center(bounds)
+    extent = math.aabb_extents(bounds)
+    input = DistanceInput { proxy_a: distance.shape_proxy(g_triangle, 3, 0.0), proxy_b: local_proxy,
+                            transform: math.transform_identity(), use_radii: true }
+    cache = distance.empty_cache()
+    materials = height_field_material_indices(h)
+    corners = corners_ready()
+    tri = g_triangle as Vec3[]
+    tolerance = 0.1 * math.LINEAR_SLOP
+    row = range.min_row
+    while row <= range.max_row {
+        if row >= 0 && row < h.row_count - 1 {
+            column = range.min_column
+            while column <= range.max_column {
+                if column >= 0 && column < h.column_count - 1 {
+                    cell = row * (h.column_count - 1) + column
+                    if materials[cell] != HEIGHT_FIELD_HOLE {
+                        cell_corners(h, row, column, corners)
+                        if mesh.test_bounds_triangle_overlap(center, extent, corners[0], corners[2], corners[1]) {
+                            tri[0] = corners[0]
+                            tri[1] = corners[2]
+                            tri[2] = corners[1]
+                            cache.count = 0
+                            output = distance.shape_distance(&input, &cache, null, 0)
+                            if output.distance < tolerance { return true }
+                        }
+                        if mesh.test_bounds_triangle_overlap(center, extent, corners[2], corners[3], corners[1]) {
+                            tri[0] = corners[3]
+                            tri[1] = corners[1]
+                            tri[2] = corners[2]
+                            cache.count = 0
+                            output = distance.shape_distance(&input, &cache, null, 0)
+                            if output.distance < tolerance { return true }
+                        }
+                    }
+                }
+                column = column + 1
+            }
+        }
+        row = row + 1
+    }
+    return false
+}
+
+// Every triangle of the cells a box covers, to the visitor, in index order.
+query_height_field(h: *HeightFieldData, bounds: AABB, visitor: fn(Vec3, Vec3, Vec3, int, ptr) -> bool, context: ptr) {
+    range = cell_range(h, bounds)
+    materials = height_field_material_indices(h)
+    corners = corners_ready()
+    row = range.min_row
+    while row <= range.max_row {
+        if row >= 0 && row < h.row_count - 1 {
+            column = range.min_column
+            while column <= range.max_column {
+                if column >= 0 && column < h.column_count - 1 {
+                    cell = row * (h.column_count - 1) + column
+                    if materials[cell] != HEIGHT_FIELD_HOLE {
+                        cell_corners(h, row, column, corners)
+                        p11 = corners[0]
+                        p12 = corners[1]
+                        p21 = corners[2]
+                        p22 = corners[3]
+                        cell_bounds = AABB { lower: math.min_vec3(math.min_vec3(p11, p12), math.min_vec3(p21, p22)),
+                                             upper: math.max_vec3(math.max_vec3(p11, p12), math.max_vec3(p21, p22)) }
+                        if math.aabb_overlaps(bounds, cell_bounds) {
+                            triangle_index = 2 * cell
+                            if h.clockwise {
+                                if visitor(p11, p12, p21, triangle_index, context) == false { return }
+                                if visitor(p22, p21, p12, triangle_index + 1, context) == false { return }
+                            } else {
+                                if visitor(p11, p21, p12, triangle_index, context) == false { return }
+                                if visitor(p22, p12, p21, triangle_index + 1, context) == false { return }
+                            }
+                        }
+                    }
+                }
+                column = column + 1
+            }
+        }
+        row = row + 1
+    }
+}
+
+// The planes of the front-facing triangles the mover's capsule is within
+// its radius of, up to the capacity; returns how many.
+collide_mover_and_height_field(planes: PlaneResult[], capacity: int, h: *HeightFieldData, mover: Capsule) -> int {
+    if capacity == 0 { return 0 }
+    scratch_ready()
+    input = DistanceInput { proxy_a: distance.shape_proxy(g_triangle, 3, 0.0), proxy_b: distance.shape_proxy((&mover) as ptr, 2, 0.0),
+                            transform: math.transform_identity(), use_radii: false }
+    cache = distance.empty_cache()
+    radius = mover.radius
+    center = math.lerp(mover.center1, mover.center2, 0.5)
+    bounds = math.aabb_inflate(AABB { lower: math.min_vec3(mover.center1, mover.center2), upper: math.max_vec3(mover.center1, mover.center2) }, radius)
+    bounds_center = math.aabb_center(bounds)
+    bounds_extent = math.aabb_extents(bounds)
+    range = cell_range(h, bounds)
+    materials = height_field_material_indices(h)
+    corners = corners_ready()
+    tri = g_triangle as Vec3[]
+    plane_count = 0
+    row = range.min_row
+    while row <= range.max_row {
+        if row >= 0 && row < h.row_count - 1 {
+            column = range.min_column
+            while column <= range.max_column {
+                if column >= 0 && column < h.column_count - 1 {
+                    cell = row * (h.column_count - 1) + column
+                    material = materials[cell]
+                    if material != HEIGHT_FIELD_HOLE {
+                        cell_corners(h, row, column, corners)
+                        p11 = corners[0]
+                        p12 = corners[1]
+                        p21 = corners[2]
+                        p22 = corners[3]
+                        if h.clockwise {
+                            swap = p12
+                            p12 = p21
+                            p21 = swap
+                        }
+                        k = 0
+                        while k < 2 {
+                            a = p11
+                            b = p21
+                            c = p12
+                            if k == 1 {
+                                a = p22
+                                b = p12
+                                c = p21
+                            }
+                            if mesh.test_bounds_triangle_overlap(bounds_center, bounds_extent, a, b, c) {
+                                if math.signed_volume(a, b, c, center) >= 0.0 {
+                                    tri[0] = a
+                                    tri[1] = b
+                                    tri[2] = c
+                                    cache.count = 0
+                                    output = distance.shape_distance(&input, &cache, null, 0)
+                                    if output.distance > 0.0 && output.distance <= radius {
+                                        planes[plane_count] = PlaneResult { plane: Plane { normal: output.normal, offset: radius - output.distance },
+                                                                            point: output.point_a, triangle_index: 2 * cell + k, child_index: 0,
+                                                                            material_index: material }
+                                        plane_count = plane_count + 1
+                                        if plane_count == capacity { return plane_count }
+                                    }
+                                }
+                            }
+                            k = k + 1
+                        }
+                    }
+                }
+                column = column + 1
+            }
+        }
+        row = row + 1
+    }
+    return plane_count
+}

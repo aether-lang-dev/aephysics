@@ -1,0 +1,635 @@
+// aephysics.height_field against the reference's (Box3D's)
+// test_height_field.c: the grid's bounds, the triangle index mapping on
+// an asymmetric grid, the winding's normals, a ray onto a flat field, the
+// overlap at the surface, the vertical casts straddling a cell boundary,
+// the shape cast and the ray cast against a brute force over every
+// triangle of a wave, and the back side culled for both windings; and
+// beyond it the edge flags of a wave and of holes, the box query, the
+// mover's planes, and a scaled field. The file roundtrip is not ported.
+
+import std.string
+import aephysics.math
+import aephysics.core
+import aephysics.distance
+import aephysics.manifold
+import aephysics.triangle_manifold
+import aephysics.mesh
+import aephysics.height_field
+
+extern calloc(count: int, size: int) -> ptr
+extern exit(code: int)
+extern free(p: ptr)
+extern sqrt(x: float) -> float
+
+var failures = 0
+var checks = 0
+
+ensure(name: string, ok: bool) {
+    checks = checks + 1
+    if !ok {
+        println("height_field: FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+small(name: string, value: float, tolerance: float) {
+    ensure("${name} (${value})", math.abs_float(value) < tolerance)
+}
+
+// A flat 3 x 3 field at y = 0 with the given cell materials.
+make_flat_field(materials: ptr, clockwise: bool) -> *HeightFieldData {
+    heights = calloc(9, 8)
+    def = height_field.height_field_def()
+    def.heights = heights
+    def.material_indices = materials
+    def.scale = math.vec3(1.0, 1.0, 1.0)
+    def.count_x = 3
+    def.count_z = 3
+    def.global_minimum_height = 0.0 - 1.0
+    def.global_maximum_height = 1.0
+    def.clockwise_winding = clockwise
+    h = height_field.create_height_field(&def)
+    free(heights)
+    return h
+}
+
+test_create() {
+    h = height_field.create_grid(4, 4, math.vec3(1.0, 1.0, 1.0), false)
+    ensure("grid rows", h.row_count == 4)
+    ensure("grid columns", h.column_count == 4)
+    ensure("grid counter-clockwise", h.clockwise == false)
+    ensure("grid version", h.version == height_field.HEIGHT_FIELD_VERSION)
+    small("grid lower x", h.aabb.lower.x, math.EPSILON)
+    small("grid lower y", h.aabb.lower.y, math.EPSILON)
+    small("grid lower z", h.aabb.lower.z, math.EPSILON)
+    small("grid upper x", h.aabb.upper.x - 3.0, math.EPSILON)
+    small("grid upper y", h.aabb.upper.y, math.EPSILON)
+    small("grid upper z", h.aabb.upper.z - 3.0, math.EPSILON)
+    ensure("grid triangle count", height_field.height_field_triangle_count(h) == 18)
+    ensure("grid hash", h.hash != (0 as long))
+    height_field.destroy_height_field(h)
+
+    // An asymmetric grid catches a vertex stride (columns) confused with
+    // a cell stride (columns - 1).
+    row_count = 4
+    column_count = 5
+    h = height_field.create_grid(row_count, column_count, math.vec3(1.0, 1.0, 1.0), false)
+    triangle_count = 2 * (row_count - 1) * (column_count - 1)
+    bad = 0
+    triangle_index = 0
+    while triangle_index < triangle_count {
+        quad = triangle_index >> 1
+        row = quad / (column_count - 1)
+        column = quad - row * (column_count - 1)
+        index11 = row * column_count + column
+        index12 = index11 + 1
+        index21 = (row + 1) * column_count + column
+        index22 = index21 + 1
+        t = height_field.get_height_field_triangle(h, triangle_index)
+        if (triangle_index & 1) == 0 {
+            if t.i1 != index11 || t.i2 != index21 || t.i3 != index12 { bad = bad + 1 }
+        } else {
+            if t.i1 != index22 || t.i2 != index12 || t.i3 != index21 { bad = bad + 1 }
+        }
+        // The vertices are where the indices say.
+        if t.v1.x != (t.i1 % column_count) as float || t.v1.z != (t.i1 / column_count) as float { bad = bad + 1 }
+        triangle_index = triangle_index + 1
+    }
+    ensure("triangle indices on a 4 x 5 grid", bad == 0)
+    height_field.destroy_height_field(h)
+
+    // The same flat field wound both ways: the normal of triangle 0 flips.
+    materials = calloc(4, 4)
+    ccw = make_flat_field(materials, false)
+    cw = make_flat_field(materials, true)
+    ta = height_field.get_height_field_triangle(ccw, 0)
+    tb = height_field.get_height_field_triangle(cw, 0)
+    na = math.make_normal_from_points(ta.v1, ta.v2, ta.v3)
+    nb = math.make_normal_from_points(tb.v1, tb.v2, tb.v3)
+    small("ccw normal x", na.x, math.EPSILON)
+    small("ccw normal y", na.y - 1.0, math.EPSILON)
+    small("ccw normal z", na.z, math.EPSILON)
+    small("cw normal x", nb.x, math.EPSILON)
+    small("cw normal y", nb.y + 1.0, math.EPSILON)
+    small("cw normal z", nb.z, math.EPSILON)
+    ensure("cw indices swapped", tb.i1 == ta.i1 && tb.i2 == ta.i3 && tb.i3 == ta.i2)
+    height_field.destroy_height_field(ccw)
+    height_field.destroy_height_field(cw)
+    free(materials)
+
+    // Heights quantise to the global range and come back within a quantum;
+    // a height beyond the range is clamped.
+    heights_block = calloc(9, 8)
+    heights = heights_block as float[]
+    heights[4] = 0.75
+    heights[8] = 3.0
+    def = height_field.height_field_def()
+    def.heights = heights_block
+    def.scale = math.vec3(2.0, 0.5, 2.0)
+    def.count_x = 3
+    def.count_z = 3
+    h = height_field.create_height_field(&def)
+    small("quantised height", height_field.height_field_height(h, 4) - 0.75, 2.0 / 65535.0)
+    small("clamped height", height_field.height_field_height(h, 8) - 1.0, 0.000001)
+    small("scaled upper y", h.aabb.upper.y - 0.5, 0.000001)
+    small("scaled upper x", h.aabb.upper.x - 4.0, 0.000001)
+    small("scaled lower y", h.aabb.lower.y, 0.000001)
+    t = height_field.get_height_field_triangle(h, 7)
+    small("scaled vertex", t.v1.y - 0.5, 0.000001)
+    ensure("materials default to 0", height_field.get_height_field_material(h, 3) == 0)
+    height_field.destroy_height_field(h)
+    def.count_x = 1
+    ensure("a one-column field is refused", height_field.create_height_field(&def) == null)
+    def.count_x = 3
+    def.heights = null
+    ensure("a field without heights is refused", height_field.create_height_field(&def) == null)
+    free(heights_block)
+}
+
+test_flags() {
+    // A flat field: every interior edge is flat, so it carries both bits;
+    // an edge on the border or against a hole carries none.
+    materials_block = calloc(9, 4)
+    materials = materials_block as int[]
+    materials[4] = height_field.HEIGHT_FIELD_HOLE
+    heights = calloc(16, 8)
+    def = height_field.height_field_def()
+    def.heights = heights
+    def.material_indices = materials_block
+    def.count_x = 4
+    def.count_z = 4
+    h = height_field.create_height_field(&def)
+    flags = height_field.height_field_flags(h)
+    // Cell 0 (corner): triangle 0 has the diagonal (edge 2) flat and
+    // edges 1 and 3 on the border.
+    ensure("corner triangle 0 flags", flags[0] == (triangle_manifold.CONCAVE_EDGE2 | triangle_manifold.INVERSE_CONCAVE_EDGE2))
+    // Cell 0 triangle 1: diagonal flat, edge 1 against cell 1 (flat), edge 3 against cell 3 (flat).
+    ensure("corner triangle 1 flags", flags[1] == triangle_manifold.ALL_FLAT_EDGES)
+    // Cell 1 triangle 1: edge 3 against the hole (cell 4).
+    ensure("triangle above the hole", flags[3] == (triangle_manifold.ALL_FLAT_EDGES & (255 - triangle_manifold.CONCAVE_EDGE3 - triangle_manifold.INVERSE_CONCAVE_EDGE3)))
+    // Cell 5 triangle 0: edge 1 against the hole.
+    ensure("triangle right of the hole", flags[10] == (triangle_manifold.ALL_FLAT_EDGES & (255 - triangle_manifold.CONCAVE_EDGE1 - triangle_manifold.INVERSE_CONCAVE_EDGE1)))
+    ensure("the hole's triangles carry no flags", flags[8] == 0 && flags[9] == 0)
+    ensure("a hole's material", height_field.get_height_field_material(h, 9) == height_field.HEIGHT_FIELD_HOLE)
+    height_field.destroy_height_field(h)
+
+    // A ridge along z at column 1: the edges against it are concave on
+    // the outside faces... the ridge's own faces meet convexly at the top.
+    hs = heights as float[]
+    hs[1] = 1.0
+    hs[5] = 1.0
+    hs[9] = 1.0
+    hs[13] = 1.0
+    materials[4] = 0
+    h = height_field.create_height_field(&def)
+    flags = height_field.height_field_flags(h)
+    // Cell 0 triangle 1 (its edge 1 is x = 1, the ridge's crest, against cell 1 sloping down): inverse concave only.
+    ensure("convex ridge edge", (flags[1] & triangle_manifold.CONCAVE_EDGE1) == 0 && (flags[1] & triangle_manifold.INVERSE_CONCAVE_EDGE1) != 0)
+    // Cell 1 triangle 1 (edge 1 is x = 2, at the foot of the ridge): concave, not inverse.
+    ensure("concave foot edge", (flags[3] & triangle_manifold.CONCAVE_EDGE1) != 0 && (flags[3] & triangle_manifold.INVERSE_CONCAVE_EDGE1) == 0)
+    // The clockwise field swaps edges 1 and 3 on the returned triangle.
+    def.clockwise_winding = true
+    cw = height_field.create_height_field(&def)
+    t = height_field.get_height_field_triangle(cw, 3)
+    swapped = (flags[3] & 0x22) | ((flags[3] & 0x11) << 2) | ((flags[3] & 0x44) >> 2)
+    ensure("clockwise swaps the edge bits", t.flags == swapped && t.flags != flags[3])
+    ensure("the concave foot edge became edge 3", (t.flags & triangle_manifold.CONCAVE_EDGE3) != 0 && (t.flags & triangle_manifold.INVERSE_CONCAVE_EDGE3) == 0)
+    height_field.destroy_height_field(cw)
+    height_field.destroy_height_field(h)
+    free(heights)
+    free(materials_block)
+}
+
+test_ray_and_overlap() {
+    // A flat field with a tight range recovers y = 0 to a hundred-thousandth.
+    heights = calloc(16, 8)
+    materials = calloc(9, 4)
+    def = height_field.height_field_def()
+    def.heights = heights
+    def.material_indices = materials
+    def.count_x = 4
+    def.count_z = 4
+    h = height_field.create_height_field(&def)
+    out = height_field.ray_cast_height_field(h, math.vec3(1.25, 10.0, 1.25), math.vec3(0.0, 0.0 - 20.0, 0.0), 1.0)
+    ensure("flat ray hit", out.hit)
+    small("flat ray fraction", out.fraction - 0.5, 0.00001)
+    small("flat ray normal x", out.normal.x, 0.00001)
+    small("flat ray normal y", out.normal.y - 1.0, 0.00001)
+    small("flat ray normal z", out.normal.z, 0.00001)
+    ensure("flat ray triangle", out.triangle_index == 2 * (1 * 3 + 1))
+    small("flat ray point", math.length(math.sub(out.point, math.vec3(1.25, 0.0, 1.25))), 0.0001)
+    // A ray that never reaches the field, and one outside it.
+    out = height_field.ray_cast_height_field(h, math.vec3(1.25, 10.0, 1.25), math.vec3(0.0, 0.0 - 5.0, 0.0), 1.0)
+    ensure("short ray misses", out.hit == false)
+    out = height_field.ray_cast_height_field(h, math.vec3(5.0, 10.0, 1.25), math.vec3(0.0, 0.0 - 20.0, 0.0), 1.0)
+    ensure("ray beside the field misses", out.hit == false)
+    // The world-space bounds under a transform.
+    t = Transform { p: math.vec3(10.0, 0.0, 0.0), q: math.quat_identity() }
+    bounds = height_field.compute_height_field_aabb(h, t)
+    small("transformed lower x", bounds.lower.x - 10.0, 0.000001)
+    small("transformed upper x", bounds.upper.x - 13.0, 0.000001)
+    height_field.destroy_height_field(h)
+    free(heights)
+    free(materials)
+
+    // A sphere a diameter above the grid is clear; centred on it, it overlaps.
+    h = height_field.create_grid(4, 4, math.vec3(1.0, 1.0, 1.0), false)
+    center_block = calloc(1, sizeof(Vec3))
+    center = center_block as Vec3[]
+    center[0] = math.vec3(1.5, 1.0, 1.5)
+    ensure("sphere above is clear", height_field.overlap_height_field(h, math.transform_identity(), distance.shape_proxy(center_block, 1, 0.5)) == false)
+    center[0] = math.vec3(1.5, 0.0, 1.5)
+    ensure("sphere at the surface overlaps", height_field.overlap_height_field(h, math.transform_identity(), distance.shape_proxy(center_block, 1, 0.5)))
+    // The field moved up by 2 under its transform: the sphere at y 1 is
+    // clear again from below... it is 1 below the surface, so inside.
+    t = Transform { p: math.vec3(0.0, 0.0 - 2.0, 0.0), q: math.quat_identity() }
+    center[0] = math.vec3(1.5, 1.0, 1.5)
+    ensure("sphere under the moved field is clear", height_field.overlap_height_field(h, t, distance.shape_proxy(center_block, 1, 0.5)) == false)
+    center[0] = math.vec3(1.5, 0.0 - 2.0, 1.5)
+    ensure("sphere at the moved surface overlaps", height_field.overlap_height_field(h, t, distance.shape_proxy(center_block, 1, 0.5)))
+    free(center_block)
+    height_field.destroy_height_field(h)
+}
+
+test_straddle() {
+    // A vertical cast whose swept box straddles a cell boundary must test
+    // every cell it covers: the field is flat with only cell (0, 0) solid,
+    // and each sphere's centre is nudged just past one of its boundaries,
+    // leaving the solid cell on the trailing side of the walk.
+    materials_block = calloc(4, 4)
+    materials = materials_block as int[]
+    materials[1] = height_field.HEIGHT_FIELD_HOLE
+    materials[2] = height_field.HEIGHT_FIELD_HOLE
+    materials[3] = height_field.HEIGHT_FIELD_HOLE
+    h = make_flat_field(materials_block, false)
+    radius = 0.3
+    center_block = calloc(1, sizeof(Vec3))
+    center = center_block as Vec3[]
+    down = math.vec3(0.0, 0.0 - 20.0, 0.0)
+    // Across x = 1: contact on the cell edge, sqrt(0.05^2 + cy^2) = radius.
+    center[0] = math.vec3(1.05, 10.0, 0.5)
+    out = height_field.shape_cast_height_field(h, distance.shape_proxy(center_block, 1, radius), down, 1.0, false)
+    ensure("straddle x hit", out.hit)
+    small("straddle x fraction", out.fraction - 0.4852098, 0.002)
+    center[0] = math.vec3(0.5, 10.0, 1.05)
+    out = height_field.shape_cast_height_field(h, distance.shape_proxy(center_block, 1, radius), down, 1.0, false)
+    ensure("straddle z hit", out.hit)
+    small("straddle z fraction", out.fraction - 0.4852098, 0.002)
+    // Across the corner: contact on the vertex.
+    center[0] = math.vec3(1.05, 10.0, 1.05)
+    out = height_field.shape_cast_height_field(h, distance.shape_proxy(center_block, 1, radius), down, 1.0, false)
+    ensure("straddle corner hit", out.hit)
+    small("straddle corner fraction", out.fraction - 0.4854226, 0.002)
+    free(center_block)
+    height_field.destroy_height_field(h)
+    free(materials_block)
+}
+
+// The proxy against every triangle that is not a hole: the truth the grid
+// walk is checked against.
+brute_force_shape_cast(h: *HeightFieldData, proxy: ShapeProxy, translation: Vec3, tri_block: ptr) -> CastOutput {
+    best = distance.empty_cast_output()
+    best_fraction = 1.0
+    tri = tri_block as Vec3[]
+    materials = height_field.height_field_material_indices(h)
+    count = height_field.height_field_triangle_count(h)
+    t = 0
+    while t < count {
+        if materials[t >> 1] != height_field.HEIGHT_FIELD_HOLE {
+            triangle = height_field.get_height_field_triangle(h, t)
+            tri[0] = triangle.v1
+            tri[1] = triangle.v2
+            tri[2] = triangle.v3
+            pair = ShapeCastPairInput { proxy_a: distance.shape_proxy(tri_block, 3, 0.0), proxy_b: proxy, transform: math.transform_identity(),
+                                        translation_b: translation, max_fraction: best_fraction, can_encroach: false }
+            out = distance.shape_cast(&pair)
+            if out.hit && out.fraction < best_fraction {
+                best_fraction = out.fraction
+                best = out
+                best.triangle_index = t
+            }
+        }
+        t = t + 1
+    }
+    return best
+}
+
+brute_force_ray_cast(h: *HeightFieldData, origin: Vec3, translation: Vec3) -> CastOutput {
+    best = distance.empty_cast_output()
+    best_fraction = 1.0
+    materials = height_field.height_field_material_indices(h)
+    count = height_field.height_field_triangle_count(h)
+    t = 0
+    while t < count {
+        if materials[t >> 1] != height_field.HEIGHT_FIELD_HOLE {
+            triangle = height_field.get_height_field_triangle(h, t)
+            alpha = mesh.intersect_ray_triangle(origin, translation, triangle.v1, triangle.v2, triangle.v3)
+            if alpha < best_fraction {
+                best_fraction = alpha
+                best.hit = true
+                best.fraction = alpha
+                best.triangle_index = t
+            }
+        }
+        t = t + 1
+    }
+    return best
+}
+
+test_brute_force() {
+    h = height_field.create_wave(10, 10, math.vec3(2.0, 1.5, 2.0), 0.1, 0.03333, false)
+    origin_block = calloc(1, sizeof(Vec3))
+    origin = origin_block as Vec3[]
+    tri_block = calloc(3, sizeof(Vec3))
+
+    // The sample's repro: a sphere moving only in z and y, where the walk
+    // used to stop a row early by comparing fractions of different sweeps.
+    origin[0] = math.vec3(14.5, 4.0, 11.913)
+    translation = math.vec3(0.0, 0.0 - 8.0, 6.397)
+    proxy = distance.shape_proxy(origin_block, 1, 0.2)
+    grid = height_field.shape_cast_height_field(h, proxy, translation, 1.0, false)
+    brute = brute_force_shape_cast(h, proxy, translation, tri_block)
+    ensure("repro brute hit", brute.hit)
+    ensure("repro grid hit", grid.hit == brute.hit)
+    small("repro fraction", grid.fraction - brute.fraction, 0.002)
+
+    // Origins across the field with assorted directions and radii.
+    radii_block = calloc(3, 8)
+    radii = radii_block as float[]
+    radii[0] = 0.15
+    radii[1] = 0.4
+    radii[2] = 0.9
+    deltas_block = calloc(8, sizeof(Vec3))
+    deltas = deltas_block as Vec3[]
+    deltas[0] = math.vec3(0.0, 0.0 - 8.0, 0.0)
+    deltas[1] = math.vec3(0.0, 0.0 - 8.0, 6.4)
+    deltas[2] = math.vec3(5.1, 0.0 - 8.0, 0.0)
+    deltas[3] = math.vec3(0.0, 0.0 - 8.0, 0.0 - 6.4)
+    deltas[4] = math.vec3(0.0 - 5.1, 0.0 - 8.0, 0.0)
+    deltas[5] = math.vec3(6.0, 0.0 - 8.0, 5.0)
+    deltas[6] = math.vec3(0.0 - 7.0, 0.0 - 8.0, 4.0)
+    deltas[7] = math.vec3(9.0, 0.0 - 3.0, 0.0 - 9.0)
+    mismatches = 0
+    hits = 0
+    xi = 0
+    while xi < 5 {
+        zi = 0
+        while zi < 5 {
+            // The nudge keeps the swept box straddling cell boundaries.
+            origin[0] = math.vec3(1.0 + 4.0 * (xi as float) + 0.05, 4.0, 1.0 + 4.0 * (zi as float) + 0.05)
+            di = 0
+            while di < 8 {
+                ri = 0
+                while ri < 3 {
+                    proxy = distance.shape_proxy(origin_block, 1, radii[ri])
+                    grid = height_field.shape_cast_height_field(h, proxy, deltas[di], 1.0, false)
+                    brute = brute_force_shape_cast(h, proxy, deltas[di], tri_block)
+                    diff = math.abs_float(grid.fraction - brute.fraction)
+                    if grid.hit != brute.hit || (brute.hit && diff > 0.002) {
+                        println("  mismatch: origin ${origin[0].x} ${origin[0].z} delta ${di} r ${radii[ri]} grid ${grid.hit} ${grid.fraction} brute ${brute.hit} ${brute.fraction} tri ${brute.triangle_index}")
+                        mismatches = mismatches + 1
+                    }
+                    if brute.hit { hits = hits + 1 }
+                    ri = ri + 1
+                }
+                di = di + 1
+            }
+            zi = zi + 1
+        }
+        xi = xi + 1
+    }
+    ensure("shape casts match the brute force over the wave", mismatches == 0)
+    ensure("most shape casts hit (${hits} of 600)", hits > 400)
+
+    // The ray cast goes through the same walk with a point proxy.
+    deltas[0] = math.vec3(0.0, 0.0 - 8.0, 0.0)
+    deltas[1] = math.vec3(0.0, 0.0 - 8.0, 12.0)
+    deltas[2] = math.vec3(12.0, 0.0 - 8.0, 0.0)
+    deltas[3] = math.vec3(0.0, 0.0 - 8.0, 0.0 - 12.0)
+    deltas[4] = math.vec3(0.0 - 12.0, 0.0 - 8.0, 0.0)
+    deltas[5] = math.vec3(14.0, 0.0 - 8.0, 11.0)
+    deltas[6] = math.vec3(0.0 - 13.0, 0.0 - 8.0, 9.0)
+    deltas[7] = math.vec3(16.0, 0.0 - 4.0, 0.0 - 15.0)
+    mismatches = 0
+    hits = 0
+    xi = 0
+    while xi < 5 {
+        zi = 0
+        while zi < 5 {
+            ray_origin = math.vec3(1.0 + 4.0 * (xi as float) + 0.05, 4.0, 1.0 + 4.0 * (zi as float) + 0.05)
+            di = 0
+            while di < 8 {
+                grid = height_field.ray_cast_height_field(h, ray_origin, deltas[di], 1.0)
+                brute = brute_force_ray_cast(h, ray_origin, deltas[di])
+                diff = math.abs_float(grid.fraction - brute.fraction)
+                if grid.hit != brute.hit || (brute.hit && diff > 0.0001) || (brute.hit && grid.triangle_index != brute.triangle_index) {
+                    println("  mismatch: origin ${ray_origin.x} ${ray_origin.z} delta ${di} grid ${grid.hit} ${grid.fraction} tri ${grid.triangle_index} brute ${brute.hit} ${brute.fraction} tri ${brute.triangle_index}")
+                    mismatches = mismatches + 1
+                }
+                if brute.hit { hits = hits + 1 }
+                di = di + 1
+            }
+            zi = zi + 1
+        }
+        xi = xi + 1
+    }
+    ensure("ray casts match the brute force over the wave", mismatches == 0)
+    ensure("most rays hit (${hits} of 200)", hits > 100)
+
+    // A field with holes: the brute force skips them the same way.
+    height_field.destroy_height_field(h)
+    h = height_field.create_wave(10, 10, math.vec3(2.0, 1.5, 2.0), 0.1, 0.03333, true)
+    mismatches = 0
+    xi = 0
+    while xi < 5 {
+        zi = 0
+        while zi < 5 {
+            ray_origin = math.vec3(1.0 + 4.0 * (xi as float) + 0.05, 4.0, 1.0 + 4.0 * (zi as float) + 0.05)
+            di = 0
+            while di < 8 {
+                grid = height_field.ray_cast_height_field(h, ray_origin, deltas[di], 1.0)
+                brute = brute_force_ray_cast(h, ray_origin, deltas[di])
+                if grid.hit != brute.hit || (brute.hit && grid.triangle_index != brute.triangle_index) { mismatches = mismatches + 1 }
+                di = di + 1
+            }
+            zi = zi + 1
+        }
+        xi = xi + 1
+    }
+    ensure("ray casts match the brute force with holes", mismatches == 0)
+    height_field.destroy_height_field(h)
+    free(deltas_block)
+    free(radii_block)
+    free(tri_block)
+    free(origin_block)
+}
+
+test_backside() {
+    materials_block = calloc(4, 4)
+    materials = materials_block as int[]
+    materials[0] = 1
+    center_block = calloc(1, sizeof(Vec3))
+    center = center_block as Vec3[]
+    down = math.vec3(0.0, 0.0 - 10.0, 0.0)
+    up = math.vec3(0.0, 10.0, 0.0)
+
+    // Falling onto the front face reports the hit, the triangle and its
+    // material; rising from behind is culled.
+    h = make_flat_field(materials_block, false)
+    center[0] = math.vec3(0.3, 5.0, 0.25)
+    out = height_field.shape_cast_height_field(h, distance.shape_proxy(center_block, 1, 0.2), down, 1.0, false)
+    ensure("front shape hit", out.hit)
+    small("front shape fraction", out.fraction - 0.48, 0.01)
+    ensure("front shape normal", out.normal.y > 0.99)
+    ensure("front shape triangle", out.triangle_index == 0 || out.triangle_index == 1)
+    ensure("front shape material", out.material_index == 1)
+    center[0] = math.vec3(0.3, 0.0 - 5.0, 0.25)
+    out = height_field.shape_cast_height_field(h, distance.shape_proxy(center_block, 1, 0.2), up, 1.0, false)
+    ensure("back shape culled", out.hit == false)
+    out = height_field.ray_cast_height_field(h, math.vec3(0.3, 5.0, 0.25), down, 1.0)
+    ensure("front ray hit", out.hit)
+    small("front ray fraction", out.fraction - 0.5, 0.001)
+    ensure("front ray normal", out.normal.y > 0.99)
+    ensure("front ray triangle", out.triangle_index == 0 || out.triangle_index == 1)
+    ensure("front ray material", out.material_index == 1)
+    out = height_field.ray_cast_height_field(h, math.vec3(0.3, 0.0 - 5.0, 0.25), up, 1.0)
+    ensure("back ray culled", out.hit == false)
+    height_field.destroy_height_field(h)
+
+    // A clockwise field faces down: the rising sphere hits, the falling one is culled.
+    h = make_flat_field(materials_block, true)
+    center[0] = math.vec3(0.3, 0.0 - 5.0, 0.25)
+    out = height_field.shape_cast_height_field(h, distance.shape_proxy(center_block, 1, 0.2), up, 1.0, false)
+    ensure("clockwise shape hit", out.hit)
+    small("clockwise shape fraction", out.fraction - 0.48, 0.01)
+    ensure("clockwise shape normal", out.normal.y < 0.0 - 0.99)
+    ensure("clockwise shape triangle", out.triangle_index == 0 || out.triangle_index == 1)
+    ensure("clockwise shape material", out.material_index == 1)
+    center[0] = math.vec3(0.3, 5.0, 0.25)
+    out = height_field.shape_cast_height_field(h, distance.shape_proxy(center_block, 1, 0.2), down, 1.0, false)
+    ensure("clockwise shape culled", out.hit == false)
+    out = height_field.ray_cast_height_field(h, math.vec3(0.3, 0.0 - 5.0, 0.25), up, 1.0)
+    ensure("clockwise ray hit", out.hit)
+    small("clockwise ray fraction", out.fraction - 0.5, 0.001)
+    ensure("clockwise ray normal", out.normal.y < 0.0 - 0.99)
+    ensure("clockwise ray triangle", out.triangle_index == 0 || out.triangle_index == 1)
+    ensure("clockwise ray material", out.material_index == 1)
+    out = height_field.ray_cast_height_field(h, math.vec3(0.3, 5.0, 0.25), down, 1.0)
+    ensure("clockwise ray culled", out.hit == false)
+    height_field.destroy_height_field(h)
+    free(center_block)
+    free(materials_block)
+}
+
+var query_count = 0
+var query_index_sum = 0
+var query_normal_sum = 0.0
+
+count_triangle(a: Vec3, b: Vec3, c: Vec3, triangle_index: int, context: ptr) -> bool {
+    query_count = query_count + 1
+    query_index_sum = query_index_sum + triangle_index
+    query_normal_sum = query_normal_sum + math.make_normal_from_points(a, b, c).y
+    return true
+}
+
+stop_at_first(a: Vec3, b: Vec3, c: Vec3, triangle_index: int, context: ptr) -> bool {
+    query_count = query_count + 1
+    return false
+}
+
+test_query_and_mover() {
+    h = height_field.create_grid(5, 5, math.vec3(1.0, 1.0, 1.0), false)
+    // A box within row 1, column 2 gets that cell's two triangles (cell 6: 12 and 13).
+    query_count = 0
+    query_index_sum = 0
+    query_normal_sum = 0.0
+    height_field.query_height_field(h, AABB { lower: math.vec3(2.2, 0.0 - 0.1, 1.2), upper: math.vec3(2.8, 0.1, 1.8) }, count_triangle, null)
+    ensure("one cell's triangles", query_count == 2)
+    ensure("their indices", query_index_sum == 12 + 13)
+    small("they face up", query_normal_sum - 2.0, 0.000001)
+    // A box over the whole field gets all 32; beside it, none; above it, none.
+    query_count = 0
+    height_field.query_height_field(h, AABB { lower: math.vec3(0.0 - 1.0, 0.0 - 1.0, 0.0 - 1.0), upper: math.vec3(5.0, 1.0, 5.0) }, count_triangle, null)
+    ensure("every triangle", query_count == 32)
+    query_count = 0
+    height_field.query_height_field(h, AABB { lower: math.vec3(6.0, 0.0 - 1.0, 0.0), upper: math.vec3(7.0, 1.0, 1.0) }, count_triangle, null)
+    ensure("beside the field", query_count == 0)
+    query_count = 0
+    height_field.query_height_field(h, AABB { lower: math.vec3(1.0, 2.0, 1.0), upper: math.vec3(2.0, 3.0, 2.0) }, count_triangle, null)
+    ensure("above the field", query_count == 0)
+    // The visitor can stop the query.
+    query_count = 0
+    height_field.query_height_field(h, AABB { lower: math.vec3(0.0 - 1.0, 0.0 - 1.0, 0.0 - 1.0), upper: math.vec3(5.0, 1.0, 5.0) }, stop_at_first, null)
+    ensure("the visitor stops the query", query_count == 1)
+    height_field.destroy_height_field(h)
+
+    // A clockwise field's query winds the triangles to face down.
+    materials_block = calloc(4, 4)
+    cw = make_flat_field(materials_block, true)
+    query_count = 0
+    query_normal_sum = 0.0
+    height_field.query_height_field(cw, AABB { lower: math.vec3(0.0 - 1.0, 0.0 - 1.0, 0.0 - 1.0), upper: math.vec3(3.0, 1.0, 3.0) }, count_triangle, null)
+    ensure("clockwise query count", query_count == 8)
+    small("clockwise query faces down", query_normal_sum + 8.0, 0.000001)
+    height_field.destroy_height_field(cw)
+    free(materials_block)
+
+    // The mover: a capsule standing on the flat grid within its radius
+    // gets the planes of the triangles under it, pointing up, with the
+    // penetration as the offset; hovering, none; a clockwise field
+    // (facing down) gives it nothing from above.
+    h = height_field.create_grid(5, 5, math.vec3(1.0, 1.0, 1.0), false)
+    planes_block = calloc(8, sizeof(PlaneResult))
+    planes = planes_block as PlaneResult[]
+    mover = manifold.capsule(math.vec3(2.5, 0.2, 2.5), math.vec3(2.5, 1.2, 2.5), 0.3)
+    count = height_field.collide_mover_and_height_field(planes, 8, h, mover)
+    ensure("mover planes (${count})", count == 2)
+    if count == 2 {
+        small("mover plane normal", planes[0].plane.normal.y - 1.0, 0.0001)
+        // The grid's quantum (512 / 65535) puts its surface 0.0039 under y = 0.
+        small("mover plane offset", planes[0].plane.offset - 0.1, 0.01)
+        ensure("mover triangle", planes[0].triangle_index == 20 && planes[1].triangle_index == 21)
+        ensure("mover material", planes[0].material_index == 0)
+    }
+    mover = manifold.capsule(math.vec3(2.5, 1.0, 2.5), math.vec3(2.5, 2.0, 2.5), 0.3)
+    ensure("hovering mover", height_field.collide_mover_and_height_field(planes, 8, h, mover) == 0)
+    mover = manifold.capsule(math.vec3(2.5, 0.2, 2.5), math.vec3(2.5, 1.2, 2.5), 0.3)
+    ensure("mover capacity", height_field.collide_mover_and_height_field(planes, 1, h, mover) == 1)
+    // A capsule spanning a corner of four cells gets up to eight planes.
+    mover = manifold.capsule(math.vec3(2.0, 0.2, 2.0), math.vec3(2.0, 1.2, 2.0), 0.3)
+    count = height_field.collide_mover_and_height_field(planes, 8, h, mover)
+    ensure("mover at a corner (${count})", count >= 4)
+    height_field.destroy_height_field(h)
+    materials_block = calloc(4, 4)
+    cw = make_flat_field(materials_block, true)
+    mover = manifold.capsule(math.vec3(1.0, 0.2, 1.0), math.vec3(1.0, 1.2, 1.0), 0.3)
+    ensure("clockwise field ignores the mover above", height_field.collide_mover_and_height_field(planes, 8, cw, mover) == 0)
+    mover = manifold.capsule(math.vec3(1.0, 0.0 - 1.2, 1.0), math.vec3(1.0, 0.0 - 0.2, 1.0), 0.3)
+    count = height_field.collide_mover_and_height_field(planes, 8, cw, mover)
+    ensure("clockwise field holds the mover below (${count})", count >= 1)
+    if count >= 1 { small("clockwise mover normal", planes[0].plane.normal.y + 1.0, 0.0001) }
+    height_field.destroy_height_field(cw)
+    free(materials_block)
+    free(planes_block)
+}
+
+main() {
+    before = core.alloc_count()
+    test_create()
+    test_flags()
+    test_ray_and_overlap()
+    test_straddle()
+    test_brute_force()
+    test_backside()
+    test_query_and_mover()
+    // The module's scratch stays allocated: three blocks.
+    ensure("every other counted allocation was freed (${core.alloc_count() - before})", core.alloc_count() == before + 3)
+
+    println("height_field: ${checks} checks")
+    if failures == 0 {
+        println("height_field: all checks passed")
+    } else {
+        println("height_field: ${failures} failure(s)")
+        exit(1)
+    }
+}
