@@ -273,4 +273,4 @@ against our double), the mover 1.45x. The sphere-against-capsule cast
 is 2.5x and the overlap 2x: both are one GJK call on proxies with
 radii, where the box-against-box work of the distance layer sat at
 1.3-1.5x; the radius handling in `distance.shape_cast` and
-`shape_distance` is the place to profile (aephysics#8).
+`shape_distance` is the place to profile (aephysics#9).

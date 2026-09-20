@@ -102,7 +102,7 @@ started until its tests pass.
    million units), the cast through the dispatch; plus every kind under
    one transform through every query, and the filters. Rays and masses
    at parity; the GJK cast and overlap on proxies with radii 2-2.5x,
-   to profile (aephysics#8). The world-bound half of shape.c (creation
+   to profile (aephysics#9). The world-bound half of shape.c (creation
    on a body, the broad-phase proxy, materials, events) comes with the
    dynamics.
 11. **compound**: compound.c (the baked compound: children under a
