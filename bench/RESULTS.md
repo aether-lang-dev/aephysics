@@ -445,3 +445,21 @@ one core, scalar. The reference solves its convex contacts eight at a
 time in SIMD lanes (b3ContactConstraintWide); that path is the layer
 to add and measure once the step exists to compare against.
 
+## joint_solver
+
+`bench/joint_solver.ae` (ours alone, as the contact solver's): 5,000
+cubes in a row chained by 4,999 joints of one kind, the row given a
+sideways velocity gradient, ten steps of the passes: prepared, warm
+started, four biased sub-step solves and four relaxes.
+
+| pass, 10 steps of 4,999 joints | revolute (limited) | spherical (cone and twist) | weld | prismatic (limited, sprung) |
+|---|---|---|---|---|
+| prepare | 4.1 ms | 3.9 | 2.8 | 2.9 |
+| warm start | 1.0 | 1.0 | 0.9 | 1.5 |
+| 4 biased solves | 24.7 | 21.5 | 22.0 | 19.2 |
+| 4 relaxes | 25.2 | 21.7 | 16.0 | 13.6 |
+
+About 0.5 to 0.6 microseconds per joint per solve, on one core. The
+reference solves joints the same way (scalar, per graph colour); its
+numbers come with the step's pair.
+

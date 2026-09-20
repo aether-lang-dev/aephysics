@@ -230,9 +230,22 @@ started until its tests pass.
      mu N and the friction centre, the twist bound, restitution above and
      below its threshold, the warm start and the hit event. The wide
      (SIMD) path for convex contacts is a later, measured layer.
-   - `aephysics.joint_solver`: the seven joints' prepare, warm start,
-     solve and reaction (distance, motor, prismatic, revolute, spherical,
-     weld, wheel) with joint.c's dispatch.
+   - `aephysics.joint_solver` (done, PR #20): the seven joints' prepare,
+     warm start and solve (distance, motor, parallel, prismatic,
+     revolute, spherical, weld, wheel: distance_joint.c and its
+     siblings), the kinds' accessors and their constraint forces and
+     torques, joint.c's dispatch with the constraint hertz clamped to a
+     quarter of the sub-step rate. Shared pieces factored once: the
+     prepare's base (masses, fixed rotation, awake indices), the world
+     frames, the hinge's perpendicular axes, the point constraint's mass
+     matrix, the limits' bias scales. math gains skew, blend3 and the
+     quaternion delta. 149 checks: test_joint.c's accessor round trips
+     on every kind, then each kind solved by hand on a cube hung from a
+     static ground (the velocities a rigid joint removes and keeps, the
+     limits' push back on a body turned past them and the relax undoing
+     it before the bodies move, springs, motors at their speed and
+     bounded by their force, the forces and torques from the impulses,
+     the warm start).
    - `aephysics.solver`: solver.c's stages (the Soft Step: integrate
      velocities, warm start, solve, integrate positions, relax,
      restitution, store impulses, per graph colour), continuous

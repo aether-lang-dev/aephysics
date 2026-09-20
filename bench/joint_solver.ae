@@ -1,0 +1,155 @@
+// The joint solver's passes on 5,000 cubes in a row chained by 4,999
+// joints of one kind (revolute, then spherical, then weld, then
+// prismatic), each solved by hand ten times as one step does: the
+// colours' joints prepared, warm started, four sub-steps of a biased
+// solve and four relaxes. No solve exists free-standing in the
+// reference (its step integrates too), so this runs ours alone; the
+// step's pair comes with the world layer. Single thread, wall time per
+// pass, the joints' impulses summed as the checksum.
+import std.string
+import std.os
+import aephysics.math
+import aephysics.core
+import aephysics.hull
+import aephysics.manifold
+import aephysics.shape
+import aephysics.broad_phase
+import aephysics.dynamics
+import aephysics.contact_solver
+import aephysics.joint_solver
+
+clock() -> long { return os.now_monotonic_ns() }
+ms(ns: long) -> float { return (ns as float) / 1000000.0 }
+
+const COUNT = 5000
+const STEPS = 10
+
+run(kind: int, name: string, box: *HullData) {
+    world_def = dynamics.default_world_def()
+    world_id = dynamics.create_world(&world_def)
+    w = dynamics.get_world(world_id.index1 - 1)
+    shape_def = dynamics.default_shape_def()
+    shape_def.density = 1.0
+    ids_block = core.alloc(COUNT * sizeof(BodyId))
+    ids = ids_block as BodyId[]
+    i = 0
+    while i < COUNT {
+        body_def = dynamics.default_body_def()
+        body_def.kind = dynamics.BODY_DYNAMIC
+        body_def.position = math.vec3((2 * i) as float, 4.0, 0.0)
+        body_def.linear_velocity = math.vec3(0.0, 0.0 - 1.0, 0.1 * (i % 7) as float)
+        ids[i] = dynamics.create_body(world_id, &body_def)
+        dynamics.create_hull_shape(ids[i], &shape_def, box)
+        i = i + 1
+    }
+    i = 0
+    while i < COUNT - 1 {
+        if kind == dynamics.JOINT_REVOLUTE {
+            rdef = dynamics.default_revolute_joint_def()
+            rdef.base.body_id_a = ids[i]
+            rdef.base.body_id_b = ids[i + 1]
+            rdef.base.local_frame_a.p = math.vec3(1.0, 0.0, 0.0)
+            rdef.base.local_frame_b.p = math.vec3(0.0 - 1.0, 0.0, 0.0)
+            rdef.enable_limit = true
+            rdef.lower_angle = 0.0 - 0.5
+            rdef.upper_angle = 0.5
+            dynamics.create_revolute_joint(world_id, &rdef)
+        } else if kind == dynamics.JOINT_SPHERICAL {
+            sdef = dynamics.default_spherical_joint_def()
+            sdef.base.body_id_a = ids[i]
+            sdef.base.body_id_b = ids[i + 1]
+            sdef.base.local_frame_a.p = math.vec3(1.0, 0.0, 0.0)
+            sdef.base.local_frame_b.p = math.vec3(0.0 - 1.0, 0.0, 0.0)
+            sdef.enable_cone_limit = true
+            sdef.cone_angle = 0.5
+            sdef.enable_twist_limit = true
+            sdef.lower_twist_angle = 0.0 - 0.5
+            sdef.upper_twist_angle = 0.5
+            dynamics.create_spherical_joint(world_id, &sdef)
+        } else if kind == dynamics.JOINT_WELD {
+            wdef = dynamics.default_weld_joint_def()
+            wdef.base.body_id_a = ids[i]
+            wdef.base.body_id_b = ids[i + 1]
+            wdef.base.local_frame_a.p = math.vec3(1.0, 0.0, 0.0)
+            wdef.base.local_frame_b.p = math.vec3(0.0 - 1.0, 0.0, 0.0)
+            dynamics.create_weld_joint(world_id, &wdef)
+        } else {
+            pdef = dynamics.default_prismatic_joint_def()
+            pdef.base.body_id_a = ids[i]
+            pdef.base.body_id_b = ids[i + 1]
+            pdef.base.local_frame_a.p = math.vec3(1.0, 0.0, 0.0)
+            pdef.base.local_frame_b.p = math.vec3(0.0 - 1.0, 0.0, 0.0)
+            pdef.enable_limit = true
+            pdef.lower_translation = 0.0 - 0.5
+            pdef.upper_translation = 0.5
+            pdef.enable_spring = true
+            pdef.hertz = 2.0
+            dynamics.create_prismatic_joint(world_id, &pdef)
+        }
+        i = i + 1
+    }
+    ctx = contact_solver.default_step_context(w)
+    ctx.dt = 1.0 / 60.0
+    ctx.inv_dt = 60.0
+    ctx.sub_step_count = 4
+    ctx.h = ctx.dt / 4.0
+    ctx.inv_h = 240.0
+    w.inv_h = 240.0
+    awake = dynamics.get_solver_set(w, dynamics.AWAKE_SET)
+    ctx.states = awake.body_states.data
+    ctx.sims = awake.body_sims.data
+    prepare_ns = 0 as long
+    warm_ns = 0 as long
+    solve_ns = 0 as long
+    relax_ns = 0 as long
+    step = 0
+    while step < STEPS {
+        t0 = clock()
+        c = 0
+        while c < dynamics.GRAPH_COLOR_COUNT { joint_solver.prepare_joints(&ctx, dynamics.graph_color(w, c)); c = c + 1 }
+        t1 = clock()
+        c = 0
+        while c < dynamics.GRAPH_COLOR_COUNT { joint_solver.warm_start_joints(&ctx, dynamics.graph_color(w, c)); c = c + 1 }
+        t2 = clock()
+        sub = 0
+        while sub < 4 {
+            c = 0
+            while c < dynamics.GRAPH_COLOR_COUNT { joint_solver.solve_joints(&ctx, dynamics.graph_color(w, c), true); c = c + 1 }
+            sub = sub + 1
+        }
+        t3 = clock()
+        sub = 0
+        while sub < 4 {
+            c = 0
+            while c < dynamics.GRAPH_COLOR_COUNT { joint_solver.solve_joints(&ctx, dynamics.graph_color(w, c), false); c = c + 1 }
+            sub = sub + 1
+        }
+        t4 = clock()
+        prepare_ns = prepare_ns + (t1 - t0)
+        warm_ns = warm_ns + (t2 - t1)
+        solve_ns = solve_ns + (t3 - t2)
+        relax_ns = relax_ns + (t4 - t3)
+        step = step + 1
+    }
+    checksum = 0.0
+    i = 0
+    while i < w.joints.count {
+        j = dynamics.joint_at(w, i)
+        if j.joint_id != dynamics.NULL_INDEX {
+            checksum = checksum + math.length(joint_solver.get_joint_constraint_force(w, j)) / 240.0
+        }
+        i = i + 1
+    }
+    println("aephysics joint_solver: ${STEPS} steps of ${COUNT - 1} ${name} joints: prepare ${ms(prepare_ns)} ms, warm start ${ms(warm_ns)} ms, 4 biased solves ${ms(solve_ns)} ms, 4 relaxes ${ms(relax_ns)} ms (impulse sum ${checksum})")
+    core.free_bytes(ids_block, COUNT * sizeof(BodyId))
+    dynamics.destroy_world(world_id)
+}
+
+main() {
+    box = hull.make_box_hull(0.5, 0.5, 0.5)
+    run(dynamics.JOINT_REVOLUTE, "revolute", box)
+    run(dynamics.JOINT_SPHERICAL, "spherical", box)
+    run(dynamics.JOINT_WELD, "weld", box)
+    run(dynamics.JOINT_PRISMATIC, "prismatic", box)
+    hull.destroy_hull(box)
+}
