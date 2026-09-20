@@ -13,6 +13,7 @@
 // xorshift32 with its seeds. The falling ragdolls wait on the human
 // (shared/human.c).
 import std.string
+import std.os
 import aephysics.math
 import aephysics.core
 import aephysics.hull
@@ -31,6 +32,35 @@ extern sqrt(x: float) -> float
 
 var failures = 0
 var checks = 0
+
+// AEPHYSICS_TRACE=1 prints a checksum of every body after every step,
+// to find the first step two platforms part on (issue #27).
+var g_trace = false
+
+// The checksum of every body's transform right now.
+checksum(bodies: BodyId[], count: int) -> float {
+    hash = 0.0
+    i = 0
+    while i < count {
+        hash = fold_transform(hash, dynamics.body_get_transform(bodies[i]))
+        i = i + 1
+    }
+    return hash
+}
+
+// The checksum's bits, since a printed float rounds to six digits.
+bits_of(value: float) -> long {
+    holder = value
+    words = ((&holder) as ptr) as long[]
+    return words[0]
+}
+
+trace(scene: string, step: int, bodies: BodyId[], count: int) {
+    if g_trace {
+        hash = checksum(bodies, count)
+        println("trace ${scene} ${step} ${hash} ${bits_of(hash)}")
+    }
+}
 
 ensure(name: string, ok: bool) {
     checks = checks + 1
@@ -117,19 +147,16 @@ fold_transform(hash: float, xf: Transform) -> float {
 }
 
 // The bodies' resting transforms once every body sleeps: the step and the checksum.
-settle(world_id: WorldId, bodies: BodyId[], count: int, max_steps: int) -> Outcome {
+settle(scene: string, world_id: WorldId, bodies: BodyId[], count: int, first_step: int, max_steps: int) -> Outcome {
     outcome = Outcome { sleep_step: 0 - 1, hash: 0.0, query_hits: 0, query_hash: 0.0 }
     step = 0
     while step < max_steps {
         physics_world.step(world_id, 1.0 / 60.0, 4)
         step = step + 1
+        trace(scene, first_step + step, bodies, count)
         if physics_world.get_awake_body_count(world_id) == 0 {
             outcome.sleep_step = step
-            i = 0
-            while i < count {
-                outcome.hash = fold_transform(outcome.hash, dynamics.body_get_transform(bodies[i]))
-                i = i + 1
-            }
+            outcome.hash = checksum(bodies, count)
             break
         }
     }
@@ -199,7 +226,7 @@ wave_pile() -> Outcome {
         layer = layer + 1
     }
     ensure("wave pile: ${WAVE_PILE_BODY_COUNT} bodies", index == WAVE_PILE_BODY_COUNT)
-    outcome = settle(world_id, bodies, WAVE_PILE_BODY_COUNT, 2000)
+    outcome = settle("wave_pile", world_id, bodies, WAVE_PILE_BODY_COUNT, 0, 2000)
     free(bodies_block)
     dynamics.destroy_world(world_id)
     hull.destroy_hull(rock)
@@ -309,8 +336,9 @@ query_spawn() -> Outcome {
         spawn_count = spawn_count + 1
         physics_world.step(world_id, 1.0 / 60.0, 4)
         step = step + 1
+        trace("query_spawn", step, bodies, spawn_count)
     }
-    settled = settle(world_id, bodies, QUERY_SPAWN_COUNT, 2000)
+    settled = settle("query_spawn", world_id, bodies, QUERY_SPAWN_COUNT, step, 2000)
     outcome = state.outcome
     outcome.sleep_step = settled.sleep_step + step
     if settled.sleep_step < 0 { outcome.sleep_step = 0 - 1 }
@@ -367,7 +395,7 @@ mesh_drop() -> Outcome {
         }
         i = i + 1
     }
-    outcome = settle(world_id, bodies, count, 2000)
+    outcome = settle("mesh_drop", world_id, bodies, count, 0, 2000)
     free(bodies_block)
     dynamics.destroy_world(world_id)
     hull.destroy_hull(slat)
@@ -376,6 +404,8 @@ mesh_drop() -> Outcome {
 }
 
 main() {
+    value = os.getenv("AEPHYSICS_TRACE")
+    g_trace = value != null && string.length(value) > 0
     first = wave_pile()
     second = wave_pile()
     println("determinism: wave pile slept at step ${first.sleep_step}, checksum ${first.hash}")

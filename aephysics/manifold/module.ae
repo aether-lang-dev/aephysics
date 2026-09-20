@@ -1032,7 +1032,7 @@ build_face_a_contact(m: *LocalManifold, capacity: int, hull_a: *HullData, hull_b
         point_count = clip_polygon(output, input, point_count, clip_plane, edge_index, ref_plane)
         swap = input
         input = output
-        output = swap
+        output = swap as ClipVertex[]
         if point_count < 3 {
             clear_sat_cache(cache)
             return false

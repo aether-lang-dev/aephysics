@@ -88,11 +88,21 @@ world as a whole: `test_mover_world.ae` (the mover through a world:
 which material a plane came from, for meshes, compounds and convex
 shapes; 38 checks), `test_determinism.ae` (the reference's wave pile,
 query spawn and mesh drop with its own random numbers, each run to
-sleep twice and compared bit for bit; the query spawn sleeps on the
-reference's step 242 with its 59 query hits, the mesh drop a step
-apart; 9 checks) and `test_large_world.ae` (a stack, a bullet and the
+sleep twice and compared bit for bit; the query spawn sleeps a step
+after the reference's with its 59 query hits, the mesh drop two; 9
+checks) and `test_large_world.ae` (a stack, a bullet and the
 origin-relative queries at x = 0 and at x = 1e7 agree, the whole
 engine being in doubles; 43 checks).
+
+The step is deterministic across platforms, not only across runs:
+`AEPHYSICS_TRACE=1 target/test_determinism` prints every body's
+checksum after every step with its bits, CI records the Linux trace in
+its log, and the Windows trace (MinGW, a different gcc) matches it bit
+for bit on all 776 steps of the three scenes. The engine's own maths
+(the reference's cos, sin and atan2 approximations, `sqrt`, `floor`
+and `remainder` as the only libm calls, no fused multiply-adds in the
+lanes) is what makes that hold; the one divergence seen so far was an
+older `aetherc` folding `1.0 / 60.0` to ten digits (issue #27).
 
 ## Where it is going
 
