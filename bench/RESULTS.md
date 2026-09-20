@@ -245,3 +245,32 @@ straddled cell on top of distance's 1.3-1.5x; the overlap 1.85x. The
 field is 4.2 MB here against 1.3 MB there: the reference packs 16-bit
 heights and 8-bit materials and flags, which Aether cannot yet address,
 so they are ints.
+
+## shape
+
+`bench/shape.ae` and `bench/shape_box3d.c`: 1,000,000 rays at a unit
+sphere and 1,000,000 at a capsule from a fan of origins, a third of them
+missing; 100,000 casts of a sphere at a capsule under a transform;
+100,000 overlaps of a sphere with it; 100,000 mover planes against it;
+100,000 capsule masses.
+
+| phase | aephysics | Box3D |
+|---|---|---|
+| 1,000,000 sphere ray casts | 33.2 ms | **31.5** |
+| 1,000,000 capsule ray casts | **41.0** | 49.7 |
+| 100,000 shape casts | 44.6 | **18.0** |
+| 100,000 overlaps | 12.2 | **5.9** |
+| 100,000 mover planes | 6.9 | **4.8** |
+| 100,000 capsule masses | 4.5 | **4.3** |
+
+The same answers: the ray hits agree to one boundary case in a million
+(349,452 sphere hits here against 349,451, the same 595,654 on the
+capsule) with equal fraction sums, the casts hit the same 89,582 times
+with equal sums, the overlaps (51,518), the mover's planes (45,071) and
+the masses agree. The sphere ray and the masses are at parity, the
+capsule ray is 0.8x (the reference's float division by the axis length
+against our double), the mover 1.45x. The sphere-against-capsule cast
+is 2.5x and the overlap 2x: both are one GJK call on proxies with
+radii, where the box-against-box work of the distance layer sat at
+1.3-1.5x; the radius handling in `distance.shape_cast` and
+`shape_distance` is the place to profile (aephysics#9).
