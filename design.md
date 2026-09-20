@@ -196,9 +196,27 @@ started until its tests pass.
      sphere on a mesh and a cube on a compound child. Bench: the
      reference's zero-time step collides without solving, so the pass
      compares (1.7x, aephysics#17 to profile with the solver).
-     Next in this module: the joints' creation and bases (the seven
-     kinds' sims come with the joint solver), the sensors, and the
-     step-free parts of test_joint.c and test_world.c that need them.
+     Third slice: joint.c's base (the joint definitions of every kind,
+     creation on two bodies with the edges on both, the sim in the
+     disabled, static, awake (the graph, a sleeping set woken) or
+     sleeping set (two sleeping sets merged), the island link, the
+     collide-connected rule in the pair filter with the world's custom
+     filter, destruction, the accessors, the linear and angular
+     separations, the reaction for the joint events), the kinds' data
+     laid over a block at the end of the sim (the reference's union),
+     solver_set.c's transfers and merge, body.c's type change, disable
+     and enable (which move the joints along), sensor.c (a sensor per
+     sensor shape, the overlap pass over the three trees with the
+     visitors sorted and made unique, the begin and end events in id
+     order, the hits the continuous pass will feed it) and shape.c's
+     sensor accessors. 541 checks in all: test_joint.c's shared API on
+     every kind and the contacts a joint clears, the sets and islands
+     under sleep, wake, disable, enable and type changes, and
+     test_world.c's sensor moved by hand. Found and fixed on the way:
+     core's buffers grew from a capacity of one to one (the sleeping
+     sets of one body). The solving of the kinds (prepare, warm start,
+     solve, the per-kind accessors and constraint forces) comes with
+     joint_solver.
    - `aephysics.contact_solver`: contact_solver.c scalar (the prepare,
      warm start, solve, restitution and store passes; the wide SIMD path
      later, measured).

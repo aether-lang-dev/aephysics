@@ -8,7 +8,11 @@
 // bodies created and destroyed, the ids caught by their generations,
 // worlds recycled; and beyond it every set (static, disabled, awake and
 // asleep), the shapes' lists and proxies, the transforms and velocities,
-// destruction in every order with the solver sets validated throughout.
+// destruction in every order with the solver sets validated throughout;
+// the contacts, graph and islands; the step-free parts of test_joint.c
+// (every kind's creation and shared API, the contacts a joint clears)
+// with the joints' sets, islands, disabling and type changes; and the
+// sensors' overlaps moved by hand instead of stepped.
 
 import std.string
 import aephysics.math
@@ -812,6 +816,516 @@ test_mesh_and_compound_contacts() {
     free(spheres_block)
 }
 
+// --- joints ------------------------------------------------------------------------------------------------
+
+// The reference's JointFixture: a static ground and a dynamic cube at
+// (0, 4, 0), no gravity; the frames put the anchor at the cube.
+struct JointFixture {
+    world_id: WorldId
+    ground_id: BodyId
+    body_id: BodyId
+}
+
+joint_fixture() -> JointFixture {
+    fixtures_ready()
+    wdef = dynamics.default_world_def()
+    wdef.gravity = math.vec3_zero()
+    world_id = dynamics.create_world(&wdef)
+    gdef = dynamics.default_body_def()
+    ground_id = dynamics.create_body(world_id, &gdef)
+    bdef = dynamic_body_def()
+    bdef.position = math.vec3(0.0, 4.0, 0.0)
+    body_id = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    sdef.density = 1.0
+    dynamics.create_hull_shape(body_id, &sdef, g_cube as *HullData)
+    return JointFixture { world_id: world_id, ground_id: ground_id, body_id: body_id }
+}
+
+common_frames(base: *JointDef, f: *JointFixture) {
+    base.body_id_a = f.ground_id
+    base.body_id_b = f.body_id
+    base.local_frame_a.p = math.vec3(0.0, 4.0, 0.0)
+    base.local_frame_b.p = math.vec3_zero()
+}
+
+joints_valid(world_id: WorldId) -> bool {
+    w = dynamics.get_world(world_id.index1 - 1)
+    return dynamics.validate_solver_sets(w) && dynamics.validate_contacts(w) && dynamics.validate_joints(w)
+}
+
+same_body(a: BodyId, b: BodyId) -> bool { return a.index1 == b.index1 && a.world0 == b.world0 && a.generation == b.generation }
+
+// The reference's ExerciseJointBase: the API every kind shares.
+exercise_joint_base(name: string, id: JointId, f: *JointFixture, kind: int) {
+    world_id = f.world_id
+    ensure("${name}: valid", dynamics.joint_is_valid(id))
+    ensure("${name}: kind", dynamics.joint_get_type(id) == kind)
+    ensure("${name}: bodies", same_body(dynamics.joint_get_body_a(id), f.ground_id) && same_body(dynamics.joint_get_body_b(id), f.body_id))
+    got_world = dynamics.joint_get_world(id)
+    ensure("${name}: world", got_world.index1 == world_id.index1 && got_world.generation == world_id.generation)
+    original_a = dynamics.joint_get_local_frame_a(id)
+    original_b = dynamics.joint_get_local_frame_b(id)
+    frame_a = Transform { p: math.vec3(0.1, 0.2, 0.3), q: math.quat_identity() }
+    dynamics.joint_set_local_frame_a(id, frame_a)
+    got_a = dynamics.joint_get_local_frame_a(id)
+    ensure("${name}: frame a", got_a.p.x == frame_a.p.x && got_a.p.y == frame_a.p.y && got_a.p.z == frame_a.p.z)
+    frame_b = Transform { p: math.vec3(0.0 - 0.4, 0.5, 0.0 - 0.6), q: math.quat_identity() }
+    dynamics.joint_set_local_frame_b(id, frame_b)
+    got_b = dynamics.joint_get_local_frame_b(id)
+    ensure("${name}: frame b", got_b.p.x == frame_b.p.x && got_b.p.y == frame_b.p.y && got_b.p.z == frame_b.p.z)
+    dynamics.joint_set_collide_connected(id, true)
+    ensure("${name}: collide connected on", dynamics.joint_get_collide_connected(id))
+    dynamics.joint_set_collide_connected(id, false)
+    ensure("${name}: collide connected off", dynamics.joint_get_collide_connected(id) == false)
+    marker = core.alloc(8)
+    dynamics.joint_set_user_data(id, marker)
+    ensure("${name}: user data", dynamics.joint_get_user_data(id) == marker)
+    core.free_bytes(marker, 8)
+    dynamics.joint_set_constraint_tuning(id, 90.0, 3.0)
+    ensure("${name}: tuning", dynamics.joint_get_constraint_hertz(id) == 90.0 && dynamics.joint_get_constraint_damping_ratio(id) == 3.0)
+    dynamics.joint_set_force_threshold(id, 100.0)
+    ensure("${name}: force threshold", dynamics.joint_get_force_threshold(id) == 100.0)
+    dynamics.joint_set_torque_threshold(id, 200.0)
+    ensure("${name}: torque threshold", dynamics.joint_get_torque_threshold(id) == 200.0)
+    dynamics.joint_wake_bodies(id)
+    ensure("${name}: awake", dynamics.joint_is_awake(id))
+    linear = dynamics.joint_get_linear_separation(id)
+    ensure("${name}: linear separation finite", math.is_valid_float(linear) && linear >= 0.0)
+    if kind != dynamics.JOINT_WHEEL {
+        angular = dynamics.joint_get_angular_separation(id)
+        ensure("${name}: angular separation finite", math.is_valid_float(angular) && angular >= 0.0)
+    }
+    w = dynamics.get_world(world_id.index1 - 1)
+    reaction = dynamics.get_joint_reaction(w, dynamics.get_joint_sim(w, dynamics.get_joint_full_id(w, id)), 60.0)
+    ensure("${name}: no reaction before solving", reaction.force == 0.0 && reaction.torque == 0.0)
+    dynamics.joint_set_local_frame_a(id, original_a)
+    dynamics.joint_set_local_frame_b(id, original_b)
+    ensure("${name}: valid", joints_valid(world_id))
+}
+
+// The reference's FinishJoint: the joint destroyed, its id stale, the world gone.
+finish_joint(name: string, id: JointId, f: *JointFixture) {
+    w = dynamics.get_world(f.world_id.index1 - 1)
+    ensure("${name}: one joint in the graph", dynamics.world_joint_count(w) == 1 && dynamics.get_joint_full_id(w, id).set_index == dynamics.AWAKE_SET)
+    dynamics.destroy_joint(id, true)
+    ensure("${name}: destroyed", dynamics.joint_is_valid(id) == false && dynamics.world_joint_count(w) == 0)
+    ensure("${name}: bodies' lists empty", dynamics.get_body_full_id(w, f.body_id).joint_count == 0 && dynamics.get_body_full_id(w, f.ground_id).joint_count == 0)
+    ensure("${name}: valid after", joints_valid(f.world_id))
+    dynamics.destroy_world(f.world_id)
+}
+
+test_joint_kinds() {
+    // Every kind's data fits the sim's block.
+    ensure("distance joint fits", sizeof(DistanceJoint) <= dynamics.JOINT_DATA_BYTES)
+    ensure("motor joint fits", sizeof(MotorJoint) <= dynamics.JOINT_DATA_BYTES)
+    ensure("parallel joint fits", sizeof(ParallelJoint) <= dynamics.JOINT_DATA_BYTES)
+    ensure("prismatic joint fits", sizeof(PrismaticJoint) <= dynamics.JOINT_DATA_BYTES)
+    ensure("revolute joint fits", sizeof(RevoluteJoint) <= dynamics.JOINT_DATA_BYTES)
+    ensure("spherical joint fits (${sizeof(SphericalJoint)})", sizeof(SphericalJoint) <= dynamics.JOINT_DATA_BYTES)
+    ensure("weld joint fits", sizeof(WeldJoint) <= dynamics.JOINT_DATA_BYTES)
+    ensure("wheel joint fits", sizeof(WheelJoint) <= dynamics.JOINT_DATA_BYTES)
+    soft = dynamics.make_soft(30.0, 10.0, 1.0 / 240.0)
+    small("softness scales sum to one", soft.mass_scale + soft.impulse_scale - 1.0, 0.000001)
+    ensure("zero hertz is rigid", dynamics.make_soft(0.0, 1.0, 0.01).mass_scale == 0.0)
+
+    // Parallel.
+    f = joint_fixture()
+    pdef = dynamics.default_parallel_joint_def()
+    common_frames(&pdef.base, &f)
+    pdef.hertz = 2.0
+    pdef.damping_ratio = 0.5
+    pdef.max_torque = 100.0
+    id = dynamics.create_parallel_joint(f.world_id, &pdef)
+    exercise_joint_base("parallel", id, &f, dynamics.JOINT_PARALLEL)
+    parallel = dynamics.parallel_joint_of(dynamics.get_joint_sim_of_kind(id, dynamics.JOINT_PARALLEL))
+    ensure("parallel: data", parallel.hertz == 2.0 && parallel.damping_ratio == 0.5 && parallel.max_torque == 100.0)
+    ensure("parallel: wrong kind refused", dynamics.get_joint_sim_of_kind(id, dynamics.JOINT_WELD) == null)
+    small("parallel: no angular separation at rest", dynamics.joint_get_angular_separation(id), 0.000001)
+    finish_joint("parallel", id, &f)
+
+    // Distance: the anchors coincide, the rest length is 2.
+    f = joint_fixture()
+    ddef = dynamics.default_distance_joint_def()
+    common_frames(&ddef.base, &f)
+    ddef.length = 2.0
+    id = dynamics.create_distance_joint(f.world_id, &ddef)
+    exercise_joint_base("distance", id, &f, dynamics.JOINT_DISTANCE)
+    d = dynamics.distance_joint_of(dynamics.get_joint_sim_of_kind(id, dynamics.JOINT_DISTANCE))
+    ensure("distance: data", d.length == 2.0 && d.min_length == 0.005 && d.max_length == 100000.0 && d.enable_spring == false)
+    small("distance: separation is the rest length", dynamics.joint_get_linear_separation(id) - 2.0, 0.000001)
+    d.enable_spring = true
+    d.enable_limit = true
+    d.min_length = 0.0
+    d.max_length = 5.0
+    small("distance: a spring inside its limits separates nothing", dynamics.joint_get_linear_separation(id), 0.000001)
+    d.min_length = 3.0
+    small("distance: below the minimum (the anchors coincide)", dynamics.joint_get_linear_separation(id) - 3.0, 0.000001)
+    ddef.length = 0.0
+    ensure("distance: a zero length is refused", dynamics.create_distance_joint(f.world_id, &ddef).index1 == 0)
+    finish_joint("distance", id, &f)
+
+    // Filter.
+    f = joint_fixture()
+    fdef = dynamics.default_filter_joint_def()
+    fdef.base.body_id_a = f.ground_id
+    fdef.base.body_id_b = f.body_id
+    id = dynamics.create_filter_joint(f.world_id, &fdef)
+    exercise_joint_base("filter", id, &f, dynamics.JOINT_FILTER)
+    finish_joint("filter", id, &f)
+
+    // Motor.
+    f = joint_fixture()
+    mdef = dynamics.default_motor_joint_def()
+    common_frames(&mdef.base, &f)
+    mdef.linear_velocity = math.vec3(1.0, 2.0, 3.0)
+    mdef.max_spring_torque = 800.0
+    id = dynamics.create_motor_joint(f.world_id, &mdef)
+    exercise_joint_base("motor", id, &f, dynamics.JOINT_MOTOR)
+    m = dynamics.motor_joint_of(dynamics.get_joint_sim_of_kind(id, dynamics.JOINT_MOTOR))
+    ensure("motor: data", m.linear_velocity.z == 3.0 && m.max_spring_torque == 800.0)
+    finish_joint("motor", id, &f)
+
+    // Prismatic: the limits' order is checked.
+    f = joint_fixture()
+    prdef = dynamics.default_prismatic_joint_def()
+    common_frames(&prdef.base, &f)
+    prdef.enable_limit = true
+    prdef.lower_translation = 0.0 - 2.0
+    prdef.upper_translation = 2.0
+    prdef.max_motor_force = 30.0
+    id = dynamics.create_prismatic_joint(f.world_id, &prdef)
+    exercise_joint_base("prismatic", id, &f, dynamics.JOINT_PRISMATIC)
+    pr = dynamics.prismatic_joint_of(dynamics.get_joint_sim_of_kind(id, dynamics.JOINT_PRISMATIC))
+    ensure("prismatic: data", pr.lower_translation == 0.0 - 2.0 && pr.upper_translation == 2.0 && pr.enable_limit && pr.max_motor_force == 30.0)
+    small("prismatic: at rest", dynamics.joint_get_linear_separation(id), 0.000001)
+    prdef.lower_translation = 3.0
+    ensure("prismatic: reversed limits refused", dynamics.create_prismatic_joint(f.world_id, &prdef).index1 == 0)
+    finish_joint("prismatic", id, &f)
+
+    // Revolute: the angles clamp and order themselves.
+    f = joint_fixture()
+    rdef = dynamics.default_revolute_joint_def()
+    common_frames(&rdef.base, &f)
+    rdef.lower_angle = 1.0
+    rdef.upper_angle = 0.0 - 4.0
+    rdef.target_angle = 5.0
+    id = dynamics.create_revolute_joint(f.world_id, &rdef)
+    exercise_joint_base("revolute", id, &f, dynamics.JOINT_REVOLUTE)
+    r = dynamics.revolute_joint_of(dynamics.get_joint_sim_of_kind(id, dynamics.JOINT_REVOLUTE))
+    small("revolute: lower clamped", r.lower_angle + 0.99 * math.PI, 0.00001)
+    ensure("revolute: upper ordered", r.upper_angle == 1.0)
+    small("revolute: target clamped", r.target_angle - math.PI, 0.00001)
+    small("revolute: no separation at rest", dynamics.joint_get_linear_separation(id) + dynamics.joint_get_angular_separation(id), 0.000001)
+    finish_joint("revolute", id, &f)
+
+    // Spherical: the cone clamps to a half turn.
+    f = joint_fixture()
+    sdef = dynamics.default_spherical_joint_def()
+    common_frames(&sdef.base, &f)
+    sdef.enable_cone_limit = true
+    sdef.cone_angle = 3.0
+    sdef.enable_twist_limit = true
+    sdef.lower_twist_angle = 0.5
+    sdef.upper_twist_angle = 0.0 - 0.5
+    sdef.motor_velocity = math.vec3(0.1, 0.2, 0.3)
+    id = dynamics.create_spherical_joint(f.world_id, &sdef)
+    exercise_joint_base("spherical", id, &f, dynamics.JOINT_SPHERICAL)
+    sp = dynamics.spherical_joint_of(dynamics.get_joint_sim_of_kind(id, dynamics.JOINT_SPHERICAL))
+    small("spherical: cone clamped", sp.cone_angle - 0.5 * math.PI, 0.00001)
+    ensure("spherical: twist ordered", sp.lower_twist_angle == 0.0 - 0.5 && sp.upper_twist_angle == 0.5)
+    ensure("spherical: motor velocity", sp.motor_velocity.y == 0.2 && sp.enable_cone_limit && sp.enable_twist_limit)
+    small("spherical: inside its limits", dynamics.joint_get_angular_separation(id), 0.000001)
+    sdef.cone_angle = 0.0 - 1.0
+    ensure("spherical: a negative cone is refused", dynamics.create_spherical_joint(f.world_id, &sdef).index1 == 0)
+    finish_joint("spherical", id, &f)
+
+    // Weld: rigid unless a hertz is given.
+    f = joint_fixture()
+    wdef = dynamics.default_weld_joint_def()
+    common_frames(&wdef.base, &f)
+    id = dynamics.create_weld_joint(f.world_id, &wdef)
+    exercise_joint_base("weld", id, &f, dynamics.JOINT_WELD)
+    weld = dynamics.weld_joint_of(dynamics.get_joint_sim_of_kind(id, dynamics.JOINT_WELD))
+    small("weld: rigid at rest", dynamics.joint_get_linear_separation(id) + dynamics.joint_get_angular_separation(id), 0.000001)
+    weld.linear_hertz = 3.0
+    weld.angular_hertz = 4.0
+    ensure("weld: soft separates nothing", dynamics.joint_get_linear_separation(id) == 0.0 && dynamics.joint_get_angular_separation(id) == 0.0)
+    wdef.linear_hertz = 0.0 - 1.0
+    ensure("weld: a negative hertz is refused", dynamics.create_weld_joint(f.world_id, &wdef).index1 == 0)
+    finish_joint("weld", id, &f)
+
+    // Wheel: the suspension spring is on by default.
+    f = joint_fixture()
+    whdef = dynamics.default_wheel_joint_def()
+    common_frames(&whdef.base, &f)
+    whdef.enable_suspension_limit = true
+    whdef.lower_suspension_limit = 0.0 - 1.0
+    whdef.upper_suspension_limit = 1.0
+    whdef.target_steering_angle = 0.25
+    id = dynamics.create_wheel_joint(f.world_id, &whdef)
+    exercise_joint_base("wheel", id, &f, dynamics.JOINT_WHEEL)
+    wheel = dynamics.wheel_joint_of(dynamics.get_joint_sim_of_kind(id, dynamics.JOINT_WHEEL))
+    ensure("wheel: data", wheel.enable_suspension_spring && wheel.suspension_hertz == 1.0 && wheel.suspension_damping_ratio == 0.7 && wheel.target_steering_angle == 0.25)
+    small("wheel: at rest", dynamics.joint_get_linear_separation(id), 0.000001)
+    whdef.lower_suspension_limit = 2.0
+    ensure("wheel: reversed limits refused", dynamics.create_wheel_joint(f.world_id, &whdef).index1 == 0)
+    finish_joint("wheel", id, &f)
+
+    // A joint needs two different valid bodies of one world.
+    f = joint_fixture()
+    bad = dynamics.default_weld_joint_def()
+    bad.base.body_id_a = f.body_id
+    bad.base.body_id_b = f.body_id
+    ensure("one body twice is refused", dynamics.create_weld_joint(f.world_id, &bad).index1 == 0)
+    bad.base.body_id_b = dynamics.null_body_id()
+    ensure("a null body is refused", dynamics.create_weld_joint(f.world_id, &bad).index1 == 0)
+    ensure("nothing created", dynamics.world_joint_count(dynamics.get_world(f.world_id.index1 - 1)) == 0)
+    dynamics.destroy_world(f.world_id)
+}
+
+// The reference's TestCreateJointClearsContacts and the sets' bookkeeping.
+test_joint_sets() {
+    // Two overlapping cubes touch; a joint that forbids their collision
+    // destroys the contact and the broad phase makes no new one; letting
+    // them collide again brings it back.
+    world_id = slab_world()
+    w = dynamics.get_world(world_id.index1 - 1)
+    a = cube_at(world_id, math.vec3(0.0, 0.49, 0.0), false)
+    b = cube_at(world_id, math.vec3(0.5, 0.49, 0.0), false)
+    step_contacts(w)
+    ensure("clears: touching before", dynamics.body_get_contact_capacity(a) == 2 && dynamics.world_contact_count(w) == 3)
+    rdef = dynamics.default_revolute_joint_def()
+    rdef.base.body_id_a = a
+    rdef.base.body_id_b = b
+    rdef.base.local_frame_a.p = math.vec3(0.25, 0.0, 0.0)
+    rdef.base.local_frame_b.p = math.vec3(0.0 - 0.25, 0.0, 0.0)
+    id = dynamics.create_revolute_joint(world_id, &rdef)
+    ensure("clears: the pair's contact destroyed", dynamics.world_contact_count(w) == 2 && dynamics.body_get_contact_capacity(a) == 1 && dynamics.body_get_contact_capacity(b) == 1)
+    ensure("clears: the joint is in the island with both cubes", dynamics.world_island_count(w) == 1 && dynamics.island_at(w, dynamics.get_body_full_id(w, a).island_id).joints.count == 1)
+    ensure("clears: a dynamic pair's colour", dynamics.get_joint_full_id(w, id).color_index < dynamics.DYNAMIC_COLOR_COUNT)
+    step_contacts(w)
+    ensure("clears: no new contact between them", dynamics.world_contact_count(w) == 2 && broad_phase.pair_count(&w.broad_phase) == 2)
+    ensure("clears: valid", joints_valid(world_id))
+    dynamics.joint_set_collide_connected(id, true)
+    step_contacts(w)
+    ensure("clears: colliding again", dynamics.world_contact_count(w) == 3 && dynamics.body_get_contact_capacity(a) == 2)
+    dynamics.joint_set_collide_connected(id, false)
+    ensure("clears: destroyed again", dynamics.world_contact_count(w) == 2)
+    ensure("clears: valid after", joints_valid(world_id))
+    // The joint destroyed: the island keeps both cubes (they share the slab only) until it splits.
+    dynamics.destroy_joint(id, true)
+    island_id = dynamics.get_body_full_id(w, a).island_id
+    ensure("destroyed: removals counted", dynamics.island_at(w, island_id).constraint_remove_count >= 1 && dynamics.island_at(w, island_id).joints.count == 0)
+    parts = dynamics.split_island(w, island_id)
+    ensure("destroyed: split in two (${parts})", parts == 2 && dynamics.world_island_count(w) == 2)
+    ensure("destroyed: valid", joints_valid(world_id))
+    dynamics.destroy_world(world_id)
+
+    // Joints between static, sleeping, awake and disabled bodies land in
+    // the right sets: two far cubes asleep in two sets are joined into one
+    // set; a joint to an awake cube wakes it; a joint to the static slab
+    // from a static body stays in the static set; a disabled body's joint
+    // is in the disabled set and comes back when it is enabled.
+    world_id = slab_world()
+    w = dynamics.get_world(world_id.index1 - 1)
+    left = cube_at(world_id, math.vec3(0.0 - 3.0, 0.49, 0.0), false)
+    right = cube_at(world_id, math.vec3(3.0, 0.49, 0.0), false)
+    step_contacts(w)
+    left_body = dynamics.get_body_full_id(w, left)
+    right_body = dynamics.get_body_full_id(w, right)
+    ensure("sets: both asleep", dynamics.try_sleep_island(w, left_body.island_id) && dynamics.try_sleep_island(w, right_body.island_id))
+    ensure("sets: in two sets", left_body.set_index >= dynamics.FIRST_SLEEPING_SET && right_body.set_index >= dynamics.FIRST_SLEEPING_SET && left_body.set_index != right_body.set_index)
+    ddef = dynamics.default_distance_joint_def()
+    ddef.base.body_id_a = left
+    ddef.base.body_id_b = right
+    ddef.length = 6.0
+    rope = dynamics.create_distance_joint(world_id, &ddef)
+    ensure("sets: still asleep, in one set", left_body.set_index >= dynamics.FIRST_SLEEPING_SET && left_body.set_index == right_body.set_index)
+    rope_joint = dynamics.get_joint_full_id(w, rope)
+    ensure("sets: the joint in the sleeping set", rope_joint.set_index == left_body.set_index && rope_joint.color_index == dynamics.NULL_INDEX)
+    ensure("sets: the islands merged asleep", dynamics.world_island_count(w) == 1 && left_body.island_id == right_body.island_id)
+    ensure("sets: the joint in the island", rope_joint.island_id == left_body.island_id && dynamics.island_at(w, rope_joint.island_id).joints.count == 1)
+    ensure("sets: valid asleep", joints_valid(world_id))
+    // The sleeping set wakes through a joint to an awake body.
+    top = cube_at(world_id, math.vec3(0.0, 8.0, 0.0), false)
+    wdef = dynamics.default_weld_joint_def()
+    wdef.base.body_id_a = top
+    wdef.base.body_id_b = left
+    weld = dynamics.create_weld_joint(world_id, &wdef)
+    ensure("sets: woken by the joint", left_body.set_index == dynamics.AWAKE_SET && right_body.set_index == dynamics.AWAKE_SET)
+    ensure("sets: both joints in the graph", rope_joint.set_index == dynamics.AWAKE_SET && rope_joint.color_index != dynamics.NULL_INDEX && dynamics.get_joint_full_id(w, weld).color_index != dynamics.NULL_INDEX)
+    ensure("sets: one island of three", dynamics.world_island_count(w) == 1 && dynamics.island_at(w, left_body.island_id).bodies.count == 3 && dynamics.island_at(w, left_body.island_id).joints.count == 2)
+    ensure("sets: valid awake", joints_valid(world_id))
+    // A joint between two static bodies is in the static set and in no island.
+    sdef = dynamics.default_body_def()
+    sdef.position = math.vec3(0.0, 0.0 - 3.0, 0.0)
+    post = dynamics.create_body(world_id, &sdef)
+    slab_id = dynamics.make_body_id(w, 0)
+    fdef = dynamics.default_filter_joint_def()
+    fdef.base.body_id_a = post
+    fdef.base.body_id_b = slab_id
+    static_joint = dynamics.create_filter_joint(world_id, &fdef)
+    ensure("sets: static joint", dynamics.get_joint_full_id(w, static_joint).set_index == dynamics.STATIC_SET && dynamics.get_joint_full_id(w, static_joint).island_id == dynamics.NULL_INDEX)
+    ensure("sets: not awake", dynamics.joint_is_awake(static_joint) == false)
+    // The whole island sleeps with its joints; waking one body brings them back.
+    ensure("sets: the three sleep", dynamics.try_sleep_island(w, left_body.island_id))
+    ensure("sets: joints in the sleeping set", rope_joint.set_index == left_body.set_index && dynamics.get_solver_set(w, left_body.set_index).joint_sims.count == 2)
+    ensure("sets: valid asleep again", joints_valid(world_id))
+    dynamics.joint_wake_bodies(rope)
+    ensure("sets: joints back in the graph", rope_joint.set_index == dynamics.AWAKE_SET && dynamics.get_solver_set(w, dynamics.AWAKE_SET).joint_sims.count == 0)
+    ensure("sets: valid after the wake", joints_valid(world_id))
+    // Disabled: the left cube's joints go to the disabled set; enabling brings them back and relinks.
+    dynamics.body_disable(left)
+    ensure("disabled: the body", left_body.set_index == dynamics.DISABLED_SET && left_body.island_id == dynamics.NULL_INDEX)
+    ensure("disabled: its joints", rope_joint.set_index == dynamics.DISABLED_SET && dynamics.get_joint_full_id(w, weld).set_index == dynamics.DISABLED_SET && rope_joint.island_id == dynamics.NULL_INDEX)
+    ensure("disabled: the others' islands split off", dynamics.island_at(w, right_body.island_id).joints.count == 0)
+    ensure("disabled: valid", joints_valid(world_id))
+    dynamics.body_enable(left)
+    ensure("enabled: awake", left_body.set_index == dynamics.AWAKE_SET)
+    ensure("enabled: joints back", rope_joint.set_index == dynamics.AWAKE_SET && dynamics.get_joint_full_id(w, weld).set_index == dynamics.AWAKE_SET && rope_joint.island_id != dynamics.NULL_INDEX)
+    ensure("enabled: one island of three again", dynamics.island_at(w, left_body.island_id).bodies.count == 3)
+    ensure("enabled: valid", joints_valid(world_id))
+    // A joint created while a body is disabled waits in the disabled set.
+    dynamics.body_disable(right)
+    ddef.base.body_id_a = right
+    ddef.base.body_id_b = top
+    waiting = dynamics.create_distance_joint(world_id, &ddef)
+    ensure("waiting: in the disabled set", dynamics.get_joint_full_id(w, waiting).set_index == dynamics.DISABLED_SET)
+    dynamics.body_enable(right)
+    ensure("waiting: in the graph once enabled", dynamics.get_joint_full_id(w, waiting).set_index == dynamics.AWAKE_SET && dynamics.island_at(w, left_body.island_id).joints.count == 3)
+    ensure("waiting: valid", joints_valid(world_id))
+    // The type changed: the top cube made static parks its joints where a
+    // static body keeps them, then dynamic again relinks them.
+    dynamics.body_set_type(top, dynamics.BODY_STATIC)
+    top_body = dynamics.get_body_full_id(w, top)
+    ensure("type: static now", top_body.set_index == dynamics.STATIC_SET && top_body.island_id == dynamics.NULL_INDEX && top_body.kind == dynamics.BODY_STATIC)
+    ensure("type: the joints to dynamic bodies stay awake", dynamics.get_joint_full_id(w, weld).set_index == dynamics.AWAKE_SET && dynamics.get_joint_full_id(w, waiting).set_index == dynamics.AWAKE_SET)
+    ensure("type: valid", joints_valid(world_id))
+    dynamics.body_set_type(top, dynamics.BODY_DYNAMIC)
+    ensure("type: dynamic again", top_body.set_index == dynamics.AWAKE_SET && top_body.island_id != dynamics.NULL_INDEX && dynamics.island_at(w, top_body.island_id).joints.count == 3)
+    ensure("type: valid again", joints_valid(world_id))
+    ids_block = calloc(4, sizeof(JointId))
+    ids = ids_block as JointId[]
+    ensure("the left cube lists two joints", dynamics.body_get_joints(left, ids, 4) == 2 && dynamics.body_get_joint_count(left) == 2)
+    free(ids_block)
+    // A body destroyed takes its joints.
+    dynamics.destroy_body(top)
+    ensure("destroyed body: its two joints gone", dynamics.joint_is_valid(weld) == false && dynamics.joint_is_valid(waiting) == false && dynamics.world_joint_count(w) == 2)
+    ensure("destroyed body: the rope stays", dynamics.joint_is_valid(rope) && left_body.joint_count == 1)
+    ensure("destroyed body: valid", joints_valid(world_id))
+    dynamics.destroy_world(world_id)
+    ensure("world gone: joint ids stale", dynamics.joint_is_valid(rope) == false)
+}
+
+// --- sensors -------------------------------------------------------------------------------------------------
+
+// The reference's TestSensor without the step: a wall that reports
+// sensor events, a sphere sensor moved through it by hand.
+test_sensors() {
+    fixtures_ready()
+    world_id = new_world()
+    w = dynamics.get_world(world_id.index1 - 1)
+    wall_def = dynamics.default_body_def()
+    wall_def.position = math.vec3(1.5, 11.0, 0.0)
+    wall = dynamics.create_body(world_id, &wall_def)
+    wall_hull = hull.make_box_hull(0.5, 10.0, 1.0)
+    sdef = dynamics.default_shape_def()
+    sdef.enable_sensor_events = true
+    wall_shape = dynamics.create_hull_shape(wall, &sdef, wall_hull)
+    bdef = dynamic_body_def()
+    bdef.position = math.vec3(7.4, 4.0, 0.0)
+    bullet = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    sdef.is_sensor = true
+    sdef.enable_sensor_events = true
+    sensor_shape = dynamics.create_sphere_shape(bullet, &sdef, manifold.sphere(math.vec3_zero(), 0.1))
+    ensure("a sensor", dynamics.shape_is_sensor(sensor_shape) && dynamics.shape_is_sensor(wall_shape) == false && dynamics.world_sensor_count(w) == 1)
+    ensure("no overlap far away", dynamics.shape_get_sensor_capacity(sensor_shape) == 0)
+    dynamics.overlap_sensors(w)
+    ensure("far: no events", dynamics.world_sensor_begin_event_count(w) == 0 && dynamics.world_sensor_end_event_count(w) == 0)
+    // Into the wall: one begin event, one overlap.
+    dynamics.body_set_transform(bullet, math.vec3(1.5, 4.0, 0.0), math.quat_identity())
+    step_contacts(w)
+    ensure("sensors make no contacts", dynamics.world_contact_count(w) == 0)
+    dynamics.overlap_sensors(w)
+    ensure("in: one begin event", dynamics.world_sensor_begin_event_count(w) == 1 && dynamics.world_sensor_end_event_count(w) == 0)
+    begin = dynamics.world_sensor_begin_event(w, 0)
+    ensure("in: the event names both shapes", begin.sensor_shape_id.index1 == sensor_shape.index1 && begin.visitor_shape_id.index1 == wall_shape.index1 && dynamics.shape_is_valid(begin.visitor_shape_id))
+    visitors_block = calloc(4, sizeof(ShapeId))
+    visitors = visitors_block as ShapeId[]
+    ensure("in: one overlap", dynamics.shape_get_sensor_capacity(sensor_shape) == 1 && dynamics.shape_get_sensor_data(sensor_shape, visitors, 4) == 1 && visitors[0].index1 == wall_shape.index1)
+    dynamics.overlap_sensors(w)
+    ensure("staying: no new events", dynamics.world_sensor_begin_event_count(w) == 0 && dynamics.world_sensor_end_event_count(w) == 0)
+    ensure("valid with a sensor", joints_valid(world_id))
+    // Out the other side: an end event.
+    dynamics.body_set_transform(bullet, math.vec3(0.0 - 2.0, 4.0, 0.0), math.quat_identity())
+    dynamics.overlap_sensors(w)
+    ensure("out: one end event", dynamics.world_sensor_begin_event_count(w) == 0 && dynamics.world_sensor_end_event_count(w) == 1)
+    ensure("out: no overlaps", dynamics.shape_get_sensor_capacity(sensor_shape) == 0)
+    dynamics.swap_end_events(w)
+    ensure("swapped: the end events cleared", dynamics.world_sensor_end_event_count(w) == 0)
+    // Back in; the wall stops asking for sensor events: an end event.
+    dynamics.body_set_transform(bullet, math.vec3(1.5, 4.0, 0.0), math.quat_identity())
+    dynamics.overlap_sensors(w)
+    ensure("back: begin", dynamics.world_sensor_begin_event_count(w) == 1)
+    dynamics.shape_enable_sensor_events(wall_shape, false)
+    ensure("the wall's flag", dynamics.shape_are_sensor_events_enabled(wall_shape) == false)
+    dynamics.overlap_sensors(w)
+    ensure("silent wall: end", dynamics.world_sensor_begin_event_count(w) == 0 && dynamics.world_sensor_end_event_count(w) == 1)
+    dynamics.swap_end_events(w)
+    dynamics.shape_enable_sensor_events(wall_shape, true)
+    dynamics.overlap_sensors(w)
+    ensure("wall back: begin", dynamics.world_sensor_begin_event_count(w) == 1)
+    // The sensor itself switched off drops its overlaps.
+    dynamics.shape_enable_sensor_events(sensor_shape, false)
+    dynamics.overlap_sensors(w)
+    ensure("sensor off: end", dynamics.world_sensor_end_event_count(w) == 1 && dynamics.shape_get_sensor_capacity(sensor_shape) == 0)
+    dynamics.swap_end_events(w)
+    dynamics.shape_enable_sensor_events(sensor_shape, true)
+    dynamics.overlap_sensors(w)
+    ensure("sensor on: begin", dynamics.world_sensor_begin_event_count(w) == 1)
+    // A second sensor on the wall's body, around the bullet: a sensor that
+    // reports events is visited by other sensors (the reference's rule), a
+    // sensor never visits its own body's shapes.
+    sdef = dynamics.default_shape_def()
+    sdef.is_sensor = true
+    sdef.enable_sensor_events = true
+    wall_sensor = dynamics.create_sphere_shape(wall, &sdef, manifold.sphere(math.vec3(0.0, 0.0 - 7.0, 0.0), 1.0))
+    ensure("two sensors", dynamics.world_sensor_count(w) == 2)
+    dynamics.overlap_sensors(w)
+    ensure("sensors visit each other", dynamics.shape_get_sensor_capacity(wall_sensor) == 1 && dynamics.shape_get_sensor_capacity(sensor_shape) == 2 && dynamics.world_sensor_begin_event_count(w) == 2)
+    sdef = dynamics.default_shape_def()
+    sdef.enable_sensor_events = true
+    solid = dynamics.create_sphere_shape(bullet, &sdef, manifold.sphere(math.vec3_zero(), 0.2))
+    dynamics.overlap_sensors(w)
+    ensure("a solid shape visits", dynamics.shape_get_sensor_capacity(wall_sensor) == 2 && dynamics.world_sensor_begin_event_count(w) == 1)
+    ensure("a sensor ignores its own body", dynamics.shape_get_sensor_capacity(sensor_shape) == 2)
+    ensure("the events are in shape id order", dynamics.world_sensor_begin_event(w, 0).visitor_shape_id.index1 == solid.index1)
+    ensure("valid with two sensors", joints_valid(world_id))
+    // The disabled bullet drops out of the wall's sensor and reports nothing itself.
+    dynamics.body_disable(bullet)
+    dynamics.overlap_sensors(w)
+    ensure("disabled: four ends", dynamics.world_sensor_end_event_count(w) == 4 && dynamics.shape_get_sensor_capacity(sensor_shape) == 0 && dynamics.shape_get_sensor_capacity(wall_sensor) == 0)
+    dynamics.swap_end_events(w)
+    dynamics.body_enable(bullet)
+    dynamics.overlap_sensors(w)
+    ensure("enabled: four begins", dynamics.world_sensor_begin_event_count(w) == 4)
+    // The wall's sensor destroyed while overlapping: its two overlaps end now, the other sensor moves down a slot.
+    dynamics.destroy_shape(wall_sensor, true)
+    ensure("destroyed sensor: two end events, one sensor left", dynamics.world_sensor_end_event_count(w) == 2 && dynamics.world_sensor_count(w) == 1)
+    ensure("destroyed sensor: the other's index fixed", dynamics.get_shape_full_id(w, sensor_shape).sensor_index == 0)
+    ensure("valid after", joints_valid(world_id))
+    // The body destroyed with its sensor: its overlaps (the wall, and the destroyed sensor not yet dropped) end.
+    dynamics.swap_end_events(w)
+    dynamics.destroy_body(bullet)
+    ensure("destroyed body: two end events, no sensors", dynamics.world_sensor_end_event_count(w) == 2 && dynamics.world_sensor_count(w) == 0)
+    ensure("valid at the end", joints_valid(world_id))
+    free(visitors_block)
+    dynamics.destroy_world(world_id)
+    hull.destroy_hull(wall_hull)
+}
+
 main() {
     before = core.alloc_count()
     test_mass()
@@ -821,11 +1335,14 @@ main() {
     test_sets_and_shapes()
     test_contacts()
     test_mesh_and_compound_contacts()
+    test_joint_kinds()
+    test_joint_sets()
+    test_sensors()
     hull.destroy_hull(g_cube as *HullData)
     hull.destroy_hull(g_slab as *HullData)
     // The scratch stays allocated: the worlds' block, the masses, the contact scratch (five),
-    // the mesh's three, the mesh contact's six, and one of the sphere's.
-    ensure("every other counted allocation was freed (${core.alloc_count() - before})", core.alloc_count() == before + 17)
+    // the mesh's three, the mesh contact's six, the sphere's two, and the sensors' points.
+    ensure("every other counted allocation was freed (${core.alloc_count() - before})", core.alloc_count() == before + 19)
 
     println("dynamics: ${checks} checks")
     if failures == 0 {

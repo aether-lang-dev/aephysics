@@ -4,9 +4,12 @@
 // summed, every body's transform set once, then the world destroyed;
 // then 5,000 cubes resting on a slab through eleven zero-length steps
 // (the reference's step with no time collides and does not solve): the
-// first finds the pairs and begins the contacts, the rest recycle them.
-// Single thread, wall time per phase, with the mass sum and the contact
-// count as the checksum.
+// first finds the pairs and begins the contacts, the rest recycle them;
+// then those cubes chained by 4,999 revolute joints (created, then
+// destroyed); then 2,500 sensor spheres over 2,500 static boxes through
+// eleven zero-length steps (which run the sensor pass). Single thread,
+// wall time per phase, with the mass sum, the contact count, the island
+// count and the begin event count as the checksums.
 #include "box3d/box3d.h"
 #include "box3d/collision.h"
 #include "box3d/math_functions.h"
@@ -26,6 +29,7 @@ static double now_ms( void )
 #define ROUNDS 10
 #define DYNAMIC 5000
 #define STATIC 500
+#define SENSORS 2500
 
 int main( void )
 {
@@ -89,8 +93,8 @@ int main( void )
 			b3BodyDef bodyDef = b3DefaultBodyDef();
 			bodyDef.type = b3_dynamicBody;
 			bodyDef.position = (b3Pos){ 2.0f * ( i % 100 ), 0.49f, 2.0f * ( i / 100 ) };
-			b3BodyId id = b3CreateBody( worldId, &bodyDef );
-			b3CreateHullShape( id, &shapeDef, &box.base );
+			ids[i] = b3CreateBody( worldId, &bodyDef );
+			b3CreateHullShape( ids[i], &shapeDef, &box.base );
 		}
 		double t0 = now_ms();
 		b3World_Step( worldId, 0.0f, 1 );
@@ -103,6 +107,67 @@ int main( void )
 		b3Counters counters = b3World_GetCounters( worldId );
 		printf( "box3d dynamics: first collide of %d cubes on a slab %.2f ms (%d contacts, %d islands), 10 recycling collides %.2f ms\n",
 				DYNAMIC, t1 - t0, counters.contactCount, counters.islandCount, t2 - t1 );
+
+		// Joints: the cubes chained, then unchained.
+		b3JointId* joints = calloc( DYNAMIC, sizeof( b3JointId ) );
+		t0 = now_ms();
+		for ( int i = 0; i < DYNAMIC - 1; ++i )
+		{
+			b3RevoluteJointDef jointDef = b3DefaultRevoluteJointDef();
+			jointDef.base.bodyIdA = ids[i];
+			jointDef.base.bodyIdB = ids[i + 1];
+			jointDef.base.localFrameA.p = (b3Vec3){ 1.0f, 0.0f, 0.0f };
+			jointDef.base.localFrameB.p = (b3Vec3){ -1.0f, 0.0f, 0.0f };
+			joints[i] = b3CreateRevoluteJoint( worldId, &jointDef );
+		}
+		t1 = now_ms();
+		counters = b3World_GetCounters( worldId );
+		int jointCount = counters.jointCount;
+		int islandCount = counters.islandCount;
+		for ( int i = 0; i < DYNAMIC - 1; ++i )
+		{
+			b3DestroyJoint( joints[i], false );
+		}
+		t2 = now_ms();
+		printf( "box3d dynamics: chain %d cubes with %d revolute joints %.2f ms (%d island), destroy them %.2f ms\n", DYNAMIC, jointCount,
+				t1 - t0, islandCount, t2 - t1 );
+		free( joints );
+		b3DestroyWorld( worldId );
+	}
+
+	// Sensors: spheres over static boxes.
+	{
+		b3WorldDef worldDef = b3DefaultWorldDef();
+		b3WorldId worldId = b3CreateWorld( &worldDef );
+		for ( int i = 0; i < SENSORS; ++i )
+		{
+			b3BodyDef boxDef = b3DefaultBodyDef();
+			boxDef.position = (b3Pos){ 2.0f * ( i % 50 ), 0.0f, 2.0f * ( i / 50 ) };
+			b3BodyId boxId = b3CreateBody( worldId, &boxDef );
+			b3ShapeDef boxShapeDef = b3DefaultShapeDef();
+			boxShapeDef.enableSensorEvents = true;
+			b3CreateHullShape( boxId, &boxShapeDef, &box.base );
+			b3BodyDef sensorDef = b3DefaultBodyDef();
+			sensorDef.type = b3_dynamicBody;
+			sensorDef.position = (b3Pos){ 2.0f * ( i % 50 ) + 0.5f, 0.0f, 2.0f * ( i / 50 ) };
+			b3BodyId sensorId = b3CreateBody( worldId, &sensorDef );
+			b3ShapeDef sensorShapeDef = b3DefaultShapeDef();
+			sensorShapeDef.isSensor = true;
+			sensorShapeDef.enableSensorEvents = true;
+			b3Sphere sphere = { { 0.0f, 0.0f, 0.0f }, 0.6f };
+			b3CreateSphereShape( sensorId, &sensorShapeDef, &sphere );
+		}
+		double t0 = now_ms();
+		b3World_Step( worldId, 0.0f, 1 );
+		double t1 = now_ms();
+		int beginCount = b3World_GetSensorEvents( worldId ).beginCount;
+		for ( int k = 0; k < 10; ++k )
+		{
+			b3World_Step( worldId, 0.0f, 1 );
+		}
+		double t2 = now_ms();
+		printf( "box3d dynamics: first pass of %d sensors over %d boxes %.2f ms (%d begin events), 10 more passes %.2f ms\n", SENSORS, SENSORS,
+				t1 - t0, beginCount, t2 - t1 );
 		b3DestroyWorld( worldId );
 	}
 	free( ids );

@@ -375,7 +375,7 @@ kept as speculative ones, as the reference keeps them. The test checks
 the seams (a sphere on an interior edge or vertex gives one point), the
 cache's persistence and the cull.
 
-## dynamics (bookkeeping and contacts)
+## dynamics (bookkeeping, contacts, joints, sensors)
 
 `bench/dynamics.ae` and `bench/dynamics_box3d.c`: ten rounds of a world
 with 5,000 dynamic bodies (a box hull and an offset sphere each, the
@@ -384,17 +384,27 @@ dynamic body's transform set once (its shapes' bounds and proxies
 updated), then the world destroyed; then 5,000 cubes resting on a slab
 through eleven collide passes with no solve (the reference's step with
 a zero time step does exactly that: the pairs, the narrow phase, the
-state changes): the first begins every contact, the rest recycle them.
+state changes): the first begins every contact, the rest recycle them;
+then those cubes chained by 4,999 revolute joints (each created into the
+constraint graph and linked into the islands, which merge into one),
+then every joint destroyed; then 2,500 sensor spheres over 2,500 static
+boxes through eleven sensor passes (each with the pairs and the narrow
+phase before it, as the reference's zero-time step runs them).
 
 | phase | aephysics | Box3D |
 |---|---|---|
-| 5,500 bodies and 10,500 shapes created, 10 rounds | **116 ms** | 118 |
-| 5,000 transforms set, 10 rounds | **40** | 54 |
-| the world destroyed, 10 rounds | 6.1 | **4.4** |
-| first collide: 5,000 contacts begun, islands linked | 7.7 | **4.6** |
-| 10 recycling collides | 3.9 | **2.2** |
+| 5,500 bodies and 10,500 shapes created, 10 rounds | **112 ms** | 120 |
+| 5,000 transforms set, 10 rounds | **39** | 55 |
+| the world destroyed, 10 rounds | 5.6 | **4.7** |
+| first collide: 5,000 contacts begun, islands linked | 7.2 | **4.6** |
+| 10 recycling collides | 4.0 | **2.5** |
+| 4,999 revolute joints created, 5,000 islands merged into one | **2.9** | 5.7 |
+| the joints destroyed | 0.23 | **0.11** |
+| first sensor pass: 2,500 begin events | 1.4 | **1.0** |
+| 10 more sensor passes | 8.7 | **7.0** |
 
-The same mass sum (53,272.5), the same 5,000 contacts and 5,000 islands.
+The same mass sum (53,272.5), the same 5,000 contacts and 5,000
+islands, 4,999 joints and one island, 2,500 begin events.
 Creation is at parity: the reference's hull database hashes every hull
 shape's bytes and refcounts them, which this layer does not do (a hull
 shape keeps the pointer it was given). The transforms are 0.7x: the
@@ -405,4 +415,8 @@ reference's narrow phase prefetches the next contact and packs its
 state; the first pass also computes 5,000 hull-hull manifolds (the
 distance layer's 1.3-1.5x) and links 5,000 islands. The wide contact
 solver will read these arrays, so this is the place to come back to
-with the solver's profile.
+with the solver's profile. Joint creation is 0.5x: the reference's
+b3CreateJoint records the call for its replay and validates the joint
+definition's cookie; the destruction is 2x on a tenth of a millisecond.
+The sensor passes are 1.2-1.4x: each pass queries the three trees per
+sensor and runs GJK on every candidate, the distance layer's gap.
