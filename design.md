@@ -326,6 +326,16 @@ started until its tests pass.
      falling ragdolls (they need the human of shared/human.c, the
      ground of the Euphoria work), test_world.c's compound hit events,
      overflow colour pile and hull database.
+   - `aephysics.human` (done, PR #29): the reference's ragdoll
+     (shared/human.c) as a module, with the body forces, torques and
+     impulses, the bullet setter and body_get_contact_data it needed on dynamics. 44 checks
+     (the figure's shape, a fall to rest in one piece, the setters, a
+     kick, the align spring standing it, the anchors holding its pose,
+     the same drop twice bit for bit); the falling ragdolls scene of
+     test_determinism.c (eight figures on grid meshes and tori) added to
+     test_determinism.ae; the reference's "rain" benchmark (300 ragdolls
+     dropped in columns over 400 steps) as a pair at 1.05x its time. The
+     research note below says what an active ragdoll takes from it.
 14. **parallel**: `parallel_for` and the scheduler over Aether's actors;
    the benchmarks by thread count as the original records them.
 15. **recording and replay**, `world_snapshot`: last, since they are the
@@ -395,3 +405,55 @@ Soft Step is for. The plan in ae3d, once this port stands:
 
 Each is its own epic in ae3d (nicolas-maman/ae3d#365); none of them can
 start before the dynamics layer here passes its tests.
+
+### What the ragdoll layer gives them (PR #29)
+
+`aephysics.human` is the reference's figure (shared/human.c) as a module:
+twelve capsule bones, spherical joints with cone and twist limits at the
+spine, neck, hips and shoulders, revolute joints at the knees and elbows,
+a spring on every joint toward the reference pose, a motor on every
+joint whose torque limit is its friction, and filter joints for the
+limbs that would clash. The pieces an active ragdoll composes are all
+there and measured:
+
+- **The pose drive.** Every joint has a spring (`hertz`, `damping_ratio`)
+  toward a target: `target_angle` on the hinges, `target_rotation` on
+  the spherical joints; `human_set_joint_spring_hertz` and
+  `human_set_joint_damping_ratio` tune the whole figure. Setting the
+  targets from an animation clip each step is the animation-driven
+  ragdoll (plan item 2); the springs are soft constraints, so a chain
+  of twelve holds under them without exploding, which the rain
+  benchmark shows at 300 figures.
+- **The muscle budget.** The motors' `max_motor_torque` per joint
+  (`human_set_joint_friction_torque` scales all of them by a per-joint
+  share) is the torque limit a behaviour works within; a spring's
+  `max_spring_torque` on the motor joints bounds the drive itself. A
+  behaviour raises the budget on the limbs it needs (arms toward the
+  ground on a fall) and drops it on the rest (going limp).
+- **The pose target as bodies.** `human_create_motor_anchors` hangs
+  every bone from a kinematic anchor through a motor joint's position
+  and rotation springs: move the anchors (from a clip, from a controller)
+  and the figure follows, with the world pushing back. The parallel
+  anchors (`human_create_parallel_anchors`) drive rotation only, with a
+  torque cap, and let the figure fall while it keeps its shape -- the
+  shape of Euphoria's "keep the pose while you tumble" reflexes.
+- **Balance's inputs.** A controller in the SIMBICON line needs the centre
+  of mass and its velocity (the bones' masses and velocities are
+  readable), the support polygon (the feet's contact points and normal
+  impulses come through the contact events and `body_get_contact_data`, PR #29),
+  and the joint reactions (`joint_get_constraint_force/torque`); it
+  writes the hip and stance-ankle targets. The align spring
+  (`human_align_spring`) is the crudest balance: a parallel joint to the
+  ground that springs the pelvis upright, which the sample uses at 25 Hz.
+- **Actuation beyond springs.** `body_apply_torque`,
+  `body_apply_force`, and the impulses (PR #29 added them) let a
+  controller act directly on a bone for the cases a joint spring cannot
+  express (a shove, a step's push-off).
+- **Determinism.** The falling ragdolls repeat bit for bit and match
+  across platforms, so a behaviour's tests can pin outcomes.
+
+What is not there yet, and belongs to the ae3d epics: a skeleton-to-
+ragdoll builder (this figure's frames were measured from one rig), the
+per-step controller hook (a `before_step` callback so behaviours set
+targets from the state the step will use), and the behaviours
+themselves.

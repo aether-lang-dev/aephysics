@@ -70,6 +70,8 @@ exports (
     body_get_position, body_get_rotation, body_get_transform, body_set_transform,
     body_get_local_point, body_get_world_point, body_get_local_vector, body_get_world_vector,
     body_get_linear_velocity, body_get_angular_velocity, body_set_linear_velocity, body_set_angular_velocity,
+    body_apply_force, body_apply_force_to_center, body_apply_torque, body_apply_linear_impulse,
+    body_apply_linear_impulse_to_center, body_apply_angular_impulse, body_set_bullet, body_is_bullet, ContactData, body_get_contact_data,
     body_get_local_point_velocity, body_get_world_point_velocity,
     body_get_type, body_get_mass, body_get_inverse_mass, body_get_local_rotational_inertia,
     body_get_world_inverse_rotational_inertia, body_get_local_center, body_get_world_center,
@@ -2015,6 +2017,94 @@ body_set_linear_velocity(id: BodyId, v: Vec3) {
     if math.length_squared(v) > 0.0 { wake_body(w, body) }
     state = get_body_state(w, body)
     if state != null { state.linear_velocity = v }
+}
+
+// Forces and torques accumulate on the sim for the next step's
+// integration; impulses change the velocities now. Each wakes the body
+// when asked and does nothing to a body that is not awake after that.
+awake_for_apply(w: *World, body: *Body, wake: bool) -> bool {
+    if wake && body.set_index >= FIRST_SLEEPING_SET { wake_body(w, body) }
+    return body.set_index == AWAKE_SET
+}
+
+body_apply_force(id: BodyId, force: Vec3, point: Vec3, wake: bool) {
+    w = body_world(id)
+    body = get_body_full_id(w, id)
+    if awake_for_apply(w, body, wake) == false { return }
+    sim = get_body_sim(w, body)
+    sim.force = math.add(sim.force, force)
+    sim.torque = math.add(sim.torque, math.cross(math.sub(point, sim.center), force))
+}
+
+body_apply_force_to_center(id: BodyId, force: Vec3, wake: bool) {
+    w = body_world(id)
+    body = get_body_full_id(w, id)
+    if awake_for_apply(w, body, wake) == false { return }
+    sim = get_body_sim(w, body)
+    sim.force = math.add(sim.force, force)
+}
+
+body_apply_torque(id: BodyId, torque: Vec3, wake: bool) {
+    w = body_world(id)
+    body = get_body_full_id(w, id)
+    if awake_for_apply(w, body, wake) == false { return }
+    sim = get_body_sim(w, body)
+    sim.torque = math.add(sim.torque, torque)
+}
+
+// The linear velocity after an impulse, capped at the world's maximum speed.
+capped_linear_velocity(w: *World, v: Vec3) -> Vec3 {
+    max_speed = w.max_linear_speed
+    if math.length_squared(v) > max_speed * max_speed { return math.mul_sv(max_speed, math.normalize(v)) }
+    return v
+}
+
+body_apply_linear_impulse(id: BodyId, impulse: Vec3, point: Vec3, wake: bool) {
+    w = body_world(id)
+    body = get_body_full_id(w, id)
+    if awake_for_apply(w, body, wake) == false { return }
+    sim = get_body_sim(w, body)
+    state = get_body_state(w, body)
+    state.linear_velocity = capped_linear_velocity(w, math.mul_add(state.linear_velocity, sim.inv_mass, impulse))
+    delta = math.mul_mv(sim.inv_inertia_world, math.cross(math.sub(point, sim.center), impulse))
+    state.angular_velocity = math.add(state.angular_velocity, delta)
+}
+
+body_apply_linear_impulse_to_center(id: BodyId, impulse: Vec3, wake: bool) {
+    w = body_world(id)
+    body = get_body_full_id(w, id)
+    if awake_for_apply(w, body, wake) == false { return }
+    sim = get_body_sim(w, body)
+    state = get_body_state(w, body)
+    state.linear_velocity = capped_linear_velocity(w, math.mul_add(state.linear_velocity, sim.inv_mass, impulse))
+}
+
+// The angular impulse through the local inertia, so it is exact under rotation.
+body_apply_angular_impulse(id: BodyId, impulse: Vec3, wake: bool) {
+    w = body_world(id)
+    body = get_body_full_id(w, id)
+    if awake_for_apply(w, body, wake) == false { return }
+    sim = get_body_sim(w, body)
+    state = get_body_state(w, body)
+    local_impulse = math.inv_rotate_vector(sim.transform.q, impulse)
+    local_delta = math.mul_mv(sim.inv_inertia_local, local_impulse)
+    state.angular_velocity = math.add(state.angular_velocity, math.rotate_vector(sim.transform.q, local_delta))
+}
+
+body_set_bullet(id: BodyId, flag: bool) {
+    w = body_world(id)
+    if w == null { return }
+    body = get_body_full_id(w, id)
+    new_flag = 0
+    if flag { new_flag = IS_BULLET }
+    if (body.flags & IS_BULLET) == new_flag { return }
+    body.flags = (body.flags & (0 - 1 - IS_BULLET)) | new_flag
+    sync_body_flags(w, body)
+}
+
+body_is_bullet(id: BodyId) -> bool {
+    w = body_world(id)
+    return (get_body_full_id(w, id).flags & IS_BULLET) != 0
 }
 
 body_set_angular_velocity(id: BodyId, v: Vec3) {
@@ -4980,6 +5070,34 @@ body_get_joint_count(id: BodyId) -> int { return get_body_full_id(world_at(id.wo
 body_get_contact_capacity(id: BodyId) -> int {
     w = world_at(id.world0)
     return get_body_full_id(w, id).contact_count
+}
+
+// The touching contacts on a body (b3Body_GetContactData): their ids,
+// the shapes, and the manifolds to read points and impulses from.
+struct ContactData {
+    contact_id: ContactId
+    shape_id_a: ShapeId
+    shape_id_b: ShapeId
+    manifolds: ptr                 // Manifold[manifold_count], the contact's own
+    manifold_count: int
+}
+
+body_get_contact_data(id: BodyId, data: ContactData[], capacity: int) -> int {
+    w = world_at(id.world0)
+    if w.locked { return 0 }
+    body = get_body_full_id(w, id)
+    key = body.head_contact_key
+    count = 0
+    while key != NULL_INDEX && count < capacity {
+        c = contact_at(w, key >> 1)
+        if (c.flags & CONTACT_TOUCHING) != 0 {
+            data[count] = ContactData { contact_id: make_contact_id(w, c), shape_id_a: make_shape_id(w, world_shape_at(w, c.shape_id_a)),
+                                        shape_id_b: make_shape_id(w, world_shape_at(w, c.shape_id_b)), manifolds: c.manifolds, manifold_count: c.manifold_count }
+            count = count + 1
+        }
+        key = contact_edge_next(w, key)
+    }
+    return count
 }
 
 // The joints on a body, by id.
