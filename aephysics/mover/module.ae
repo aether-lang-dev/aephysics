@@ -1,0 +1,85 @@
+// aephysics.mover -- the character mover's plane solver: given the
+// planes the mover's capsule touches (from the shapes' collide_mover
+// functions, each with a push limit), the translation it wanted is
+// pushed out of every plane by a Gauss-Seidel sweep with the pushes
+// accumulated and clamped, and its velocity is clipped against the
+// planes that pushed.
+//
+// Box3D's mover.c (Erin Catto, MIT), the reference this engine is
+// measured against: twenty iterations, the linear slop added to each
+// separation so the mover rests just off the surface without jitter,
+// convergence when the sweep's total push falls under the slop. Names
+// are the reference's without its prefix, in snake case: b3SolvePlanes
+// is solve_planes. The mover's queries through a world (planes from
+// every shape in a region, the mover's time of impact) come with the
+// world.
+import std.string
+import aephysics.math
+
+exports ( CollisionPlane, PlaneSolverResult, collision_plane, solve_planes, clip_vector, MAX_PLANE_ITERATIONS )
+
+const MAX_PLANE_ITERATIONS = 20
+
+// A plane the mover is pushed out of. The push limit makes it soft
+// (usually in metres; the largest float for rigid), the push is what the
+// solver applied, and clip_velocity says whether clip_vector uses it.
+struct CollisionPlane {
+    plane: Plane
+    push_limit: float
+    push: float
+    clip_velocity: bool
+}
+
+struct PlaneSolverResult {
+    delta: Vec3              // the translation after the pushes
+    iteration_count: int     // for diagnostics
+}
+
+collision_plane(plane: Plane, push_limit: float, clip_velocity: bool) -> CollisionPlane {
+    return CollisionPlane { plane: plane, push_limit: push_limit, push: 0.0, clip_velocity: clip_velocity }
+}
+
+// The translation pushed out of the planes, and each plane's push.
+solve_planes(target_delta: Vec3, planes: CollisionPlane[], count: int) -> PlaneSolverResult {
+    i = 0
+    while i < count {
+        planes[i].push = 0.0
+        i = i + 1
+    }
+    delta = target_delta
+    tolerance = math.LINEAR_SLOP
+    iteration = 0
+    while iteration < MAX_PLANE_ITERATIONS {
+        total_push = 0.0
+        plane_index = 0
+        while plane_index < count {
+            // The slop keeps the mover just off the surface, without jitter.
+            separation = math.plane_separation(planes[plane_index].plane, delta) + math.LINEAR_SLOP
+            push = 0.0 - separation
+            // The accumulated push is clamped, not the increment.
+            accumulated = planes[plane_index].push
+            planes[plane_index].push = math.clamp_float(accumulated + push, 0.0, planes[plane_index].push_limit)
+            push = planes[plane_index].push - accumulated
+            delta = math.mul_add(delta, push, planes[plane_index].plane.normal)
+            total_push = total_push + math.abs_float(push)
+            plane_index = plane_index + 1
+        }
+        if total_push < tolerance { break }
+        iteration = iteration + 1
+    }
+    return PlaneSolverResult { delta: delta, iteration_count: iteration }
+}
+
+// The vector with its component into every plane that pushed (and clips) removed.
+clip_vector(vector: Vec3, planes: CollisionPlane[], count: int) -> Vec3 {
+    v = vector
+    plane_index = 0
+    while plane_index < count {
+        if planes[plane_index].push != 0.0 && planes[plane_index].clip_velocity {
+            normal = planes[plane_index].plane.normal
+            v = math.mul_sub(v, math.min_float(0.0, math.dot(v, normal)), normal)
+        }
+        plane_index = plane_index + 1
+    }
+    return v
+}

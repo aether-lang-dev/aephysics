@@ -122,18 +122,70 @@ started until its tests pass.
    `aephysics.capsule`, the material `aephysics.material`, and the
    hull's mover moved beside the mesh's; `aephysics.shape` imports them
    all. `tree_validate` accepts a baked tree (no parents).
-12. **dynamics**: `body`, `contact`, `constraint_graph` (graph colouring),
-   `solver_set`, `island`, `solver` (the Soft Step: sub-stepping, relax
-   iterations, restitution), `contact_solver` (scalar first; the wide SIMD
-   path second, measured), the joints (revolute, prismatic, distance,
-   motor, weld, wheel, spherical), `sensor`, `mover` (the character mover),
-   `physics_world`. Tests: `test_body`, `test_joint`, `test_world`,
-   `test_mover`, `test_determinism`, `test_large_world`.
-13. **parallel**: `parallel_for` and the scheduler over Aether's actors;
+12. **mover** (done): mover.c as `aephysics.mover`: the character
+   mover's plane solver (twenty Gauss-Seidel sweeps with the pushes
+   accumulated and clamped to each plane's limit, the slop keeping the
+   mover just off the surface) and the velocity clip. 56 checks:
+   test_mover.c's solver cases and every mover collision that needs no
+   world (sphere, capsule, hull, mesh, height field), plus a corner, a
+   soft plane and the clip. 0.9x the reference on a million solves with
+   one iteration's difference in 1.7 million.
+13. **dynamics**: the reference's world is one mutually recursive body
+   of C (body.c, contact.c, joint.c, island.c, solver_set.c,
+   constraint_graph.c, sensor.c, broad_phase.c and half of
+   physics_world.c call into each other), so the cut into Aether's
+   acyclic modules is:
+   - `aephysics.mesh_contact`: mesh_contact.c's cluster reduction of a
+     mesh's or height field's triangle manifolds against a convex shape
+     (the point culling and the per-cluster reduction are pure; the
+     triangle cache it refreshes is the contact's, so the entry point
+     takes the cache as a struct).
+   - `aephysics.broad_phase`: broad_phase.c's trees per body type,
+     proxies keyed by type in the low bits, the moved-sibling gathering,
+     the self and cross pair walks and the pair set; the pair filter and
+     the pair emission are visitors, since the reference does its shape
+     filtering and contact creation inside. Own test: pairs found and
+     not found across moves, a compound's children, the pair set's
+     persistence.
+   - `aephysics.dynamics`: one module for the world's state and its
+     bookkeeping -- the World with its arrays (bodies, shapes, contacts,
+     joints, islands, solver sets), the ids with generations, the
+     body's sims and states, the shape's world half (creation on a
+     body, the fat bounds, the proxy, materials, events flags), the
+     contact (creation from a pair, the manifold update through the
+     manifold functions and the mesh contact), the joints' creation and
+     their bases, the constraint graph colouring, the solver sets
+     (awake, static, disabled, sleeping islands), the islands (union by
+     links, split on wake), the sensors. No stepping. Own tests: the
+     world's bookkeeping without a step (bodies and shapes created and
+     destroyed, contacts begun from pairs, islands linked and split,
+     sets moved on sleep and wake), and the parts of test_body.c and
+     test_world.c that need no step (mass data, extents, validity,
+     recycling).
+   - `aephysics.contact_solver`: contact_solver.c scalar (the prepare,
+     warm start, solve, restitution and store passes; the wide SIMD path
+     later, measured).
+   - `aephysics.joint_solver`: the seven joints' prepare, warm start,
+     solve and reaction (distance, motor, prismatic, revolute, spherical,
+     weld, wheel) with joint.c's dispatch.
+   - `aephysics.solver`: solver.c's stages (the Soft Step: integrate
+     velocities, warm start, solve, integrate positions, relax,
+     restitution, store impulses, per graph colour), continuous
+     collision, the sleep decision, the enlarged bounds and the broad
+     phase update. Single-threaded first; the stage/block structure kept
+     so the parallel layer only adds workers.
+   - `aephysics.physics_world`: the step (collide, solve, events), the
+     world queries (overlap, casts, the mover's planes and time of
+     impact through the broad phase), the events, the public setters.
+     Tests: test_body.c, test_joint.c, test_world.c, test_body_query.c,
+     the world parts of test_mover.c, test_determinism.c,
+     test_large_world.c; bench pairs on the reference's benchmark
+     scenes as each becomes possible.
+14. **parallel**: `parallel_for` and the scheduler over Aether's actors;
    the benchmarks by thread count as the original records them.
-14. **recording and replay**, `world_snapshot`: last, since they are the
+15. **recording and replay**, `world_snapshot`: last, since they are the
    tooling and not the engine.
-15. **benchmarks**: `reference/benchmark/main.c`'s nine scenes ported, run
+16. **benchmarks**: `reference/benchmark/main.c`'s nine scenes ported, run
    against the C build on the same machine, recorded under `benchmark/`.
 
 ## Measures
