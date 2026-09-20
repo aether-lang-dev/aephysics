@@ -201,8 +201,8 @@ binned SAH, edges identified each time; 100,000 rays cast down onto it;
 
 | phase | aephysics | Box3D |
 |---|---|---|
-| 10 builds, median split (80,000 triangles) | 199 ms | **129** |
-| 10 builds, binned SAH | 316 | **256** |
+| 10 builds, median split (80,000 triangles) | 221 ms | **129** |
+| 10 builds, binned SAH | 335 | **256** |
 | 100,000 ray casts | 20.8 | **10.2** |
 | 100,000 box queries | 70.4 | **39.5** |
 | 10,000 shape casts | 24.7 | **14.3** |
@@ -322,3 +322,32 @@ velocities, 1,662,623 iterations here against 1,662,624 there (one
 convergence test on the float's side of the slop). The solver runs
 at 0.9x: the reference reads its planes through a pointer per pass
 where the loop here indexes the array.
+
+## broad_phase
+
+`bench/broad_phase.ae`: 10,000 dynamic unit boxes on a jittered 25 x 16
+x 25 grid at 1.4 spacing over a static ground, the first update finding
+every pair, then 20 steps in which every box drifts a little and only
+the new pairs come out, each update's keys adopted into the pair set.
+The reference finds its pairs inside its world (broad_phase.c filters
+through the shapes and creates the contacts itself), so it has no
+free-standing counterpart; its pair update is measured against ours
+through the world benchmarks once the world steps.
+
+| phase | aephysics |
+|---|---|
+| 10,000 proxies created | 3.5 ms |
+| first update (2,900 pairs) | 2.2 |
+| 20 steps of 10,000 moves and an update (757 new pairs) | 91 |
+
+A step is 4.6 ms, most of it the 10,000 proxy moves (a leaf removed and
+re-inserted each); the update itself walks only the sibling pairs a
+moved node touched. The test checks every update against a brute force
+over the boxes.
+
+The hash under the pair set and every map (core's `key_hash`) was
+rewritten during this layer: the previous 64-bit mixer multiplied
+signed longs, which is undefined in the C underneath, and gcc at -O2
+made two inlined copies of it disagree, so a key stored by one copy was
+not found by the other. The new mixer stays in 32-bit products; the
+mesh builds above moved from 199 to 221 ms and 316 to 335 ms with it.

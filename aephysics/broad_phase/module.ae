@@ -1,0 +1,566 @@
+// aephysics.broad_phase -- the broad phase: one dynamic tree per body
+// type (static, kinematic, dynamic), the shapes' proxies keyed by their
+// type in the low two bits, and the pair update that finds every new
+// overlap after a step: the dynamic tree against itself through the
+// sibling pairs a moved node touched (cross-subtree only, so no
+// duplicates), and against the static and kinematic trees from a
+// breadth-first seeding; the candidates culled by the set of pairs that
+// already have a contact, filtered by the client's visitor, a compound's
+// pair expanded to one per overlapping child, and the keys sorted so
+// the contacts come out in an order the trees cannot change.
+//
+// Box3D's broad_phase.c (Erin Catto, MIT), the reference this engine is
+// measured against. Names are the reference's without its prefix, in
+// snake case: b3UpdateBroadPhasePairs is update_broad_phase_pairs.
+//
+// Differences: the reference filters pairs and creates contacts inside
+// the update through its world; here the filter and the compound
+// lookups are visitors and the update leaves the sorted keys for the
+// client to turn into contacts, adding each to the pair set as it does
+// (the reference's contact creation does the same). Single-threaded:
+// the seeds and the moved siblings are walked in order here, where the
+// reference spreads them over workers.
+import std.string
+import aephysics.math
+import aephysics.core
+import aephysics.dynamic_tree
+
+exports (
+    BroadPhase, PairVisitors, Capacity,
+    BODY_STATIC, BODY_KINEMATIC, BODY_DYNAMIC, BODY_TYPE_COUNT, NULL_INDEX,
+    proxy_type, proxy_id, proxy_key,
+    create_broad_phase, destroy_broad_phase, broad_phase_tree,
+    broad_phase_create_proxy, broad_phase_destroy_proxy, broad_phase_move_proxy,
+    broad_phase_mark_proxy_moved, broad_phase_mark_proxy_moved_serial, broad_phase_get_shape_index,
+    broad_phase_test_overlap, broad_phase_get_aabb,
+    update_broad_phase_pairs, pair_key_count, pair_key, pair_key_shape_a, pair_key_shape_b, pair_key_child,
+    add_pair, remove_pair, has_pair, pair_count,
+    validate_broad_phase, validate_no_moved, sort_longs
+)
+
+extern memset(block: ptr, value: int, size: int) -> ptr
+extern memcpy(dst: ptr, src: ptr, size: int) -> ptr
+
+const NULL_INDEX = 0 - 1
+const BODY_STATIC = 0
+const BODY_KINEMATIC = 1
+const BODY_DYNAMIC = 2
+const BODY_TYPE_COUNT = 3
+const CROSS_SEED_COUNT = 64
+const STACK_SIZE = 512
+
+// What a world expects to hold, for the initial capacities.
+struct Capacity {
+    static_shape_count: int
+    dynamic_shape_count: int
+    contact_count: int
+}
+
+struct BroadPhase {
+    trees: ptr               // DynamicTree[BODY_TYPE_COUNT]
+    pair_set: HashSet        // the pairs that have a contact
+    moved_siblings: ptr      // int[]: the dynamic tree's sibling pairs a moved node touched
+    moved_capacity: int
+    pair_keys: ptr           // long[]: the keys the last update found, sorted
+    pair_key_count: int
+    pair_key_capacity: int
+    stack: ptr               // int[STACK_SIZE]: the proxy-against-subtree walk
+    pair_stack: ptr          // int[2 * STACK_SIZE]: the subtree-against-subtree walk
+    seeds: ptr               // int[2 * 2 * CROSS_SEED_COUNT]: node index pairs
+    queue: ptr               // int[2 * 2 * CROSS_SEED_COUNT]: the seeding's ring
+}
+
+// What the client answers about its shapes during an update: whether a
+// pair may collide, and which shapes are compounds (the compound's tree
+// and the body's transform, so the other shape's box can be pulled into
+// the compound's frame). compound_tree_of returns null for a plain
+// shape and a *DynamicTree for a compound.
+struct PairVisitors {
+    should_pair: fn(int, int, ptr) -> bool
+    compound_tree_of: fn(int, ptr) -> ptr
+    compound_transform: fn(int, ptr) -> Transform
+    context: ptr
+}
+
+// The type sits in the low two bits of a key, the id above.
+proxy_type(key: int) -> int { return key & 3 }
+proxy_id(key: int) -> int { return key >> 2 }
+proxy_key(id: int, kind: int) -> int { return (id << 2) | kind }
+
+broad_phase_tree(bp: *BroadPhase, kind: int) -> *DynamicTree { return (bp.trees + kind * sizeof(DynamicTree)) as *DynamicTree }
+
+create_broad_phase(bp: *BroadPhase, capacity: Capacity) {
+    bp.trees = core.alloc(BODY_TYPE_COUNT * sizeof(DynamicTree))
+    made = dynamic_tree.tree_create(math.max_int(16, capacity.static_shape_count))
+    copy_tree(broad_phase_tree(bp, BODY_STATIC), made)
+    made = dynamic_tree.tree_create(16)
+    copy_tree(broad_phase_tree(bp, BODY_KINEMATIC), made)
+    made = dynamic_tree.tree_create(math.max_int(16, capacity.dynamic_shape_count))
+    copy_tree(broad_phase_tree(bp, BODY_DYNAMIC), made)
+    bp.pair_set = core.set_create(math.max_int(32, 2 * capacity.contact_count))
+    bp.moved_siblings = null
+    bp.moved_capacity = 0
+    bp.pair_keys = null
+    bp.pair_key_count = 0
+    bp.pair_key_capacity = 0
+    bp.stack = core.alloc(STACK_SIZE * 4)
+    bp.pair_stack = core.alloc(2 * STACK_SIZE * 4)
+    bp.seeds = core.alloc(4 * CROSS_SEED_COUNT * 4)
+    bp.queue = core.alloc(4 * CROSS_SEED_COUNT * 4)
+}
+
+copy_tree(dst: *DynamicTree, src: DynamicTree) {
+    dst.nodes = src.nodes
+    dst.parents = src.parents
+    dst.proxies = src.proxies
+    dst.node_end = src.node_end
+    dst.node_capacity = src.node_capacity
+    dst.pair_free_list = src.pair_free_list
+    dst.proxy_count = src.proxy_count
+    dst.proxy_capacity = src.proxy_capacity
+    dst.proxy_free_list = src.proxy_free_list
+    dst.swap_nodes = src.swap_nodes
+    dst.leaf_indices = src.leaf_indices
+    dst.leaf_nodes = src.leaf_nodes
+    dst.leaf_centers = src.leaf_centers
+    dst.rebuild_capacity = src.rebuild_capacity
+    dst.dfs_ordered = src.dfs_ordered
+    dst.stack = src.stack
+    dst.stack_dist = src.stack_dist
+    dst.copy_stack = src.copy_stack
+}
+
+destroy_broad_phase(bp: *BroadPhase) {
+    i = 0
+    while i < BODY_TYPE_COUNT {
+        dynamic_tree.tree_destroy(broad_phase_tree(bp, i))
+        i = i + 1
+    }
+    core.free_bytes(bp.trees, BODY_TYPE_COUNT * sizeof(DynamicTree))
+    core.set_destroy(&bp.pair_set)
+    core.free_bytes(bp.moved_siblings, bp.moved_capacity * 4)
+    core.free_bytes(bp.pair_keys, bp.pair_key_capacity * 8)
+    core.free_bytes(bp.stack, STACK_SIZE * 4)
+    core.free_bytes(bp.pair_stack, 2 * STACK_SIZE * 4)
+    core.free_bytes(bp.seeds, 4 * CROSS_SEED_COUNT * 4)
+    core.free_bytes(bp.queue, 4 * CROSS_SEED_COUNT * 4)
+    memset(bp as ptr, 0, sizeof(BroadPhase))
+}
+
+// A shape's proxy in the tree of its body's type. A static proxy is not
+// marked moved (no pairs are sought for it) unless the client forces it.
+broad_phase_create_proxy(bp: *BroadPhase, kind: int, box: AABB, category_bits: long, shape_index: int, force_pair_creation: bool) -> int {
+    mark = kind != BODY_STATIC || force_pair_creation
+    id = dynamic_tree.tree_create_proxy_internal(broad_phase_tree(bp, kind), box, category_bits, shape_index as long, mark)
+    return proxy_key(id, kind)
+}
+
+broad_phase_destroy_proxy(bp: *BroadPhase, key: int) {
+    dynamic_tree.tree_destroy_proxy(broad_phase_tree(bp, proxy_type(key)), proxy_id(key))
+}
+
+// The proxy re-inserted at a new box and marked moved.
+broad_phase_move_proxy(bp: *BroadPhase, key: int, box: AABB) {
+    dynamic_tree.tree_move_proxy_internal(broad_phase_tree(bp, proxy_type(key)), proxy_id(key), box, true)
+}
+
+broad_phase_mark_proxy_moved_serial(bp: *BroadPhase, key: int) {
+    dynamic_tree.tree_mark_proxy_moved_serial(broad_phase_tree(bp, proxy_type(key)), proxy_id(key))
+}
+
+broad_phase_mark_proxy_moved(bp: *BroadPhase, key: int, box: AABB) {
+    dynamic_tree.tree_mark_proxy_moved(broad_phase_tree(bp, proxy_type(key)), proxy_id(key), box)
+}
+
+broad_phase_get_shape_index(bp: *BroadPhase, key: int) -> int {
+    return dynamic_tree.tree_get_user_data(broad_phase_tree(bp, proxy_type(key)), proxy_id(key)) as int
+}
+
+broad_phase_get_aabb(bp: *BroadPhase, key: int) -> AABB {
+    return dynamic_tree.tree_get_aabb(broad_phase_tree(bp, proxy_type(key)), proxy_id(key))
+}
+
+broad_phase_test_overlap(bp: *BroadPhase, key_a: int, key_b: int) -> bool {
+    return math.aabb_overlaps(broad_phase_get_aabb(bp, key_a), broad_phase_get_aabb(bp, key_b))
+}
+
+// --- the pair set and the keys -------------------------------------------------------------------
+
+add_pair(bp: *BroadPhase, key: long) -> bool { return core.set_add(&bp.pair_set, key) }
+remove_pair(bp: *BroadPhase, key: long) -> bool { return core.set_remove(&bp.pair_set, key) }
+has_pair(bp: *BroadPhase, key: long) -> bool { return core.set_contains(&bp.pair_set, key) }
+pair_count(bp: *BroadPhase) -> int { return core.set_count(&bp.pair_set) }
+
+pair_key_count(bp: *BroadPhase) -> int { return bp.pair_key_count }
+
+pair_key(bp: *BroadPhase, index: int) -> long {
+    keys = bp.pair_keys as long[]
+    return keys[index]
+}
+
+pair_key_shape_a(key: long) -> int { return (core.lsr(key, 64 - core.SHAPE_POWER) as int) & (core.MAX_SHAPES - 1) }
+pair_key_shape_b(key: long) -> int { return (core.lsr(key, 64 - 2 * core.SHAPE_POWER) as int) & (core.MAX_SHAPES - 1) }
+pair_key_child(key: long) -> int { return (key as int) & (core.MAX_CHILD_SHAPES - 1) }
+
+push_key(bp: *BroadPhase, key: long) {
+    if bp.pair_key_count == bp.pair_key_capacity {
+        grown = math.max_int(64, 2 * bp.pair_key_capacity)
+        block = core.alloc(grown * 8)
+        if bp.pair_keys != null {
+            memcpy(block, bp.pair_keys, bp.pair_key_count * 8)
+            core.free_bytes(bp.pair_keys, bp.pair_key_capacity * 8)
+        }
+        bp.pair_keys = block
+        bp.pair_key_capacity = grown
+    }
+    keys = bp.pair_keys as long[]
+    keys[bp.pair_key_count] = key
+    bp.pair_key_count = bp.pair_key_count + 1
+}
+
+// --- candidates ------------------------------------------------------------------------------------
+
+// The update's visitors and the walk's stack of subtree pairs.
+struct PairContext {
+    bp: *BroadPhase
+    visitors: PairVisitors
+    check_compounds: bool    // only the static cross pass can meet a compound
+    stack_count: int
+}
+
+// One of the two is a compound: the pair becomes one per child whose box
+// the other shape's box (pulled into the compound's frame) overlaps.
+struct CompoundContext {
+    bp: *BroadPhase
+    compound_shape: int
+    other_shape: int
+}
+
+compound_child_visitor(proxy: int, user_data: long, context: ptr) -> bool {
+    ctx = context as *CompoundContext
+    key = core.shape_pair_key(ctx.compound_shape, ctx.other_shape, user_data as int)
+    if has_pair(ctx.bp, key) == false { push_key(ctx.bp, key) }
+    return true
+}
+
+emit_compound_pairs(ctx: *PairContext, compound_shape: int, other_shape: int, other_key: int) {
+    bp = ctx.bp
+    // A visitor is called through a local copy: a nested field is not callable.
+    visitors = ctx.visitors
+    compound_tree = visitors.compound_tree_of(compound_shape, visitors.context) as *DynamicTree
+    compound_transform = visitors.compound_transform(compound_shape, visitors.context)
+    other_box = broad_phase_get_aabb(bp, other_key)
+    local_box = math.aabb_transform(math.invert_transform(compound_transform), other_box)
+    child_ctx = CompoundContext { bp: bp, compound_shape: compound_shape, other_shape: other_shape }
+    start = bp.pair_key_count
+    dynamic_tree.tree_query(compound_tree, local_box, dynamic_tree.default_mask_bits(), false, compound_child_visitor, (&child_ctx) as ptr)
+    // The gauntlet is a property of the pair, so it runs once for every child.
+    if bp.pair_key_count > start && visitors.should_pair(compound_shape, other_shape, visitors.context) == false {
+        bp.pair_key_count = start
+    }
+}
+
+// A candidate straight from the trees: culled by the pair set, then the
+// visitor's gauntlet, then kept as a key. The proxies' keys are known
+// (the compound expansion needs the other shape's box).
+add_candidate_pair(ctx: *PairContext, shape_a: int, shape_b: int, key_a: int, key_b: int) {
+    bp = ctx.bp
+    visitors = ctx.visitors
+    if ctx.check_compounds {
+        if visitors.compound_tree_of(shape_a, visitors.context) != null {
+            emit_compound_pairs(ctx, shape_a, shape_b, key_b)
+            return
+        }
+        if visitors.compound_tree_of(shape_b, visitors.context) != null {
+            emit_compound_pairs(ctx, shape_b, shape_a, key_a)
+            return
+        }
+    }
+    key = core.shape_pair_key(shape_a, shape_b, 0)
+    if has_pair(bp, key) { return }
+    if visitors.should_pair(math.min_int(shape_a, shape_b), math.max_int(shape_a, shape_b), visitors.context) {
+        push_key(bp, key)
+    }
+}
+
+// Did either move, and if so do they overlap?
+test_pair(a: TreeNode, b: TreeNode) -> bool {
+    if ((a.flag_index | b.flag_index) & dynamic_tree.MOVED_NODE) == 0 { return false }
+    return math.aabb_overlaps(a.aabb, b.aabb)
+}
+
+// A leaf against a subtree of a tree (its own or another): the moved
+// flag on either side and the boxes cull.
+collide_proxy_and_subtree(ctx: *PairContext, leaf: TreeNode, leaf_key: int, tree: *DynamicTree, tree_kind: int, pair: int) {
+    nodes = tree.nodes as TreeNode[]
+    proxies = tree.proxies as TreeProxy[]
+    leaf_mark = leaf.flag_index & dynamic_tree.MOVED_NODE
+    leaf_box = leaf.aabb
+    shape_id = broad_phase_get_shape_index(ctx.bp, leaf_key)
+    stack = ctx.bp.stack as int[]
+    stack_count = 1
+    stack[0] = pair
+    while stack_count > 0 {
+        stack_count = stack_count - 1
+        current = stack[stack_count]
+        i = 0
+        while i < 2 {
+            index = current + i
+            i = i + 1
+            flags = nodes[index].flag_index
+            if ((flags | leaf_mark) & dynamic_tree.MOVED_NODE) == 0 { continue }
+            if math.aabb_overlaps(leaf_box, nodes[index].aabb) == false { continue }
+            if dynamic_tree.is_leaf(flags) {
+                other_proxy = dynamic_tree.proxy_id_of(flags)
+                add_candidate_pair(ctx, shape_id, proxies[other_proxy].user_data as int, leaf_key, proxy_key(other_proxy, tree_kind))
+            } else if stack_count < STACK_SIZE {
+                stack[stack_count] = dynamic_tree.left_child(flags)
+                stack_count = stack_count + 1
+            }
+        }
+    }
+}
+
+// One node against another: a pair of leaves is a candidate, a leaf
+// against a subtree walks it, two subtrees go on the stack.
+visit_pair(ctx: *PairContext, tree_a: *DynamicTree, kind_a: int, tree_b: *DynamicTree, kind_b: int, a: int, b: int) {
+    nodes_a = tree_a.nodes as TreeNode[]
+    nodes_b = tree_b.nodes as TreeNode[]
+    node_a = nodes_a[a]
+    node_b = nodes_b[b]
+    if test_pair(node_a, node_b) == false { return }
+    leaf_a = dynamic_tree.is_leaf(node_a.flag_index)
+    leaf_b = dynamic_tree.is_leaf(node_b.flag_index)
+    if leaf_a && leaf_b {
+        proxies_a = tree_a.proxies as TreeProxy[]
+        proxies_b = tree_b.proxies as TreeProxy[]
+        proxy_a = dynamic_tree.proxy_id_of(node_a.flag_index)
+        proxy_b = dynamic_tree.proxy_id_of(node_b.flag_index)
+        add_candidate_pair(ctx, proxies_a[proxy_a].user_data as int, proxies_b[proxy_b].user_data as int,
+                           proxy_key(proxy_a, kind_a), proxy_key(proxy_b, kind_b))
+    } else if leaf_a {
+        collide_proxy_and_subtree(ctx, node_a, proxy_key(dynamic_tree.proxy_id_of(node_a.flag_index), kind_a), tree_b, kind_b, dynamic_tree.left_child(node_b.flag_index))
+    } else if leaf_b {
+        collide_proxy_and_subtree(ctx, node_b, proxy_key(dynamic_tree.proxy_id_of(node_b.flag_index), kind_b), tree_a, kind_a, dynamic_tree.left_child(node_a.flag_index))
+    } else if ctx.stack_count < STACK_SIZE {
+        stack = ctx.bp.pair_stack as int[]
+        stack[2 * ctx.stack_count] = dynamic_tree.left_child(node_a.flag_index)
+        stack[2 * ctx.stack_count + 1] = dynamic_tree.left_child(node_b.flag_index)
+        ctx.stack_count = ctx.stack_count + 1
+    }
+}
+
+// Two subtrees against each other, which may be of one tree: pairs come
+// only across the two, never within one, so a moved node's two children
+// give no duplicates (Real-Time Collision Detection 6.3.2).
+collide_cross_pairs(ctx: *PairContext, tree_a: *DynamicTree, kind_a: int, tree_b: *DynamicTree, kind_b: int, subtree_a: int, subtree_b: int) {
+    stack = ctx.bp.pair_stack as int[]
+    ctx.stack_count = 0
+    visit_pair(ctx, tree_a, kind_a, tree_b, kind_b, subtree_a, subtree_b)
+    while ctx.stack_count > 0 {
+        ctx.stack_count = ctx.stack_count - 1
+        pair_a = stack[2 * ctx.stack_count]
+        pair_b = stack[2 * ctx.stack_count + 1]
+        i = 0
+        while i < 4 {
+            visit_pair(ctx, tree_a, kind_a, tree_b, kind_b, pair_a + (i >> 1), pair_b + (i & 1))
+            i = i + 1
+        }
+    }
+}
+
+// The dynamic tree's sibling pairs a moved node touched, in order.
+gather_moved_siblings(tree: *DynamicTree, siblings: int[]) -> int {
+    nodes = tree.nodes as TreeNode[]
+    count = 0
+    pair = 2
+    while pair < tree.node_end {
+        if ((nodes[pair].flag_index | nodes[pair + 1].flag_index) & dynamic_tree.MOVED_NODE) != 0 {
+            siblings[count] = pair
+            count = count + 1
+        }
+        pair = pair + 2
+    }
+    return count
+}
+
+// A breadth-first walk of two trees from their roots until the queue
+// holds enough node pairs to seed the cross walk (the reference spreads
+// them over workers; here they keep the same order).
+gather_cross_seeds(bp: *BroadPhase, tree_a: *DynamicTree, tree_b: *DynamicTree, seeds: int[], seed_offset: int) -> int {
+    nodes_a = tree_a.nodes as TreeNode[]
+    nodes_b = tree_b.nodes as TreeNode[]
+    queue = bp.queue as int[]
+    mask = 2 * CROSS_SEED_COUNT - 1
+    head = 0
+    tail = 0
+    if tree_a.proxy_count > 0 && tree_b.proxy_count > 0 && test_pair(nodes_a[dynamic_tree.ROOT_NODE], nodes_b[dynamic_tree.ROOT_NODE]) {
+        queue[2 * (tail & mask)] = dynamic_tree.ROOT_NODE
+        queue[2 * (tail & mask) + 1] = dynamic_tree.ROOT_NODE
+        tail = tail + 1
+    }
+    seed_count = 0
+    while head < tail && seed_count + (tail - head) + 3 < CROSS_SEED_COUNT {
+        a = queue[2 * (head & mask)]
+        b = queue[2 * (head & mask) + 1]
+        head = head + 1
+        if dynamic_tree.is_leaf(nodes_a[a].flag_index) || dynamic_tree.is_leaf(nodes_b[b].flag_index) {
+            seeds[2 * (seed_offset + seed_count)] = a
+            seeds[2 * (seed_offset + seed_count) + 1] = b
+            seed_count = seed_count + 1
+            continue
+        }
+        child_a = dynamic_tree.left_child(nodes_a[a].flag_index)
+        child_b = dynamic_tree.left_child(nodes_b[b].flag_index)
+        i = 0
+        while i < 4 {
+            ca = child_a + (i >> 1)
+            cb = child_b + (i & 1)
+            if test_pair(nodes_a[ca], nodes_b[cb]) {
+                queue[2 * (tail & mask)] = ca
+                queue[2 * (tail & mask) + 1] = cb
+                tail = tail + 1
+            }
+            i = i + 1
+        }
+    }
+    while head < tail {
+        seeds[2 * (seed_offset + seed_count)] = queue[2 * (head & mask)]
+        seeds[2 * (seed_offset + seed_count) + 1] = queue[2 * (head & mask) + 1]
+        seed_count = seed_count + 1
+        head = head + 1
+    }
+    return seed_count
+}
+
+// An in-place quicksort of longs, for the keys.
+sort_longs(keys: long[], count: int) {
+    if count < 2 { return }
+    quick_sort(keys, 0, count - 1)
+}
+
+quick_sort(keys: long[], low: int, high: int) {
+    while low < high {
+        if high - low < 16 {
+            i = low + 1
+            while i <= high {
+                v = keys[i]
+                j = i - 1
+                while j >= low && keys[j] > v {
+                    keys[j + 1] = keys[j]
+                    j = j - 1
+                }
+                keys[j + 1] = v
+                i = i + 1
+            }
+            return
+        }
+        mid = low + (high - low) / 2
+        pivot = keys[mid]
+        i = low
+        j = high
+        while i <= j {
+            while keys[i] < pivot { i = i + 1 }
+            while keys[j] > pivot { j = j - 1 }
+            if i <= j {
+                swap = keys[i]
+                keys[i] = keys[j]
+                keys[j] = swap
+                i = i + 1
+                j = j - 1
+            }
+        }
+        // The smaller side recurses, the larger loops: the stack stays logarithmic.
+        if j - low < high - i {
+            if low < j { quick_sort(keys, low, j) }
+            low = i
+        } else {
+            if i < high { quick_sort(keys, i, high) }
+            high = j
+        }
+    }
+}
+
+// The new pairs since the last update, as sorted keys in the broad
+// phase (read them with pair_key_count and pair_key; a key names two
+// shapes and a compound child). Nothing is found when nothing moved. The
+// static tree's moved flags are cleared, the dynamic and kinematic trees
+// rebuilt where stale. Returns how many keys.
+update_broad_phase_pairs(bp: *BroadPhase, visitors: PairVisitors, has_compounds: bool) -> int {
+    bp.pair_key_count = 0
+    static_tree = broad_phase_tree(bp, BODY_STATIC)
+    kinematic_tree = broad_phase_tree(bp, BODY_KINEMATIC)
+    dynamic_tree_ = broad_phase_tree(bp, BODY_DYNAMIC)
+    need_update = dynamic_tree.tree_has_moved(static_tree) || dynamic_tree.tree_needs_rebuild(kinematic_tree) ||
+                  dynamic_tree.tree_needs_rebuild(dynamic_tree_)
+    if need_update == false { return 0 }
+
+    // The dynamic tree's moved sibling pairs.
+    pair_capacity = math.max_int(dynamic_tree_.node_end / 2, 1)
+    if pair_capacity > bp.moved_capacity {
+        core.free_bytes(bp.moved_siblings, bp.moved_capacity * 4)
+        bp.moved_capacity = pair_capacity
+        bp.moved_siblings = core.alloc(pair_capacity * 4)
+    }
+    siblings = bp.moved_siblings as int[]
+    dynamic_move_count = gather_moved_siblings(dynamic_tree_, siblings)
+
+    // The seeds against the static and kinematic trees.
+    seeds = bp.seeds as int[]
+    static_seed_count = gather_cross_seeds(bp, dynamic_tree_, static_tree, seeds, 0)
+    kinematic_seed_count = gather_cross_seeds(bp, dynamic_tree_, kinematic_tree, seeds, static_seed_count)
+
+    ctx = PairContext { bp: bp, visitors: visitors, check_compounds: has_compounds, stack_count: 0 }
+    i = 0
+    while i < static_seed_count {
+        collide_cross_pairs(&ctx, dynamic_tree_, BODY_DYNAMIC, static_tree, BODY_STATIC, seeds[2 * i], seeds[2 * i + 1])
+        i = i + 1
+    }
+    ctx.check_compounds = false
+    i = 0
+    while i < kinematic_seed_count {
+        k = static_seed_count + i
+        collide_cross_pairs(&ctx, dynamic_tree_, BODY_DYNAMIC, kinematic_tree, BODY_KINEMATIC, seeds[2 * k], seeds[2 * k + 1])
+        i = i + 1
+    }
+    // The dynamic tree against itself.
+    i = 0
+    while i < dynamic_move_count {
+        collide_cross_pairs(&ctx, dynamic_tree_, BODY_DYNAMIC, dynamic_tree_, BODY_DYNAMIC, siblings[i], siblings[i] + 1)
+        i = i + 1
+    }
+    dynamic_tree.tree_clear_moved(static_tree)
+
+    // The stale trees, which the reference rebuilds beside the narrow phase.
+    dynamic_tree.tree_rebuild(dynamic_tree_, false)
+    dynamic_tree.tree_rebuild(kinematic_tree, false)
+
+    // Sorted, the contacts come out in an order the trees cannot change;
+    // a duplicate would be a bug in the walk, and is dropped.
+    keys = bp.pair_keys as long[]
+    sort_longs(keys, bp.pair_key_count)
+    kept = 0
+    i = 0
+    while i < bp.pair_key_count {
+        if i == 0 || keys[i] != keys[i - 1] {
+            keys[kept] = keys[i]
+            kept = kept + 1
+        }
+        i = i + 1
+    }
+    bp.pair_key_count = kept
+    return kept
+}
+
+validate_broad_phase(bp: *BroadPhase) -> bool {
+    return dynamic_tree.tree_validate(broad_phase_tree(bp, BODY_DYNAMIC)) && dynamic_tree.tree_validate(broad_phase_tree(bp, BODY_KINEMATIC))
+}
+
+validate_no_moved(bp: *BroadPhase) -> bool {
+    i = 0
+    while i < BODY_TYPE_COUNT {
+        if dynamic_tree.tree_validate_no_moved(broad_phase_tree(bp, i)) == false { return false }
+        i = i + 1
+    }
+    return true
+}
