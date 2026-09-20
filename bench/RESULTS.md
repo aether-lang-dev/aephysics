@@ -536,5 +536,4 @@ The compile is a third slower and the executable 1.7x larger. Turning
 every double into a float in the emitted C (an experiment, not a
 change) made the grid slower, 26 ms, so precision is not where the time
 goes at present. An emitter-side `static inline` for small leaf
-functions is asked of Aether in aether-lang-dev/aether (see the issue
-linked from the PR).
+functions is asked of Aether in aether-lang-dev/aether#2123.
