@@ -417,7 +417,7 @@ ints_reserve(a: *IntArray, capacity: int) {
 ints_push(a: *IntArray, value: int) {
     if a.count == a.capacity {
         grown = 8
-        if a.capacity > 0 { grown = a.capacity + a.capacity / 2 }
+        if a.capacity > 0 { grown = a.capacity + a.capacity / 2 + 1 }
         ints_reserve(a, grown)
     }
     data = a.data as int[]
@@ -498,7 +498,7 @@ buffer_reserve(b: *Buffer, capacity: int) {
 buffer_push(b: *Buffer) -> int {
     if b.count == b.capacity {
         grown = 8
-        if b.capacity > 0 { grown = b.capacity + b.capacity / 2 }
+        if b.capacity > 0 { grown = b.capacity + b.capacity / 2 + 1 }
         buffer_reserve(b, grown)
     }
     index = b.count

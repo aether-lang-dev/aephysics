@@ -19,11 +19,16 @@
 // the reference's without its prefix, in snake case: b3CreateBody is
 // create_body, b3Body_SetMassData is body_set_mass_data.
 //
-// This layer so far: worlds, bodies (creation, destruction, transforms,
-// velocities, mass data, extents, damping, sleep and enable flags),
-// shapes (creation of every kind, destruction, proxies), islands of one
-// body, solver sets for sleeping bodies, and the validation. Contacts,
-// joints and sensors are declared and come next.
+// This layer: worlds, bodies (creation, destruction, transforms,
+// velocities, mass data, extents, damping, sleep and enable flags, the
+// type changed, disabled and enabled), shapes (creation of every kind,
+// destruction, proxies), contacts (the pair filter, the narrow phase,
+// the touching state, the events), the constraint graph, islands, solver
+// sets (sleep, wake, merge), joints (the base of every kind, their
+// creation on two bodies with the edges, sets and islands, destruction,
+// the accessors, separations and reactions; the solving of the kinds
+// comes with joint_solver), sensors (their overlaps begin and end), and
+// the validation. Nothing here steps time.
 //
 // Differences: no hull database (a hull shape keeps the pointer it was
 // given; the owner keeps the hull alive), no name cache, no recording
@@ -93,7 +98,31 @@ exports (
     create_graph, destroy_graph, add_contact_to_graph, remove_contact_from_graph, add_joint_to_graph, remove_joint_from_graph,
     create_contact, destroy_contact, update_contact, contact_edge_next, invalidate_body_contacts,
     merge_islands, link_contact, unlink_contact, link_joint, unlink_joint, split_island, try_sleep_island,
-    update_pairs, collide, validate_contacts
+    update_pairs, collide, validate_contacts,
+    Softness, JointDef, DistanceJointDef, MotorJointDef, FilterJointDef, ParallelJointDef, PrismaticJointDef, RevoluteJointDef,
+    SphericalJointDef, WeldJointDef, WheelJointDef, JointId, JointPair, JointReaction,
+    DistanceJoint, MotorJoint, ParallelJoint, PrismaticJoint, RevoluteJoint, SphericalJoint, WeldJoint, WheelJoint,
+    JOINT_PARALLEL, JOINT_DISTANCE, JOINT_FILTER, JOINT_MOTOR, JOINT_PRISMATIC, JOINT_REVOLUTE, JOINT_SPHERICAL, JOINT_WELD, JOINT_WHEEL,
+    JOINT_DATA_BYTES,
+    make_soft, default_joint_def, default_parallel_joint_def, default_distance_joint_def, default_motor_joint_def,
+    default_filter_joint_def, default_prismatic_joint_def, default_revolute_joint_def, default_spherical_joint_def,
+    default_weld_joint_def, default_wheel_joint_def, null_joint_id,
+    distance_joint_of, motor_joint_of, parallel_joint_of, prismatic_joint_of, revolute_joint_of, spherical_joint_of, weld_joint_of, wheel_joint_of,
+    joint_is_valid, get_joint_full_id, make_joint_id, get_joint_sim, get_joint_sim_of_kind, joint_edge_next,
+    create_distance_joint, create_motor_joint, create_filter_joint, create_parallel_joint, create_prismatic_joint,
+    create_revolute_joint, create_spherical_joint, create_weld_joint, create_wheel_joint, destroy_joint, destroy_joint_internal,
+    joint_get_type, joint_get_body_a, joint_get_body_b, joint_get_world, joint_set_local_frame_a, joint_get_local_frame_a,
+    joint_set_local_frame_b, joint_get_local_frame_b, joint_set_user_data, joint_get_user_data, joint_set_collide_connected,
+    joint_get_collide_connected, joint_is_awake, joint_wake_bodies, joint_set_constraint_tuning, joint_get_constraint_hertz,
+    joint_get_constraint_damping_ratio, joint_set_force_threshold, joint_get_force_threshold, joint_set_torque_threshold,
+    joint_get_torque_threshold, get_joint_reaction, joint_get_linear_separation, joint_get_angular_separation,
+    should_bodies_collide, world_set_custom_filter, world_clear_custom_filter,
+    transfer_body, transfer_joint, merge_solver_sets, body_set_type, body_disable, body_enable, body_get_joint_count,
+    body_get_contact_capacity, body_get_joints, world_joint_count,
+    Sensor, SensorBeginTouchEvent, SensorEndTouchEvent, sensor_at, world_sensor_count,
+    world_sensor_begin_event_count, world_sensor_begin_event, world_sensor_end_event_count, world_sensor_end_event,
+    shape_enable_sensor_events, shape_are_sensor_events_enabled, shape_get_sensor_capacity, shape_get_sensor_data,
+    shape_get_contact_capacity, add_sensor_hit, overlap_sensors, validate_joints
 )
 
 extern memset(block: ptr, value: int, size: int) -> ptr
@@ -133,6 +162,17 @@ const SIM_ENABLE_PRE_SOLVE_EVENTS = 0x00200000
 const SIM_MESH_CONTACT = 0x00400000
 const RELATIVE_TRANSFORM_VALID = 0x00800000
 const ENABLE_SPECULATIVE_POINTS = 0x01000000
+// Joint kinds (b3JointType).
+const JOINT_PARALLEL = 0
+const JOINT_DISTANCE = 1
+const JOINT_FILTER = 2
+const JOINT_MOTOR = 3
+const JOINT_PRISMATIC = 4
+const JOINT_REVOLUTE = 5
+const JOINT_SPHERICAL = 6
+const JOINT_WELD = 7
+const JOINT_WHEEL = 8
+const JOINT_DATA_BYTES = 544   // JointSim.data: room for the largest kind's data (the spherical joint's 520)
 // The shape kinds (the shape module's, restated).
 const KIND_SPHERE = 0
 const KIND_CAPSULE = 1
@@ -466,22 +506,396 @@ struct JointEdge {
     next_key: int
 }
 
-// A joint's organisation (its kinds come with the joint layer).
+// A joint's organisation: where its sim lives, its edges on both bodies, its island.
 struct Joint {
     user_data: ptr
-    set_index: int
-    color_index: int
+    set_index: int                 // NULL_INDEX when the slot is free
+    color_index: int               // NULL_INDEX unless awake
     local_index: int
     edge_a: JointEdge
     edge_b: JointEdge
     joint_id: int
     island_id: int
     island_index: int
+    draw_scale: float
     kind: int
+    generation: int
+    collide_connected: bool
+}
+
+// A soft constraint's coefficients at a time step.
+struct Softness {
+    bias_rate: float
+    mass_scale: float
+    impulse_scale: float
+}
+
+struct JointId {
+    index1: int
+    world0: int
     generation: int
 }
 
-// A joint's simulation data (its kinds fill this in with the joint layer).
+// The base of every joint definition. The frames are local to the
+// bodies' origins, not their centres of mass, so a mass change or a
+// new shape does not break the joint.
+struct JointDef {
+    user_data: ptr
+    body_id_a: BodyId
+    body_id_b: BodyId
+    local_frame_a: Transform
+    local_frame_b: Transform
+    force_threshold: float         // for the joint events
+    torque_threshold: float
+    constraint_hertz: float        // advanced: the constraint's stiffness
+    constraint_damping_ratio: float
+    draw_scale: float
+    collide_connected: bool        // whether the attached bodies collide
+}
+
+// A segment between a point on each body: a rope or a spring.
+struct DistanceJointDef {
+    base: JointDef
+    length: float                  // the rest length, clamped to a stable minimum
+    enable_spring: bool            // a spring instead of a rigid rod (the limit and motor need it)
+    lower_spring_force: float      // the tension it sustains
+    upper_spring_force: float      // the compression
+    hertz: float
+    damping_ratio: float
+    enable_limit: bool
+    min_length: float
+    max_length: float
+    enable_motor: bool
+    max_motor_force: float
+    motor_speed: float
+}
+
+// The relative position and velocity of two bodies driven.
+struct MotorJointDef {
+    base: JointDef
+    linear_velocity: Vec3
+    max_velocity_force: float
+    angular_velocity: Vec3
+    max_velocity_torque: float
+    linear_hertz: float            // the position spring
+    linear_damping_ratio: float
+    max_spring_force: float
+    angular_hertz: float
+    angular_damping_ratio: float
+    max_spring_torque: float
+}
+
+// Collision between two bodies disabled, nothing else.
+struct FilterJointDef {
+    base: JointDef
+}
+
+// The z axes of the two frames kept aligned by a spring (a body kept upright).
+struct ParallelJointDef {
+    base: JointDef
+    hertz: float
+    damping_ratio: float
+    max_torque: float
+}
+
+// Body B slides along frame A's x axis, without rotating relative to A.
+struct PrismaticJointDef {
+    base: JointDef
+    enable_spring: bool
+    hertz: float
+    damping_ratio: float
+    target_translation: float
+    enable_limit: bool
+    lower_translation: float
+    upper_translation: float
+    enable_motor: bool
+    max_motor_force: float
+    motor_speed: float
+}
+
+// A point on B fixed to a point on A, rotation about the z axis.
+struct RevoluteJointDef {
+    base: JointDef
+    target_angle: float            // B's angle minus A's in the reference state
+    enable_spring: bool
+    hertz: float
+    damping_ratio: float
+    enable_limit: bool
+    lower_angle: float             // at least -0.99 pi
+    upper_angle: float             // at most 0.99 pi
+    enable_motor: bool
+    max_motor_torque: float
+    motor_speed: float
+}
+
+// A point on B fixed to a point on A, free rotation about it, a cone and a twist limit.
+struct SphericalJointDef {
+    base: JointDef
+    enable_spring: bool
+    hertz: float
+    damping_ratio: float
+    target_rotation: Quat          // frame B relative to frame A
+    enable_cone_limit: bool        // the cone about frame A's z axis
+    cone_angle: float
+    enable_twist_limit: bool       // the twist about frame B's z axis
+    lower_twist_angle: float
+    upper_twist_angle: float
+    enable_motor: bool
+    max_motor_torque: float
+    motor_velocity: Vec3           // angular velocity of B relative to A, in world space
+}
+
+// Two bodies held together, with springs for softness.
+struct WeldJointDef {
+    base: JointDef
+    linear_hertz: float            // zero for the stiffest
+    angular_hertz: float
+    linear_damping_ratio: float
+    angular_damping_ratio: float
+}
+
+// A is the chassis, B the wheel: it spins about frame B's z axis,
+// travels along frame A's x axis, and may steer about that axis.
+struct WheelJointDef {
+    base: JointDef
+    enable_suspension_spring: bool
+    suspension_hertz: float
+    suspension_damping_ratio: float
+    enable_suspension_limit: bool
+    lower_suspension_limit: float
+    upper_suspension_limit: float
+    enable_spin_motor: bool
+    max_spin_torque: float
+    spin_speed: float
+    enable_steering: bool
+    steering_hertz: float
+    steering_damping_ratio: float
+    target_steering_angle: float
+    max_steering_torque: float
+    enable_steering_limit: bool
+    lower_steering_limit: float
+    upper_steering_limit: float
+}
+
+// The kinds' data, each laid over JointSim.data.
+struct DistanceJoint {
+    length: float
+    hertz: float
+    damping_ratio: float
+    lower_spring_force: float
+    upper_spring_force: float
+    min_length: float
+    max_length: float
+    max_motor_force: float
+    motor_speed: float
+    impulse: float
+    lower_impulse: float
+    upper_impulse: float
+    motor_impulse: float
+    index_a: int
+    index_b: int
+    anchor_a: Vec3
+    anchor_b: Vec3
+    delta_center: Vec3
+    distance_softness: Softness
+    axial_mass: float
+    enable_spring: bool
+    enable_limit: bool
+    enable_motor: bool
+}
+
+struct MotorJoint {
+    linear_velocity: Vec3
+    angular_velocity: Vec3
+    max_velocity_force: float
+    max_velocity_torque: float
+    linear_hertz: float
+    linear_damping_ratio: float
+    max_spring_force: float
+    angular_hertz: float
+    angular_damping_ratio: float
+    max_spring_torque: float
+    linear_velocity_impulse: Vec3
+    angular_velocity_impulse: Vec3
+    linear_spring_impulse: Vec3
+    angular_spring_impulse: Vec3
+    linear_spring: Softness
+    angular_spring: Softness
+    index_a: int
+    index_b: int
+    frame_a: Transform
+    frame_b: Transform
+    delta_center: Vec3
+    angular_mass: Matrix3
+}
+
+struct ParallelJoint {
+    hertz: float
+    damping_ratio: float
+    max_torque: float
+    perp_impulse: Vec2
+    perp_axis_x: Vec3
+    perp_axis_y: Vec3
+    quat_a: Quat
+    quat_b: Quat
+    index_a: int
+    index_b: int
+    softness: Softness
+}
+
+struct PrismaticJoint {
+    perp_impulse: Vec2
+    angular_impulse: Vec3
+    spring_impulse: float
+    motor_impulse: float
+    lower_impulse: float
+    upper_impulse: float
+    hertz: float
+    damping_ratio: float
+    max_motor_force: float
+    motor_speed: float
+    target_translation: float
+    lower_translation: float
+    upper_translation: float
+    index_a: int
+    index_b: int
+    frame_a: Transform
+    frame_b: Transform
+    joint_axis: Vec3
+    perp_axis_y: Vec3
+    perp_axis_z: Vec3
+    delta_center: Vec3
+    delta_angle: float
+    rotation_mass: Matrix3
+    spring_softness: Softness
+    enable_spring: bool
+    enable_limit: bool
+    enable_motor: bool
+}
+
+struct RevoluteJoint {
+    linear_impulse: Vec3
+    perp_impulse: Vec2
+    spring_impulse: float
+    motor_impulse: float
+    lower_impulse: float
+    upper_impulse: float
+    hertz: float
+    damping_ratio: float
+    max_motor_torque: float
+    motor_speed: float
+    target_angle: float
+    lower_angle: float
+    upper_angle: float
+    index_a: int
+    index_b: int
+    frame_a: Transform
+    frame_b: Transform
+    rotation_axis_z: Vec3
+    perp_axis_x: Vec3
+    perp_axis_y: Vec3
+    delta_center: Vec3
+    delta_angle: float
+    axial_mass: float
+    spring_softness: Softness
+    enable_spring: bool
+    enable_motor: bool
+    enable_limit: bool
+}
+
+struct SphericalJoint {
+    linear_impulse: Vec3
+    spring_impulse: Vec3
+    motor_impulse: Vec3
+    lower_twist_impulse: float
+    upper_twist_impulse: float
+    swing_impulse: float
+    hertz: float
+    damping_ratio: float
+    max_motor_torque: float
+    motor_velocity: Vec3
+    lower_twist_angle: float
+    upper_twist_angle: float
+    cone_angle: float
+    target_rotation: Quat
+    index_a: int
+    index_b: int
+    frame_a: Transform
+    frame_b: Transform
+    delta_center: Vec3
+    swing_axis: Vec3
+    twist_jacobian: Vec3
+    rotation_mass: Matrix3
+    swing_mass: float
+    twist_mass: float
+    spring_softness: Softness
+    enable_spring: bool
+    enable_motor: bool
+    enable_cone_limit: bool
+    enable_twist_limit: bool
+}
+
+struct WeldJoint {
+    linear_hertz: float
+    linear_damping_ratio: float
+    angular_hertz: float
+    angular_damping_ratio: float
+    linear_spring: Softness
+    angular_spring: Softness
+    linear_impulse: Vec3
+    angular_impulse: Vec3
+    index_a: int
+    index_b: int
+    frame_a: Transform
+    frame_b: Transform
+    delta_center: Vec3
+    angular_mass: Matrix3
+}
+
+struct WheelJoint {
+    linear_impulse: Vec2
+    angular_impulse: Vec2
+    spin_impulse: float
+    max_spin_torque: float
+    spin_speed: float
+    suspension_spring_impulse: float
+    lower_suspension_impulse: float
+    upper_suspension_impulse: float
+    lower_suspension_limit: float
+    upper_suspension_limit: float
+    suspension_hertz: float
+    suspension_damping_ratio: float
+    steering_spring_impulse: float
+    lower_steering_impulse: float
+    upper_steering_impulse: float
+    lower_steering_limit: float
+    upper_steering_limit: float
+    target_steering_angle: float
+    max_steering_torque: float
+    steering_hertz: float
+    steering_damping_ratio: float
+    index_a: int
+    index_b: int
+    frame_a: Transform
+    frame_b: Transform
+    delta_center: Vec3
+    spin_mass: float
+    suspension_mass: float
+    steering_mass: float
+    suspension_softness: Softness
+    steering_softness: Softness
+    enable_spin_motor: bool
+    enable_suspension_spring: bool
+    enable_suspension_limit: bool
+    enable_steering: bool
+    enable_steering_limit: bool
+    enable_steering_motor: bool
+}
+
+// A joint's simulation data: the frames, the bodies' inverse masses
+// (filled by the solver's prepare), the constraint's softness, the
+// thresholds, and the kind's data in the block at the end (the
+// reference's union: read through distance_joint_of and its siblings).
 struct JointSim {
     joint_id: int
     kind: int
@@ -489,6 +903,47 @@ struct JointSim {
     body_id_b: int
     local_frame_a: Transform
     local_frame_b: Transform
+    inv_mass_a: float
+    inv_mass_b: float
+    inv_inertia_a: Matrix3
+    inv_inertia_b: Matrix3
+    constraint_hertz: float
+    constraint_damping_ratio: float
+    constraint_softness: Softness
+    force_threshold: float
+    torque_threshold: float
+    fixed_rotation: bool
+    data: long[68]                 // JOINT_DATA_BYTES
+}
+
+struct JointPair {
+    joint: *Joint
+    sim: *JointSim
+}
+
+struct JointReaction {
+    force: float
+    torque: float
+}
+
+// A sensor shape's overlaps: the visitors it found last pass and the
+// pass before (keys of shape id and generation, sorted), and the hits
+// the continuous pass reports between passes.
+struct Sensor {
+    hits: Buffer                   // long
+    overlaps1: Buffer              // long
+    overlaps2: Buffer              // long
+    shape_id: int
+}
+
+struct SensorBeginTouchEvent {
+    sensor_shape_id: ShapeId
+    visitor_shape_id: ShapeId
+}
+
+struct SensorEndTouchEvent {
+    sensor_shape_id: ShapeId
+    visitor_shape_id: ShapeId
 }
 
 // One colour of the constraint graph: no two constraints in it share a
@@ -566,6 +1021,14 @@ struct World {
     islands: Buffer                // Island
     shape_id_pool: IdPool
     shapes: Buffer                 // WorldShape
+    sensors: Buffer                // Sensor
+    sensor_begin_events: Buffer    // SensorBeginTouchEvent
+    sensor_end_events0: Buffer     // SensorEndTouchEvent, double buffered with the contacts' index
+    sensor_end_events1: Buffer
+    sensor_event_bits: BitSet      // the sensors whose overlaps changed this pass
+    custom_filter: fn(ShapeId, ShapeId, ptr) -> bool
+    custom_filter_context: ptr
+    has_custom_filter: bool
     compound_shape_count: int
     step_index: long
     split_island_id: int
@@ -636,7 +1099,7 @@ get_world_from_id(id: WorldId) -> *World {
 
 empty_solver_set() -> SolverSet {
     return SolverSet { body_sims: core.buffer_create(sizeof(BodySim), 0), body_states: core.buffer_create(sizeof(BodyState), 0),
-                       joint_sims: core.buffer_create(8, 0), contact_indices: core.ints_create(0),
+                       joint_sims: core.buffer_create(sizeof(JointSim), 0), contact_indices: core.ints_create(0),
                        island_sims: core.buffer_create(sizeof(IslandSim), 0), set_index: NULL_INDEX }
 }
 
@@ -707,6 +1170,12 @@ create_world(def: *WorldDef) -> WorldId {
     core.buffer_reserve(&solver_set_at(w, awake_set).body_states, math.max_int(16, def.dynamic_body_count))
     w.shape_id_pool = core.idpool_create()
     w.shapes = core.buffer_create(sizeof(WorldShape), math.max_int(16, def.static_shape_count + def.dynamic_shape_count))
+    w.sensors = core.buffer_create(sizeof(Sensor), 0)
+    w.sensor_begin_events = core.buffer_create(sizeof(SensorBeginTouchEvent), 4)
+    w.sensor_end_events0 = core.buffer_create(sizeof(SensorEndTouchEvent), 4)
+    w.sensor_end_events1 = core.buffer_create(sizeof(SensorEndTouchEvent), 4)
+    w.sensor_event_bits = core.bitset_create(64)
+    w.has_custom_filter = false
     w.contact_id_pool = core.idpool_create()
     w.contacts = core.buffer_create(sizeof(Contact), math.max_int(16, def.contact_count))
     w.joint_id_pool = core.idpool_create()
@@ -738,7 +1207,7 @@ create_world(def: *WorldDef) -> WorldId {
 destroy_world(id: WorldId) {
     if world_is_valid(id) == false { return }
     w = get_world_from_id(id)
-    // The shapes' materials and the contacts' caches.
+    // The shapes' materials, the sensors' lists and the contacts' caches.
     i = 0
     while i < w.shapes.count {
         s = world_shape_at(w, i)
@@ -748,6 +1217,19 @@ destroy_world(id: WorldId) {
         }
         i = i + 1
     }
+    i = 0
+    while i < w.sensors.count {
+        sensor = sensor_at(w, i)
+        core.buffer_destroy(&sensor.hits)
+        core.buffer_destroy(&sensor.overlaps1)
+        core.buffer_destroy(&sensor.overlaps2)
+        i = i + 1
+    }
+    core.buffer_destroy(&w.sensors)
+    core.buffer_destroy(&w.sensor_begin_events)
+    core.buffer_destroy(&w.sensor_end_events0)
+    core.buffer_destroy(&w.sensor_end_events1)
+    core.bitset_destroy(&w.sensor_event_bits)
     i = 0
     while i < w.contacts.count {
         c = contact_at(w, i)
@@ -1018,7 +1500,7 @@ create_body(world_id: WorldId, def: *BodyDef) -> BodyId {
 
 is_body_awake(w: *World, body: *Body) -> bool { return body.set_index == AWAKE_SET }
 
-// A sleeping body's whole set wakes (the contacts and joints follow with their layers).
+// A sleeping body's whole set wakes.
 wake_body(w: *World, body: *Body) -> bool {
     if body.set_index >= FIRST_SLEEPING_SET {
         wake_solver_set(w, body.set_index)
@@ -1027,20 +1509,27 @@ wake_body(w: *World, body: *Body) -> bool {
     return false
 }
 
-// The body's joints and contacts (with their layers), its shapes and their
-// proxies, its island, its sim and state, then its id (the generation stays).
+// The body's joints and contacts, its shapes (their sensors and
+// proxies), its island, its sim and state, then its id (the generation stays).
 destroy_body(id: BodyId) {
     if body_is_valid(id) == false { return }
     w = world_at(id.world0)
     if w.locked { return }
     w.locked = true
     body = body_at(w, id.index1 - 1)
-    // Bodies attached through contacts wake, even when this one is static.
+    // Bodies attached through joints or contacts wake, even when this one is static.
+    key = body.head_joint_key
+    while key != NULL_INDEX {
+        j = joint_at(w, key >> 1)
+        key = joint_edge_next(w, key)
+        destroy_joint_internal(w, j, true)
+    }
     destroy_body_contacts(w, body, true)
     shape_id = body.head_shape_id
     while shape_id != NULL_INDEX {
         s = world_shape_at(w, shape_id)
         if s.geometry.kind == KIND_COMPOUND { w.compound_shape_count = w.compound_shape_count - 1 }
+        if s.sensor_index != NULL_INDEX { destroy_sensor(w, s) }
         if s.proxy_key != NULL_INDEX {
             broad_phase.broad_phase_destroy_proxy(&w.broad_phase, s.proxy_key)
             s.proxy_key = NULL_INDEX
@@ -1187,7 +1676,7 @@ create_shape(body_id: BodyId, def: *ShapeDef, geometry: Shape) -> ShapeId {
     s.next_shape_id = body.head_shape_id
     body.head_shape_id = shape_id
     body.shape_count = body.shape_count + 1
-    if def.is_sensor { s.sensor_index = 0 }   // the sensor layer gives it a sensor
+    if def.is_sensor { create_sensor(w, s) }
 
     if def.update_body_mass {
         update_body_mass_data(w, body)
@@ -1239,6 +1728,7 @@ destroy_shape(id: ShapeId, update_body_mass: bool) {
     if body.head_shape_id == s.id { body.head_shape_id = s.next_shape_id }
     body.shape_count = body.shape_count - 1
     if s.geometry.kind == KIND_COMPOUND { w.compound_shape_count = w.compound_shape_count - 1 }
+    if s.sensor_index != NULL_INDEX { destroy_sensor(w, s) }
     if s.proxy_key != NULL_INDEX {
         broad_phase.broad_phase_destroy_proxy(&w.broad_phase, s.proxy_key)
         s.proxy_key = NULL_INDEX
@@ -2876,7 +3366,7 @@ wake_solver_set(w: *World, set_index: int) {
     destroy_solver_set(w, set_index)
 }
 
-// A joint sim into a colour of the graph (the joint layer fills the sims).
+// A joint sim copied into a colour of the graph.
 add_joint_to_graph(w: *World, sim: *JointSim, j: *Joint) {
     body_a = body_at(w, j.edge_a.body_id)
     body_b = body_at(w, j.edge_b.body_id)
@@ -3016,7 +3506,7 @@ try_sleep_island(w: *World, island_id: int) -> bool {
 // --- the pair filter and the collide pass ----------------------------------------------------------------------
 
 // Whether two shapes may collide: not on one body, no sensors, the
-// filters (a joint's collide-connected flag comes with the joint layer).
+// filters, no joint forbidding it, the world's custom filter.
 should_pair(shape_id_a: int, shape_id_b: int, context: ptr) -> bool {
     w = context as *World
     shape_a = world_shape_at(w, shape_id_a)
@@ -3024,6 +3514,11 @@ should_pair(shape_id_a: int, shape_id_b: int, context: ptr) -> bool {
     if shape_a.body_id == shape_b.body_id { return false }
     if shape_a.sensor_index != NULL_INDEX || shape_b.sensor_index != NULL_INDEX { return false }
     if shape.should_shapes_collide(shape_a.filter, shape_b.filter) == false { return false }
+    if should_bodies_collide(w, body_at(w, shape_a.body_id), body_at(w, shape_b.body_id)) == false { return false }
+    if w.has_custom_filter && ((shape_a.flags & SHAPE_ENABLE_CUSTOM_FILTERING) != 0 || (shape_b.flags & SHAPE_ENABLE_CUSTOM_FILTERING) != 0) {
+        filter = w.custom_filter
+        if filter(make_shape_id(w, shape_a), make_shape_id(w, shape_b), w.custom_filter_context) == false { return false }
+    }
     return true
 }
 
@@ -3277,6 +3772,7 @@ collide(w: *World) -> int {
 swap_end_events(w: *World) {
     w.end_event_index = 1 - w.end_event_index
     core.buffer_clear(end_events(w))
+    core.buffer_clear(sensor_end_events(w))
 }
 
 // --- contact validation --------------------------------------------------------------------------------------
@@ -3342,6 +3838,1484 @@ validate_contacts(w: *World) -> bool {
                 key = contact_edge_next(w, key)
             }
             if count != body.contact_count { return false }
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// --- joints -----------------------------------------------------------------------------------------------
+
+// The softness of a spring at a time step (b3MakeSoft): the bias rate,
+// the mass scale and the impulse scale, the last two summing to one.
+make_soft(hertz: float, zeta: float, h: float) -> Softness {
+    if hertz == 0.0 { return Softness { bias_rate: 0.0, mass_scale: 0.0, impulse_scale: 0.0 } }
+    omega = 2.0 * math.PI * hertz
+    a1 = 2.0 * zeta + h * omega
+    a2 = h * omega * a1
+    a3 = 1.0 / (1.0 + a2)
+    return Softness { bias_rate: omega / a1, mass_scale: a2 * a3, impulse_scale: a3 }
+}
+
+default_joint_def() -> JointDef {
+    max = math.MAX_FLOAT
+    return JointDef { user_data: null, body_id_a: null_body_id(), body_id_b: null_body_id(),
+                      local_frame_a: math.transform_identity(), local_frame_b: math.transform_identity(),
+                      force_threshold: max, torque_threshold: max, constraint_hertz: 60.0, constraint_damping_ratio: 2.0,
+                      draw_scale: 1.0, collide_connected: false }
+}
+
+default_parallel_joint_def() -> ParallelJointDef {
+    max = math.MAX_FLOAT
+    return ParallelJointDef { base: default_joint_def(), hertz: 1.0, damping_ratio: 1.0, max_torque: max }
+}
+
+default_distance_joint_def() -> DistanceJointDef {
+    max = math.MAX_FLOAT
+    huge = math.HUGE
+    return DistanceJointDef { base: default_joint_def(), length: 1.0, enable_spring: false, lower_spring_force: 0.0 - max,
+                              upper_spring_force: max, hertz: 0.0, damping_ratio: 0.0, enable_limit: false, min_length: 0.0,
+                              max_length: huge, enable_motor: false, max_motor_force: 0.0, motor_speed: 0.0 }
+}
+
+default_motor_joint_def() -> MotorJointDef {
+    return MotorJointDef { base: default_joint_def(), linear_velocity: math.vec3_zero(), max_velocity_force: 0.0,
+                           angular_velocity: math.vec3_zero(), max_velocity_torque: 0.0, linear_hertz: 0.0, linear_damping_ratio: 0.0,
+                           max_spring_force: 0.0, angular_hertz: 0.0, angular_damping_ratio: 0.0, max_spring_torque: 0.0 }
+}
+
+default_filter_joint_def() -> FilterJointDef { return FilterJointDef { base: default_joint_def() } }
+
+default_prismatic_joint_def() -> PrismaticJointDef {
+    return PrismaticJointDef { base: default_joint_def(), enable_spring: false, hertz: 0.0, damping_ratio: 0.0, target_translation: 0.0,
+                               enable_limit: false, lower_translation: 0.0, upper_translation: 0.0, enable_motor: false,
+                               max_motor_force: 0.0, motor_speed: 0.0 }
+}
+
+default_revolute_joint_def() -> RevoluteJointDef {
+    return RevoluteJointDef { base: default_joint_def(), target_angle: 0.0, enable_spring: false, hertz: 0.0, damping_ratio: 0.0,
+                              enable_limit: false, lower_angle: 0.0, upper_angle: 0.0, enable_motor: false, max_motor_torque: 0.0,
+                              motor_speed: 0.0 }
+}
+
+default_spherical_joint_def() -> SphericalJointDef {
+    return SphericalJointDef { base: default_joint_def(), enable_spring: false, hertz: 0.0, damping_ratio: 0.0,
+                               target_rotation: math.quat_identity(), enable_cone_limit: false, cone_angle: 0.0,
+                               enable_twist_limit: false, lower_twist_angle: 0.0, upper_twist_angle: 0.0, enable_motor: false,
+                               max_motor_torque: 0.0, motor_velocity: math.vec3_zero() }
+}
+
+default_weld_joint_def() -> WeldJointDef {
+    return WeldJointDef { base: default_joint_def(), linear_hertz: 0.0, angular_hertz: 0.0, linear_damping_ratio: 0.0, angular_damping_ratio: 0.0 }
+}
+
+default_wheel_joint_def() -> WheelJointDef {
+    return WheelJointDef { base: default_joint_def(), enable_suspension_spring: true, suspension_hertz: 1.0, suspension_damping_ratio: 0.7,
+                           enable_suspension_limit: false, lower_suspension_limit: 0.0, upper_suspension_limit: 0.0,
+                           enable_spin_motor: false, max_spin_torque: 0.0, spin_speed: 0.0, enable_steering: false, steering_hertz: 1.0,
+                           steering_damping_ratio: 0.7, target_steering_angle: 0.0, max_steering_torque: 0.0, enable_steering_limit: false,
+                           lower_steering_limit: 0.0, upper_steering_limit: 0.0 }
+}
+
+null_joint_id() -> JointId { return JointId { index1: 0, world0: 0, generation: 0 } }
+
+// The kind's data inside a sim.
+distance_joint_of(sim: *JointSim) -> *DistanceJoint { return (&sim.data) as *DistanceJoint }
+motor_joint_of(sim: *JointSim) -> *MotorJoint { return (&sim.data) as *MotorJoint }
+parallel_joint_of(sim: *JointSim) -> *ParallelJoint { return (&sim.data) as *ParallelJoint }
+prismatic_joint_of(sim: *JointSim) -> *PrismaticJoint { return (&sim.data) as *PrismaticJoint }
+revolute_joint_of(sim: *JointSim) -> *RevoluteJoint { return (&sim.data) as *RevoluteJoint }
+spherical_joint_of(sim: *JointSim) -> *SphericalJoint { return (&sim.data) as *SphericalJoint }
+weld_joint_of(sim: *JointSim) -> *WeldJoint { return (&sim.data) as *WeldJoint }
+wheel_joint_of(sim: *JointSim) -> *WheelJoint { return (&sim.data) as *WheelJoint }
+
+joint_is_valid(id: JointId) -> bool {
+    if id.world0 < 0 || id.world0 >= MAX_WORLDS { return false }
+    worlds_ready()
+    w = world_at(id.world0)
+    if w.in_use == false { return false }
+    if id.index1 < 1 || id.index1 > w.joints.count { return false }
+    j = joint_at(w, id.index1 - 1)
+    if j.joint_id == NULL_INDEX { return false }
+    return j.generation == id.generation
+}
+
+get_joint_full_id(w: *World, id: JointId) -> *Joint { return joint_at(w, id.index1 - 1) }
+make_joint_id(w: *World, j: *Joint) -> JointId { return JointId { index1: j.joint_id + 1, world0: w.world_id, generation: j.generation } }
+
+// The joint's sim: in its colour of the graph when awake, in its set otherwise.
+get_joint_sim(w: *World, j: *Joint) -> *JointSim {
+    if j.set_index == AWAKE_SET { return joint_sim_at(&graph_color(w, j.color_index).joint_sims, j.local_index) }
+    return joint_sim_at(&solver_set_at(w, j.set_index).joint_sims, j.local_index)
+}
+
+// The sim of a joint id, when it is of the kind (null otherwise).
+get_joint_sim_of_kind(id: JointId, kind: int) -> *JointSim {
+    if joint_is_valid(id) == false { return null }
+    w = world_at(id.world0)
+    j = get_joint_full_id(w, id)
+    if j.kind != kind { return null }
+    return get_joint_sim(w, j)
+}
+
+// Every contact between two bodies destroyed (a joint that forbids their
+// collision); walks the shorter list, and wakes nobody.
+destroy_contacts_between_bodies(w: *World, body_a: *Body, body_b: *Body) {
+    key = body_a.head_contact_key
+    other_id = body_b.id
+    if body_b.contact_count < body_a.contact_count {
+        key = body_b.head_contact_key
+        other_id = body_a.id
+    }
+    while key != NULL_INDEX {
+        c = contact_at(w, key >> 1)
+        edge_index = key & 1
+        key = contact_edge_next(w, key)
+        other = c.edge_b.body_id
+        if edge_index == 1 { other = c.edge_a.body_id }
+        if other == other_id { destroy_contact(w, c, false) }
+    }
+}
+
+// A joint sim zeroed in a colour of the graph; its index in the joint.
+create_joint_in_graph(w: *World, j: *Joint) -> *JointSim {
+    body_a = body_at(w, j.edge_a.body_id)
+    body_b = body_at(w, j.edge_b.body_id)
+    color_index = assign_color(&w.constraint_graph, body_a.id, body_b.id, body_a.kind, body_b.kind)
+    color = graph_color(w, color_index)
+    index = core.buffer_push(&color.joint_sims)
+    sim = joint_sim_at(&color.joint_sims, index)
+    memset(sim as ptr, 0, sizeof(JointSim))
+    j.color_index = color_index
+    j.local_index = index
+    return sim
+}
+
+// A zeroed joint sim at the end of a set's; its index in the joint.
+create_joint_in_set(w: *World, set_index: int, j: *Joint) -> *JointSim {
+    set = solver_set_at(w, set_index)
+    j.set_index = set_index
+    j.local_index = set.joint_sims.count
+    index = core.buffer_push(&set.joint_sims)
+    sim = joint_sim_at(&set.joint_sims, index)
+    memset(sim as ptr, 0, sizeof(JointSim))
+    return sim
+}
+
+// The base of every joint (b3CreateJoint): the contacts between the
+// bodies destroyed unless they may collide, the joint's slot and edges on
+// both bodies, its sim in the disabled set when a body is disabled, the
+// static set when neither is dynamic, the graph when either is awake
+// (the other's set woken), else the sleeping set (two sleeping sets
+// merged); then the island link. The world's lock is the caller's.
+create_joint(w: *World, def: *JointDef, kind: int) -> JointPair {
+    body_a = get_body_full_id(w, def.body_id_a)
+    body_b = get_body_full_id(w, def.body_id_b)
+    if def.collide_connected == false { destroy_contacts_between_bodies(w, body_a, body_b) }
+    body_id_a = body_a.id
+    body_id_b = body_b.id
+    max_set_index = math.max_int(body_a.set_index, body_b.set_index)
+    joint_id = core.idpool_alloc(&w.joint_id_pool)
+    if joint_id == w.joints.count {
+        index = core.buffer_push(&w.joints)
+        fresh = joint_at(w, index)
+        memset(fresh as ptr, 0, sizeof(Joint))
+    }
+    j = joint_at(w, joint_id)
+    j.joint_id = joint_id
+    j.user_data = def.user_data
+    j.generation = j.generation + 1
+    j.set_index = NULL_INDEX
+    j.color_index = NULL_INDEX
+    j.local_index = NULL_INDEX
+    j.island_id = NULL_INDEX
+    j.island_index = NULL_INDEX
+    j.draw_scale = def.draw_scale
+    j.kind = kind
+    j.collide_connected = def.collide_connected
+    // The doubly linked list on body A.
+    j.edge_a.body_id = body_id_a
+    j.edge_a.prev_key = NULL_INDEX
+    j.edge_a.next_key = body_a.head_joint_key
+    key_a = (joint_id << 1) | 0
+    if body_a.head_joint_key != NULL_INDEX { set_joint_edge_prev(w, body_a.head_joint_key, key_a) }
+    body_a.head_joint_key = key_a
+    body_a.joint_count = body_a.joint_count + 1
+    // And on body B.
+    j.edge_b.body_id = body_id_b
+    j.edge_b.prev_key = NULL_INDEX
+    j.edge_b.next_key = body_b.head_joint_key
+    key_b = (joint_id << 1) | 1
+    if body_b.head_joint_key != NULL_INDEX { set_joint_edge_prev(w, body_b.head_joint_key, key_b) }
+    body_b.head_joint_key = key_b
+    body_b.joint_count = body_b.joint_count + 1
+
+    sim = null as *JointSim
+    if body_a.set_index == DISABLED_SET || body_b.set_index == DISABLED_SET {
+        sim = create_joint_in_set(w, DISABLED_SET, j)
+    } else if body_a.kind != BODY_DYNAMIC && body_b.kind != BODY_DYNAMIC {
+        sim = create_joint_in_set(w, STATIC_SET, j)
+    } else if body_a.set_index == AWAKE_SET || body_b.set_index == AWAKE_SET {
+        if max_set_index >= FIRST_SLEEPING_SET { wake_solver_set(w, max_set_index) }
+        j.set_index = AWAKE_SET
+        sim = create_joint_in_graph(w, j)
+    } else {
+        // Between sleeping and/or static bodies: the sleeping set, two of them merged.
+        sim = create_joint_in_set(w, max_set_index, j)
+        if body_a.set_index != body_b.set_index && body_a.set_index >= FIRST_SLEEPING_SET && body_b.set_index >= FIRST_SLEEPING_SET {
+            merge_solver_sets(w, body_a.set_index, body_b.set_index)
+            // The merge moved the sim.
+            sim = joint_sim_at(&solver_set_at(w, body_a.set_index).joint_sims, j.local_index)
+        }
+    }
+    sim.joint_id = joint_id
+    sim.body_id_a = body_id_a
+    sim.body_id_b = body_id_b
+    sim.local_frame_a = def.local_frame_a
+    sim.local_frame_b = def.local_frame_b
+    sim.kind = kind
+    sim.constraint_hertz = def.constraint_hertz
+    sim.constraint_damping_ratio = def.constraint_damping_ratio
+    sim.constraint_softness = Softness { bias_rate: 0.0, mass_scale: 1.0, impulse_scale: 0.0 }
+    sim.force_threshold = def.force_threshold
+    sim.torque_threshold = def.torque_threshold
+    if j.set_index > DISABLED_SET { link_joint(w, j) }
+    return JointPair { joint: j, sim: sim }
+}
+
+set_joint_edge_prev(w: *World, key: int, prev: int) {
+    j = joint_at(w, key >> 1)
+    if (key & 1) == 0 { j.edge_a.prev_key = prev } else { j.edge_b.prev_key = prev }
+}
+
+set_joint_edge_next(w: *World, key: int, next: int) {
+    j = joint_at(w, key >> 1)
+    if (key & 1) == 0 { j.edge_a.next_key = next } else { j.edge_b.next_key = next }
+}
+
+joint_edge_next(w: *World, key: int) -> int {
+    j = joint_at(w, key >> 1)
+    if (key & 1) == 0 { return j.edge_a.next_key }
+    return j.edge_b.next_key
+}
+
+joint_edge_prev(w: *World, key: int) -> int {
+    j = joint_at(w, key >> 1)
+    if (key & 1) == 0 { return j.edge_a.prev_key }
+    return j.edge_b.prev_key
+}
+
+// The world of a joint definition, unlocked; null when it is not usable.
+joint_world(world_id: WorldId, def: *JointDef) -> *World {
+    if world_is_valid(world_id) == false { return null }
+    w = get_world_from_id(world_id)
+    if w.locked { return null }
+    if body_is_valid(def.body_id_a) == false || body_is_valid(def.body_id_b) == false { return null }
+    if def.body_id_a.world0 != w.world_id || def.body_id_b.world0 != w.world_id { return null }
+    if def.body_id_a.index1 == def.body_id_b.index1 { return null }
+    if math.is_valid_transform(def.local_frame_a) == false || math.is_valid_transform(def.local_frame_b) == false { return null }
+    return w
+}
+
+create_distance_joint(world_id: WorldId, def: *DistanceJointDef) -> JointId {
+    w = joint_world(world_id, &def.base)
+    if w == null { return null_joint_id() }
+    if def.length <= 0.0 || def.lower_spring_force > def.upper_spring_force { return null_joint_id() }
+    w.locked = true
+    pair = create_joint(w, &def.base, JOINT_DISTANCE)
+    d = distance_joint_of(pair.sim)
+    d.length = math.max_float(def.length, math.LINEAR_SLOP)
+    d.hertz = def.hertz
+    d.damping_ratio = def.damping_ratio
+    d.lower_spring_force = def.lower_spring_force
+    d.upper_spring_force = def.upper_spring_force
+    d.min_length = math.max_float(def.min_length, math.LINEAR_SLOP)
+    d.max_length = math.max_float(def.min_length, def.max_length)
+    d.max_motor_force = def.max_motor_force
+    d.motor_speed = def.motor_speed
+    d.enable_spring = def.enable_spring
+    d.enable_limit = def.enable_limit
+    d.enable_motor = def.enable_motor
+    w.locked = false
+    return make_joint_id(w, pair.joint)
+}
+
+create_motor_joint(world_id: WorldId, def: *MotorJointDef) -> JointId {
+    w = joint_world(world_id, &def.base)
+    if w == null { return null_joint_id() }
+    w.locked = true
+    pair = create_joint(w, &def.base, JOINT_MOTOR)
+    m = motor_joint_of(pair.sim)
+    m.linear_velocity = def.linear_velocity
+    m.max_velocity_force = def.max_velocity_force
+    m.angular_velocity = def.angular_velocity
+    m.max_velocity_torque = def.max_velocity_torque
+    m.linear_hertz = def.linear_hertz
+    m.linear_damping_ratio = def.linear_damping_ratio
+    m.max_spring_force = def.max_spring_force
+    m.angular_hertz = def.angular_hertz
+    m.angular_damping_ratio = def.angular_damping_ratio
+    m.max_spring_torque = def.max_spring_torque
+    w.locked = false
+    return make_joint_id(w, pair.joint)
+}
+
+create_filter_joint(world_id: WorldId, def: *FilterJointDef) -> JointId {
+    w = joint_world(world_id, &def.base)
+    if w == null { return null_joint_id() }
+    w.locked = true
+    pair = create_joint(w, &def.base, JOINT_FILTER)
+    w.locked = false
+    return make_joint_id(w, pair.joint)
+}
+
+create_parallel_joint(world_id: WorldId, def: *ParallelJointDef) -> JointId {
+    w = joint_world(world_id, &def.base)
+    if w == null { return null_joint_id() }
+    if def.hertz < 0.0 || def.damping_ratio < 0.0 || def.max_torque < 0.0 { return null_joint_id() }
+    w.locked = true
+    pair = create_joint(w, &def.base, JOINT_PARALLEL)
+    p = parallel_joint_of(pair.sim)
+    p.hertz = def.hertz
+    p.damping_ratio = def.damping_ratio
+    p.max_torque = def.max_torque
+    w.locked = false
+    return make_joint_id(w, pair.joint)
+}
+
+create_prismatic_joint(world_id: WorldId, def: *PrismaticJointDef) -> JointId {
+    w = joint_world(world_id, &def.base)
+    if w == null { return null_joint_id() }
+    if def.lower_translation > def.upper_translation { return null_joint_id() }
+    w.locked = true
+    pair = create_joint(w, &def.base, JOINT_PRISMATIC)
+    p = prismatic_joint_of(pair.sim)
+    p.hertz = def.hertz
+    p.damping_ratio = def.damping_ratio
+    p.target_translation = def.target_translation
+    p.lower_translation = def.lower_translation
+    p.upper_translation = def.upper_translation
+    p.max_motor_force = def.max_motor_force
+    p.motor_speed = def.motor_speed
+    p.enable_spring = def.enable_spring
+    p.enable_limit = def.enable_limit
+    p.enable_motor = def.enable_motor
+    w.locked = false
+    return make_joint_id(w, pair.joint)
+}
+
+create_revolute_joint(world_id: WorldId, def: *RevoluteJointDef) -> JointId {
+    w = joint_world(world_id, &def.base)
+    if w == null { return null_joint_id() }
+    w.locked = true
+    pair = create_joint(w, &def.base, JOINT_REVOLUTE)
+    r = revolute_joint_of(pair.sim)
+    pi = math.PI
+    r.hertz = def.hertz
+    r.damping_ratio = def.damping_ratio
+    r.target_angle = math.clamp_float(def.target_angle, 0.0 - pi, pi)
+    lower = math.min_float(def.lower_angle, def.upper_angle)
+    upper = math.max_float(def.lower_angle, def.upper_angle)
+    r.lower_angle = math.clamp_float(lower, 0.0 - 0.99 * pi, 0.99 * pi)
+    r.upper_angle = math.clamp_float(upper, 0.0 - 0.99 * pi, 0.99 * pi)
+    r.max_motor_torque = def.max_motor_torque
+    r.motor_speed = def.motor_speed
+    r.enable_spring = def.enable_spring
+    r.enable_limit = def.enable_limit
+    r.enable_motor = def.enable_motor
+    w.locked = false
+    return make_joint_id(w, pair.joint)
+}
+
+create_spherical_joint(world_id: WorldId, def: *SphericalJointDef) -> JointId {
+    w = joint_world(world_id, &def.base)
+    if w == null { return null_joint_id() }
+    pi = math.PI
+    if def.cone_angle < 0.0 || def.cone_angle > 0.99 * pi || math.is_valid_quat(def.target_rotation) == false { return null_joint_id() }
+    w.locked = true
+    pair = create_joint(w, &def.base, JOINT_SPHERICAL)
+    s = spherical_joint_of(pair.sim)
+    s.hertz = def.hertz
+    s.damping_ratio = def.damping_ratio
+    s.target_rotation = def.target_rotation
+    s.cone_angle = math.clamp_float(def.cone_angle, 0.0, 0.5 * pi)
+    lower = math.min_float(def.lower_twist_angle, def.upper_twist_angle)
+    upper = math.max_float(def.lower_twist_angle, def.upper_twist_angle)
+    s.lower_twist_angle = math.clamp_float(lower, 0.0 - 0.99 * pi, 0.99 * pi)
+    s.upper_twist_angle = math.clamp_float(upper, 0.0 - 0.99 * pi, 0.99 * pi)
+    s.max_motor_torque = def.max_motor_torque
+    s.motor_velocity = def.motor_velocity
+    s.enable_spring = def.enable_spring
+    s.enable_cone_limit = def.enable_cone_limit
+    s.enable_twist_limit = def.enable_twist_limit
+    s.enable_motor = def.enable_motor
+    w.locked = false
+    return make_joint_id(w, pair.joint)
+}
+
+create_weld_joint(world_id: WorldId, def: *WeldJointDef) -> JointId {
+    w = joint_world(world_id, &def.base)
+    if w == null { return null_joint_id() }
+    if def.angular_hertz < 0.0 || def.angular_damping_ratio < 0.0 || def.linear_hertz < 0.0 || def.linear_damping_ratio < 0.0 { return null_joint_id() }
+    w.locked = true
+    pair = create_joint(w, &def.base, JOINT_WELD)
+    weld = weld_joint_of(pair.sim)
+    weld.linear_hertz = def.linear_hertz
+    weld.linear_damping_ratio = def.linear_damping_ratio
+    weld.angular_hertz = def.angular_hertz
+    weld.angular_damping_ratio = def.angular_damping_ratio
+    w.locked = false
+    return make_joint_id(w, pair.joint)
+}
+
+create_wheel_joint(world_id: WorldId, def: *WheelJointDef) -> JointId {
+    w = joint_world(world_id, &def.base)
+    if w == null { return null_joint_id() }
+    if def.lower_suspension_limit > def.upper_suspension_limit { return null_joint_id() }
+    w.locked = true
+    pair = create_joint(w, &def.base, JOINT_WHEEL)
+    wheel = wheel_joint_of(pair.sim)
+    wheel.enable_suspension_spring = def.enable_suspension_spring
+    wheel.suspension_hertz = def.suspension_hertz
+    wheel.suspension_damping_ratio = def.suspension_damping_ratio
+    wheel.enable_suspension_limit = def.enable_suspension_limit
+    wheel.lower_suspension_limit = def.lower_suspension_limit
+    wheel.upper_suspension_limit = def.upper_suspension_limit
+    wheel.enable_spin_motor = def.enable_spin_motor
+    wheel.max_spin_torque = def.max_spin_torque
+    wheel.spin_speed = def.spin_speed
+    wheel.enable_steering = def.enable_steering
+    wheel.steering_hertz = def.steering_hertz
+    wheel.steering_damping_ratio = def.steering_damping_ratio
+    wheel.target_steering_angle = def.target_steering_angle
+    wheel.max_steering_torque = def.max_steering_torque
+    wheel.enable_steering_limit = def.enable_steering_limit
+    wheel.lower_steering_limit = def.lower_steering_limit
+    wheel.upper_steering_limit = def.upper_steering_limit
+    w.locked = false
+    return make_joint_id(w, pair.joint)
+}
+
+// The joint out of both bodies' lists, its island, its colour or set;
+// its id freed (the generation kept); the bodies woken when asked.
+destroy_joint_internal(w: *World, j: *Joint, wake_bodies: bool) {
+    joint_id = j.joint_id
+    body_a = body_at(w, j.edge_a.body_id)
+    body_b = body_at(w, j.edge_b.body_id)
+    // Out of body A's list.
+    if j.edge_a.prev_key != NULL_INDEX { set_joint_edge_next(w, j.edge_a.prev_key, j.edge_a.next_key) }
+    if j.edge_a.next_key != NULL_INDEX { set_joint_edge_prev(w, j.edge_a.next_key, j.edge_a.prev_key) }
+    if body_a.head_joint_key == ((joint_id << 1) | 0) { body_a.head_joint_key = j.edge_a.next_key }
+    body_a.joint_count = body_a.joint_count - 1
+    // Out of body B's.
+    if j.edge_b.prev_key != NULL_INDEX { set_joint_edge_next(w, j.edge_b.prev_key, j.edge_b.next_key) }
+    if j.edge_b.next_key != NULL_INDEX { set_joint_edge_prev(w, j.edge_b.next_key, j.edge_b.prev_key) }
+    if body_b.head_joint_key == ((joint_id << 1) | 1) { body_b.head_joint_key = j.edge_b.next_key }
+    body_b.joint_count = body_b.joint_count - 1
+    if j.island_id != NULL_INDEX { unlink_joint(w, j) }
+    set_index = j.set_index
+    local_index = j.local_index
+    if set_index == AWAKE_SET {
+        remove_joint_from_graph(w, j.edge_a.body_id, j.edge_b.body_id, j.color_index, local_index)
+    } else {
+        set = solver_set_at(w, set_index)
+        moved = core.buffer_remove_swap(&set.joint_sims, local_index)
+        if moved != NULL_INDEX && moved != local_index {
+            joint_at(w, joint_sim_at(&set.joint_sims, local_index).joint_id).local_index = local_index
+        }
+    }
+    j.set_index = NULL_INDEX
+    j.local_index = NULL_INDEX
+    j.color_index = NULL_INDEX
+    j.joint_id = NULL_INDEX
+    core.idpool_free(&w.joint_id_pool, joint_id)
+    if wake_bodies {
+        wake_body(w, body_a)
+        wake_body(w, body_b)
+    }
+}
+
+destroy_joint(id: JointId, wake_attached: bool) {
+    if joint_is_valid(id) == false { return }
+    w = world_at(id.world0)
+    if w.locked { return }
+    w.locked = true
+    destroy_joint_internal(w, get_joint_full_id(w, id), wake_attached)
+    w.locked = false
+}
+
+// --- joint accessors ----------------------------------------------------------------------------------------
+
+joint_get_type(id: JointId) -> int { return get_joint_full_id(world_at(id.world0), id).kind }
+joint_get_body_a(id: JointId) -> BodyId {
+    w = world_at(id.world0)
+    return make_body_id(w, get_joint_full_id(w, id).edge_a.body_id)
+}
+joint_get_body_b(id: JointId) -> BodyId {
+    w = world_at(id.world0)
+    return make_body_id(w, get_joint_full_id(w, id).edge_b.body_id)
+}
+joint_get_world(id: JointId) -> WorldId {
+    w = world_at(id.world0)
+    return WorldId { index1: id.world0 + 1, generation: w.generation }
+}
+joint_set_local_frame_a(id: JointId, frame: Transform) {
+    w = world_at(id.world0)
+    get_joint_sim(w, get_joint_full_id(w, id)).local_frame_a = frame
+}
+joint_get_local_frame_a(id: JointId) -> Transform {
+    w = world_at(id.world0)
+    return get_joint_sim(w, get_joint_full_id(w, id)).local_frame_a
+}
+joint_set_local_frame_b(id: JointId, frame: Transform) {
+    w = world_at(id.world0)
+    get_joint_sim(w, get_joint_full_id(w, id)).local_frame_b = frame
+}
+joint_get_local_frame_b(id: JointId) -> Transform {
+    w = world_at(id.world0)
+    return get_joint_sim(w, get_joint_full_id(w, id)).local_frame_b
+}
+joint_set_user_data(id: JointId, data: ptr) { get_joint_full_id(world_at(id.world0), id).user_data = data }
+joint_get_user_data(id: JointId) -> ptr { return get_joint_full_id(world_at(id.world0), id).user_data }
+joint_get_collide_connected(id: JointId) -> bool { return get_joint_full_id(world_at(id.world0), id).collide_connected }
+joint_is_awake(id: JointId) -> bool { return get_joint_full_id(world_at(id.world0), id).set_index == AWAKE_SET }
+
+joint_set_constraint_tuning(id: JointId, hertz: float, damping_ratio: float) {
+    w = world_at(id.world0)
+    sim = get_joint_sim(w, get_joint_full_id(w, id))
+    sim.constraint_hertz = hertz
+    sim.constraint_damping_ratio = damping_ratio
+}
+joint_get_constraint_hertz(id: JointId) -> float {
+    w = world_at(id.world0)
+    return get_joint_sim(w, get_joint_full_id(w, id)).constraint_hertz
+}
+joint_get_constraint_damping_ratio(id: JointId) -> float {
+    w = world_at(id.world0)
+    return get_joint_sim(w, get_joint_full_id(w, id)).constraint_damping_ratio
+}
+joint_set_force_threshold(id: JointId, threshold: float) {
+    w = world_at(id.world0)
+    get_joint_sim(w, get_joint_full_id(w, id)).force_threshold = threshold
+}
+joint_get_force_threshold(id: JointId) -> float {
+    w = world_at(id.world0)
+    return get_joint_sim(w, get_joint_full_id(w, id)).force_threshold
+}
+joint_set_torque_threshold(id: JointId, threshold: float) {
+    w = world_at(id.world0)
+    get_joint_sim(w, get_joint_full_id(w, id)).torque_threshold = threshold
+}
+joint_get_torque_threshold(id: JointId) -> float {
+    w = world_at(id.world0)
+    return get_joint_sim(w, get_joint_full_id(w, id)).torque_threshold
+}
+
+// Whether the attached bodies collide: turning it on asks the broad
+// phase for their pairs again (the body with fewer shapes is marked
+// moved), turning it off destroys the contacts between them.
+joint_set_collide_connected(id: JointId, should_collide: bool) {
+    w = world_at(id.world0)
+    if w.locked { return }
+    j = get_joint_full_id(w, id)
+    if j.collide_connected == should_collide { return }
+    j.collide_connected = should_collide
+    body_a = body_at(w, j.edge_a.body_id)
+    body_b = body_at(w, j.edge_b.body_id)
+    if should_collide {
+        shape_id = body_b.head_shape_id
+        if body_a.shape_count < body_b.shape_count { shape_id = body_a.head_shape_id }
+        while shape_id != NULL_INDEX {
+            s = world_shape_at(w, shape_id)
+            if s.proxy_key != NULL_INDEX { broad_phase.broad_phase_mark_proxy_moved_serial(&w.broad_phase, s.proxy_key) }
+            shape_id = s.next_shape_id
+        }
+    } else {
+        destroy_contacts_between_bodies(w, body_a, body_b)
+    }
+}
+
+joint_wake_bodies(id: JointId) {
+    w = world_at(id.world0)
+    if w.locked { return }
+    w.locked = true
+    j = get_joint_full_id(w, id)
+    wake_body(w, body_at(w, j.edge_a.body_id))
+    wake_body(w, body_at(w, j.edge_b.body_id))
+    w.locked = false
+}
+
+// The force and torque a joint's impulses amount to over a step (for the joint events).
+get_joint_reaction(w: *World, sim: *JointSim, inv_time_step: float) -> JointReaction {
+    linear_impulse = 0.0
+    angular_impulse = 0.0
+    kind = sim.kind
+    if kind == JOINT_PARALLEL {
+        p = parallel_joint_of(sim)
+        angular_impulse = math.length(math.vec3(p.perp_impulse.x, p.perp_impulse.y, 0.0))
+    } else if kind == JOINT_DISTANCE {
+        d = distance_joint_of(sim)
+        linear_impulse = math.abs_float(d.impulse + d.lower_impulse - d.upper_impulse + d.motor_impulse)
+    } else if kind == JOINT_MOTOR {
+        m = motor_joint_of(sim)
+        linear_impulse = math.length(math.add(m.linear_velocity_impulse, m.linear_spring_impulse))
+        angular_impulse = math.length(math.add(m.angular_velocity_impulse, m.angular_spring_impulse))
+    } else if kind == JOINT_PRISMATIC {
+        pr = prismatic_joint_of(sim)
+        linear_impulse = math.length(math.vec3(pr.motor_impulse + pr.lower_impulse - pr.upper_impulse, pr.perp_impulse.x, pr.perp_impulse.y))
+        angular_impulse = math.length(pr.angular_impulse)
+    } else if kind == JOINT_REVOLUTE {
+        r = revolute_joint_of(sim)
+        linear_impulse = math.length(r.linear_impulse)
+        angular_impulse = math.length(math.vec3(r.perp_impulse.x, r.perp_impulse.y, r.motor_impulse + r.lower_impulse - r.upper_impulse))
+    } else if kind == JOINT_SPHERICAL {
+        s = spherical_joint_of(sim)
+        linear_impulse = math.length(s.linear_impulse)
+        xf_a = get_body_transform(w, sim.body_id_a)
+        xf_b = get_body_transform(w, sim.body_id_b)
+        q_a = math.mul_quat(xf_a.q, sim.local_frame_a.q)
+        q_b = math.mul_quat(xf_b.q, sim.local_frame_b.q)
+        cone_axis = math.rotate_vector(q_a, math.vec3_axis_z())
+        twist_axis = math.rotate_vector(q_b, math.vec3_axis_z())
+        swing_axis = math.normalize(math.cross(cone_axis, twist_axis))
+        impulse = math.add(s.spring_impulse, s.motor_impulse)
+        impulse = math.mul_add(impulse, s.lower_twist_impulse - s.upper_twist_impulse, twist_axis)
+        impulse = math.mul_add(impulse, s.swing_impulse, swing_axis)
+        angular_impulse = math.length(impulse)
+    } else if kind == JOINT_WELD {
+        weld = weld_joint_of(sim)
+        linear_impulse = math.length(weld.linear_impulse)
+        angular_impulse = math.length(weld.angular_impulse)
+    } else if kind == JOINT_WHEEL {
+        wheel = wheel_joint_of(sim)
+        axial = wheel.suspension_spring_impulse + wheel.lower_suspension_impulse - wheel.upper_suspension_impulse
+        linear_impulse = sqrt(wheel.linear_impulse.x * wheel.linear_impulse.x + wheel.linear_impulse.y * wheel.linear_impulse.y + axial * axial)
+        angular_impulse = math.abs_float(wheel.spin_impulse)
+    }
+    return JointReaction { force: linear_impulse * inv_time_step, torque: angular_impulse * inv_time_step }
+}
+
+// How far the joint's frames are from where the constraint wants them,
+// as a distance.
+joint_get_linear_separation(id: JointId) -> float {
+    w = world_at(id.world0)
+    j = get_joint_full_id(w, id)
+    base = get_joint_sim(w, j)
+    xf_a = get_body_transform(w, j.edge_a.body_id)
+    xf_b = get_body_transform(w, j.edge_b.body_id)
+    p_a = math.transform_point(xf_a, base.local_frame_a.p)
+    p_b = math.transform_point(xf_b, base.local_frame_b.p)
+    dp = math.sub(p_b, p_a)
+    kind = j.kind
+    if kind == JOINT_DISTANCE {
+        d = distance_joint_of(base)
+        len = math.length(dp)
+        if d.enable_spring {
+            if d.enable_limit {
+                if len < d.min_length { return d.min_length - len }
+                if len > d.max_length { return len - d.max_length }
+            }
+            return 0.0
+        }
+        return math.abs_float(len - d.length)
+    }
+    if kind == JOINT_PRISMATIC {
+        pr = prismatic_joint_of(base)
+        axis_a = math.rotate_vector(xf_a.q, math.vec3_axis_x())
+        perp_a = math.perp(axis_a)
+        perpendicular = math.abs_float(math.dot(perp_a, dp))
+        limit = 0.0
+        if pr.enable_limit {
+            translation = math.dot(axis_a, dp)
+            if translation < pr.lower_translation { limit = pr.lower_translation - translation }
+            if pr.upper_translation < translation { limit = translation - pr.upper_translation }
+        }
+        return sqrt(perpendicular * perpendicular + limit * limit)
+    }
+    if kind == JOINT_REVOLUTE || kind == JOINT_SPHERICAL { return math.length(dp) }
+    if kind == JOINT_WELD {
+        if weld_joint_of(base).linear_hertz == 0.0 { return math.length(dp) }
+        return 0.0
+    }
+    if kind == JOINT_WHEEL {
+        wheel = wheel_joint_of(base)
+        axis_a = math.rotate_vector(xf_a.q, math.vec3_axis_x())
+        perp_a = math.perp(axis_a)
+        perpendicular = math.abs_float(math.dot(perp_a, dp))
+        limit = 0.0
+        if wheel.enable_suspension_limit {
+            translation = math.dot(axis_a, dp)
+            if translation < wheel.lower_suspension_limit { limit = wheel.lower_suspension_limit - translation }
+            if wheel.upper_suspension_limit < translation { limit = translation - wheel.upper_suspension_limit }
+        }
+        return sqrt(perpendicular * perpendicular + limit * limit)
+    }
+    return 0.0
+}
+
+// The same as an angle (the wheel joint's is a todo in the reference: zero here).
+joint_get_angular_separation(id: JointId) -> float {
+    w = world_at(id.world0)
+    j = get_joint_full_id(w, id)
+    base = get_joint_sim(w, j)
+    xf_a = get_body_transform(w, j.edge_a.body_id)
+    xf_b = get_body_transform(w, j.edge_b.body_id)
+    rel_q = math.inv_mul_quat(xf_a.q, xf_b.q)
+    kind = j.kind
+    if kind == JOINT_PARALLEL {
+        rel_q.v.z = 0.0
+        return math.get_quat_angle(rel_q)
+    }
+    if kind == JOINT_PRISMATIC { return math.get_quat_angle(rel_q) }
+    if kind == JOINT_REVOLUTE {
+        r = revolute_joint_of(base)
+        if r.enable_limit {
+            angle = math.get_twist_angle(rel_q)
+            if angle < r.lower_angle { return math.get_quat_angle(rel_q) }
+            if r.upper_angle < angle { return math.get_quat_angle(rel_q) }
+        }
+        rel_q.v.z = 0.0
+        return math.get_quat_angle(rel_q)
+    }
+    if kind == JOINT_SPHERICAL {
+        s = spherical_joint_of(base)
+        sum = 0.0
+        if s.enable_cone_limit {
+            swing = math.get_swing_angle(rel_q)
+            sum = sum + math.max_float(0.0, swing - s.cone_angle)
+        }
+        if s.enable_twist_limit {
+            twist = math.get_twist_angle(rel_q)
+            sum = sum + math.max_float(0.0, s.lower_twist_angle - twist)
+            sum = sum + math.max_float(0.0, twist - s.upper_twist_angle)
+        }
+        return sum
+    }
+    if kind == JOINT_WELD {
+        if weld_joint_of(base).angular_hertz == 0.0 { return math.get_quat_angle(rel_q) }
+        return 0.0
+    }
+    return 0.0
+}
+
+// Whether two bodies may collide: one must be dynamic and no joint
+// between them may forbid it (the shorter joint list is walked).
+should_bodies_collide(w: *World, body_a: *Body, body_b: *Body) -> bool {
+    if body_a.kind != BODY_DYNAMIC && body_b.kind != BODY_DYNAMIC { return false }
+    key = body_b.head_joint_key
+    other_id = body_a.id
+    if body_a.joint_count < body_b.joint_count {
+        key = body_a.head_joint_key
+        other_id = body_b.id
+    }
+    while key != NULL_INDEX {
+        j = joint_at(w, key >> 1)
+        edge_index = key & 1
+        other = j.edge_b.body_id
+        if edge_index == 1 { other = j.edge_a.body_id }
+        if j.collide_connected == false && other == other_id { return false }
+        key = joint_edge_next(w, key)
+    }
+    return true
+}
+
+world_set_custom_filter(w: *World, filter: fn(ShapeId, ShapeId, ptr) -> bool, context: ptr) {
+    w.custom_filter = filter
+    w.custom_filter_context = context
+    w.has_custom_filter = true
+}
+
+world_clear_custom_filter(w: *World) { w.has_custom_filter = false }
+
+// --- transfers between sets --------------------------------------------------------------------------------
+
+// A body's sim from one set to another (its transient flags cleared),
+// its state dropped or made fresh; the body's indices follow.
+transfer_body(w: *World, target: *SolverSet, source: *SolverSet, body: *Body) {
+    if target.set_index == source.set_index { return }
+    source_index = body.local_index
+    target_index = core.buffer_push(&target.body_sims)
+    memcpy(target.body_sims.data + target_index * sizeof(BodySim), body_sim_at(source, source_index) as ptr, sizeof(BodySim))
+    target_sim = body_sim_at(target, target_index)
+    target_sim.flags = target_sim.flags & (0 - 1 - (IS_FAST | IS_SPEED_CAPPED | HAD_TIME_OF_IMPACT))
+    moved = core.buffer_remove_swap(&source.body_sims, source_index)
+    if moved != NULL_INDEX && moved != source_index {
+        body_at(w, body_sim_at(source, source_index).body_id).local_index = source_index
+    }
+    if source.set_index == AWAKE_SET {
+        core.buffer_remove_swap(&source.body_states, source_index)
+    } else if target.set_index == AWAKE_SET {
+        state_index = core.buffer_push(&target.body_states)
+        state = body_state_at(target, state_index)
+        state.linear_velocity = math.vec3_zero()
+        state.angular_velocity = math.vec3_zero()
+        state.delta_position = math.vec3_zero()
+        state.delta_rotation = math.quat_identity()
+        state.flags = body.flags
+    }
+    body.set_index = target.set_index
+    body.local_index = target_index
+}
+
+// A joint's sim from one set to another: out of a colour when leaving
+// the awake set, into one when entering it.
+transfer_joint(w: *World, target: *SolverSet, source: *SolverSet, j: *Joint) {
+    if target.set_index == source.set_index { return }
+    local_index = j.local_index
+    color_index = j.color_index
+    source_sim = null as *JointSim
+    if source.set_index == AWAKE_SET {
+        source_sim = joint_sim_at(&graph_color(w, color_index).joint_sims, local_index)
+    } else {
+        source_sim = joint_sim_at(&source.joint_sims, local_index)
+    }
+    if target.set_index == AWAKE_SET {
+        add_joint_to_graph(w, source_sim, j)
+        j.set_index = AWAKE_SET
+    } else {
+        j.set_index = target.set_index
+        j.local_index = target.joint_sims.count
+        j.color_index = NULL_INDEX
+        target_index = core.buffer_push(&target.joint_sims)
+        memcpy(target.joint_sims.data + target_index * sizeof(JointSim), source_sim as ptr, sizeof(JointSim))
+    }
+    if source.set_index == AWAKE_SET {
+        remove_joint_from_graph(w, j.edge_a.body_id, j.edge_b.body_id, color_index, local_index)
+    } else {
+        moved = core.buffer_remove_swap(&source.joint_sims, local_index)
+        if moved != NULL_INDEX && moved != local_index {
+            joint_at(w, joint_sim_at(&source.joint_sims, local_index).joint_id).local_index = local_index
+        }
+    }
+}
+
+// Two sleeping sets into one (the smaller moves): bodies, contacts,
+// joints and islands; the emptied set destroyed.
+merge_solver_sets(w: *World, set_id1: int, set_id2: int) {
+    id1 = set_id1
+    id2 = set_id2
+    if solver_set_at(w, id1).body_sims.count < solver_set_at(w, id2).body_sims.count {
+        id1 = set_id2
+        id2 = set_id1
+    }
+    set1 = solver_set_at(w, id1)
+    set2 = solver_set_at(w, id2)
+    i = 0
+    while i < set2.body_sims.count {
+        src = body_sim_at(set2, i)
+        body = body_at(w, src.body_id)
+        body.set_index = id1
+        body.local_index = set1.body_sims.count
+        index = core.buffer_push(&set1.body_sims)
+        memcpy(set1.body_sims.data + index * sizeof(BodySim), src as ptr, sizeof(BodySim))
+        i = i + 1
+    }
+    i = 0
+    while i < set2.contact_indices.count {
+        contact_index = core.ints_get(&set2.contact_indices, i)
+        c = contact_at(w, contact_index)
+        c.set_index = id1
+        c.local_index = set1.contact_indices.count
+        core.ints_push(&set1.contact_indices, contact_index)
+        i = i + 1
+    }
+    i = 0
+    while i < set2.joint_sims.count {
+        jsrc = joint_sim_at(&set2.joint_sims, i)
+        j = joint_at(w, jsrc.joint_id)
+        j.set_index = id1
+        j.local_index = set1.joint_sims.count
+        jindex = core.buffer_push(&set1.joint_sims)
+        memcpy(set1.joint_sims.data + jindex * sizeof(JointSim), jsrc as ptr, sizeof(JointSim))
+        i = i + 1
+    }
+    i = 0
+    while i < set2.island_sims.count {
+        island_id = island_sim_at(set2, i).island_id
+        island = island_at(w, island_id)
+        island.set_index = id1
+        island.local_index = set1.island_sims.count
+        iindex = core.buffer_push(&set1.island_sims)
+        island_sim_at(set1, iindex).island_id = island_id
+        i = i + 1
+    }
+    destroy_solver_set(w, id2)
+}
+
+// --- a body's type and enabling -------------------------------------------------------------------------------
+
+// The body's type changed (b3Body_SetType): its contacts destroyed, its
+// set woken, its joints parked in the static set while the body moves
+// to the static or awake set and its island is made or dropped, the
+// joints back where a dynamic body puts them, the proxies remade in the
+// right tree, the joints relinked. Refused for compound and height
+// field shapes on a body that would move.
+body_set_type(id: BodyId, kind: int) {
+    if body_is_valid(id) == false { return }
+    w = world_at(id.world0)
+    if w.locked { return }
+    body = body_at(w, id.index1 - 1)
+    original = body.kind
+    if original == kind { return }
+    if kind != BODY_STATIC {
+        shape_id = body.head_shape_id
+        while shape_id != NULL_INDEX {
+            s = world_shape_at(w, shape_id)
+            if s.geometry.kind == KIND_COMPOUND || s.geometry.kind == KIND_HEIGHT_FIELD { return }
+            shape_id = s.next_shape_id
+        }
+    }
+    w.locked = true
+    if body.set_index == DISABLED_SET {
+        body.kind = kind
+        if kind == BODY_DYNAMIC { body.flags = body.flags | DYNAMIC_FLAG } else { body.flags = body.flags & (0 - 1 - DYNAMIC_FLAG) }
+        sync_body_flags(w, body)
+        update_body_mass_data(w, body)
+        w.locked = false
+        return
+    }
+    destroy_body_contacts(w, body, false)
+    wake_body(w, body)
+    static_set = solver_set_at(w, STATIC_SET)
+    key = body.head_joint_key
+    while key != NULL_INDEX {
+        j = joint_at(w, key >> 1)
+        key = joint_edge_next(w, key)
+        if j.set_index == DISABLED_SET { continue }
+        // The attached bodies wake (a static body's wake above wakes no one).
+        wake_body(w, body_at(w, j.edge_a.body_id))
+        wake_body(w, body_at(w, j.edge_b.body_id))
+        unlink_joint(w, j)
+        transfer_joint(w, static_set, solver_set_at(w, j.set_index), j)
+    }
+    body.kind = kind
+    if kind == BODY_DYNAMIC { body.flags = body.flags | DYNAMIC_FLAG } else { body.flags = body.flags & (0 - 1 - DYNAMIC_FLAG) }
+    awake_set = solver_set_at(w, AWAKE_SET)
+    target_set = awake_set
+    if kind == BODY_STATIC { target_set = static_set }
+    transfer_body(w, target_set, solver_set_at(w, body.set_index), body)
+    if original == BODY_STATIC {
+        create_island_for_body(w, AWAKE_SET, body)
+    } else if kind == BODY_STATIC {
+        remove_body_from_island(w, body)
+    }
+    key = body.head_joint_key
+    while key != NULL_INDEX {
+        j = joint_at(w, key >> 1)
+        key = joint_edge_next(w, key)
+        if j.set_index == DISABLED_SET { continue }
+        if body_at(w, j.edge_a.body_id).kind == BODY_DYNAMIC || body_at(w, j.edge_b.body_id).kind == BODY_DYNAMIC {
+            transfer_joint(w, awake_set, static_set, j)
+        }
+    }
+    t = get_body_sim(w, body).transform
+    shape_id = body.head_shape_id
+    while shape_id != NULL_INDEX {
+        s = world_shape_at(w, shape_id)
+        shape_id = s.next_shape_id
+        if s.proxy_key != NULL_INDEX { broad_phase.broad_phase_destroy_proxy(&w.broad_phase, s.proxy_key) }
+        create_shape_proxy(w, s, kind, t, true)
+    }
+    key = body.head_joint_key
+    while key != NULL_INDEX {
+        j = joint_at(w, key >> 1)
+        edge_index = key & 1
+        key = joint_edge_next(w, key)
+        other_id = j.edge_b.body_id
+        if edge_index == 1 { other_id = j.edge_a.body_id }
+        other = body_at(w, other_id)
+        if other.set_index == DISABLED_SET { continue }
+        if body.kind != BODY_DYNAMIC && other.kind != BODY_DYNAMIC { continue }
+        link_joint(w, j)
+    }
+    sync_body_flags(w, body)
+    update_body_mass_data(w, body)
+    w.locked = false
+}
+
+// The body out of the simulation: its contacts destroyed (the touching
+// bodies woken), its joints unlinked and parked in the disabled set with
+// it, its proxies removed, its island left.
+body_disable(id: BodyId) {
+    if body_is_valid(id) == false { return }
+    w = world_at(id.world0)
+    if w.locked { return }
+    body = body_at(w, id.index1 - 1)
+    if body.set_index == DISABLED_SET { return }
+    w.locked = true
+    destroy_body_contacts(w, body, true)
+    set = solver_set_at(w, body.set_index)
+    disabled = solver_set_at(w, DISABLED_SET)
+    key = body.head_joint_key
+    while key != NULL_INDEX {
+        j = joint_at(w, key >> 1)
+        key = joint_edge_next(w, key)
+        if j.set_index == DISABLED_SET { continue }
+        unlink_joint(w, j)
+        transfer_joint(w, disabled, solver_set_at(w, j.set_index), j)
+    }
+    shape_id = body.head_shape_id
+    while shape_id != NULL_INDEX {
+        s = world_shape_at(w, shape_id)
+        shape_id = s.next_shape_id
+        if s.proxy_key != NULL_INDEX {
+            broad_phase.broad_phase_destroy_proxy(&w.broad_phase, s.proxy_key)
+            s.proxy_key = NULL_INDEX
+        }
+    }
+    remove_body_from_island(w, body)
+    transfer_body(w, disabled, set, body)
+    w.locked = false
+}
+
+// The body back: into the static or awake set, its proxies remade, an
+// island of its own, its joints whose other body is enabled into the
+// right set and linked (a sleeping other body wakes through the link).
+body_enable(id: BodyId) {
+    if body_is_valid(id) == false { return }
+    w = world_at(id.world0)
+    if w.locked { return }
+    body = body_at(w, id.index1 - 1)
+    if body.set_index != DISABLED_SET { return }
+    disabled = solver_set_at(w, DISABLED_SET)
+    set_id = AWAKE_SET
+    if body.kind == BODY_STATIC { set_id = STATIC_SET }
+    transfer_body(w, solver_set_at(w, set_id), disabled, body)
+    t = get_body_sim(w, body).transform
+    shape_id = body.head_shape_id
+    while shape_id != NULL_INDEX {
+        s = world_shape_at(w, shape_id)
+        shape_id = s.next_shape_id
+        create_shape_proxy(w, s, body.kind, t, true)
+    }
+    if set_id != STATIC_SET { create_island_for_body(w, set_id, body) }
+    key = body.head_joint_key
+    while key != NULL_INDEX {
+        j = joint_at(w, key >> 1)
+        key = joint_edge_next(w, key)
+        body_a = body_at(w, j.edge_a.body_id)
+        body_b = body_at(w, j.edge_b.body_id)
+        if body_a.set_index == DISABLED_SET || body_b.set_index == DISABLED_SET { continue }
+        joint_set_id = body_a.set_index
+        if body_a.set_index == STATIC_SET && body_b.set_index == STATIC_SET { joint_set_id = STATIC_SET }
+        else if body_a.set_index == STATIC_SET { joint_set_id = body_b.set_index }
+        transfer_joint(w, solver_set_at(w, joint_set_id), disabled, j)
+        if joint_set_id != STATIC_SET { link_joint(w, j) }
+    }
+}
+
+body_get_joint_count(id: BodyId) -> int { return get_body_full_id(world_at(id.world0), id).joint_count }
+body_get_contact_capacity(id: BodyId) -> int {
+    w = world_at(id.world0)
+    return get_body_full_id(w, id).contact_count
+}
+
+// The joints on a body, by id.
+body_get_joints(id: BodyId, joints: JointId[], capacity: int) -> int {
+    w = world_at(id.world0)
+    body = get_body_full_id(w, id)
+    key = body.head_joint_key
+    count = 0
+    while key != NULL_INDEX && count < capacity {
+        j = joint_at(w, key >> 1)
+        joints[count] = make_joint_id(w, j)
+        count = count + 1
+        key = joint_edge_next(w, key)
+    }
+    return count
+}
+
+world_joint_count(w: *World) -> int { return core.idpool_count(&w.joint_id_pool) }
+
+// --- sensors -------------------------------------------------------------------------------------------------
+
+// A sensor's visitor, as one key: the shape id above its generation.
+visitor_key(shape_id: int, generation: int) -> long { return ((shape_id as long) << 32) | (generation as long) }
+visitor_shape_id(key: long) -> int { return (key >> 32) as int }
+visitor_generation(key: long) -> int { return key as int }
+
+sensor_at(w: *World, index: int) -> *Sensor { return (w.sensors.data + index * sizeof(Sensor)) as *Sensor }
+sensor_end_events(w: *World) -> *Buffer {
+    if w.end_event_index == 0 { return &w.sensor_end_events0 }
+    return &w.sensor_end_events1
+}
+world_sensor_count(w: *World) -> int { return w.sensors.count }
+world_sensor_begin_event_count(w: *World) -> int { return w.sensor_begin_events.count }
+world_sensor_begin_event(w: *World, index: int) -> SensorBeginTouchEvent {
+    events = w.sensor_begin_events.data as SensorBeginTouchEvent[]
+    return events[index]
+}
+world_sensor_end_event_count(w: *World) -> int { return sensor_end_events(w).count }
+world_sensor_end_event(w: *World, index: int) -> SensorEndTouchEvent {
+    events = sensor_end_events(w).data as SensorEndTouchEvent[]
+    return events[index]
+}
+
+push_sensor_begin_event(w: *World, sensor_id: ShapeId, visitor: long) {
+    index = core.buffer_push(&w.sensor_begin_events)
+    events = w.sensor_begin_events.data as SensorBeginTouchEvent[]
+    events[index] = SensorBeginTouchEvent { sensor_shape_id: sensor_id,
+                                            visitor_shape_id: ShapeId { index1: visitor_shape_id(visitor) + 1, world0: w.world_id, generation: visitor_generation(visitor) } }
+}
+
+push_sensor_end_event(w: *World, sensor_id: ShapeId, visitor: long) {
+    b = sensor_end_events(w)
+    index = core.buffer_push(b)
+    events = b.data as SensorEndTouchEvent[]
+    events[index] = SensorEndTouchEvent { sensor_shape_id: sensor_id,
+                                          visitor_shape_id: ShapeId { index1: visitor_shape_id(visitor) + 1, world0: w.world_id, generation: visitor_generation(visitor) } }
+}
+
+// A sensor for a shape: its overlap lists, its place among the world's.
+create_sensor(w: *World, s: *WorldShape) {
+    s.sensor_index = w.sensors.count
+    index = core.buffer_push(&w.sensors)
+    sensor = sensor_at(w, index)
+    sensor.hits = core.buffer_create(8, 4)
+    sensor.overlaps1 = core.buffer_create(8, 16)
+    sensor.overlaps2 = core.buffer_create(8, 16)
+    sensor.shape_id = s.id
+}
+
+// The sensor's overlaps end, its lists go, the last sensor takes its slot.
+destroy_sensor(w: *World, s: *WorldShape) {
+    sensor = sensor_at(w, s.sensor_index)
+    sensor_id = make_shape_id(w, s)
+    overlaps = sensor.overlaps2.data as long[]
+    i = 0
+    while i < sensor.overlaps2.count {
+        push_sensor_end_event(w, sensor_id, overlaps[i])
+        i = i + 1
+    }
+    core.buffer_destroy(&sensor.hits)
+    core.buffer_destroy(&sensor.overlaps1)
+    core.buffer_destroy(&sensor.overlaps2)
+    moved = core.buffer_remove_swap(&w.sensors, s.sensor_index)
+    if moved != NULL_INDEX && moved != s.sensor_index {
+        world_shape_at(w, sensor_at(w, s.sensor_index).shape_id).sensor_index = s.sensor_index
+    }
+    s.sensor_index = NULL_INDEX
+}
+
+shape_enable_sensor_events(id: ShapeId, flag: bool) {
+    s = get_shape_full_id(world_at(id.world0), id)
+    if flag { s.flags = s.flags | SHAPE_ENABLE_SENSOR_EVENTS } else { s.flags = s.flags & (0 - 1 - SHAPE_ENABLE_SENSOR_EVENTS) }
+}
+shape_are_sensor_events_enabled(id: ShapeId) -> bool { return (get_shape_full_id(world_at(id.world0), id).flags & SHAPE_ENABLE_SENSOR_EVENTS) != 0 }
+
+// The shapes a sensor overlaps, as of the last pass.
+shape_get_sensor_capacity(id: ShapeId) -> int {
+    w = world_at(id.world0)
+    s = get_shape_full_id(w, id)
+    if s.sensor_index == NULL_INDEX { return 0 }
+    return sensor_at(w, s.sensor_index).overlaps2.count
+}
+
+shape_get_sensor_data(id: ShapeId, visitors: ShapeId[], capacity: int) -> int {
+    w = world_at(id.world0)
+    s = get_shape_full_id(w, id)
+    if s.sensor_index == NULL_INDEX { return 0 }
+    sensor = sensor_at(w, s.sensor_index)
+    count = math.min_int(sensor.overlaps2.count, capacity)
+    overlaps = sensor.overlaps2.data as long[]
+    i = 0
+    while i < count {
+        visitors[i] = ShapeId { index1: visitor_shape_id(overlaps[i]) + 1, world0: w.world_id, generation: visitor_generation(overlaps[i]) }
+        i = i + 1
+    }
+    return count
+}
+
+shape_get_contact_capacity(id: ShapeId) -> int {
+    w = world_at(id.world0)
+    s = get_shape_full_id(w, id)
+    if s.sensor_index != NULL_INDEX { return 0 }
+    return body_at(w, s.body_id).contact_count
+}
+
+// A sensor hit found by the continuous pass, kept until the next overlap pass.
+add_sensor_hit(w: *World, sensor_shape: *WorldShape, visitor: *WorldShape) {
+    sensor = sensor_at(w, sensor_shape.sensor_index)
+    index = core.buffer_push(&sensor.hits)
+    hits = sensor.hits.data as long[]
+    hits[index] = visitor_key(visitor.id, visitor.generation)
+}
+
+struct SensorQueryContext {
+    w: *World
+    sensor: *Sensor
+    sensor_shape: *WorldShape
+    transform: Transform
+}
+
+var g_sensor_points: ptr = null   // Vec3[MAX_SHAPE_CAST_POINTS]: the visitor in the sensor's frame
+
+// Whether a convex visitor overlaps the sensor's shape: the visitor's
+// proxy in the sensor's frame against the sensor's geometry.
+overlap_sensor(sensor_shape: *WorldShape, sensor_transform: Transform, visitor: *WorldShape, visitor_transform: Transform) -> bool {
+    if g_sensor_points == null { g_sensor_points = core.alloc(distance.MAX_SHAPE_CAST_POINTS * sizeof(Vec3)) }
+    proxy = shape.make_shape_proxy(&visitor.geometry)
+    relative = math.inv_mul_transforms(sensor_transform, visitor_transform)
+    count = math.min_int(proxy.count, distance.MAX_SHAPE_CAST_POINTS)
+    points = proxy.points as Vec3[]
+    local_points = g_sensor_points as Vec3[]
+    i = 0
+    while i < count {
+        local_points[i] = math.transform_point(relative, points[i])
+        i = i + 1
+    }
+    return shape.overlap_shape(&sensor_shape.geometry, math.transform_identity(), distance.shape_proxy(g_sensor_points, count, proxy.radius))
+}
+
+// A tree's proxy near a sensor: a convex shape on another body that
+// wants sensor events, passing the filters, and overlapping.
+sensor_query_visitor(proxy_id: int, user_data: long, context: ptr) -> bool {
+    qc = context as *SensorQueryContext
+    w = qc.w
+    shape_id = user_data as int
+    sensor_shape = qc.sensor_shape
+    if shape_id == sensor_shape.id { return true }
+    other = world_shape_at(w, shape_id)
+    if shape.is_convex(other.geometry.kind) == false { return true }
+    if (other.flags & SHAPE_ENABLE_SENSOR_EVENTS) == 0 { return true }
+    if other.body_id == sensor_shape.body_id { return true }
+    if shape.should_shapes_collide(sensor_shape.filter, other.filter) == false { return true }
+    if w.has_custom_filter && ((sensor_shape.flags & SHAPE_ENABLE_CUSTOM_FILTERING) != 0 || (other.flags & SHAPE_ENABLE_CUSTOM_FILTERING) != 0) {
+        filter = w.custom_filter
+        if filter(make_shape_id(w, sensor_shape), make_shape_id(w, other), w.custom_filter_context) == false { return true }
+    }
+    other_transform = get_body_transform(w, other.body_id)
+    if overlap_sensor(sensor_shape, qc.transform, other, other_transform) == false { return true }
+    sensor = qc.sensor
+    index = core.buffer_push(&sensor.overlaps2)
+    overlaps = sensor.overlaps2.data as long[]
+    overlaps[index] = visitor_key(shape_id, other.generation)
+    return true
+}
+
+// The sensors' pass (b3OverlapSensors, one worker): each sensor's last
+// overlaps become the previous ones, the hits seed the new ones, the
+// three trees are queried, the new list sorted and made unique; where
+// the lists differ, begin and end events in shape id order. A disabled
+// sensor drops all its overlaps.
+overlap_sensors(w: *World) {
+    core.buffer_clear(&w.sensor_begin_events)
+    sensor_count = w.sensors.count
+    if sensor_count == 0 { return }
+    core.bitset_set_count_and_clear(&w.sensor_event_bits, sensor_count)
+    sensor_index = 0
+    while sensor_index < sensor_count {
+        sensor = sensor_at(w, sensor_index)
+        sensor_shape = world_shape_at(w, sensor.shape_id)
+        temp = sensor.overlaps1
+        sensor.overlaps1 = sensor.overlaps2
+        sensor.overlaps2 = temp
+        core.buffer_clear(&sensor.overlaps2)
+        hits = sensor.hits.data as long[]
+        i = 0
+        while i < sensor.hits.count {
+            index = core.buffer_push(&sensor.overlaps2)
+            seeded = sensor.overlaps2.data as long[]
+            seeded[index] = hits[i]
+            i = i + 1
+        }
+        core.buffer_clear(&sensor.hits)
+        body = body_at(w, sensor_shape.body_id)
+        if body.set_index == DISABLED_SET || (sensor_shape.flags & SHAPE_ENABLE_SENSOR_EVENTS) == 0 {
+            if sensor.overlaps1.count != 0 { core.bitset_set(&w.sensor_event_bits, sensor_index) }
+            sensor_index = sensor_index + 1
+            continue
+        }
+        qc = SensorQueryContext { w: w, sensor: sensor, sensor_shape: sensor_shape, transform: get_body_sim(w, body).transform }
+        bounds = sensor_shape.aabb
+        mask = sensor_shape.filter.mask_bits
+        dynamic_tree.tree_query(broad_phase.broad_phase_tree(&w.broad_phase, BODY_STATIC), bounds, mask, false, sensor_query_visitor, (&qc) as ptr)
+        dynamic_tree.tree_query(broad_phase.broad_phase_tree(&w.broad_phase, BODY_KINEMATIC), bounds, mask, false, sensor_query_visitor, (&qc) as ptr)
+        dynamic_tree.tree_query(broad_phase.broad_phase_tree(&w.broad_phase, BODY_DYNAMIC), bounds, mask, false, sensor_query_visitor, (&qc) as ptr)
+        overlaps = sensor.overlaps2.data as long[]
+        broad_phase.sort_longs(overlaps, sensor.overlaps2.count)
+        unique = 0
+        i = 0
+        while i < sensor.overlaps2.count {
+            if unique == 0 || visitor_shape_id(overlaps[i]) != visitor_shape_id(overlaps[unique - 1]) {
+                overlaps[unique] = overlaps[i]
+                unique = unique + 1
+            }
+            i = i + 1
+        }
+        sensor.overlaps2.count = unique
+        count1 = sensor.overlaps1.count
+        if count1 != unique {
+            core.bitset_set(&w.sensor_event_bits, sensor_index)
+        } else {
+            previous = sensor.overlaps1.data as long[]
+            i = 0
+            while i < count1 {
+                if previous[i] != overlaps[i] {
+                    core.bitset_set(&w.sensor_event_bits, sensor_index)
+                    i = count1
+                }
+                i = i + 1
+            }
+        }
+        sensor_index = sensor_index + 1
+    }
+    // The events, in sensor order then shape id order.
+    sensor_index = 0
+    while sensor_index < sensor_count {
+        if core.bitset_get(&w.sensor_event_bits, sensor_index) {
+            sensor = sensor_at(w, sensor_index)
+            sensor_shape = world_shape_at(w, sensor.shape_id)
+            sensor_id = make_shape_id(w, sensor_shape)
+            count1 = sensor.overlaps1.count
+            count2 = sensor.overlaps2.count
+            refs1 = sensor.overlaps1.data as long[]
+            refs2 = sensor.overlaps2.data as long[]
+            index1 = 0
+            index2 = 0
+            while index1 < count1 && index2 < count2 {
+                r1 = refs1[index1]
+                r2 = refs2[index2]
+                if visitor_shape_id(r1) == visitor_shape_id(r2) {
+                    if visitor_generation(r1) < visitor_generation(r2) {
+                        push_sensor_end_event(w, sensor_id, r1)
+                        index1 = index1 + 1
+                    } else if visitor_generation(r1) > visitor_generation(r2) {
+                        push_sensor_begin_event(w, sensor_id, r2)
+                        index2 = index2 + 1
+                    } else {
+                        index1 = index1 + 1
+                        index2 = index2 + 1
+                    }
+                } else if visitor_shape_id(r1) < visitor_shape_id(r2) {
+                    push_sensor_end_event(w, sensor_id, r1)
+                    index1 = index1 + 1
+                } else {
+                    push_sensor_begin_event(w, sensor_id, r2)
+                    index2 = index2 + 1
+                }
+            }
+            while index1 < count1 {
+                push_sensor_end_event(w, sensor_id, refs1[index1])
+                index1 = index1 + 1
+            }
+            while index2 < count2 {
+                push_sensor_begin_event(w, sensor_id, refs2[index2])
+                index2 = index2 + 1
+            }
+        }
+        sensor_index = sensor_index + 1
+    }
+}
+
+// --- joint and sensor validation ------------------------------------------------------------------------------
+
+// Every live joint is where its indices say (a colour or a set), in the
+// set its bodies' sets and types dictate, in an island iff out of the
+// static and disabled sets; the sets' and colours' sims point back; both
+// bodies' lists close on their counts; every sensor and its shape agree.
+validate_joints(w: *World) -> bool {
+    live = 0
+    i = 0
+    while i < w.joints.count {
+        j = joint_at(w, i)
+        if j.joint_id != NULL_INDEX {
+            live = live + 1
+            if j.joint_id != i { return false }
+            body_a = body_at(w, j.edge_a.body_id)
+            body_b = body_at(w, j.edge_b.body_id)
+            if body_a.set_index == DISABLED_SET || body_b.set_index == DISABLED_SET {
+                if j.set_index != DISABLED_SET { return false }
+            } else if body_a.kind != BODY_DYNAMIC && body_b.kind != BODY_DYNAMIC {
+                if j.set_index != STATIC_SET { return false }
+            } else if body_a.set_index == AWAKE_SET || body_b.set_index == AWAKE_SET {
+                if j.set_index != AWAKE_SET { return false }
+            } else {
+                if j.set_index != math.max_int(body_a.set_index, body_b.set_index) { return false }
+            }
+            if j.set_index == AWAKE_SET {
+                if j.color_index < 0 || j.color_index >= GRAPH_COLOR_COUNT { return false }
+                color = graph_color(w, j.color_index)
+                if j.local_index >= color.joint_sims.count || joint_sim_at(&color.joint_sims, j.local_index).joint_id != i { return false }
+                if j.color_index != OVERFLOW_INDEX {
+                    if body_a.kind == BODY_DYNAMIC && core.bitset_get(&color.body_set, body_a.id) == false { return false }
+                    if body_b.kind == BODY_DYNAMIC && core.bitset_get(&color.body_set, body_b.id) == false { return false }
+                }
+            } else {
+                if j.color_index != NULL_INDEX { return false }
+                set = solver_set_at(w, j.set_index)
+                if j.local_index >= set.joint_sims.count || joint_sim_at(&set.joint_sims, j.local_index).joint_id != i { return false }
+            }
+            sim = get_joint_sim(w, j)
+            if sim.body_id_a != j.edge_a.body_id || sim.body_id_b != j.edge_b.body_id || sim.kind != j.kind { return false }
+            if j.set_index > DISABLED_SET {
+                if j.island_id == NULL_INDEX { return false }
+                island = island_at(w, j.island_id)
+                if j.island_index >= island.joints.count || joint_link_at(island, j.island_index).joint_id != i { return false }
+            } else if j.island_id != NULL_INDEX { return false }
+        }
+        i = i + 1
+    }
+    if live != core.idpool_count(&w.joint_id_pool) { return false }
+    // The sets' and colours' sims.
+    i = 0
+    while i < w.solver_sets.count {
+        set = solver_set_at(w, i)
+        if set.set_index != NULL_INDEX {
+            k = 0
+            while k < set.joint_sims.count {
+                j = joint_at(w, joint_sim_at(&set.joint_sims, k).joint_id)
+                if j.set_index != i || j.local_index != k { return false }
+                k = k + 1
+            }
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < GRAPH_COLOR_COUNT {
+        color = graph_color(w, i)
+        k = 0
+        while k < color.joint_sims.count {
+            j = joint_at(w, joint_sim_at(&color.joint_sims, k).joint_id)
+            if j.set_index != AWAKE_SET || j.color_index != i || j.local_index != k { return false }
+            k = k + 1
+        }
+        i = i + 1
+    }
+    // The bodies' lists.
+    i = 0
+    while i < w.bodies.count {
+        body = body_at(w, i)
+        if body.set_index != NULL_INDEX {
+            count = 0
+            key = body.head_joint_key
+            prev = NULL_INDEX
+            while key != NULL_INDEX {
+                j = joint_at(w, key >> 1)
+                edge_body = j.edge_b.body_id
+                if (key & 1) == 0 { edge_body = j.edge_a.body_id }
+                if edge_body != i || joint_edge_prev(w, key) != prev { return false }
+                count = count + 1
+                prev = key
+                key = joint_edge_next(w, key)
+            }
+            if count != body.joint_count { return false }
+        }
+        i = i + 1
+    }
+    // The sensors.
+    i = 0
+    while i < w.sensors.count {
+        sensor = sensor_at(w, i)
+        s = world_shape_at(w, sensor.shape_id)
+        if s.id != sensor.shape_id || s.sensor_index != i { return false }
+        i = i + 1
+    }
+    i = 0
+    while i < w.shapes.count {
+        s = world_shape_at(w, i)
+        if s.id != NULL_INDEX && s.sensor_index != NULL_INDEX {
+            if s.sensor_index >= w.sensors.count || sensor_at(w, s.sensor_index).shape_id != i { return false }
         }
         i = i + 1
     }

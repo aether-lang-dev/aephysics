@@ -4,8 +4,12 @@
 // transform set once, then the world destroyed; then 5,000 cubes resting
 // on a slab through eleven collide passes (the pairs, the narrow phase
 // and the state changes, no solve): the first begins the contacts, the
-// rest recycle them. Single thread, wall time per phase, with the mass
-// sum and the contact count as the checksum.
+// rest recycle them; then those cubes chained by 4,999 revolute joints
+// (created into the graph, then destroyed); then 2,500 sensor spheres
+// over 2,500 static boxes through eleven sensor passes (the first with
+// the pairs and the narrow phase, as the reference's zero-length step).
+// Single thread, wall time per phase, with the mass sum, the contact
+// count, the island count and the begin event count as the checksums.
 import std.string
 import std.os
 import aephysics.math
@@ -34,6 +38,7 @@ ms(ns: long) -> float { return (ns as float) / 1000000.0 }
 const ROUNDS = 10
 const DYNAMIC = 5000
 const STATIC = 500
+const SENSORS = 2500
 
 main() {
     box = hull.make_box_hull(0.5, 0.5, 0.5)
@@ -119,6 +124,70 @@ main() {
     }
     t2 = clock()
     println("aephysics dynamics: first collide of ${DYNAMIC} cubes on a slab ${ms(t1 - t0)} ms (${dynamics.world_contact_count(w)} contacts, ${dynamics.world_island_count(w)} islands), 10 recycling collides ${ms(t2 - t1)} ms")
+
+    // Joints: the cubes chained, then unchained.
+    joints_block = calloc(DYNAMIC, sizeof(JointId))
+    joints = joints_block as JointId[]
+    t0 = clock()
+    i = 0
+    while i < DYNAMIC - 1 {
+        joint_def = dynamics.default_revolute_joint_def()
+        joint_def.base.body_id_a = dynamics.make_body_id(w, 1 + i)
+        joint_def.base.body_id_b = dynamics.make_body_id(w, 2 + i)
+        joint_def.base.local_frame_a.p = math.vec3(1.0, 0.0, 0.0)
+        joint_def.base.local_frame_b.p = math.vec3(0.0 - 1.0, 0.0, 0.0)
+        joints[i] = dynamics.create_revolute_joint(world_id, &joint_def)
+        i = i + 1
+    }
+    t1 = clock()
+    joint_count = dynamics.world_joint_count(w)
+    island_count = dynamics.world_island_count(w)
+    i = 0
+    while i < DYNAMIC - 1 {
+        dynamics.destroy_joint(joints[i], false)
+        i = i + 1
+    }
+    t2 = clock()
+    println("aephysics dynamics: chain ${DYNAMIC} cubes with ${joint_count} revolute joints ${ms(t1 - t0)} ms (${island_count} island), destroy them ${ms(t2 - t1)} ms")
+    free(joints_block)
+    dynamics.destroy_world(world_id)
+
+    // Sensors: spheres over static boxes.
+    world_id = dynamics.create_world(&world_def)
+    w = dynamics.get_world(world_id.index1 - 1)
+    i = 0
+    while i < SENSORS {
+        box_def = dynamics.default_body_def()
+        box_def.position = math.vec3((2 * (i % 50)) as float, 0.0, (2 * (i / 50)) as float)
+        box_id = dynamics.create_body(world_id, &box_def)
+        box_shape_def = dynamics.default_shape_def()
+        box_shape_def.enable_sensor_events = true
+        dynamics.create_hull_shape(box_id, &box_shape_def, box)
+        sensor_def = dynamics.default_body_def()
+        sensor_def.kind = dynamics.BODY_DYNAMIC
+        sensor_def.position = math.vec3((2 * (i % 50)) as float + 0.5, 0.0, (2 * (i / 50)) as float)
+        sensor_id = dynamics.create_body(world_id, &sensor_def)
+        sensor_shape_def = dynamics.default_shape_def()
+        sensor_shape_def.is_sensor = true
+        sensor_shape_def.enable_sensor_events = true
+        dynamics.create_sphere_shape(sensor_id, &sensor_shape_def, manifold.sphere(math.vec3_zero(), 0.6))
+        i = i + 1
+    }
+    t0 = clock()
+    dynamics.update_pairs(w)
+    dynamics.collide(w)
+    dynamics.overlap_sensors(w)
+    t1 = clock()
+    begin_count = dynamics.world_sensor_begin_event_count(w)
+    k = 0
+    while k < 10 {
+        dynamics.update_pairs(w)
+        dynamics.collide(w)
+        dynamics.overlap_sensors(w)
+        k = k + 1
+    }
+    t2 = clock()
+    println("aephysics dynamics: first pass of ${SENSORS} sensors over ${SENSORS} boxes ${ms(t1 - t0)} ms (${begin_count} begin events), 10 more passes ${ms(t2 - t1)} ms")
     dynamics.destroy_world(world_id)
     hull.destroy_hull(slab)
     hull.destroy_hull(box)
