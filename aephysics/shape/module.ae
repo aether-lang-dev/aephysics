@@ -35,7 +35,7 @@ exports (
     compute_shape_aabb, compute_fat_shape_aabb, compute_swept_shape_aabb, get_shape_centroid,
     get_shape_area, get_shape_projected_area, compute_shape_mass, compute_shape_extent,
     ray_cast_shape, shape_cast_shape, overlap_shape, collide_mover, make_shape_proxy,
-    farthest_point_on_aabb
+    farthest_point_on_aabb, shape_time_of_impact
 )
 
 const SHAPE_SPHERE = 0
@@ -367,3 +367,180 @@ make_shape_proxy(shape: *Shape) -> ShapeProxy {
     if kind == SHAPE_HULL { return hull.hull_proxy(shape.hull) }
     return distance.shape_proxy(null, 0, 0.0)
 }
+
+// --- time of impact ---------------------------------------------------------------------------------------------
+
+// The time of impact of a convex shape B sweeping against shape A
+// (b3ShapeTimeOfImpact): convex against convex directly; against a
+// mesh or height field each triangle in B's swept bounds is tried,
+// triangles B starts behind or finishes in front of skipped, and a hit
+// at fraction zero retried with a small sphere around B's centroid (the
+// fallback radius, so a shape starting in contact is not stuck);
+// against a compound each child in the bounds. A sensor A skips the
+// finished-in-front early out. Only the earliest hit is kept.
+struct ImpactContext {
+    input: TOIInput
+    output: TOIOutput
+    local_centroid_b: Vec3         // B's centroid in B's frame
+    mesh_local_centroid_b1: Vec3   // and at the sweep's ends, in the mesh's frame
+    mesh_local_centroid_b2: Vec3
+    fallback_radius: float
+    is_sensor: bool
+    compound_transform: Transform
+    local_sweep_bounds_b: AABB     // B's swept bounds in the compound's frame
+}
+
+var g_toi_points_b: ptr = null   // Vec3[2]: B's sphere or capsule points, safe from the children's
+var g_toi_points_a: ptr = null   // Vec3[2]: a child's
+var g_toi_triangle: ptr = null   // Vec3[3]: the triangle tried
+
+toi_buffers_ready() {
+    if g_toi_points_b == null {
+        g_toi_points_b = core.alloc(2 * sizeof(Vec3))
+        g_toi_points_a = core.alloc(2 * sizeof(Vec3))
+        g_toi_triangle = core.alloc(3 * sizeof(Vec3))
+    }
+}
+
+// A proxy whose points are the module's own copy when they were the sphere module's shared ones.
+own_proxy(shape: *Shape, block: ptr) -> ShapeProxy {
+    proxy = make_shape_proxy(shape)
+    kind = shape.kind
+    if kind == SHAPE_SPHERE || kind == SHAPE_CAPSULE {
+        src = proxy.points as Vec3[]
+        dst = block as Vec3[]
+        i = 0
+        while i < proxy.count {
+            dst[i] = src[i]
+            i = i + 1
+        }
+        return distance.shape_proxy(block, proxy.count, proxy.radius)
+    }
+    return proxy
+}
+
+sweep_transform_start(sw: Sweep) -> Transform { return Transform { p: math.sub(sw.c1, math.rotate_vector(sw.q1, sw.local_center)), q: sw.q1 } }
+sweep_transform_end(sw: Sweep) -> Transform { return Transform { p: math.sub(sw.c2, math.rotate_vector(sw.q2, sw.local_center)), q: sw.q2 } }
+
+better_hit(ctx: *ImpactContext, output: TOIOutput) {
+    if 0.0 < output.fraction && output.fraction < ctx.input.max_fraction {
+        ctx.output = output
+        ctx.input.max_fraction = output.fraction
+    }
+}
+
+mesh_time_of_impact_visitor(a: Vec3, b: Vec3, c: Vec3, triangle_index: int, context: ptr) -> bool {
+    ctx = context as *ImpactContext
+    n = math.normalize(math.cross(math.sub(b, a), math.sub(c, a)))
+    offset1 = math.dot(n, math.sub(ctx.mesh_local_centroid_b1, a))
+    offset2 = math.dot(n, math.sub(ctx.mesh_local_centroid_b2, a))
+    // Started behind.
+    if offset1 < 0.0 { return true }
+    // Finished in front.
+    if ctx.is_sensor == false && offset1 - offset2 < ctx.fallback_radius && offset2 > ctx.fallback_radius { return true }
+    triangle = g_toi_triangle as Vec3[]
+    triangle[0] = a
+    triangle[1] = b
+    triangle[2] = c
+    ctx.input.proxy_a = distance.shape_proxy(g_toi_triangle, 3, 0.0)
+    output = distance.time_of_impact(&ctx.input)
+    if 0.0 < output.fraction && output.fraction < ctx.input.max_fraction {
+        ctx.output = output
+        ctx.input.max_fraction = output.fraction
+    } else if output.fraction == 0.0 {
+        // A hit at the start: the small sphere around B's centroid instead.
+        fallback = ctx.input
+        fallback.proxy_b = distance.shape_proxy((&ctx.local_centroid_b) as ptr, 1, ctx.fallback_radius + math.LINEAR_SLOP)
+        output = distance.time_of_impact(&fallback)
+        if 0.0 < output.fraction && output.fraction < ctx.input.max_fraction {
+            ctx.output = output
+            ctx.input.max_fraction = output.fraction
+        }
+    }
+    return true
+}
+
+compound_time_of_impact_visitor(c: *CompoundData, child_index: int, context: ptr) -> bool {
+    ctx = context as *ImpactContext
+    child = compound.get_compound_child(c, child_index)
+    ctx.input.sweep_a = compound.make_compound_child_sweep(ctx.compound_transform, child.transform)
+    kind = child.kind
+    if kind == SHAPE_CAPSULE {
+        points = g_toi_points_a as Vec3[]
+        points[0] = child.capsule.center1
+        points[1] = child.capsule.center2
+        ctx.input.proxy_a = distance.shape_proxy(g_toi_points_a, 2, child.capsule.radius)
+        better_hit(ctx, distance.time_of_impact(&ctx.input))
+    } else if kind == SHAPE_HULL {
+        ctx.input.proxy_a = hull.hull_proxy(child.hull)
+        better_hit(ctx, distance.time_of_impact(&ctx.input))
+    } else if kind == SHAPE_SPHERE {
+        points = g_toi_points_a as Vec3[]
+        points[0] = child.sphere.center
+        ctx.input.proxy_a = distance.shape_proxy(g_toi_points_a, 1, child.sphere.radius)
+        better_hit(ctx, distance.time_of_impact(&ctx.input))
+    } else if kind == SHAPE_MESH {
+        mesh_ctx = ImpactContext { input: ctx.input, output: ctx.output, local_centroid_b: ctx.local_centroid_b,
+                                   mesh_local_centroid_b1: math.vec3_zero(), mesh_local_centroid_b2: math.vec3_zero(),
+                                   fallback_radius: ctx.fallback_radius, is_sensor: false, compound_transform: ctx.compound_transform,
+                                   local_sweep_bounds_b: ctx.local_sweep_bounds_b }
+        mesh_world = math.mul_transforms(ctx.compound_transform, child.transform)
+        xf_b1 = sweep_transform_start(ctx.input.sweep_b)
+        xf_b2 = sweep_transform_end(ctx.input.sweep_b)
+        mesh_ctx.mesh_local_centroid_b1 = math.inv_transform_point(mesh_world, math.transform_point(xf_b1, ctx.local_centroid_b))
+        mesh_ctx.mesh_local_centroid_b2 = math.inv_transform_point(mesh_world, math.transform_point(xf_b2, ctx.local_centroid_b))
+        local_bounds = math.aabb_transform(math.invert_transform(child.transform), ctx.local_sweep_bounds_b)
+        mesh.query_mesh(child.mesh, local_bounds, mesh_time_of_impact_visitor, (&mesh_ctx) as ptr)
+        if mesh_ctx.input.max_fraction < ctx.input.max_fraction {
+            ctx.output = mesh_ctx.output
+            ctx.input.max_fraction = mesh_ctx.input.max_fraction
+        }
+    }
+    ctx.input.proxy_a = distance.shape_proxy(null, 0, 0.0)
+    return true
+}
+
+shape_time_of_impact(shape_a: *Shape, shape_b: *Shape, sweep_a: Sweep, sweep_b: Sweep, max_fraction: float, is_sensor_a: bool) -> TOIOutput {
+    toi_buffers_ready()
+    kind_a = shape_a.kind
+    proxy_b = own_proxy(shape_b, g_toi_points_b)
+    no_hit = TOIOutput { state: 0, point: math.vec3_zero(), normal: math.vec3_zero(), fraction: 0.0, distance: 0.0,
+                         distance_iterations: 0, push_back_iterations: 0, root_iterations: 0 }
+    if kind_a == SHAPE_COMPOUND {
+        local_centroid_b = get_shape_centroid(shape_b)
+        extents = compute_shape_extent(shape_b, local_centroid_b)
+        compound_transform = Transform { p: sweep_a.c1, q: sweep_a.q1 }
+        bounds = compute_swept_shape_aabb(shape_b, sweep_b, max_fraction)
+        ctx = ImpactContext { input: TOIInput { proxy_a: distance.shape_proxy(null, 0, 0.0), proxy_b: proxy_b, sweep_a: sweep_a, sweep_b: sweep_b, max_fraction: max_fraction },
+                              output: no_hit, local_centroid_b: local_centroid_b, mesh_local_centroid_b1: math.vec3_zero(), mesh_local_centroid_b2: math.vec3_zero(),
+                              fallback_radius: math.max_float(0.75 * extents.min_extent, 4.0 * math.LINEAR_SLOP), is_sensor: is_sensor_a,
+                              compound_transform: compound_transform,
+                              local_sweep_bounds_b: math.aabb_transform(math.invert_transform(compound_transform), bounds) }
+        compound.query_compound(shape_a.compound, ctx.local_sweep_bounds_b, compound_time_of_impact_visitor, (&ctx) as ptr)
+        return ctx.output
+    }
+    if kind_a == SHAPE_MESH || kind_a == SHAPE_HEIGHT_FIELD {
+        local_centroid_b = get_shape_centroid(shape_b)
+        xf_a = sweep_transform_start(sweep_a)
+        xf_b1 = sweep_transform_start(sweep_b)
+        xf_b2 = sweep_transform_end(sweep_b)
+        extents = compute_shape_extent(shape_b, local_centroid_b)
+        bounds = compute_swept_shape_aabb(shape_b, sweep_b, max_fraction)
+        local_bounds = math.aabb_transform(math.invert_transform(xf_a), bounds)
+        ctx = ImpactContext { input: TOIInput { proxy_a: distance.shape_proxy(null, 3, 0.0), proxy_b: proxy_b, sweep_a: sweep_a, sweep_b: sweep_b, max_fraction: max_fraction },
+                              output: no_hit, local_centroid_b: local_centroid_b,
+                              mesh_local_centroid_b1: math.inv_transform_point(xf_a, math.transform_point(xf_b1, local_centroid_b)),
+                              mesh_local_centroid_b2: math.inv_transform_point(xf_a, math.transform_point(xf_b2, local_centroid_b)),
+                              fallback_radius: math.max_float(0.5 * extents.min_extent, math.LINEAR_SLOP), is_sensor: is_sensor_a,
+                              compound_transform: math.transform_identity(), local_sweep_bounds_b: local_bounds }
+        if kind_a == SHAPE_MESH {
+            mesh.query_mesh(shape_a.mesh, local_bounds, mesh_time_of_impact_visitor, (&ctx) as ptr)
+        } else {
+            height_field.query_height_field(shape_a.height_field, local_bounds, mesh_time_of_impact_visitor, (&ctx) as ptr)
+        }
+        return ctx.output
+    }
+    input = TOIInput { proxy_a: make_shape_proxy(shape_a), proxy_b: proxy_b, sweep_a: sweep_a, sweep_b: sweep_b, max_fraction: max_fraction }
+    return distance.time_of_impact(&input)
+}
+

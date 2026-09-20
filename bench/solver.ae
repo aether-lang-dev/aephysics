@@ -1,0 +1,98 @@
+// The step end to end (the pairs, the narrow phase, the Soft Step
+// solve) against the reference's b3World_Step in bench/solver_box3d.c:
+// 5,000 cubes dropped from a metre onto a slab in a 100 by 50 grid
+// (they land, slide and settle) for 120 steps of 1/60 with four
+// sub-steps; then 100 stacks of 10 cubes for 120 steps (the stacking
+// stress: dynamic pairs in every colour). Single thread, wall time of
+// the steps, the sum of the cubes' heights and the awake count as the
+// checksums.
+import std.string
+import std.os
+import aephysics.math
+import aephysics.core
+import aephysics.hull
+import aephysics.manifold
+import aephysics.shape
+import aephysics.broad_phase
+import aephysics.dynamics
+import aephysics.contact_solver
+import aephysics.joint_solver
+import aephysics.solver
+
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+
+clock() -> long { return os.now_monotonic_ns() }
+ms(ns: long) -> float { return (ns as float) / 1000000.0 }
+
+const STEPS = 120
+
+step(w: *World, dt: float, sub_steps: int) {
+    dynamics.update_pairs(w)
+    ctx = contact_solver.default_step_context(w)
+    ctx.dt = dt
+    ctx.sub_step_count = sub_steps
+    ctx.inv_dt = 1.0 / dt
+    ctx.h = dt / (sub_steps as float)
+    ctx.inv_h = (sub_steps as float) * ctx.inv_dt
+    w.inv_h = ctx.inv_h
+    w.inv_dt = ctx.inv_dt
+    contact_hertz = math.min_float(w.contact_hertz, 0.125 * ctx.inv_h)
+    ctx.contact_softness = dynamics.make_soft(contact_hertz, w.contact_damping_ratio, ctx.h)
+    ctx.static_softness = dynamics.make_soft(2.0 * contact_hertz, 0.5 * w.contact_damping_ratio, ctx.h)
+    dynamics.collide(w)
+    solver.solve(w, &ctx)
+    dynamics.overlap_sensors(w)
+    dynamics.swap_end_events(w)
+    core.stack_grow(&w.stack)
+}
+
+run(name: string, count: int, columns: int, rows: int, spacing: float, base_height: float, layer_height: float, box: *HullData, slab: *HullData) {
+    world_def = dynamics.default_world_def()
+    world_id = dynamics.create_world(&world_def)
+    w = dynamics.get_world(world_id.index1 - 1)
+    shape_def = dynamics.default_shape_def()
+    shape_def.density = 1.0
+    ground_def = dynamics.default_body_def()
+    ground_def.position = math.vec3(100.0, 0.0 - 0.5, 50.0)
+    ground = dynamics.create_body(world_id, &ground_def)
+    dynamics.create_hull_shape(ground, &shape_def, slab)
+    ids_block = calloc(count, sizeof(BodyId))
+    ids = ids_block as BodyId[]
+    i = 0
+    while i < count {
+        body_def = dynamics.default_body_def()
+        body_def.kind = dynamics.BODY_DYNAMIC
+        column = i % (columns * rows)
+        layer = i / (columns * rows)
+        body_def.position = math.vec3(spacing * ((column % columns) as float), base_height + layer_height * (layer as float), spacing * ((column / columns) as float))
+        ids[i] = dynamics.create_body(world_id, &body_def)
+        dynamics.create_hull_shape(ids[i], &shape_def, box)
+        i = i + 1
+    }
+    t0 = clock()
+    s = 0
+    while s < STEPS {
+        step(w, 1.0 / 60.0, 4)
+        s = s + 1
+    }
+    t1 = clock()
+    height_sum = 0.0
+    i = 0
+    while i < count {
+        height_sum = height_sum + dynamics.body_get_position(ids[i]).y
+        i = i + 1
+    }
+    println("aephysics solver: ${name}: ${STEPS} steps of ${count} cubes ${ms(t1 - t0)} ms (height sum ${height_sum}, ${dynamics.world_awake_body_count(w)} awake, ${dynamics.world_contact_count(w)} contacts)")
+    free(ids_block)
+    dynamics.destroy_world(world_id)
+}
+
+main() {
+    box = hull.make_box_hull(0.5, 0.5, 0.5)
+    slab = hull.make_box_hull(110.0, 0.5, 60.0)
+    run("falling grid", 5000, 100, 50, 2.0, 1.5, 0.0, box, slab)
+    run("stacks of ten", 1000, 10, 10, 4.0, 0.5, 1.0, box, slab)
+    hull.destroy_hull(slab)
+    hull.destroy_hull(box)
+}

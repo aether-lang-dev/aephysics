@@ -33,7 +33,7 @@ exports (
     sqrt_float, atan2_approx, compute_cos_sin, sin_approx, cos_approx, unwind_angle,
     add, sub, mul, neg, dot, length, length_squared, distance, distance_squared,
     normalize, get_length_and_normalize, perp, is_normalized, mul_add, mul_sub, mul_sv,
-    cross, lerp, blend2, blend3, skew, delta_quat_to_rotation, abs_vec3, sign, min_vec3, max_vec3, clamp_vec3, safe_scale, scalar_triple_product,
+    cross, lerp, blend2, blend3, skew, delta_quat_to_rotation, integrate_rotation, modified_cross, abs_vec3, sign, min_vec3, max_vec3, clamp_vec3, safe_scale, scalar_triple_product,
     is_normalized_quat, rotate_vector, inv_rotate_vector, dot_quat, mul_quat, inv_mul_quat,
     conjugate, negate_quat, normalize_quat, make_quat_from_axis_angle, get_axis_angle,
     get_quat_angle, make_quat_from_matrix, compute_quat_between_unit_vectors,
@@ -353,6 +353,19 @@ blend2(s: float, a: Vec3, t: float, b: Vec3) -> Vec3 {
 
 blend3(s: float, a: Vec3, t: float, b: Vec3, u: float, c: Vec3) -> Vec3 {
     return Vec3 { x: s * a.x + t * b.x + u * c.x, y: s * a.y + t * b.y + u * c.y, z: s * a.z + t * b.z + u * c.z }
+}
+
+// The cross product with every term positive: a bound on the velocity of
+// a body's farthest point from the magnitudes of its spin and extent.
+modified_cross(a: Vec3, b: Vec3) -> Vec3 {
+    return Vec3 { x: a.y * b.z + a.z * b.y, y: a.z * b.x + a.x * b.z, z: a.x * b.y + a.y * b.x }
+}
+
+// The rotation advanced by a small rotation vector (a quaternion
+// derivative step, renormalised).
+integrate_rotation(q1: Quat, delta_rotation: Vec3) -> Quat {
+    qd = mul_quat(Quat { v: mul_sv(0.5, delta_rotation), s: 0.0 }, q1)
+    return normalize_quat(Quat { v: add(q1.v, qd.v), s: qd.s + q1.s })
 }
 
 // The matrix of the cross product: skew(v) * a = cross(v, a).

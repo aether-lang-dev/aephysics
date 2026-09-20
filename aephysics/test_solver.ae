@@ -1,0 +1,382 @@
+// aephysics.solver stepped by hand (the pairs, the narrow phase, then
+// the solve, as the world's step will run them): a cube in free fall
+// against the closed form of the sub-stepped integration, a cube
+// dropped onto a slab settling on its top and falling asleep with its
+// island, a stack of three staying stacked, a bouncy sphere bouncing
+// back up, a pendulum keeping its length, a fast sphere stopped by a
+// thin wall by the continuous pass instead of tunnelling through it, a
+// bullet stopped by a dynamic box, the move, hit and joint events, a
+// sensor swept through, and two worlds stepping bit for bit alike.
+import std.string
+import aephysics.math
+import aephysics.core
+import aephysics.hull
+import aephysics.manifold
+import aephysics.shape
+import aephysics.broad_phase
+import aephysics.dynamics
+import aephysics.contact_solver
+import aephysics.joint_solver
+import aephysics.solver
+
+extern exit(code: int)
+
+var failures = 0
+var checks = 0
+
+ensure(name: string, ok: bool) {
+    checks = checks + 1
+    if !ok {
+        println("solver: FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+small(name: string, value: float, tolerance: float) {
+    ensure("${name} (${value})", math.abs_float(value) < tolerance)
+}
+
+var g_slab: ptr = null
+var g_cube: ptr = null
+var g_wall: ptr = null
+
+fixtures_ready() {
+    if g_slab == null {
+        g_slab = hull.make_box_hull(20.0, 0.5, 20.0) as ptr
+        g_cube = hull.make_box_hull(0.5, 0.5, 0.5) as ptr
+        g_wall = hull.make_box_hull(0.1, 5.0, 5.0) as ptr
+    }
+}
+
+// The step as the world layer will run it: the pairs, the narrow phase, the solve.
+step(w: *World, dt: float, sub_steps: int) {
+    dynamics.update_pairs(w)
+    ctx = contact_solver.default_step_context(w)
+    ctx.dt = dt
+    ctx.sub_step_count = sub_steps
+    ctx.inv_dt = 1.0 / dt
+    ctx.h = dt / (sub_steps as float)
+    ctx.inv_h = (sub_steps as float) * ctx.inv_dt
+    w.inv_h = ctx.inv_h
+    w.inv_dt = ctx.inv_dt
+    contact_hertz = math.min_float(w.contact_hertz, 0.125 * ctx.inv_h)
+    ctx.contact_softness = dynamics.make_soft(contact_hertz, w.contact_damping_ratio, ctx.h)
+    ctx.static_softness = dynamics.make_soft(2.0 * contact_hertz, 0.5 * w.contact_damping_ratio, ctx.h)
+    dynamics.collide(w)
+    solver.solve(w, &ctx)
+    dynamics.swap_end_events(w)
+    core.stack_grow(&w.stack)
+}
+
+steps(w: *World, count: int) {
+    i = 0
+    while i < count { step(w, 1.0 / 60.0, 4); i = i + 1 }
+}
+
+world_with_slab() -> WorldId {
+    fixtures_ready()
+    wdef = dynamics.default_world_def()
+    world_id = dynamics.create_world(&wdef)
+    gdef = dynamics.default_body_def()
+    gdef.position = math.vec3(0.0, 0.0 - 0.5, 0.0)
+    ground = dynamics.create_body(world_id, &gdef)
+    sdef = dynamics.default_shape_def()
+    dynamics.create_hull_shape(ground, &sdef, g_slab as *HullData)
+    return world_id
+}
+
+cube_at(world_id: WorldId, p: Vec3) -> BodyId {
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.position = p
+    id = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    sdef.density = 1.0
+    dynamics.create_hull_shape(id, &sdef, g_cube as *HullData)
+    return id
+}
+
+world_of(id: WorldId) -> *World { return dynamics.get_world(id.index1 - 1) }
+
+test_free_fall() {
+    fixtures_ready()
+    wdef = dynamics.default_world_def()
+    world_id = dynamics.create_world(&wdef)
+    w = world_of(world_id)
+    cube = cube_at(world_id, math.vec3(0.0, 4.0, 0.0))
+    steps(w, 60)
+    // Sub-stepped semi-implicit Euler: y = y0 - g t (t + h) / 2 over 240 sub-steps of 1/240.
+    expected = 4.0 - 0.5 * 10.0 * 1.0 * (1.0 + 1.0 / 240.0)
+    small("free fall: a second of gravity", dynamics.body_get_position(cube).y - expected, 0.0001)
+    small("free fall: the velocity", dynamics.body_get_linear_velocity(cube).y + 10.0, 0.0001)
+    ensure("free fall: one move event per step", dynamics.world_body_move_event_count(w) == 1 && dynamics.world_body_move_event(w, 0).body_id.index1 == cube.index1)
+    ensure("free fall: the step counter", w.step_index == (60 as long))
+    ensure("free fall: awake", dynamics.body_is_awake(cube))
+    // A body with gravity scale zero and damping keeps its velocity, less the damping.
+    dynamics.body_set_gravity_scale(cube, 0.0)
+    dynamics.body_set_linear_velocity(cube, math.vec3(1.0, 0.0, 0.0))
+    dynamics.body_set_linear_damping(cube, 1.0)
+    steps(w, 60)
+    v = dynamics.body_get_linear_velocity(cube).x
+    ensure("damping: slowed but moving (${v})", v > 0.3 && v < 0.4)
+    dynamics.destroy_world(world_id)
+}
+
+test_resting_and_sleep() {
+    // A cube dropped from a metre settles a hair into the slab and sleeps.
+    world_id = world_with_slab()
+    w = world_of(world_id)
+    cube = cube_at(world_id, math.vec3(0.0, 1.5, 0.0))
+    steps(w, 40)
+    p = dynamics.body_get_position(cube)
+    small("dropped: resting on the slab's top (${p.y})", p.y - 0.5, 0.01)
+    small("dropped: no drift to speak of", math.abs_float(p.x) + math.abs_float(p.z), 0.01)
+    ensure("dropped: still awake before the timer", dynamics.body_is_awake(cube))
+    steps(w, 60)
+    body = dynamics.get_body_full_id(w, cube)
+    ensure("dropped: asleep after half a second at rest", dynamics.body_is_awake(cube) == false && body.set_index >= dynamics.FIRST_SLEEPING_SET)
+    ensure("dropped: the contact sleeps with it", dynamics.world_contact_count(w) == 1 && dynamics.contact_at(w, 0).set_index == body.set_index)
+    ensure("dropped: valid asleep", dynamics.validate_solver_sets(w) && dynamics.validate_contacts(w))
+    // A push wakes it and it comes to rest again.
+    dynamics.body_set_linear_velocity(cube, math.vec3(2.0, 0.0, 0.0))
+    ensure("pushed: awake", dynamics.body_is_awake(cube))
+    steps(w, 120)
+    ensure("pushed: slid and stopped (${dynamics.body_get_position(cube).x})", dynamics.body_get_position(cube).x > 0.1 && math.length(dynamics.body_get_linear_velocity(cube)) < 0.01)
+    small("pushed: still on the slab", dynamics.body_get_position(cube).y - 0.5, 0.01)
+    dynamics.destroy_world(world_id)
+
+    // Three cubes stacked stay stacked.
+    world_id = world_with_slab()
+    w = world_of(world_id)
+    a = cube_at(world_id, math.vec3(0.0, 0.5, 0.0))
+    b = cube_at(world_id, math.vec3(0.0, 1.5, 0.0))
+    c = cube_at(world_id, math.vec3(0.0, 2.5, 0.0))
+    steps(w, 120)
+    small("stack: bottom", dynamics.body_get_position(a).y - 0.5, 0.02)
+    small("stack: middle", dynamics.body_get_position(b).y - 1.5, 0.03)
+    small("stack: top", dynamics.body_get_position(c).y - 2.5, 0.04)
+    small("stack: top did not slide", math.abs_float(dynamics.body_get_position(c).x) + math.abs_float(dynamics.body_get_position(c).z), 0.01)
+    ensure("stack: one island", dynamics.world_island_count(w) == 1)
+    steps(w, 60)
+    ensure("stack: asleep as one", dynamics.body_is_awake(a) == false && dynamics.body_is_awake(c) == false && dynamics.world_awake_body_count(w) == 0)
+    ensure("stack: valid", dynamics.validate_solver_sets(w) && dynamics.validate_contacts(w) && dynamics.validate_joints(w))
+    dynamics.destroy_world(world_id)
+}
+
+test_bounce_and_events() {
+    // A bouncy sphere dropped from two metres bounces back up, with a hit event on the impact.
+    world_id = world_with_slab()
+    w = world_of(world_id)
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.position = math.vec3(0.0, 2.5, 0.0)
+    ball = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    sdef.density = 1.0
+    sdef.base_material.restitution = 0.8
+    sdef.enable_hit_events = true
+    dynamics.create_sphere_shape(ball, &sdef, manifold.sphere(math.vec3_zero(), 0.5))
+    hits = 0
+    max_up = 0.0
+    lowest = 10.0
+    i = 0
+    while i < 90 {
+        step(w, 1.0 / 60.0, 4)
+        hits = hits + dynamics.world_contact_hit_event_count(w)
+        v = dynamics.body_get_linear_velocity(ball).y
+        if v > max_up { max_up = v }
+        y = dynamics.body_get_position(ball).y
+        if y < lowest { lowest = y }
+        i = i + 1
+    }
+    ensure("bounce: went up again (${max_up})", max_up > 4.0 && max_up < 5.5)
+    ensure("bounce: did not sink (${lowest})", lowest > 0.45)
+    ensure("bounce: one hit event", hits == 1)
+    dynamics.destroy_world(world_id)
+
+    // A joint event: a weld holding a cube against gravity with a zero force threshold reports every step.
+    world_id = world_with_slab()
+    w = world_of(world_id)
+    cube = cube_at(world_id, math.vec3(0.0, 4.0, 0.0))
+    wdef = dynamics.default_weld_joint_def()
+    wdef.base.body_id_a = dynamics.make_body_id(w, 0)
+    wdef.base.body_id_b = cube
+    wdef.base.local_frame_a.p = math.vec3(0.0, 4.5, 0.0)
+    wdef.base.force_threshold = 5.0
+    weld = dynamics.create_weld_joint(world_id, &wdef)
+    steps(w, 10)
+    ensure("joint event: the weld carries the weight (10 N over 5)", dynamics.world_joint_event_count(w) == 1 && dynamics.world_joint_event(w, 0).joint_id.index1 == weld.index1)
+    small("joint event: the cube held", dynamics.body_get_position(cube).y - 4.0, 0.01)
+    force = joint_solver.joint_get_constraint_force(weld)
+    small("joint event: the force is the weight", force.y - 10.0, 0.5)
+    dynamics.destroy_world(world_id)
+}
+
+test_pendulum() {
+    // A cube hung a metre below a hinge swings from the horizontal; the distance to the pivot holds.
+    fixtures_ready()
+    wdef = dynamics.default_world_def()
+    world_id = dynamics.create_world(&wdef)
+    w = world_of(world_id)
+    gdef = dynamics.default_body_def()
+    pivot = dynamics.create_body(world_id, &gdef)
+    cube = cube_at(world_id, math.vec3(1.0, 0.0, 0.0))
+    rdef = dynamics.default_revolute_joint_def()
+    rdef.base.body_id_a = pivot
+    rdef.base.body_id_b = cube
+    rdef.base.local_frame_a.p = math.vec3_zero()
+    rdef.base.local_frame_b.p = math.vec3(0.0 - 1.0, 0.0, 0.0)
+    dynamics.create_revolute_joint(world_id, &rdef)
+    worst = 0.0
+    lowest = 0.0
+    i = 0
+    while i < 120 {
+        step(w, 1.0 / 60.0, 4)
+        p = dynamics.body_get_position(cube)
+        err = math.abs_float(math.length(p) - 1.0)
+        if err > worst { worst = err }
+        if p.y < lowest { lowest = p.y }
+        i = i + 1
+    }
+    ensure("pendulum: the length held (${worst})", worst < 0.01)
+    ensure("pendulum: swung down and past (${lowest})", lowest < 0.0 - 0.95)
+    ensure("pendulum: stays in the plane", math.abs_float(dynamics.body_get_position(cube).z) < 0.001)
+    dynamics.destroy_world(world_id)
+}
+
+test_continuous() {
+    // A small sphere at 200 m/s into a wall 0.2 thick: without the sweep it would cross the wall in a step.
+    fixtures_ready()
+    wdef = dynamics.default_world_def()
+    wdef.gravity = math.vec3_zero()
+    world_id = dynamics.create_world(&wdef)
+    w = world_of(world_id)
+    wall_def = dynamics.default_body_def()
+    wall_def.position = math.vec3(5.0, 0.0, 0.0)
+    wall = dynamics.create_body(world_id, &wall_def)
+    sdef = dynamics.default_shape_def()
+    dynamics.create_hull_shape(wall, &sdef, g_wall as *HullData)
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.position = math.vec3_zero()
+    bdef.linear_velocity = math.vec3(200.0, 0.0, 0.0)
+    ball = dynamics.create_body(world_id, &bdef)
+    sdef.density = 1.0
+    dynamics.create_sphere_shape(ball, &sdef, manifold.sphere(math.vec3_zero(), 0.1))
+    steps(w, 10)
+    x = dynamics.body_get_position(ball).x
+    ensure("continuous: stopped at the wall (${x})", x < 4.9 && x > 4.5)
+    ensure("continuous: had a time of impact", (dynamics.get_body_full_id(w, ball).flags & dynamics.HAD_TIME_OF_IMPACT) != 0 || x < 4.85)
+    dynamics.destroy_world(world_id)
+
+    // The same without continuous collision tunnels.
+    wdef.enable_continuous = false
+    world_id = dynamics.create_world(&wdef)
+    w = world_of(world_id)
+    wall = dynamics.create_body(world_id, &wall_def)
+    sdef = dynamics.default_shape_def()
+    dynamics.create_hull_shape(wall, &sdef, g_wall as *HullData)
+    ball = dynamics.create_body(world_id, &bdef)
+    sdef.density = 1.0
+    dynamics.create_sphere_shape(ball, &sdef, manifold.sphere(math.vec3_zero(), 0.1))
+    steps(w, 10)
+    ensure("no continuous: through the wall (${dynamics.body_get_position(ball).x})", dynamics.body_get_position(ball).x > 6.0)
+    dynamics.destroy_world(world_id)
+
+    // A bullet is swept against dynamic bodies too: it stops at a resting cube instead of passing through.
+    wdef.enable_continuous = true
+    world_id = dynamics.create_world(&wdef)
+    w = world_of(world_id)
+    target = cube_at(world_id, math.vec3(5.0, 0.0, 0.0))
+    bdef.is_bullet = true
+    bullet = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    sdef.density = 1.0
+    dynamics.create_sphere_shape(bullet, &sdef, manifold.sphere(math.vec3_zero(), 0.1))
+    steps(w, 3)
+    bx = dynamics.body_get_position(bullet).x
+    tx = dynamics.body_get_position(target).x
+    ensure("bullet: did not pass the cube (${bx} vs ${tx})", bx < tx)
+    ensure("bullet: the cube was pushed (${dynamics.body_get_linear_velocity(target).x})", dynamics.body_get_linear_velocity(target).x > 0.1)
+    dynamics.destroy_world(world_id)
+
+    // A fast shape through a sensor: the sweep reports the hit, the sensor pass raises the begin event.
+    world_id = dynamics.create_world(&wdef)
+    w = world_of(world_id)
+    sensor_def = dynamics.default_body_def()
+    sensor_def.position = math.vec3(5.0, 0.0, 0.0)
+    sensor_body = dynamics.create_body(world_id, &sensor_def)
+    sdef = dynamics.default_shape_def()
+    sdef.is_sensor = true
+    sdef.enable_sensor_events = true
+    dynamics.create_hull_shape(sensor_body, &sdef, g_wall as *HullData)
+    bdef.is_bullet = false
+    sdef = dynamics.default_shape_def()
+    sdef.density = 1.0
+    sdef.enable_sensor_events = true
+    ball = dynamics.create_body(world_id, &bdef)
+    dynamics.create_sphere_shape(ball, &sdef, manifold.sphere(math.vec3_zero(), 0.1))
+    begins = 0
+    i = 0
+    while i < 10 {
+        step(w, 1.0 / 60.0, 4)
+        dynamics.overlap_sensors(w)
+        begins = begins + dynamics.world_sensor_begin_event_count(w)
+        i = i + 1
+    }
+    ensure("sensor sweep: the ball passed through (${dynamics.body_get_position(ball).x})", dynamics.body_get_position(ball).x > 6.0)
+    ensure("sensor sweep: one begin event from the hit", begins == 1)
+    dynamics.destroy_world(world_id)
+}
+
+test_determinism() {
+    // Two worlds built alike step alike, bit for bit.
+    world_a = world_with_slab()
+    world_b = world_with_slab()
+    i = 0
+    while i < 20 {
+        cube_at(world_a, math.vec3((i % 5) as float - 2.0, 1.0 + (i / 5) as float * 1.1, 0.3 * (i % 3) as float))
+        cube_at(world_b, math.vec3((i % 5) as float - 2.0, 1.0 + (i / 5) as float * 1.1, 0.3 * (i % 3) as float))
+        i = i + 1
+    }
+    wa = world_of(world_a)
+    wb = world_of(world_b)
+    steps(wa, 120)
+    steps(wb, 120)
+    alike = true
+    i = 1
+    while i <= 20 {
+        pa = dynamics.body_get_position(dynamics.make_body_id(wa, i))
+        pb = dynamics.body_get_position(dynamics.make_body_id(wb, i))
+        if pa.x != pb.x || pa.y != pb.y || pa.z != pb.z { alike = false }
+        i = i + 1
+    }
+    ensure("determinism: twenty cubes alike after two seconds", alike)
+    ensure("determinism: a pile of contacts", dynamics.world_contact_count(wa) > 20 && dynamics.world_contact_count(wa) == dynamics.world_contact_count(wb))
+    ensure("determinism: valid", dynamics.validate_solver_sets(wa) && dynamics.validate_contacts(wa))
+    dynamics.destroy_world(world_a)
+    dynamics.destroy_world(world_b)
+}
+
+main() {
+    before = core.alloc_count()
+    test_free_fall()
+    test_resting_and_sleep()
+    test_bounce_and_events()
+    test_pendulum()
+    test_continuous()
+    test_determinism()
+    hull.destroy_hull(g_wall as *HullData)
+    hull.destroy_hull(g_cube as *HullData)
+    hull.destroy_hull(g_slab as *HullData)
+    // The scratch stays allocated: the worlds' block, the masses, the contact scratch, the sphere's, the sweeps'
+    // buffers, the solvers' dummy states and the sensor hits.
+    ensure("every other counted allocation was freed (${core.alloc_count() - before})", core.alloc_count() == before + 17)
+    println("solver: ${checks} checks")
+    if failures == 0 {
+        println("solver: all checks passed")
+    } else {
+        println("solver: ${failures} failure(s)")
+        exit(1)
+    }
+}
