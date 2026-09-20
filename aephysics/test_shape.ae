@@ -18,6 +18,10 @@ import aephysics.distance
 import aephysics.manifold
 import aephysics.mesh
 import aephysics.height_field
+import aephysics.material
+import aephysics.sphere
+import aephysics.capsule
+import aephysics.compound
 import aephysics.shape
 
 extern calloc(count: int, size: int) -> ptr
@@ -87,7 +91,7 @@ check_inertia_equal(name: string, a: Matrix3, b: Matrix3, tol: float) {
 
 test_mass() {
     // The sphere: its inertia is about its own centre, so the offset does not appear.
-    md = shape.compute_sphere_mass(test_sphere(), 1.0)
+    md = sphere.compute_sphere_mass(test_sphere(), 1.0)
     mass = 4.0 / 3.0 * math.PI
     small("sphere mass", md.mass - mass, math.EPSILON)
     ensure("sphere centre", md.center.x == 1.0 && md.center.y == 0.0)
@@ -157,7 +161,7 @@ test_mass() {
     c = test_capsule()
     radius = c.radius
     length = math.distance(c.center1, c.center2)
-    md = shape.compute_capsule_mass(c, 1.0)
+    md = capsule.compute_capsule_mass(c, 1.0)
     r = hull.make_box_hull(radius + 0.5 * length, radius, radius)
     md_upper = hull.compute_hull_mass(r, 1.0)
     n = 4
@@ -210,7 +214,7 @@ test_mass() {
 
     // A capsule along y has the analytic cylinder-plus-caps inertia about y.
     cy = manifold.capsule(math.vec3(0.0, 0.0 - 1.0, 0.0), math.vec3(0.0, 1.0, 0.0), 0.5)
-    md = shape.compute_capsule_mass(cy, 2.0)
+    md = capsule.compute_capsule_mass(cy, 2.0)
     cylinder_mass = 2.0 * math.PI * 0.25 * 2.0
     sphere_mass = 2.0 * (4.0 / 3.0) * math.PI * 0.125
     small("capsule mass", md.mass - cylinder_mass - sphere_mass, 0.000001)
@@ -219,7 +223,7 @@ test_mass() {
     ensure("capsule inertia diagonal", math.abs_float(md.inertia.cx.y) < 0.000001 && math.abs_float(md.inertia.cy.z) < 0.000001)
     // The same capsule along x: the roles of xx and yy swap.
     cx = manifold.capsule(math.vec3(0.0 - 1.0, 0.0, 0.0), math.vec3(1.0, 0.0, 0.0), 0.5)
-    mx = shape.compute_capsule_mass(cx, 2.0)
+    mx = capsule.compute_capsule_mass(cx, 2.0)
     small("capsule rotated xx", mx.inertia.cx.x - md.inertia.cy.y, 0.000001)
     small("capsule rotated yy", mx.inertia.cy.y - md.inertia.cx.x, 0.000001)
 
@@ -234,14 +238,14 @@ test_mass() {
 }
 
 test_aabb() {
-    b = shape.compute_sphere_aabb(test_sphere(), math.transform_identity())
+    b = sphere.compute_sphere_aabb(test_sphere(), math.transform_identity())
     small("sphere lower x", b.lower.x, math.EPSILON)
     small("sphere lower y", b.lower.y + 1.0, math.EPSILON)
     small("sphere lower z", b.lower.z + 1.0, math.EPSILON)
     small("sphere upper x", b.upper.x - 2.0, math.EPSILON)
     small("sphere upper y", b.upper.y - 1.0, math.EPSILON)
     small("sphere upper z", b.upper.z - 1.0, math.EPSILON)
-    b = shape.compute_capsule_aabb(test_capsule(), math.transform_identity())
+    b = capsule.compute_capsule_aabb(test_capsule(), math.transform_identity())
     small("capsule lower x", b.lower.x + 2.0, math.EPSILON)
     small("capsule lower y", b.lower.y + 1.0, math.EPSILON)
     small("capsule lower z", b.lower.z + 1.0, math.EPSILON)
@@ -312,54 +316,54 @@ test_ray_cast_sphere() {
     // Along each axis: the surface at 3 over a ray of 8.
     origin = math.vec3(0.0 - 4.0, 0.0, 0.0)
     translation = math.vec3(8.0, 0.0, 0.0)
-    check_hit("sphere -x", shape.ray_cast_sphere(s, origin, translation, 1.0), origin, translation, math.vec3(0.0 - 1.0, 0.0, 0.0), math.vec3(0.0 - 1.0, 0.0, 0.0), 3.0 / 8.0, 0.00001)
+    check_hit("sphere -x", sphere.ray_cast_sphere(s, origin, translation, 1.0), origin, translation, math.vec3(0.0 - 1.0, 0.0, 0.0), math.vec3(0.0 - 1.0, 0.0, 0.0), 3.0 / 8.0, 0.00001)
     origin = math.vec3(0.0, 4.0, 0.0)
     translation = math.vec3(0.0, 0.0 - 8.0, 0.0)
-    check_hit("sphere +y", shape.ray_cast_sphere(s, origin, translation, 1.0), origin, translation, math.vec3(0.0, 1.0, 0.0), math.vec3(0.0, 1.0, 0.0), 3.0 / 8.0, 0.00001)
+    check_hit("sphere +y", sphere.ray_cast_sphere(s, origin, translation, 1.0), origin, translation, math.vec3(0.0, 1.0, 0.0), math.vec3(0.0, 1.0, 0.0), 3.0 / 8.0, 0.00001)
     origin = math.vec3(0.0, 0.0, 0.0 - 4.0)
     translation = math.vec3(0.0, 0.0, 8.0)
-    check_hit("sphere -z", shape.ray_cast_sphere(s, origin, translation, 1.0), origin, translation, math.vec3(0.0, 0.0, 0.0 - 1.0), math.vec3(0.0, 0.0, 0.0 - 1.0), 3.0 / 8.0, 0.00001)
+    check_hit("sphere -z", sphere.ray_cast_sphere(s, origin, translation, 1.0), origin, translation, math.vec3(0.0, 0.0, 0.0 - 1.0), math.vec3(0.0, 0.0, 0.0 - 1.0), 3.0 / 8.0, 0.00001)
     // An offset centre, hit partway.
     s2 = manifold.sphere(math.vec3(5.0, 0.0, 0.0), 2.0)
     origin = math.vec3_zero()
     translation = math.vec3(10.0, 0.0, 0.0)
-    check_hit("sphere offset", shape.ray_cast_sphere(s2, origin, translation, 1.0), origin, translation, math.vec3(3.0, 0.0, 0.0), math.vec3(0.0 - 1.0, 0.0, 0.0), 0.3, 0.00001)
+    check_hit("sphere offset", sphere.ray_cast_sphere(s2, origin, translation, 1.0), origin, translation, math.vec3(3.0, 0.0, 0.0), math.vec3(0.0 - 1.0, 0.0, 0.0), 0.3, 0.00001)
     // A diagonal through the centre.
     k = 0.70710678
     origin = math.vec3(0.0 - 3.0, 0.0 - 3.0, 0.0)
     translation = math.vec3(6.0, 6.0, 0.0)
-    check_hit("sphere diagonal", shape.ray_cast_sphere(s, origin, translation, 1.0), origin, translation, math.vec3(0.0 - k, 0.0 - k, 0.0), math.vec3(0.0 - k, 0.0 - k, 0.0), 0.382149, 0.0001)
+    check_hit("sphere diagonal", sphere.ray_cast_sphere(s, origin, translation, 1.0), origin, translation, math.vec3(0.0 - k, 0.0 - k, 0.0), math.vec3(0.0 - k, 0.0 - k, 0.0), 0.382149, 0.0001)
 
     // Misses: pointing away, wide, stopping short.
-    ensure("sphere away", shape.ray_cast_sphere(s, math.vec3(0.0 - 4.0, 0.0, 0.0), math.vec3(0.0 - 8.0, 0.0, 0.0), 1.0).hit == false)
-    ensure("sphere wide", shape.ray_cast_sphere(s, math.vec3(0.0 - 4.0, 3.0, 0.0), math.vec3(8.0, 0.0, 0.0), 1.0).hit == false)
-    ensure("sphere short", shape.ray_cast_sphere(s, math.vec3(0.0 - 4.0, 0.0, 0.0), math.vec3(8.0, 0.0, 0.0), 0.3).hit == false)
+    ensure("sphere away", sphere.ray_cast_sphere(s, math.vec3(0.0 - 4.0, 0.0, 0.0), math.vec3(0.0 - 8.0, 0.0, 0.0), 1.0).hit == false)
+    ensure("sphere wide", sphere.ray_cast_sphere(s, math.vec3(0.0 - 4.0, 3.0, 0.0), math.vec3(8.0, 0.0, 0.0), 1.0).hit == false)
+    ensure("sphere short", sphere.ray_cast_sphere(s, math.vec3(0.0 - 4.0, 0.0, 0.0), math.vec3(8.0, 0.0, 0.0), 0.3).hit == false)
     // The clip straddling the surface at 3/8.
-    ensure("sphere clipped", shape.ray_cast_sphere(s, math.vec3(0.0 - 4.0, 0.0, 0.0), math.vec3(8.0, 0.0, 0.0), 0.374).hit == false)
-    out = shape.ray_cast_sphere(s, math.vec3(0.0 - 4.0, 0.0, 0.0), math.vec3(8.0, 0.0, 0.0), 0.376)
+    ensure("sphere clipped", sphere.ray_cast_sphere(s, math.vec3(0.0 - 4.0, 0.0, 0.0), math.vec3(8.0, 0.0, 0.0), 0.374).hit == false)
+    out = sphere.ray_cast_sphere(s, math.vec3(0.0 - 4.0, 0.0, 0.0), math.vec3(8.0, 0.0, 0.0), 0.376)
     ensure("sphere just reached", out.hit)
     small("sphere just reached fraction", out.fraction - 3.0 / 8.0, 0.00001)
     // The interior: the origin at fraction zero; a zero-length ray inside and out.
     origin = math.vec3(0.3, 0.0, 0.0)
-    out = shape.ray_cast_sphere(s, origin, math.vec3(8.0, 0.0, 0.0), 1.0)
+    out = sphere.ray_cast_sphere(s, origin, math.vec3(8.0, 0.0, 0.0), 1.0)
     ensure("sphere interior hit", out.hit)
     ensure("sphere interior fraction", out.fraction == 0.0)
     small("sphere interior point", math.distance(out.point, origin), math.EPSILON)
     origin = math.vec3(0.5, 0.0, 0.0)
-    out = shape.ray_cast_sphere(s, origin, math.vec3_zero(), 1.0)
+    out = sphere.ray_cast_sphere(s, origin, math.vec3_zero(), 1.0)
     ensure("sphere zero ray inside", out.hit)
     small("sphere zero ray point", math.distance(out.point, origin), math.EPSILON)
-    ensure("sphere zero ray outside", shape.ray_cast_sphere(s, math.vec3(3.0, 0.0, 0.0), math.vec3_zero(), 1.0).hit == false)
+    ensure("sphere zero ray outside", sphere.ray_cast_sphere(s, math.vec3(3.0, 0.0, 0.0), math.vec3_zero(), 1.0).hit == false)
     // The graze.
-    ensure("sphere graze hits", shape.ray_cast_sphere(s, math.vec3(0.0 - 4.0, 0.999, 0.0), math.vec3(8.0, 0.0, 0.0), 1.0).hit)
-    ensure("sphere graze misses", shape.ray_cast_sphere(s, math.vec3(0.0 - 4.0, 1.001, 0.0), math.vec3(8.0, 0.0, 0.0), 1.0).hit == false)
+    ensure("sphere graze hits", sphere.ray_cast_sphere(s, math.vec3(0.0 - 4.0, 0.999, 0.0), math.vec3(8.0, 0.0, 0.0), 1.0).hit)
+    ensure("sphere graze misses", sphere.ray_cast_sphere(s, math.vec3(0.0 - 4.0, 1.001, 0.0), math.vec3(8.0, 0.0, 0.0), 1.0).hit == false)
     // The hollow sphere hits from inside.
-    out = shape.ray_cast_hollow_sphere(s, math.vec3(0.3, 0.0, 0.0), math.vec3(8.0, 0.0, 0.0), 1.0)
+    out = sphere.ray_cast_hollow_sphere(s, math.vec3(0.3, 0.0, 0.0), math.vec3(8.0, 0.0, 0.0), 1.0)
     ensure("hollow sphere inside hit", out.hit)
     small("hollow sphere inside point", out.point.x - 1.0, 0.00001)
     small("hollow sphere inside normal", out.normal.x - 1.0, 0.00001)
     // The hollow cast reports its fraction in length units against a unit ray.
-    out = shape.ray_cast_hollow_sphere(s, math.vec3(0.0 - 4.0, 0.0, 0.0), math.vec3(1.0, 0.0, 0.0), 8.0)
+    out = sphere.ray_cast_hollow_sphere(s, math.vec3(0.0 - 4.0, 0.0, 0.0), math.vec3(1.0, 0.0, 0.0), 8.0)
     ensure("hollow sphere outside hit", out.hit)
     small("hollow sphere outside point", out.point.x + 1.0, 0.00001)
     small("hollow sphere outside fraction", out.fraction - 3.0, 0.00001)
@@ -370,57 +374,57 @@ test_ray_cast_capsule() {
     // The side, perpendicular: the surface at 2 over a ray of 6.
     origin = math.vec3(0.0, 3.0, 0.0)
     translation = math.vec3(0.0, 0.0 - 6.0, 0.0)
-    check_hit("capsule side y", shape.ray_cast_capsule(c, origin, translation, 1.0), origin, translation, math.vec3(0.0, 1.0, 0.0), math.vec3(0.0, 1.0, 0.0), 1.0 / 3.0, 0.00001)
+    check_hit("capsule side y", capsule.ray_cast_capsule(c, origin, translation, 1.0), origin, translation, math.vec3(0.0, 1.0, 0.0), math.vec3(0.0, 1.0, 0.0), 1.0 / 3.0, 0.00001)
     origin = math.vec3(0.0, 0.0, 3.0)
     translation = math.vec3(0.0, 0.0, 0.0 - 6.0)
-    check_hit("capsule side z", shape.ray_cast_capsule(c, origin, translation, 1.0), origin, translation, math.vec3(0.0, 0.0, 1.0), math.vec3(0.0, 0.0, 1.0), 1.0 / 3.0, 0.00001)
+    check_hit("capsule side z", capsule.ray_cast_capsule(c, origin, translation, 1.0), origin, translation, math.vec3(0.0, 0.0, 1.0), math.vec3(0.0, 0.0, 1.0), 1.0 / 3.0, 0.00001)
     origin = math.vec3(0.0 - 1.0, 3.0, 0.0)
     translation = math.vec3(0.0, 0.0 - 6.0, 0.0)
-    check_hit("capsule side near c1", shape.ray_cast_capsule(c, origin, translation, 1.0), origin, translation, math.vec3(0.0 - 1.0, 1.0, 0.0), math.vec3(0.0, 1.0, 0.0), 1.0 / 3.0, 0.00001)
+    check_hit("capsule side near c1", capsule.ray_cast_capsule(c, origin, translation, 1.0), origin, translation, math.vec3(0.0 - 1.0, 1.0, 0.0), math.vec3(0.0, 1.0, 0.0), 1.0 / 3.0, 0.00001)
     // Oblique in the z = 0 plane, crossing y = 1 within the cylinder.
     origin = math.vec3(0.0 - 3.0, 3.0, 0.0)
     translation = math.vec3(4.0, 0.0 - 4.0, 0.0)
-    check_hit("capsule oblique", shape.ray_cast_capsule(c, origin, translation, 1.0), origin, translation, math.vec3(0.0 - 1.0, 1.0, 0.0), math.vec3(0.0, 1.0, 0.0), 0.5, 0.0001)
+    check_hit("capsule oblique", capsule.ray_cast_capsule(c, origin, translation, 1.0), origin, translation, math.vec3(0.0 - 1.0, 1.0, 0.0), math.vec3(0.0, 1.0, 0.0), 0.5, 0.0001)
     // The caps: collinear onto c2, off-axis through each cap's centre.
     k = 0.70710678
     origin = math.vec3(5.0, 0.0, 0.0)
     translation = math.vec3(0.0 - 8.0, 0.0, 0.0)
-    check_hit("capsule cap collinear", shape.ray_cast_capsule(c, origin, translation, 1.0), origin, translation, math.vec3(3.0, 0.0, 0.0), math.vec3(1.0, 0.0, 0.0), 0.25, 0.00001)
+    check_hit("capsule cap collinear", capsule.ray_cast_capsule(c, origin, translation, 1.0), origin, translation, math.vec3(3.0, 0.0, 0.0), math.vec3(1.0, 0.0, 0.0), 0.25, 0.00001)
     origin = math.vec3(4.0, 2.0, 0.0)
     translation = math.vec3(0.0 - 4.0, 0.0 - 4.0, 0.0)
-    check_hit("capsule cap c2", shape.ray_cast_capsule(c, origin, translation, 1.0), origin, translation, math.vec3(2.0 + k, k, 0.0), math.vec3(k, k, 0.0), 0.323223, 0.0001)
+    check_hit("capsule cap c2", capsule.ray_cast_capsule(c, origin, translation, 1.0), origin, translation, math.vec3(2.0 + k, k, 0.0), math.vec3(k, k, 0.0), 0.323223, 0.0001)
     origin = math.vec3(0.0 - 4.0, 2.0, 0.0)
     translation = math.vec3(4.0, 0.0 - 4.0, 0.0)
-    check_hit("capsule cap c1", shape.ray_cast_capsule(c, origin, translation, 1.0), origin, translation, math.vec3(0.0 - 2.0 - k, k, 0.0), math.vec3(0.0 - k, k, 0.0), 0.323223, 0.0001)
+    check_hit("capsule cap c1", capsule.ray_cast_capsule(c, origin, translation, 1.0), origin, translation, math.vec3(0.0 - 2.0 - k, k, 0.0), math.vec3(0.0 - k, k, 0.0), 0.323223, 0.0001)
     // Misses.
-    ensure("capsule away", shape.ray_cast_capsule(c, math.vec3(0.0, 3.0, 0.0), math.vec3(0.0, 4.0, 0.0), 1.0).hit == false)
-    ensure("capsule over", shape.ray_cast_capsule(c, math.vec3(0.0, 4.0, 2.0), math.vec3(0.0, 0.0 - 8.0, 0.0), 1.0).hit == false)
-    ensure("capsule short", shape.ray_cast_capsule(c, math.vec3(0.0, 5.0, 0.0), math.vec3(0.0, 0.0 - 1.0, 0.0), 1.0).hit == false)
-    ensure("capsule parallel outside", shape.ray_cast_capsule(c, math.vec3(0.0, 3.0, 0.0), math.vec3(8.0, 0.0, 0.0), 1.0).hit == false)
-    ensure("capsule past the end", shape.ray_cast_capsule(c, math.vec3(4.0, 3.0, 0.0), math.vec3(0.0, 0.0 - 6.0, 0.0), 1.0).hit == false)
+    ensure("capsule away", capsule.ray_cast_capsule(c, math.vec3(0.0, 3.0, 0.0), math.vec3(0.0, 4.0, 0.0), 1.0).hit == false)
+    ensure("capsule over", capsule.ray_cast_capsule(c, math.vec3(0.0, 4.0, 2.0), math.vec3(0.0, 0.0 - 8.0, 0.0), 1.0).hit == false)
+    ensure("capsule short", capsule.ray_cast_capsule(c, math.vec3(0.0, 5.0, 0.0), math.vec3(0.0, 0.0 - 1.0, 0.0), 1.0).hit == false)
+    ensure("capsule parallel outside", capsule.ray_cast_capsule(c, math.vec3(0.0, 3.0, 0.0), math.vec3(8.0, 0.0, 0.0), 1.0).hit == false)
+    ensure("capsule past the end", capsule.ray_cast_capsule(c, math.vec3(4.0, 3.0, 0.0), math.vec3(0.0, 0.0 - 6.0, 0.0), 1.0).hit == false)
     // The interior.
     origin = math.vec3_zero()
-    out = shape.ray_cast_capsule(c, origin, math.vec3(0.0, 0.0 - 5.0, 0.0), 1.0)
+    out = capsule.ray_cast_capsule(c, origin, math.vec3(0.0, 0.0 - 5.0, 0.0), 1.0)
     ensure("capsule interior hit", out.hit)
     ensure("capsule interior fraction", out.fraction == 0.0)
     small("capsule interior point", math.distance(out.point, origin), math.EPSILON)
     origin = math.vec3(2.5, 0.0, 0.0)
-    out = shape.ray_cast_capsule(c, origin, math.vec3(0.0, 0.0, 5.0), 1.0)
+    out = capsule.ray_cast_capsule(c, origin, math.vec3(0.0, 0.0, 5.0), 1.0)
     ensure("capsule cap interior hit", out.hit)
     ensure("capsule cap interior fraction", out.fraction == 0.0)
     small("capsule cap interior point", math.distance(out.point, origin), math.EPSILON)
-    out = shape.ray_cast_capsule(c, math.vec3_zero(), math.vec3_zero(), 1.0)
+    out = capsule.ray_cast_capsule(c, math.vec3_zero(), math.vec3_zero(), 1.0)
     ensure("capsule zero ray inside", out.hit)
     small("capsule zero ray point", math.length(out.point), math.EPSILON)
-    ensure("capsule zero ray outside", shape.ray_cast_capsule(c, math.vec3(0.0, 3.0, 0.0), math.vec3_zero(), 1.0).hit == false)
+    ensure("capsule zero ray outside", capsule.ray_cast_capsule(c, math.vec3(0.0, 3.0, 0.0), math.vec3_zero(), 1.0).hit == false)
     // Coincident centres are a sphere.
     degenerate = manifold.capsule(math.vec3_zero(), math.vec3_zero(), 1.0)
     origin = math.vec3(0.0 - 4.0, 0.0, 0.0)
     translation = math.vec3(8.0, 0.0, 0.0)
-    check_hit("capsule degenerate", shape.ray_cast_capsule(degenerate, origin, translation, 1.0), origin, translation, math.vec3(0.0 - 1.0, 0.0, 0.0), math.vec3(0.0 - 1.0, 0.0, 0.0), 3.0 / 8.0, 0.00001)
+    check_hit("capsule degenerate", capsule.ray_cast_capsule(degenerate, origin, translation, 1.0), origin, translation, math.vec3(0.0 - 1.0, 0.0, 0.0), math.vec3(0.0 - 1.0, 0.0, 0.0), 3.0 / 8.0, 0.00001)
     // The clip straddling the side hit at 1/3.
-    ensure("capsule clipped", shape.ray_cast_capsule(c, math.vec3(0.0, 3.0, 0.0), math.vec3(0.0, 0.0 - 6.0, 0.0), 0.3).hit == false)
-    out = shape.ray_cast_capsule(c, math.vec3(0.0, 3.0, 0.0), math.vec3(0.0, 0.0 - 6.0, 0.0), 0.5)
+    ensure("capsule clipped", capsule.ray_cast_capsule(c, math.vec3(0.0, 3.0, 0.0), math.vec3(0.0, 0.0 - 6.0, 0.0), 0.3).hit == false)
+    out = capsule.ray_cast_capsule(c, math.vec3(0.0, 3.0, 0.0), math.vec3(0.0, 0.0 - 6.0, 0.0), 0.5)
     ensure("capsule just reached", out.hit)
     small("capsule just reached fraction", out.fraction - 1.0 / 3.0, 0.00001)
 
@@ -428,18 +432,18 @@ test_ray_cast_capsule() {
     axis_y = manifold.capsule(math.vec3_zero(), math.vec3(0.0, 10.0, 0.0), 1.0)
     origin = math.vec3(1.0001, 100.0, 0.0)
     translation = math.vec3(0.0 - 0.001, 0.0 - 200.0, 0.0)
-    out = shape.ray_cast_capsule(axis_y, origin, translation, 1.0)
+    out = capsule.ray_cast_capsule(axis_y, origin, translation, 1.0)
     ensure("near parallel y hit", out.hit)
     on_segment = math.point_to_segment_distance(axis_y.center1, axis_y.center2, out.point)
     small("near parallel y on the surface", math.distance(out.point, on_segment) - axis_y.radius, 0.001)
     small("near parallel y on the ray", math.distance(out.point, math.mul_add(origin, out.fraction, translation)), 0.001)
     origin = math.vec3(0.0 - 1000.0, 1.0001, 0.0)
     translation = math.vec3(2000.0, 0.0 - 0.001, 0.0)
-    out = shape.ray_cast_capsule(c, origin, translation, 1.0)
+    out = capsule.ray_cast_capsule(c, origin, translation, 1.0)
     ensure("near parallel x hit", out.hit)
     on_segment = math.point_to_segment_distance(c.center1, c.center2, out.point)
     small("near parallel x on the surface", math.distance(out.point, on_segment) - c.radius, 0.001)
-    ensure("exactly parallel outside misses", shape.ray_cast_capsule(c, math.vec3(0.0, 3.0, 0.0), math.vec3(8.0, 0.0, 0.0), 1.0).hit == false)
+    ensure("exactly parallel outside misses", capsule.ray_cast_capsule(c, math.vec3(0.0, 3.0, 0.0), math.vec3(8.0, 0.0, 0.0), 1.0).hit == false)
 }
 
 test_overlap_convention() {
@@ -447,14 +451,14 @@ test_overlap_convention() {
     zero = math.vec3_zero()
     s = unit_sphere()
     inside = math.vec3(0.2, 0.0, 0.0)
-    check_initial_overlap("sphere moving", shape.ray_cast_sphere(s, inside, ray, 1.0), inside)
-    check_initial_overlap("sphere point", shape.ray_cast_sphere(s, inside, zero, 1.0), inside)
-    ensure("sphere point outside", shape.ray_cast_sphere(s, math.vec3(3.0, 0.0, 0.0), zero, 1.0).hit == false)
+    check_initial_overlap("sphere moving", sphere.ray_cast_sphere(s, inside, ray, 1.0), inside)
+    check_initial_overlap("sphere point", sphere.ray_cast_sphere(s, inside, zero, 1.0), inside)
+    ensure("sphere point outside", sphere.ray_cast_sphere(s, math.vec3(3.0, 0.0, 0.0), zero, 1.0).hit == false)
     c = ray_capsule()
     inside = math.vec3_zero()
-    check_initial_overlap("capsule moving", shape.ray_cast_capsule(c, inside, ray, 1.0), inside)
-    check_initial_overlap("capsule point", shape.ray_cast_capsule(c, inside, zero, 1.0), inside)
-    ensure("capsule point outside", shape.ray_cast_capsule(c, math.vec3(0.0, 3.0, 0.0), zero, 1.0).hit == false)
+    check_initial_overlap("capsule moving", capsule.ray_cast_capsule(c, inside, ray, 1.0), inside)
+    check_initial_overlap("capsule point", capsule.ray_cast_capsule(c, inside, zero, 1.0), inside)
+    ensure("capsule point outside", capsule.ray_cast_capsule(c, math.vec3(0.0, 3.0, 0.0), zero, 1.0).hit == false)
     box = hull.make_box_hull(1.0, 1.0, 1.0)
     inside = math.vec3(0.3, 0.2, 0.1)
     check_initial_overlap("hull moving", hull.ray_cast_hull(box, inside, ray, 1.0), inside)
@@ -523,8 +527,8 @@ test_far_origin() {
                 u = math.normalize(math.vec3(offsets[ia], offsets[ib], 1.0))
                 origin = math.mul_add(h, d, u)
                 translation = math.mul_sv(0.0 - 2.0 * d, u)
-                os = shape.ray_cast_sphere(s, origin, translation, 1.0)
-                oc = shape.ray_cast_capsule(c, origin, translation, 1.0)
+                os = sphere.ray_cast_sphere(s, origin, translation, 1.0)
+                oc = capsule.ray_cast_capsule(c, origin, translation, 1.0)
                 err_s = ray_miss
                 if os.hit { err_s = sphere_hit_error(s, origin, translation, os.point) }
                 err_c = ray_miss
@@ -558,13 +562,13 @@ test_dispatch() {
     origin = math.vec3(0.0 - 4.0, 0.0, 0.0)
     translation = math.vec3(8.0, 0.0, 0.0)
     // The reference's RayCastShape: the sphere at x 1, the capsule -1..1, the cube.
-    out = shape.ray_cast_sphere(test_sphere(), origin, translation, 1.0)
+    out = sphere.ray_cast_sphere(test_sphere(), origin, translation, 1.0)
     ensure("cast sphere hit", out.hit)
     small("cast sphere normal x", out.normal.x + 1.0, math.EPSILON)
     small("cast sphere normal y", out.normal.y, math.EPSILON)
     small("cast sphere normal z", out.normal.z, math.EPSILON)
     small("cast sphere fraction", out.fraction - 0.5, math.EPSILON)
-    out = shape.ray_cast_capsule(test_capsule(), origin, translation, 1.0)
+    out = capsule.ray_cast_capsule(test_capsule(), origin, translation, 1.0)
     ensure("cast capsule hit", out.hit)
     small("cast capsule normal x", out.normal.x + 1.0, math.EPSILON)
     small("cast capsule normal y", out.normal.y, math.EPSILON)

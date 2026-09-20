@@ -4,20 +4,14 @@
 // transform, the swept and fat bounds, the centroid, the areas, the mass
 // properties, the extent for sleeping, the ray cast, the shape cast, the
 // overlap, the character mover's planes and the proxy; and the sphere's
-// and the capsule's own geometry, which had no module of their own.
+// and the collision filters. The sphere's and the capsule's own geometry
+// are the sphere and capsule modules.
 //
-// The shapes are Box3D's (Erin Catto, MIT) sphere.c, capsule.c and the
-// geometric half of shape.c, the reference this engine is measured
-// against: the ray against a sphere by the closest point on the ray to
-// the centre (the Ray Tracing Gems form that keeps its precision far
-// from the origin), the ray against a capsule by the closest points of
-// the two lines with the near-parallel fallback through the axial
-// circle, the initial-overlap convention (the origin, fraction zero, no
-// normal), and the mover's deep-overlap directions. Names are the
-// reference's without its prefix, in snake case: b3RayCastCapsule is
-// ray_cast_capsule. The world-bound half of shape.c (creation on a body,
-// the broad-phase proxy, materials, events, filters at run time) comes
-// with the dynamics.
+// This is the geometric half of Box3D's shape.c (Erin Catto, MIT), the
+// reference this engine is measured against. Names are the reference's
+// without its prefix, in snake case: b3RayCastShape is ray_cast_shape.
+// The world-bound half (creation on a body, the broad-phase proxy,
+// materials, events, filters at run time) comes with the dynamics.
 //
 // Differences: no union; a Shape holds every kind's fields and a kind.
 import std.string
@@ -28,25 +22,21 @@ import aephysics.distance
 import aephysics.manifold
 import aephysics.mesh
 import aephysics.height_field
+import aephysics.material
+import aephysics.sphere
+import aephysics.capsule
+import aephysics.compound
 
 exports (
     Shape, Filter, QueryFilter,
     SHAPE_SPHERE, SHAPE_CAPSULE, SHAPE_HULL, SHAPE_MESH, SHAPE_HEIGHT_FIELD, SHAPE_COMPOUND, SHAPE_KIND_COUNT,
-    OVERLAP_SLOP,
-    sphere_shape, capsule_shape, hull_shape, mesh_shape, height_field_shape,
+    sphere_shape, capsule_shape, hull_shape, mesh_shape, height_field_shape, compound_shape,
     default_filter, default_query_filter, should_shapes_collide, should_query_collide, is_convex,
-    compute_sphere_mass, compute_sphere_aabb, compute_swept_sphere_aabb, overlap_sphere,
-    ray_cast_sphere, ray_cast_hollow_sphere, shape_cast_sphere, collide_mover_and_sphere,
-    compute_capsule_mass, compute_capsule_aabb, compute_swept_capsule_aabb, overlap_capsule,
-    ray_cast_capsule, shape_cast_capsule, collide_mover_and_capsule,
-    collide_mover_and_hull,
     compute_shape_aabb, compute_fat_shape_aabb, compute_swept_shape_aabb, get_shape_centroid,
     get_shape_area, get_shape_projected_area, compute_shape_mass, compute_shape_extent,
     ray_cast_shape, shape_cast_shape, overlap_shape, collide_mover, make_shape_proxy,
     farthest_point_on_aabb
 )
-
-extern sqrt(x: float) -> float
 
 const SHAPE_SPHERE = 0
 const SHAPE_CAPSULE = 1
@@ -55,9 +45,6 @@ const SHAPE_MESH = 3
 const SHAPE_HEIGHT_FIELD = 4
 const SHAPE_COMPOUND = 5
 const SHAPE_KIND_COUNT = 6
-
-// Closer than this is an overlap (a tenth of the linear slop).
-const OVERLAP_SLOP = 0.0005
 
 // A shape of one kind: the fields of the other kinds are unused.
 struct Shape {
@@ -69,7 +56,7 @@ struct Shape {
     hull: *HullData
     mesh: Mesh
     height_field: *HeightFieldData
-    compound: ptr            // *CompoundData, the next layer
+    compound: *CompoundData
 }
 
 // Who collides with whom: a shape is in the categories of its bits and
@@ -137,6 +124,15 @@ height_field_shape(h: *HeightFieldData, material_count: int) -> Shape {
     return shape
 }
 
+compound_shape(c: *CompoundData) -> Shape {
+    shape = empty_shape()
+    shape.kind = SHAPE_COMPOUND
+    shape.density = 0.0
+    shape.compound = c
+    shape.material_count = math.max_int(c.material_count, 1)
+    return shape
+}
+
 // --- filters ----------------------------------------------------------------------------
 
 default_filter() -> Filter { return Filter { category_bits: 1 as long, mask_bits: all_bits(), group_index: 0 } }
@@ -156,367 +152,16 @@ should_query_collide(shape_filter: Filter, query_filter: QueryFilter) -> bool {
 
 is_convex(kind: int) -> bool { return kind == SHAPE_SPHERE || kind == SHAPE_CAPSULE || kind == SHAPE_HULL }
 
-// --- the sphere -----------------------------------------------------------------------------
-
-compute_sphere_mass(s: Sphere, density: float) -> MassData {
-    radius = s.radius
-    volume = 4.0 / 3.0 * math.PI * radius * radius * radius
-    mass = volume * density
-    ixx = 0.4 * mass * radius * radius
-    // The inertia is about the centre of mass.
-    return MassData { mass: mass, center: s.center, inertia: math.make_diagonal_matrix(ixx, ixx, ixx) }
-}
-
-compute_sphere_aabb(s: Sphere, t: Transform) -> AABB {
-    center = math.transform_point(t, s.center)
-    extent = math.vec3(s.radius, s.radius, s.radius)
-    return AABB { lower: math.sub(center, extent), upper: math.add(center, extent) }
-}
-
-compute_swept_sphere_aabb(s: Sphere, xf1: Transform, xf2: Transform) -> AABB {
-    r = math.vec3(s.radius, s.radius, s.radius)
-    center1 = math.transform_point(xf1, s.center)
-    center2 = math.transform_point(xf2, s.center)
-    return AABB { lower: math.sub(math.min_vec3(center1, center2), r), upper: math.add(math.max_vec3(center1, center2), r) }
-}
-
-var g_center: ptr = null   // Vec3[2]: a sphere's centre or a capsule's two, for a proxy
-
-center_buffer() -> Vec3[] {
-    if g_center == null { g_center = core.alloc(2 * sizeof(Vec3)) }
-    return g_center as Vec3[]
-}
-
-sphere_proxy(s: Sphere) -> ShapeProxy {
-    buffer = center_buffer()
-    buffer[0] = s.center
-    return distance.shape_proxy(g_center, 1, s.radius)
-}
-
-capsule_proxy(c: Capsule) -> ShapeProxy {
-    buffer = center_buffer()
-    buffer[0] = c.center1
-    buffer[1] = c.center2
-    return distance.shape_proxy(g_center, 2, c.radius)
-}
-
-overlap_sphere(s: Sphere, shape_transform: Transform, proxy: ShapeProxy) -> bool {
-    input = DistanceInput { proxy_a: sphere_proxy(s), proxy_b: proxy,
-                            transform: math.inv_mul_transforms(shape_transform, math.transform_identity()), use_radii: true }
-    cache = distance.empty_cache()
-    output = distance.shape_distance(&input, &cache, null, 0)
-    return output.distance < OVERLAP_SLOP
-}
-
-// The ray against the sphere through the closest point on the ray to the
-// centre, which keeps the precision of a far origin (Ray Tracing Gems
-// 2019, and codercorner.com/blog/?p=321). A ray starting inside, or of
-// zero length inside, reports its origin at fraction zero with no normal.
-ray_cast_sphere(s: Sphere, origin: Vec3, translation: Vec3, max_fraction: float) -> CastOutput {
-    output = distance.empty_cast_output()
-    p = s.center
-    // The ray with the centre at the origin.
-    shifted = math.sub(origin, p)
-    r = s.radius
-    rr = r * r
-    length_out = length_scratch()
-    d = math.get_length_and_normalize(length_out, translation)
-    length = length_out[0]
-    if length == 0.0 {
-        if math.length_squared(shifted) < rr {
-            output.point = origin
-            output.hit = true
-        }
-        return output
-    }
-    // The closest point on the line to the centre: dot(s + t d, d) = 0.
-    t = 0.0 - math.dot(shifted, d)
-    c = math.mul_add(shifted, t, d)
-    cc = math.dot(c, c)
-    if cc > rr { return output }
-    h = sqrt(rr - cc)
-    fraction = t - h
-    if fraction < 0.0 || max_fraction * length < fraction {
-        // The intersection is off the segment; an origin inside still counts.
-        if math.length_squared(shifted) < rr {
-            output.point = origin
-            output.hit = true
-        }
-        return output
-    }
-    hit_point = math.mul_add(shifted, fraction, d)
-    output.fraction = fraction / length
-    if output.fraction > max_fraction { output.fraction = max_fraction }
-    output.normal = math.normalize(hit_point)
-    output.point = math.mul_add(p, s.radius, output.normal)
-    output.hit = true
-    return output
-}
-
-// The same against the sphere's surface only, so a ray from inside hits
-// the far side on its way out.
-ray_cast_hollow_sphere(s: Sphere, origin: Vec3, translation: Vec3, max_fraction: float) -> CastOutput {
-    output = distance.empty_cast_output()
-    p = s.center
-    shifted = math.sub(origin, p)
-    d = math.normalize(translation)
-    t = 0.0 - math.dot(shifted, d)
-    c = math.mul_add(shifted, t, d)
-    cc = math.dot(c, c)
-    r = s.radius
-    rr = r * r
-    if cc > rr { return output }
-    h = sqrt(rr - cc)
-    fraction = t - h
-    if fraction < 0.0 { fraction = t + h }
-    if fraction < 0.0 { return output }
-    if fraction > max_fraction { return output }
-    hit_point = math.mul_add(shifted, fraction, d)
-    output.fraction = fraction
-    output.normal = math.normalize(hit_point)
-    output.point = math.mul_add(p, s.radius, output.normal)
-    output.hit = true
-    return output
-}
-
-shape_cast_sphere(s: Sphere, proxy: ShapeProxy, translation: Vec3, max_fraction: float, can_encroach: bool) -> CastOutput {
-    pair = ShapeCastPairInput { proxy_a: sphere_proxy(s), proxy_b: proxy, transform: math.transform_identity(),
-                                translation_b: translation, max_fraction: max_fraction, can_encroach: can_encroach }
-    return distance.shape_cast(&pair)
-}
-
-var g_length: ptr = null   // float[1], the out-parameter of get_length_and_normalize
-
-length_scratch() -> float[] {
-    if g_length == null { g_length = core.alloc(8) }
-    return g_length as float[]
-}
-
-// The mover's plane against a sphere: the normal from the sphere to the
-// closest point of the mover's axis, or, when the axis runs through the
-// centre, perpendicular to the axis. Returns how many planes (0 or 1).
-collide_mover_and_sphere(planes: PlaneResult[], s: Sphere, mover: Capsule) -> int {
-    total_radius = mover.radius + s.radius
-    closest = math.point_to_segment_distance(mover.center1, mover.center2, s.center)
-    length_out = length_scratch()
-    normal = math.get_length_and_normalize(length_out, math.sub(closest, s.center))
-    dist = length_out[0]
-    if dist > total_radius { return 0 }
-    if dist < math.LINEAR_SLOP {
-        axis = math.get_length_and_normalize(length_out, math.sub(mover.center2, mover.center1))
-        normal = math.vec3_axis_y()
-        if length_out[0] > math.LINEAR_SLOP { normal = math.perp(axis) }
-        dist = 0.0
-    }
-    planes[0] = PlaneResult { plane: Plane { normal: normal, offset: total_radius - dist }, point: s.center,
-                              triangle_index: 0, child_index: 0, material_index: 0 }
-    return 1
-}
-
-// --- the capsule ------------------------------------------------------------------------------
-
-// The capsule's mass: a cylinder and a sphere (the two caps) about the
-// midpoint, the caps carried out to the ends by Steiner, then turned
-// from the y axis onto the capsule's.
-compute_capsule_mass(c: Capsule, density: float) -> MassData {
-    c1 = c.center1
-    c2 = c.center2
-    r = c.radius
-    cylinder_height = math.distance(c1, c2)
-    cylinder_volume = math.PI * r * r * cylinder_height
-    cylinder_mass = cylinder_volume * density
-    sphere_volume = (4.0 / 3.0) * math.PI * r * r * r
-    sphere_mass = sphere_volume * density
-    inertia = math.add_mm(math.cylinder_inertia(cylinder_mass, r, cylinder_height), math.sphere_inertia(sphere_mass, r))
-    steiner = 0.125 * sphere_mass * (3.0 * r + 2.0 * cylinder_height) * cylinder_height
-    inertia.cx.x = inertia.cx.x + steiner
-    inertia.cz.z = inertia.cz.z + steiner
-    rotation = math.mat3_identity()
-    if cylinder_height * cylinder_height > 1000.0 * math.TINY {
-        direction = math.normalize(math.sub(c2, c1))
-        q = math.compute_quat_between_unit_vectors(math.vec3_axis_y(), direction)
-        rotation = math.make_matrix_from_quat(q)
-    }
-    return MassData { mass: sphere_mass + cylinder_mass, center: math.mul_sv(0.5, math.add(c1, c2)),
-                      inertia: math.mul_mm(rotation, math.mul_mm(inertia, math.transpose(rotation))) }
-}
-
-compute_capsule_aabb(c: Capsule, t: Transform) -> AABB {
-    center1 = math.transform_point(t, c.center1)
-    center2 = math.transform_point(t, c.center2)
-    extent = math.vec3(c.radius, c.radius, c.radius)
-    return AABB { lower: math.sub(math.min_vec3(center1, center2), extent), upper: math.add(math.max_vec3(center1, center2), extent) }
-}
-
-compute_swept_capsule_aabb(c: Capsule, xf1: Transform, xf2: Transform) -> AABB {
-    r = math.vec3(c.radius, c.radius, c.radius)
-    a = math.transform_point(xf1, c.center1)
-    b = math.transform_point(xf1, c.center2)
-    cc = math.transform_point(xf2, c.center1)
-    d = math.transform_point(xf2, c.center2)
-    return AABB { lower: math.sub(math.min_vec3(math.min_vec3(a, b), math.min_vec3(cc, d)), r),
-                  upper: math.add(math.max_vec3(math.max_vec3(a, b), math.max_vec3(cc, d)), r) }
-}
-
-overlap_capsule(c: Capsule, shape_transform: Transform, proxy: ShapeProxy) -> bool {
-    input = DistanceInput { proxy_a: capsule_proxy(c), proxy_b: proxy,
-                            transform: math.inv_mul_transforms(shape_transform, math.transform_identity()), use_radii: true }
-    cache = distance.empty_cache()
-    output = distance.shape_distance(&input, &cache, null, 0)
-    return output.distance < OVERLAP_SLOP
-}
-
-// The ray against the capsule: an origin inside the infinite cylinder is
-// inside the capsule, or casts against the nearer cap; otherwise the
-// closest points of the ray's line and the axis give the side hit (the
-// axial circle when they are nearly parallel), handed to a cap when the
-// hit falls beyond an end. Real-Time Collision Detection 5.1.9.
-ray_cast_capsule(c: Capsule, origin: Vec3, translation: Vec3, max_fraction: float) -> CastOutput {
-    c1 = c.center1
-    c2 = c.center2
-    r = c.radius
-    output = distance.empty_cast_output()
-    d = math.sub(c2, c1)
-    // A short capsule is a sphere.
-    tol = 0.01 * math.LINEAR_SLOP
-    length_squared = math.length_squared(d)
-    if length_squared < tol * tol {
-        return ray_cast_sphere(Sphere { center: math.mul_sv(0.5, math.add(c1, c2)), radius: r }, origin, translation, max_fraction)
-    }
-    // The ray's origin from the first centre, projected onto the axis.
-    s = math.sub(origin, c1)
-    length = sqrt(length_squared)
-    axis = math.mul_sv(1.0 / length, d)
-    u = math.dot(s, axis)
-    c_axis = math.mul_sv(u, axis)
-    sc = math.sub(s, c_axis)
-    sc2 = math.length_squared(sc)
-    if sc2 < r * r {
-        // Inside the infinite cylinder: inside the capsule, or facing a cap.
-        u_clamped = math.clamp_float(u, 0.0, length)
-        cp = math.mul_sv(u_clamped, axis)
-        scp = math.sub(s, cp)
-        if math.length_squared(scp) < r * r {
-            output.hit = true
-            output.point = origin
-            return output
-        }
-        return ray_cast_sphere(Sphere { center: math.add(c1, cp), radius: r }, origin, translation, max_fraction)
-    }
-    // A zero-length ray out here starts outside, so it misses.
-    length_out = length_scratch()
-    ray_axis = math.get_length_and_normalize(length_out, translation)
-    ray_length = length_out[0]
-    if ray_length == 0.0 { return output }
-    // The projected ray entirely beyond an end misses.
-    v = u + max_fraction * math.dot(translation, axis)
-    if (u < 0.0 - r && v < 0.0 - r) || (length + r < u && length + r < v) { return output }
-
-    a1 = axis
-    a2 = ray_axis
-    a12 = math.dot(a1, a2)
-    // The ray's distance to the near intersection with the infinite cylinder, in length units.
-    tr = 0.0
-    det = 1.0 - a12 * a12
-    if det < math.EPSILON {
-        // Nearly parallel: the ray against the circle that is the cylinder
-        // seen along its axis, from the ray's origin.
-        perp = math.mul_sub(a2, a12, a1)
-        perp2 = math.length_squared(perp)
-        beta = math.dot(sc, perp)
-        gamma = sc2 - r * r
-        disc = beta * beta - perp2 * gamma
-        // Casting away from the axis, or never closing to the radius.
-        if beta >= 0.0 || disc < 0.0 { return output }
-        // The near root in the form that avoids the cancellation as the ray nears parallel.
-        tr = gamma / (0.0 - beta + sqrt(disc))
-    } else {
-        // The closest points of the infinite ray and the infinite axis.
-        inv_det = 1.0 / det
-        sa1 = u
-        sa2 = math.dot(s, a2)
-        t1 = (sa1 - a12 * sa2) * inv_det
-        t2 = (a12 * sa1 - sa2) * inv_det
-        p1 = math.mul_sv(t1, a1)
-        p2 = math.mul_add(s, t2, a2)
-        g = math.sub(p2, p1)
-        g2 = math.length_squared(g)
-        if g2 > r * r { return output }
-        // The ray into the cylinder, relative to the closest point (like the sphere).
-        h = sqrt((r * r - g2) * inv_det)
-        tr = t2 - h
-    }
-    if tr < 0.0 || max_fraction * ray_length < tr { return output }
-    // The hit's place along the axis.
-    tc = u + tr * a12
-    if tc < 0.0 { return ray_cast_sphere(Sphere { center: c1, radius: r }, origin, translation, max_fraction) }
-    if length < tc { return ray_cast_sphere(Sphere { center: c2, radius: r }, origin, translation, max_fraction) }
-    // On the side, relative to c1.
-    p = math.mul_add(s, tr, ray_axis)
-    output.point = math.add(c1, p)
-    output.normal = math.normalize(math.mul_sub(p, tc, axis))
-    output.fraction = math.clamp_float(tr / ray_length, 0.0, max_fraction)
-    output.hit = true
-    return output
-}
-
-shape_cast_capsule(c: Capsule, proxy: ShapeProxy, translation: Vec3, max_fraction: float, can_encroach: bool) -> CastOutput {
-    pair = ShapeCastPairInput { proxy_a: capsule_proxy(c), proxy_b: proxy, transform: math.transform_identity(),
-                                translation_b: translation, max_fraction: max_fraction, can_encroach: can_encroach }
-    return distance.shape_cast(&pair)
-}
-
-// The mover's plane against a capsule: the normal between the closest
-// points of the two axes, or, when they cross, perpendicular to the
-// mover's axis.
-collide_mover_and_capsule(planes: PlaneResult[], c: Capsule, mover: Capsule) -> int {
-    total_radius = mover.radius + c.radius
-    approach = math.segment_distance(c.center1, c.center2, mover.center1, mover.center2)
-    length_out = length_scratch()
-    normal = math.get_length_and_normalize(length_out, math.sub(approach.point2, approach.point1))
-    dist = length_out[0]
-    if dist > total_radius { return 0 }
-    if dist < math.LINEAR_SLOP {
-        mover_axis = math.get_length_and_normalize(length_out, math.sub(mover.center2, mover.center1))
-        normal = math.vec3_axis_y()
-        if length_out[0] > math.LINEAR_SLOP { normal = math.perp(mover_axis) }
-        dist = 0.0
-    }
-    planes[0] = PlaneResult { plane: Plane { normal: normal, offset: total_radius - dist }, point: approach.point1,
-                              triangle_index: 0, child_index: 0, material_index: 0 }
-    return 1
-}
-
-// --- the hull's mover -------------------------------------------------------------------------
-
-// The mover's plane against a hull by GJK on the core segment: none when
-// the segment is inside (a mesh could not do better, so a hull does not).
-collide_mover_and_hull(planes: PlaneResult[], h: *HullData, mover: Capsule) -> int {
-    buffer = center_buffer()
-    buffer[0] = mover.center1
-    buffer[1] = mover.center2
-    input = DistanceInput { proxy_a: hull.hull_proxy(h), proxy_b: distance.shape_proxy(g_center, 2, mover.radius),
-                            transform: math.transform_identity(), use_radii: false }
-    cache = distance.empty_cache()
-    output = distance.shape_distance(&input, &cache, null, 0)
-    if output.distance == 0.0 { return 0 }
-    if output.distance <= mover.radius {
-        planes[0] = PlaneResult { plane: Plane { normal: output.normal, offset: mover.radius - output.distance }, point: output.point_a,
-                                  triangle_index: 0, child_index: 0, material_index: 0 }
-        return 1
-    }
-    return 0
-}
-
 // --- any shape ------------------------------------------------------------------------------------
 
 compute_shape_aabb(shape: *Shape, t: Transform) -> AABB {
     kind = shape.kind
-    if kind == SHAPE_CAPSULE { return compute_capsule_aabb(shape.capsule, t) }
+    if kind == SHAPE_CAPSULE { return capsule.compute_capsule_aabb(shape.capsule, t) }
+    if kind == SHAPE_COMPOUND { return compound.compute_compound_aabb(shape.compound, t) }
     if kind == SHAPE_HEIGHT_FIELD { return height_field.compute_height_field_aabb(shape.height_field, t) }
     if kind == SHAPE_HULL { return hull.compute_hull_aabb(shape.hull, t) }
     if kind == SHAPE_MESH { return mesh.compute_mesh_aabb(shape.mesh.data, t, shape.mesh.scale) }
-    if kind == SHAPE_SPHERE { return compute_sphere_aabb(shape.sphere, t) }
+    if kind == SHAPE_SPHERE { return sphere.compute_sphere_aabb(shape.sphere, t) }
     return AABB { lower: t.p, upper: t.p }
 }
 
@@ -537,15 +182,16 @@ compute_swept_shape_aabb(shape: *Shape, sweep: Sweep, time: float) -> AABB {
     xf1 = Transform { p: math.sub(sweep.c1, math.rotate_vector(sweep.q1, sweep.local_center)), q: sweep.q1 }
     xf2 = distance.get_sweep_transform(sweep, time)
     kind = shape.kind
-    if kind == SHAPE_CAPSULE { return compute_swept_capsule_aabb(shape.capsule, xf1, xf2) }
+    if kind == SHAPE_CAPSULE { return capsule.compute_swept_capsule_aabb(shape.capsule, xf1, xf2) }
     if kind == SHAPE_HULL { return hull.compute_swept_hull_aabb(shape.hull, xf1, xf2) }
-    if kind == SHAPE_SPHERE { return compute_swept_sphere_aabb(shape.sphere, xf1, xf2) }
+    if kind == SHAPE_SPHERE { return sphere.compute_swept_sphere_aabb(shape.sphere, xf1, xf2) }
     return AABB { lower: xf1.p, upper: xf1.p }
 }
 
 get_shape_centroid(shape: *Shape) -> Vec3 {
     kind = shape.kind
     if kind == SHAPE_CAPSULE { return math.lerp(shape.capsule.center1, shape.capsule.center2, 0.5) }
+    if kind == SHAPE_COMPOUND { return math.aabb_center(compound.compute_compound_aabb(shape.compound, math.transform_identity())) }
     if kind == SHAPE_SPHERE { return shape.sphere.center }
     if kind == SHAPE_HULL { return shape.hull.center }
     if kind == SHAPE_MESH { return math.aabb_center(mesh.compute_mesh_aabb(shape.mesh.data, math.transform_identity(), shape.mesh.scale)) }
@@ -578,9 +224,9 @@ get_shape_projected_area(shape: *Shape, plane_normal: Vec3) -> float {
 
 compute_shape_mass(shape: *Shape) -> MassData {
     kind = shape.kind
-    if kind == SHAPE_CAPSULE { return compute_capsule_mass(shape.capsule, shape.density) }
+    if kind == SHAPE_CAPSULE { return capsule.compute_capsule_mass(shape.capsule, shape.density) }
     if kind == SHAPE_HULL { return hull.compute_hull_mass(shape.hull, shape.density) }
-    if kind == SHAPE_SPHERE { return compute_sphere_mass(shape.sphere, shape.density) }
+    if kind == SHAPE_SPHERE { return sphere.compute_sphere_mass(shape.sphere, shape.density) }
     return MassData { mass: 0.0, center: math.vec3_zero(), inertia: math.make_diagonal_matrix(0.0, 0.0, 0.0) }
 }
 
@@ -620,6 +266,9 @@ compute_shape_extent(shape: *Shape, local_center: Vec3) -> ShapeExtent {
     if kind == SHAPE_HEIGHT_FIELD {
         return aabb_extent(height_field.compute_height_field_aabb(shape.height_field, math.transform_identity()), local_center)
     }
+    if kind == SHAPE_COMPOUND {
+        return aabb_extent(compound.compute_compound_aabb(shape.compound, math.transform_identity()), local_center)
+    }
     return ShapeExtent { min_extent: 0.0, max_extent: math.vec3_zero() }
 }
 
@@ -636,8 +285,9 @@ ray_cast_shape(shape: *Shape, t: Transform, origin: Vec3, translation: Vec3, max
     local_translation = math.inv_rotate_vector(t.q, translation)
     output = distance.empty_cast_output()
     kind = shape.kind
-    if kind == SHAPE_CAPSULE { output = ray_cast_capsule(shape.capsule, local_origin, local_translation, max_fraction) }
-    else if kind == SHAPE_SPHERE { output = ray_cast_sphere(shape.sphere, local_origin, local_translation, max_fraction) }
+    if kind == SHAPE_CAPSULE { output = capsule.ray_cast_capsule(shape.capsule, local_origin, local_translation, max_fraction) }
+    else if kind == SHAPE_COMPOUND { output = compound.ray_cast_compound(shape.compound, local_origin, local_translation, max_fraction) }
+    else if kind == SHAPE_SPHERE { output = sphere.ray_cast_sphere(shape.sphere, local_origin, local_translation, max_fraction) }
     else if kind == SHAPE_HULL { output = hull.ray_cast_hull(shape.hull, local_origin, local_translation, max_fraction) }
     else if kind == SHAPE_MESH { output = mesh.ray_cast_mesh(shape.mesh, local_origin, local_translation, max_fraction) }
     else if kind == SHAPE_HEIGHT_FIELD { output = height_field.ray_cast_height_field(shape.height_field, local_origin, local_translation, max_fraction) }
@@ -661,11 +311,12 @@ shape_cast_shape(shape: *Shape, t: Transform, proxy: ShapeProxy, translation: Ve
     local_translation = math.inv_rotate_vector(t.q, translation)
     output = distance.empty_cast_output()
     kind = shape.kind
-    if kind == SHAPE_CAPSULE { output = shape_cast_capsule(shape.capsule, local_proxy, local_translation, max_fraction, can_encroach) }
+    if kind == SHAPE_CAPSULE { output = capsule.shape_cast_capsule(shape.capsule, local_proxy, local_translation, max_fraction, can_encroach) }
+    else if kind == SHAPE_COMPOUND { output = compound.shape_cast_compound(shape.compound, local_proxy, local_translation, max_fraction, can_encroach) }
     else if kind == SHAPE_HEIGHT_FIELD { output = height_field.shape_cast_height_field(shape.height_field, local_proxy, local_translation, max_fraction, can_encroach) }
     else if kind == SHAPE_HULL { output = hull.shape_cast_hull(shape.hull, local_proxy, local_translation, max_fraction, can_encroach) }
     else if kind == SHAPE_MESH { output = mesh.shape_cast_mesh(shape.mesh, local_proxy, local_translation, max_fraction, can_encroach) }
-    else if kind == SHAPE_SPHERE { output = shape_cast_sphere(shape.sphere, local_proxy, local_translation, max_fraction, can_encroach) }
+    else if kind == SHAPE_SPHERE { output = sphere.shape_cast_sphere(shape.sphere, local_proxy, local_translation, max_fraction, can_encroach) }
     else { return output }
     output.point = math.transform_point(t, output.point)
     output.normal = math.rotate_vector(t.q, output.normal)
@@ -674,11 +325,12 @@ shape_cast_shape(shape: *Shape, t: Transform, proxy: ShapeProxy, translation: Ve
 
 overlap_shape(shape: *Shape, t: Transform, proxy: ShapeProxy) -> bool {
     kind = shape.kind
-    if kind == SHAPE_CAPSULE { return overlap_capsule(shape.capsule, t, proxy) }
+    if kind == SHAPE_CAPSULE { return capsule.overlap_capsule(shape.capsule, t, proxy) }
+    if kind == SHAPE_COMPOUND { return compound.overlap_compound(shape.compound, t, proxy) }
     if kind == SHAPE_HEIGHT_FIELD { return height_field.overlap_height_field(shape.height_field, t, proxy) }
     if kind == SHAPE_HULL { return hull.overlap_hull(shape.hull, t, proxy) }
     if kind == SHAPE_MESH { return mesh.overlap_mesh(shape.mesh, t, proxy) }
-    if kind == SHAPE_SPHERE { return overlap_sphere(shape.sphere, t, proxy) }
+    if kind == SHAPE_SPHERE { return sphere.overlap_sphere(shape.sphere, t, proxy) }
     return false
 }
 
@@ -690,9 +342,10 @@ collide_mover(planes: PlaneResult[], capacity: int, shape: *Shape, t: Transform,
                             radius: mover.radius }
     plane_count = 0
     kind = shape.kind
-    if kind == SHAPE_CAPSULE { plane_count = collide_mover_and_capsule(planes, shape.capsule, local_mover) }
-    else if kind == SHAPE_SPHERE { plane_count = collide_mover_and_sphere(planes, shape.sphere, local_mover) }
-    else if kind == SHAPE_HULL { plane_count = collide_mover_and_hull(planes, shape.hull, local_mover) }
+    if kind == SHAPE_CAPSULE { plane_count = capsule.collide_mover_and_capsule(planes, shape.capsule, local_mover) }
+    else if kind == SHAPE_COMPOUND { plane_count = compound.collide_mover_and_compound(planes, capacity, shape.compound, local_mover) }
+    else if kind == SHAPE_SPHERE { plane_count = sphere.collide_mover_and_sphere(planes, shape.sphere, local_mover) }
+    else if kind == SHAPE_HULL { plane_count = mesh.collide_mover_and_hull(planes, shape.hull, local_mover) }
     else if kind == SHAPE_MESH { plane_count = mesh.collide_mover_and_mesh(planes, capacity, shape.mesh, local_mover) }
     else if kind == SHAPE_HEIGHT_FIELD { plane_count = height_field.collide_mover_and_height_field(planes, capacity, shape.height_field, local_mover) }
     i = 0
@@ -709,8 +362,8 @@ collide_mover(planes: PlaneResult[], capacity: int, shape: *Shape, t: Transform,
 // live in the module's buffer until the next call.
 make_shape_proxy(shape: *Shape) -> ShapeProxy {
     kind = shape.kind
-    if kind == SHAPE_CAPSULE { return capsule_proxy(shape.capsule) }
-    if kind == SHAPE_SPHERE { return sphere_proxy(shape.sphere) }
+    if kind == SHAPE_CAPSULE { return sphere.capsule_proxy(shape.capsule) }
+    if kind == SHAPE_SPHERE { return sphere.sphere_proxy(shape.sphere) }
     if kind == SHAPE_HULL { return hull.hull_proxy(shape.hull) }
     return distance.shape_proxy(null, 0, 0.0)
 }

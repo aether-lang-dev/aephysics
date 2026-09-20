@@ -1,0 +1,195 @@
+// aephysics.sphere -- the sphere: its mass, bounds, the ray against it
+// by the closest point on the ray to the centre (the Ray Tracing Gems
+// 2019 form that keeps its precision far from the origin), the shape
+// cast, the overlap, and the character mover's plane against it; with
+// the proxy buffers the capsule shares.
+//
+// Box3D's sphere.c (Erin Catto, MIT), the reference this engine is
+// measured against, including the initial-overlap convention: a ray
+// starting inside, or of zero length inside, reports its origin at
+// fraction zero with no normal. Names are the reference's without its
+// prefix, in snake case: b3RayCastSphere is ray_cast_sphere.
+import std.string
+import aephysics.math
+import aephysics.core
+import aephysics.distance
+import aephysics.manifold
+import aephysics.mesh
+
+exports (
+    OVERLAP_SLOP,
+    compute_sphere_mass, compute_sphere_aabb, compute_swept_sphere_aabb, overlap_sphere,
+    ray_cast_sphere, ray_cast_hollow_sphere, shape_cast_sphere, collide_mover_and_sphere,
+    sphere_proxy, capsule_proxy, segment_proxy, length_scratch
+)
+
+extern sqrt(x: float) -> float
+
+// Closer than this is an overlap (a tenth of the linear slop).
+const OVERLAP_SLOP = 0.0005
+
+compute_sphere_mass(s: Sphere, density: float) -> MassData {
+    radius = s.radius
+    volume = 4.0 / 3.0 * math.PI * radius * radius * radius
+    mass = volume * density
+    ixx = 0.4 * mass * radius * radius
+    // The inertia is about the centre of mass.
+    return MassData { mass: mass, center: s.center, inertia: math.make_diagonal_matrix(ixx, ixx, ixx) }
+}
+
+compute_sphere_aabb(s: Sphere, t: Transform) -> AABB {
+    center = math.transform_point(t, s.center)
+    extent = math.vec3(s.radius, s.radius, s.radius)
+    return AABB { lower: math.sub(center, extent), upper: math.add(center, extent) }
+}
+
+compute_swept_sphere_aabb(s: Sphere, xf1: Transform, xf2: Transform) -> AABB {
+    r = math.vec3(s.radius, s.radius, s.radius)
+    center1 = math.transform_point(xf1, s.center)
+    center2 = math.transform_point(xf2, s.center)
+    return AABB { lower: math.sub(math.min_vec3(center1, center2), r), upper: math.add(math.max_vec3(center1, center2), r) }
+}
+
+var g_center: ptr = null   // Vec3[2]: a sphere's centre or a capsule's two, for a proxy
+
+center_buffer() -> Vec3[] {
+    if g_center == null { g_center = core.alloc(2 * sizeof(Vec3)) }
+    return g_center as Vec3[]
+}
+
+// A sphere's centre as a one-point proxy, in the module's buffer until the next call.
+sphere_proxy(s: Sphere) -> ShapeProxy {
+    buffer = center_buffer()
+    buffer[0] = s.center
+    return distance.shape_proxy(g_center, 1, s.radius)
+}
+
+// A capsule's two centres as a proxy, in the same buffer.
+capsule_proxy(c: Capsule) -> ShapeProxy {
+    buffer = center_buffer()
+    buffer[0] = c.center1
+    buffer[1] = c.center2
+    return distance.shape_proxy(g_center, 2, c.radius)
+}
+
+// Two centres as a proxy with a radius: the mover's core segment.
+segment_proxy(a: Vec3, b: Vec3, radius: float) -> ShapeProxy {
+    buffer = center_buffer()
+    buffer[0] = a
+    buffer[1] = b
+    return distance.shape_proxy(g_center, 2, radius)
+}
+
+overlap_sphere(s: Sphere, shape_transform: Transform, proxy: ShapeProxy) -> bool {
+    input = DistanceInput { proxy_a: sphere_proxy(s), proxy_b: proxy,
+                            transform: math.inv_mul_transforms(shape_transform, math.transform_identity()), use_radii: true }
+    cache = distance.empty_cache()
+    output = distance.shape_distance(&input, &cache, null, 0)
+    return output.distance < OVERLAP_SLOP
+}
+
+// The ray against the sphere through the closest point on the ray to the
+// centre, which keeps the precision of a far origin (Ray Tracing Gems
+// 2019, and codercorner.com/blog/?p=321). A ray starting inside, or of
+// zero length inside, reports its origin at fraction zero with no normal.
+ray_cast_sphere(s: Sphere, origin: Vec3, translation: Vec3, max_fraction: float) -> CastOutput {
+    output = distance.empty_cast_output()
+    p = s.center
+    // The ray with the centre at the origin.
+    shifted = math.sub(origin, p)
+    r = s.radius
+    rr = r * r
+    length_out = length_scratch()
+    d = math.get_length_and_normalize(length_out, translation)
+    length = length_out[0]
+    if length == 0.0 {
+        if math.length_squared(shifted) < rr {
+            output.point = origin
+            output.hit = true
+        }
+        return output
+    }
+    // The closest point on the line to the centre: dot(s + t d, d) = 0.
+    t = 0.0 - math.dot(shifted, d)
+    c = math.mul_add(shifted, t, d)
+    cc = math.dot(c, c)
+    if cc > rr { return output }
+    h = sqrt(rr - cc)
+    fraction = t - h
+    if fraction < 0.0 || max_fraction * length < fraction {
+        // The intersection is off the segment; an origin inside still counts.
+        if math.length_squared(shifted) < rr {
+            output.point = origin
+            output.hit = true
+        }
+        return output
+    }
+    hit_point = math.mul_add(shifted, fraction, d)
+    output.fraction = fraction / length
+    if output.fraction > max_fraction { output.fraction = max_fraction }
+    output.normal = math.normalize(hit_point)
+    output.point = math.mul_add(p, s.radius, output.normal)
+    output.hit = true
+    return output
+}
+
+// The same against the sphere's surface only, so a ray from inside hits
+// the far side on its way out.
+ray_cast_hollow_sphere(s: Sphere, origin: Vec3, translation: Vec3, max_fraction: float) -> CastOutput {
+    output = distance.empty_cast_output()
+    p = s.center
+    shifted = math.sub(origin, p)
+    d = math.normalize(translation)
+    t = 0.0 - math.dot(shifted, d)
+    c = math.mul_add(shifted, t, d)
+    cc = math.dot(c, c)
+    r = s.radius
+    rr = r * r
+    if cc > rr { return output }
+    h = sqrt(rr - cc)
+    fraction = t - h
+    if fraction < 0.0 { fraction = t + h }
+    if fraction < 0.0 { return output }
+    if fraction > max_fraction { return output }
+    hit_point = math.mul_add(shifted, fraction, d)
+    output.fraction = fraction
+    output.normal = math.normalize(hit_point)
+    output.point = math.mul_add(p, s.radius, output.normal)
+    output.hit = true
+    return output
+}
+
+shape_cast_sphere(s: Sphere, proxy: ShapeProxy, translation: Vec3, max_fraction: float, can_encroach: bool) -> CastOutput {
+    pair = ShapeCastPairInput { proxy_a: sphere_proxy(s), proxy_b: proxy, transform: math.transform_identity(),
+                                translation_b: translation, max_fraction: max_fraction, can_encroach: can_encroach }
+    return distance.shape_cast(&pair)
+}
+
+var g_length: ptr = null   // float[1], the out-parameter of get_length_and_normalize
+
+length_scratch() -> float[] {
+    if g_length == null { g_length = core.alloc(8) }
+    return g_length as float[]
+}
+
+// The mover's plane against a sphere: the normal from the sphere to the
+// closest point of the mover's axis, or, when the axis runs through the
+// centre, perpendicular to the axis. Returns how many planes (0 or 1).
+collide_mover_and_sphere(planes: PlaneResult[], s: Sphere, mover: Capsule) -> int {
+    total_radius = mover.radius + s.radius
+    closest = math.point_to_segment_distance(mover.center1, mover.center2, s.center)
+    length_out = length_scratch()
+    normal = math.get_length_and_normalize(length_out, math.sub(closest, s.center))
+    dist = length_out[0]
+    if dist > total_radius { return 0 }
+    if dist < math.LINEAR_SLOP {
+        axis = math.get_length_and_normalize(length_out, math.sub(mover.center2, mover.center1))
+        normal = math.vec3_axis_y()
+        if length_out[0] > math.LINEAR_SLOP { normal = math.perp(axis) }
+        dist = 0.0
+    }
+    planes[0] = PlaneResult { plane: Plane { normal: normal, offset: total_radius - dist }, point: s.center,
+                              triangle_index: 0, child_index: 0, material_index: 0 }
+    return 1
+}
+

@@ -1,0 +1,166 @@
+// The compound on the same scenes as bench/compound_box3d.c: a compound
+// of 2,000 children (1,000 spheres, 500 capsules and 500 instances of
+// one box hull on a 20 x 10 x 10 grid, two materials) built ten times;
+// 100,000 rays through it; 100,000 box queries over it; 10,000 sphere
+// shape casts; 10,000 overlaps; 10,000 mover planes. Single thread,
+// wall time per phase, with the hit counts and sums as the checksum.
+import std.string
+import std.os
+import aephysics.math
+import aephysics.hull
+import aephysics.distance
+import aephysics.manifold
+import aephysics.mesh
+import aephysics.material
+import aephysics.compound
+
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+extern sin(x: float) -> float
+extern cos(x: float) -> float
+
+clock() -> long { return os.now_monotonic_ns() }
+ms(ns: long) -> float { return (ns as float) / 1000000.0 }
+
+const RAYS = 100000
+const QUERIES = 100000
+const CASTS = 10000
+const OVERLAPS = 10000
+const MOVERS = 10000
+
+var query_hits = 0
+
+count_child(c: *CompoundData, child_index: int, context: ptr) -> bool {
+    query_hits = query_hits + 1
+    return true
+}
+
+main() {
+    mat_a = material.default_surface_material()
+    mat_b = material.default_surface_material()
+    mat_b.friction = 0.3
+    box = hull.make_box_hull(0.4, 0.4, 0.4)
+    spheres_block = calloc(1000, sizeof(CompoundSphereDef))
+    spheres = spheres_block as CompoundSphereDef[]
+    capsules_block = calloc(500, sizeof(CompoundCapsuleDef))
+    capsules = capsules_block as CompoundCapsuleDef[]
+    hulls_block = calloc(500, sizeof(CompoundHullDef))
+    hulls = hulls_block as CompoundHullDef[]
+    i = 0
+    while i < 2000 {
+        c = math.vec3((2 * (i % 20)) as float, (2 * ((i / 20) % 10)) as float, (2 * (i / 200)) as float)
+        mat = mat_a
+        if (i & 1) != 0 { mat = mat_b }
+        if i < 1000 {
+            spheres[i] = compound.compound_sphere_def(manifold.sphere(c, 0.5), mat)
+        } else if i < 1500 {
+            capsules[i - 1000] = compound.compound_capsule_def(manifold.capsule(math.vec3(c.x - 0.4, c.y, c.z), math.vec3(c.x + 0.4, c.y, c.z), 0.3), mat)
+        } else {
+            hulls[i - 1500] = compound.compound_hull_def(box, Transform { p: c, q: math.make_quat_from_axis_angle(math.vec3_axis_y(), 0.3) }, mat)
+        }
+        i = i + 1
+    }
+    def = compound.compound_def()
+    def.capsules = capsules_block
+    def.capsule_count = 500
+    def.hulls = hulls_block
+    def.hull_count = 500
+    def.spheres = spheres_block
+    def.sphere_count = 1000
+
+    t0 = clock()
+    data = compound.create_compound(&def)
+    i = 1
+    while i < 10 {
+        compound.destroy_compound(data)
+        data = compound.create_compound(&def)
+        i = i + 1
+    }
+    t1 = clock()
+
+    ray_hits = 0
+    ray_sum = 0.0
+    i = 0
+    while i < RAYS {
+        t = (i as float) / (RAYS as float)
+        origin = math.vec3(0.0 - 3.0, 1.0 + 17.0 * t, 9.0 + 8.0 * sin(40.0 * t))
+        translation = math.vec3(45.0, 2.0 * sin(7.0 * t), 2.0 * cos(9.0 * t))
+        out = compound.ray_cast_compound(data, origin, translation, 1.0)
+        if out.hit {
+            ray_hits = ray_hits + 1
+            ray_sum = ray_sum + out.fraction + (out.child_index as float)
+        }
+        i = i + 1
+    }
+    t2 = clock()
+
+    query_hits = 0
+    i = 0
+    while i < QUERIES {
+        t = (i as float) / (QUERIES as float)
+        c = math.vec3(1.0 + 37.0 * t, 9.0 + 8.0 * sin(3.0 * t), 9.0 + 8.0 * cos(30.0 * t))
+        h = math.vec3(1.5, 1.5, 1.5)
+        bounds = AABB { lower: math.sub(c, h), upper: math.add(c, h) }
+        compound.query_compound(data, bounds, count_child, null)
+        i = i + 1
+    }
+    t3 = clock()
+
+    cast_hits = 0
+    cast_sum = 0.0
+    start_block = calloc(1, sizeof(Vec3))
+    start = start_block as Vec3[]
+    i = 0
+    while i < CASTS {
+        t = (i as float) / (CASTS as float)
+        start[0] = math.vec3(1.0 + 37.0 * t, 25.0, 9.0 + 8.0 * sin(50.0 * t))
+        out = compound.shape_cast_compound(data, distance.shape_proxy(start_block, 1, 0.3), math.vec3(0.5 * sin(11.0 * t), 0.0 - 30.0, 0.0), 1.0, false)
+        if out.hit {
+            cast_hits = cast_hits + 1
+            cast_sum = cast_sum + out.fraction + (out.child_index as float)
+        }
+        i = i + 1
+    }
+    t4 = clock()
+
+    transform = Transform { p: math.vec3(10.0, 20.0, 30.0), q: math.make_quat_from_axis_angle(math.vec3_axis_z(), 0.5 * math.PI) }
+    overlap_hits = 0
+    i = 0
+    while i < OVERLAPS {
+        t = (i as float) / (OVERLAPS as float)
+        local = math.vec3(1.0 + 37.0 * t, 9.0 + 8.0 * sin(17.0 * t), 9.0 + 8.0 * cos(23.0 * t))
+        start[0] = math.transform_point(transform, local)
+        if compound.overlap_compound(data, transform, distance.shape_proxy(start_block, 1, 0.4)) { overlap_hits = overlap_hits + 1 }
+        i = i + 1
+    }
+    t5 = clock()
+
+    planes_block = calloc(8, sizeof(PlaneResult))
+    planes = planes_block as PlaneResult[]
+    mover_planes = 0
+    mover_sum = 0.0
+    i = 0
+    while i < MOVERS {
+        t = (i as float) / (MOVERS as float)
+        a = math.vec3(1.0 + 37.0 * t, 9.5 + 8.0 * sin(17.0 * t), 9.0 + 8.0 * cos(23.0 * t))
+        mover = manifold.capsule(a, math.vec3(a.x, a.y + 1.0, a.z), 0.35)
+        count = compound.collide_mover_and_compound(planes, 8, data, mover)
+        mover_planes = mover_planes + count
+        k = 0
+        while k < count {
+            mover_sum = mover_sum + planes[k].plane.offset
+            k = k + 1
+        }
+        i = i + 1
+    }
+    t6 = clock()
+
+    println("aephysics compound: 10 builds ${ms(t1 - t0)} ms (${data.tree.proxy_count} children, ${data.byte_count} bytes, ${data.material_count} materials), ${RAYS} rays ${ms(t2 - t1)} ms (${ray_hits} hits, sum ${ray_sum}), ${QUERIES} queries ${ms(t3 - t2)} ms (${query_hits} hits), ${CASTS} casts ${ms(t4 - t3)} ms (${cast_hits} hits, sum ${cast_sum}), ${OVERLAPS} overlaps ${ms(t5 - t4)} ms (${overlap_hits} hits), ${MOVERS} movers ${ms(t6 - t5)} ms (${mover_planes} planes, sum ${mover_sum})")
+    free(planes_block)
+    free(start_block)
+    compound.destroy_compound(data)
+    free(hulls_block)
+    free(capsules_block)
+    free(spheres_block)
+    hull.destroy_hull(box)
+}

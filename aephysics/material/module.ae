@@ -1,0 +1,30 @@
+// aephysics.material -- a surface's material: what a contact takes from
+// the shape it touches. Box3D's b3SurfaceMaterial (Erin Catto, MIT),
+// with its default; the friction and restitution combining rules come
+// with the contacts.
+import std.string
+import aephysics.math
+
+exports ( SurfaceMaterial, default_surface_material, same_material )
+
+// A surface's material.
+struct SurfaceMaterial {
+    friction: float            // the Coulomb coefficient, usually in [0, 1]
+    restitution: float         // the bounce, usually in [0, 1]
+    rolling_resistance: float  // spheres and capsules only
+    tangent_velocity: Vec3     // a conveyor belt's, in the shape's frame
+    user_material_id: long     // passed through query results and the combining functions
+    custom_color: int          // a debug colour; 0 for none
+}
+
+default_surface_material() -> SurfaceMaterial {
+    return SurfaceMaterial { friction: 0.6, restitution: 0.0, rolling_resistance: 0.0, tangent_velocity: math.vec3_zero(),
+                             user_material_id: 0 as long, custom_color: 0 }
+}
+
+// Field by field, so the struct's padding never enters.
+same_material(a: SurfaceMaterial, b: SurfaceMaterial) -> bool {
+    return a.friction == b.friction && a.restitution == b.restitution && a.rolling_resistance == b.rolling_resistance &&
+           a.tangent_velocity.x == b.tangent_velocity.x && a.tangent_velocity.y == b.tangent_velocity.y &&
+           a.tangent_velocity.z == b.tangent_velocity.z && a.user_material_id == b.user_material_id && a.custom_color == b.custom_color
+}
