@@ -994,6 +994,8 @@ struct GraphColor {
     manifold_constraints: ptr      // its ManifoldConstraint[manifold_constraint_count]
     contact_constraint_count: int
     manifold_constraint_count: int
+    wide_constraints: ptr          // the wide solver's WideConstraint[wide_constraint_count] over convex_contacts
+    wide_constraint_count: int
 }
 
 struct ConstraintGraph {

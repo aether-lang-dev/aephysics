@@ -1,0 +1,792 @@
+// aephysics.contact_solver_wide -- the convex contacts of a graph
+// colour solved four at a time: the constraints of four contacts laid
+// side by side, one lane each (a structure of arrays: every scalar of
+// the constraint is four floats), so the prepare, warm start, solve,
+// restitution and store run the same instruction on four contacts at
+// once. The bodies' states are gathered into lanes before a constraint
+// and the velocities scattered back after; a colour's contacts share
+// no body, so the lanes never alias. A static body is lane zero of the
+// identity state; a colour's tail slot has its spare lanes zeroed, so
+// they compute nothing that reaches a body.
+//
+// This is Box3D's wide contact path (contact_solver.c, Erin Catto,
+// MIT): b3PrepareContacts_Convex is prepare_wide_contacts,
+// b3SolveContacts_Convex is solve_wide_contacts, and the lane types
+// (b3FloatW, b3Vec3W, b3ContactConstraintWide) are FloatW, Vec3W and
+// WideConstraint. The lanes here are plain code the C compiler is free
+// to vectorise; the reference's SSE2 and NEON lanes are the same
+// operations on registers, and its scalar build is this. The mesh and
+// overflow contacts stay with aephysics.contact_solver.
+import std.string
+import aephysics.math
+import aephysics.core
+import aephysics.dynamics
+import aephysics.contact_solver
+
+exports (
+    WIDTH, FloatW, Vec3W, IntW, WideConstraintPoint, WideConstraint,
+    wide_constraint_at, wide_constraint_count, wide_point_at, lane, int_lane,
+    prepare_wide_contacts, warm_start_wide_contacts, solve_wide_contacts, apply_wide_restitution, store_wide_impulses,
+    set_native_lanes, native_lanes_enabled, native_layout_matches, begin_wide_step, end_wide_step
+)
+
+extern sqrt(x: float) -> float
+extern memset(p: ptr, value: int, count: int) -> ptr
+
+// The lanes as vector code, lanes.c beside this module (built with it:
+// `ae build --extra aephysics/contact_solver_wide/lanes.c`, or an
+// extra_sources entry): the same layout and arithmetic, four contacts
+// per instruction. On by default; off, the Aether lanes below run.
+extern aephysics_wide_constraint_size() -> int
+extern aephysics_wide_body_state_size() -> int
+extern aephysics_wide_warm_start(states: ptr, constraints: ptr, count: int)
+extern aephysics_wide_solve(states: ptr, constraints: ptr, count: int, use_bias: int, inv_h: float, contact_speed: float, epsilon: float)
+extern aephysics_wide_restitution(states: ptr, constraints: ptr, count: int, threshold: float)
+extern aephysics_wide_pack(block: ptr, count: int)
+extern aephysics_wide_unpack(block: ptr, count: int)
+
+var g_native_lanes = true
+
+set_native_lanes(enabled: bool) { g_native_lanes = enabled }
+native_lanes_enabled() -> bool { return g_native_lanes }
+
+// The step's wide constraints, all colours' in one block, handed to the
+// native lanes after the prepare (they pack a single-precision copy)
+// and taken back before the store (the impulses).
+begin_wide_step(block: ptr, count: int) {
+    if g_native_lanes && count > 0 { aephysics_wide_pack(block, count) }
+}
+
+end_wide_step(block: ptr, count: int) {
+    if g_native_lanes && count > 0 { aephysics_wide_unpack(block, count) }
+}
+
+// Whether lanes.c was built against this module's layout.
+native_layout_matches() -> bool {
+    return aephysics_wide_constraint_size() == sizeof(WideConstraint) && aephysics_wide_body_state_size() == sizeof(BodyState)
+}
+
+const WIDTH = 4
+const NULL_INDEX = 0 - 1
+
+// --- lanes ---------------------------------------------------------------------------------------------------
+
+// Four floats, one per contact.
+struct FloatW {
+    x: float
+    y: float
+    z: float
+    w: float
+}
+
+struct Vec2W {
+    x: FloatW
+    y: FloatW
+}
+
+struct Vec3W {
+    x: FloatW
+    y: FloatW
+    z: FloatW
+}
+
+struct QuatW {
+    v: Vec3W
+    s: FloatW
+}
+
+// Symmetric matrices: the upper triangles.
+struct SymMatrix2W {
+    cxx: FloatW
+    cxy: FloatW
+    cyy: FloatW
+}
+
+struct SymMatrix3W {
+    cxx: FloatW
+    cxy: FloatW
+    cxz: FloatW
+    cyy: FloatW
+    cyz: FloatW
+    czz: FloatW
+}
+
+// Four ints and four pointers, one per contact.
+struct IntW {
+    x: int
+    y: int
+    z: int
+    w: int
+}
+
+struct PtrW {
+    x: ptr
+    y: ptr
+    z: ptr
+    w: ptr
+}
+
+// A lane of a wide value, read and written by index.
+lane(f: *FloatW, index: int) -> float {
+    lanes = (f as ptr) as float[]
+    return lanes[index]
+}
+
+set_lane(f: *FloatW, index: int, value: float) {
+    lanes = (f as ptr) as float[]
+    lanes[index] = value
+}
+
+int_lane(v: *IntW, index: int) -> int {
+    lanes = (v as ptr) as int[]
+    return lanes[index]
+}
+
+set_int_lane(v: *IntW, index: int, value: int) {
+    lanes = (v as ptr) as int[]
+    lanes[index] = value
+}
+
+ptr_lane(v: *PtrW, index: int) -> ptr {
+    lanes = (v as ptr) as ptr[]
+    return lanes[index]
+}
+
+set_ptr_lane(v: *PtrW, index: int, value: ptr) {
+    lanes = (v as ptr) as ptr[]
+    lanes[index] = value
+}
+
+set_vec3_lane(v: *Vec3W, index: int, value: Vec3) {
+    set_lane(&v.x, index, value.x)
+    set_lane(&v.y, index, value.y)
+    set_lane(&v.z, index, value.z)
+}
+
+set_sym3_lane(m: *SymMatrix3W, index: int, value: Matrix3) {
+    set_lane(&m.cxx, index, value.cx.x)
+    set_lane(&m.cxy, index, value.cx.y)
+    set_lane(&m.cxz, index, value.cx.z)
+    set_lane(&m.cyy, index, value.cy.y)
+    set_lane(&m.cyz, index, value.cy.z)
+    set_lane(&m.czz, index, value.cz.z)
+}
+
+zero_w() -> FloatW { return FloatW { x: 0.0, y: 0.0, z: 0.0, w: 0.0 } }
+splat_w(s: float) -> FloatW { return FloatW { x: s, y: s, z: s, w: s } }
+neg_w(a: FloatW) -> FloatW { return FloatW { x: 0.0 - a.x, y: 0.0 - a.y, z: 0.0 - a.z, w: 0.0 - a.w } }
+add_w(a: FloatW, b: FloatW) -> FloatW { return FloatW { x: a.x + b.x, y: a.y + b.y, z: a.z + b.z, w: a.w + b.w } }
+sub_w(a: FloatW, b: FloatW) -> FloatW { return FloatW { x: a.x - b.x, y: a.y - b.y, z: a.z - b.z, w: a.w - b.w } }
+mul_w(a: FloatW, b: FloatW) -> FloatW { return FloatW { x: a.x * b.x, y: a.y * b.y, z: a.z * b.z, w: a.w * b.w } }
+div_w(a: FloatW, b: FloatW) -> FloatW { return FloatW { x: a.x / b.x, y: a.y / b.y, z: a.z / b.z, w: a.w / b.w } }
+sqrt_w(a: FloatW) -> FloatW { return FloatW { x: sqrt(a.x), y: sqrt(a.y), z: sqrt(a.z), w: sqrt(a.w) } }
+// a + b * c, as two operations: a fused multiply-add would differ from the scalar path.
+mul_add_w(a: FloatW, b: FloatW, c: FloatW) -> FloatW {
+    return FloatW { x: a.x + b.x * c.x, y: a.y + b.y * c.y, z: a.z + b.z * c.z, w: a.w + b.w * c.w }
+}
+min_w(a: FloatW, b: FloatW) -> FloatW {
+    return FloatW { x: if a.x <= b.x { a.x } else { b.x }, y: if a.y <= b.y { a.y } else { b.y },
+                    z: if a.z <= b.z { a.z } else { b.z }, w: if a.w <= b.w { a.w } else { b.w } }
+}
+max_w(a: FloatW, b: FloatW) -> FloatW {
+    return FloatW { x: if a.x >= b.x { a.x } else { b.x }, y: if a.y >= b.y { a.y } else { b.y },
+                    z: if a.z >= b.z { a.z } else { b.z }, w: if a.w >= b.w { a.w } else { b.w } }
+}
+// a clamped to [-b, b].
+sym_clamp_w(a: FloatW, b: FloatW) -> FloatW { return max_w(neg_w(b), min_w(a, b)) }
+// Masks are lanes of 0 or 1 (the reference's scalar lanes; its SIMD lanes are all bits).
+or_w(a: FloatW, b: FloatW) -> FloatW {
+    return FloatW { x: if a.x != 0.0 || b.x != 0.0 { 1.0 } else { 0.0 }, y: if a.y != 0.0 || b.y != 0.0 { 1.0 } else { 0.0 },
+                    z: if a.z != 0.0 || b.z != 0.0 { 1.0 } else { 0.0 }, w: if a.w != 0.0 || b.w != 0.0 { 1.0 } else { 0.0 } }
+}
+greater_w(a: FloatW, b: FloatW) -> FloatW {
+    return FloatW { x: if a.x > b.x { 1.0 } else { 0.0 }, y: if a.y > b.y { 1.0 } else { 0.0 },
+                    z: if a.z > b.z { 1.0 } else { 0.0 }, w: if a.w > b.w { 1.0 } else { 0.0 } }
+}
+equals_w(a: FloatW, b: FloatW) -> FloatW {
+    return FloatW { x: if a.x == b.x { 1.0 } else { 0.0 }, y: if a.y == b.y { 1.0 } else { 0.0 },
+                    z: if a.z == b.z { 1.0 } else { 0.0 }, w: if a.w == b.w { 1.0 } else { 0.0 } }
+}
+all_zero_w(a: FloatW) -> bool { return a.x == 0.0 && a.y == 0.0 && a.z == 0.0 && a.w == 0.0 }
+// Per lane: b where the mask is set, a elsewhere.
+blend_w(a: FloatW, b: FloatW, m: FloatW) -> FloatW {
+    return FloatW { x: if m.x != 0.0 { b.x } else { a.x }, y: if m.y != 0.0 { b.y } else { a.y },
+                    z: if m.z != 0.0 { b.z } else { a.z }, w: if m.w != 0.0 { b.w } else { a.w } }
+}
+
+mul_sv_w(s: FloatW, a: Vec3W) -> Vec3W { return Vec3W { x: mul_w(s, a.x), y: mul_w(s, a.y), z: mul_w(s, a.z) } }
+// a - s * b and a + s * b.
+mul_sub_sv_w(a: Vec3W, s: FloatW, b: Vec3W) -> Vec3W {
+    return Vec3W { x: sub_w(a.x, mul_w(s, b.x)), y: sub_w(a.y, mul_w(s, b.y)), z: sub_w(a.z, mul_w(s, b.z)) }
+}
+mul_add_sv_w(a: Vec3W, s: FloatW, b: Vec3W) -> Vec3W {
+    return Vec3W { x: add_w(a.x, mul_w(s, b.x)), y: add_w(a.y, mul_w(s, b.y)), z: add_w(a.z, mul_w(s, b.z)) }
+}
+add_v2_w(a: Vec2W, b: Vec2W) -> Vec2W { return Vec2W { x: add_w(a.x, b.x), y: add_w(a.y, b.y) } }
+sub_v_w(a: Vec3W, b: Vec3W) -> Vec3W { return Vec3W { x: sub_w(a.x, b.x), y: sub_w(a.y, b.y), z: sub_w(a.z, b.z) } }
+add_v_w(a: Vec3W, b: Vec3W) -> Vec3W { return Vec3W { x: add_w(a.x, b.x), y: add_w(a.y, b.y), z: add_w(a.z, b.z) } }
+mul_mv2_w(m: SymMatrix2W, a: Vec2W) -> Vec2W {
+    return Vec2W { x: add_w(mul_w(m.cxx, a.x), mul_w(m.cxy, a.y)), y: add_w(mul_w(m.cxy, a.x), mul_w(m.cyy, a.y)) }
+}
+mul_mv_w(m: SymMatrix3W, a: Vec3W) -> Vec3W {
+    return Vec3W { x: add_w(mul_w(m.cxx, a.x), add_w(mul_w(m.cxy, a.y), mul_w(m.cxz, a.z))),
+                   y: add_w(mul_w(m.cxy, a.x), add_w(mul_w(m.cyy, a.y), mul_w(m.cyz, a.z))),
+                   z: add_w(mul_w(m.cxz, a.x), add_w(mul_w(m.cyz, a.y), mul_w(m.czz, a.z))) }
+}
+// a - m * b and a + m * b.
+mul_sub_mv_w(a: Vec3W, m: SymMatrix3W, b: Vec3W) -> Vec3W { return sub_v_w(a, mul_mv_w(m, b)) }
+mul_add_mv_w(a: Vec3W, m: SymMatrix3W, b: Vec3W) -> Vec3W { return add_v_w(a, mul_mv_w(m, b)) }
+dot_w(a: Vec3W, b: Vec3W) -> FloatW { return add_w(add_w(mul_w(a.x, b.x), mul_w(a.y, b.y)), mul_w(a.z, b.z)) }
+cross_w(a: Vec3W, b: Vec3W) -> Vec3W {
+    return Vec3W { x: sub_w(mul_w(a.y, b.z), mul_w(a.z, b.y)),
+                   y: sub_w(mul_w(a.z, b.x), mul_w(a.x, b.z)),
+                   z: sub_w(mul_w(a.x, b.y), mul_w(a.y, b.x)) }
+}
+// v + 2 (q.v x (q.v x v + q.s v)), the reference's rotation (math.rotate_vector's form).
+rotate_vector_w(q: QuatW, a: Vec3W) -> Vec3W {
+    t1 = cross_w(q.v, a)
+    t2 = Vec3W { x: mul_add_w(t1.x, q.s, a.x), y: mul_add_w(t1.y, q.s, a.y), z: mul_add_w(t1.z, q.s, a.z) }
+    t3 = cross_w(q.v, t2)
+    two = splat_w(2.0)
+    return Vec3W { x: mul_add_w(a.x, two, t3.x), y: mul_add_w(a.y, two, t3.y), z: mul_add_w(a.z, two, t3.z) }
+}
+
+// --- the constraint ------------------------------------------------------------------------------------------
+
+// One manifold point of four contacts (b3ContactConstraintPointWide).
+struct WideConstraintPoint {
+    anchor_a: Vec3W
+    anchor_b: Vec3W
+    base_separation: FloatW
+    normal_impulse: FloatW
+    total_normal_impulse: FloatW
+    normal_mass: FloatW
+    lever_arm: FloatW
+    relative_velocity: FloatW
+}
+
+// Four convex contacts' constraints (b3ContactConstraintWide): the body
+// indices base 1 (0 for a static body), the point counts, and every
+// scalar of the constraint by lane.
+struct WideConstraint {
+    index_a: IntW
+    index_b: IntW
+    point_counts: IntW
+    inv_mass_a: FloatW
+    inv_mass_b: FloatW
+    inv_inertia_a: SymMatrix3W
+    inv_inertia_b: SymMatrix3W
+    normal: Vec3W
+    tangent1: Vec3W
+    tangent2: Vec3W
+    center_a: Vec3W                // the friction centres
+    center_b: Vec3W
+    twist_mass: FloatW
+    twist_impulse: FloatW
+    tangent_mass: SymMatrix2W
+    friction_impulse: Vec2W
+    rolling_mass: SymMatrix3W
+    rolling_impulse: Vec3W
+    friction: FloatW
+    rolling_resistance: FloatW
+    tangent_velocity1: FloatW
+    tangent_velocity2: FloatW
+    bias_rate: FloatW
+    mass_scale: FloatW
+    impulse_scale: FloatW
+    restitution: FloatW
+    manifolds: PtrW                // *Manifold per lane, null in a spare lane
+    point0: WideConstraintPoint
+    point1: WideConstraintPoint
+    point2: WideConstraintPoint
+    point3: WideConstraintPoint
+}
+
+wide_constraint_at(base: ptr, index: int) -> *WideConstraint { return (base + index * sizeof(WideConstraint)) as *WideConstraint }
+wide_point_at(c: *WideConstraint, index: int) -> *WideConstraintPoint {
+    return ((&c.point0) as ptr + index * sizeof(WideConstraintPoint)) as *WideConstraintPoint
+}
+
+// The wide constraints a colour's convex contacts fill: four to a slot.
+wide_constraint_count(convex_contact_count: int) -> int {
+    if convex_contact_count == 0 { return 0 }
+    return ((convex_contact_count - 1) / WIDTH) + 1
+}
+
+// The most points any lane has: the loops run over that many, the
+// spare lanes' zeroed masses and anchors keeping them inert.
+max_point_count(c: *WideConstraint) -> int {
+    return math.max_int(math.max_int(c.point_counts.x, c.point_counts.y), math.max_int(c.point_counts.z, c.point_counts.w))
+}
+
+// --- gather and scatter --------------------------------------------------------------------------------------
+
+// Four bodies' states in lanes (b3BodyStateW).
+struct BodyStateW {
+    v: Vec3W
+    w: Vec3W
+    dp: Vec3W
+    dq: QuatW
+}
+
+state_or_identity(states: ptr, index1: int) -> *BodyState {
+    if index1 == 0 { return contact_solver.dummy_state() }
+    return (states + (index1 - 1) * sizeof(BodyState)) as *BodyState
+}
+
+gather_bodies(states: ptr, indices: *IntW) -> BodyStateW {
+    s0 = state_or_identity(states, indices.x)
+    s1 = state_or_identity(states, indices.y)
+    s2 = state_or_identity(states, indices.z)
+    s3 = state_or_identity(states, indices.w)
+    v = Vec3W { x: FloatW { x: s0.linear_velocity.x, y: s1.linear_velocity.x, z: s2.linear_velocity.x, w: s3.linear_velocity.x },
+                y: FloatW { x: s0.linear_velocity.y, y: s1.linear_velocity.y, z: s2.linear_velocity.y, w: s3.linear_velocity.y },
+                z: FloatW { x: s0.linear_velocity.z, y: s1.linear_velocity.z, z: s2.linear_velocity.z, w: s3.linear_velocity.z } }
+    w = Vec3W { x: FloatW { x: s0.angular_velocity.x, y: s1.angular_velocity.x, z: s2.angular_velocity.x, w: s3.angular_velocity.x },
+                y: FloatW { x: s0.angular_velocity.y, y: s1.angular_velocity.y, z: s2.angular_velocity.y, w: s3.angular_velocity.y },
+                z: FloatW { x: s0.angular_velocity.z, y: s1.angular_velocity.z, z: s2.angular_velocity.z, w: s3.angular_velocity.z } }
+    dp = Vec3W { x: FloatW { x: s0.delta_position.x, y: s1.delta_position.x, z: s2.delta_position.x, w: s3.delta_position.x },
+                 y: FloatW { x: s0.delta_position.y, y: s1.delta_position.y, z: s2.delta_position.y, w: s3.delta_position.y },
+                 z: FloatW { x: s0.delta_position.z, y: s1.delta_position.z, z: s2.delta_position.z, w: s3.delta_position.z } }
+    dqv = Vec3W { x: FloatW { x: s0.delta_rotation.v.x, y: s1.delta_rotation.v.x, z: s2.delta_rotation.v.x, w: s3.delta_rotation.v.x },
+                  y: FloatW { x: s0.delta_rotation.v.y, y: s1.delta_rotation.v.y, z: s2.delta_rotation.v.y, w: s3.delta_rotation.v.y },
+                  z: FloatW { x: s0.delta_rotation.v.z, y: s1.delta_rotation.v.z, z: s2.delta_rotation.v.z, w: s3.delta_rotation.v.z } }
+    dqs = FloatW { x: s0.delta_rotation.s, y: s1.delta_rotation.s, z: s2.delta_rotation.s, w: s3.delta_rotation.s }
+    return BodyStateW { v: v, w: w, dp: dp, dq: QuatW { v: dqv, s: dqs } }
+}
+
+// The velocities back to the dynamic bodies of the lanes.
+scatter_lane(states: ptr, index1: int, body: *BodyStateW, l: int) {
+    if index1 == 0 { return }
+    state = (states + (index1 - 1) * sizeof(BodyState)) as *BodyState
+    if (state.flags & dynamics.DYNAMIC_FLAG) == 0 { return }
+    state.linear_velocity = math.vec3(lane(&body.v.x, l), lane(&body.v.y, l), lane(&body.v.z, l))
+    state.angular_velocity = math.vec3(lane(&body.w.x, l), lane(&body.w.y, l), lane(&body.w.z, l))
+}
+
+scatter_bodies(states: ptr, indices: *IntW, body: *BodyStateW) {
+    scatter_lane(states, indices.x, body, 0)
+    scatter_lane(states, indices.y, body, 1)
+    scatter_lane(states, indices.z, body, 2)
+    scatter_lane(states, indices.w, body, 3)
+}
+
+// --- the stages ----------------------------------------------------------------------------------------------
+
+// One convex contact into its lane (b3PrepareContacts_Convex's lane body).
+prepare_lane(ctx: *StepContext, c: *Contact, constraint: *WideConstraint, l: int) {
+    warm_start_scale = 0.0
+    if ctx.enable_warm_starting { warm_start_scale = 1.0 }
+    inv_tau = 1.0 / dynamics.SPECULATIVE_DISTANCE
+    manifold = dynamics.manifold_at(c, 0)
+    index_a = c.body_sim_index_a
+    index_b = c.body_sim_index_b
+    set_int_lane(&constraint.index_a, l, index_a + 1)
+    set_int_lane(&constraint.index_b, l, index_b + 1)
+    set_ptr_lane(&constraint.manifolds, l, manifold as ptr)
+    m_a = 0.0
+    i_a = math.mat3_zero()
+    v_a = math.vec3_zero()
+    w_a = math.vec3_zero()
+    if index_a != NULL_INDEX {
+        sim_a = contact_solver.sim_at(ctx.sims, index_a)
+        m_a = sim_a.inv_mass
+        i_a = sim_a.inv_inertia_world
+        state_a = contact_solver.state_at(ctx.states, index_a)
+        v_a = state_a.linear_velocity
+        w_a = state_a.angular_velocity
+    }
+    m_b = 0.0
+    i_b = math.mat3_zero()
+    v_b = math.vec3_zero()
+    w_b = math.vec3_zero()
+    if index_b != NULL_INDEX {
+        sim_b = contact_solver.sim_at(ctx.sims, index_b)
+        m_b = sim_b.inv_mass
+        i_b = sim_b.inv_inertia_world
+        state_b = contact_solver.state_at(ctx.states, index_b)
+        v_b = state_b.linear_velocity
+        w_b = state_b.angular_velocity
+    }
+    set_lane(&constraint.inv_mass_a, l, m_a)
+    set_lane(&constraint.inv_mass_b, l, m_b)
+    set_sym3_lane(&constraint.inv_inertia_a, l, i_a)
+    set_sym3_lane(&constraint.inv_inertia_b, l, i_b)
+    soft = ctx.contact_softness
+    if index_a == NULL_INDEX || index_b == NULL_INDEX { soft = ctx.static_softness }
+    normal = manifold.normal
+    tangent1 = math.perp(normal)
+    tangent2 = math.cross(tangent1, normal)
+    set_vec3_lane(&constraint.normal, l, normal)
+    set_vec3_lane(&constraint.tangent1, l, tangent1)
+    set_vec3_lane(&constraint.tangent2, l, tangent2)
+    set_lane(&constraint.friction, l, c.friction)
+    set_lane(&constraint.restitution, l, c.restitution)
+    set_lane(&constraint.rolling_resistance, l, c.rolling_resistance)
+    set_lane(&constraint.tangent_velocity1, l, math.dot(c.tangent_velocity, tangent1))
+    set_lane(&constraint.tangent_velocity2, l, math.dot(c.tangent_velocity, tangent2))
+    set_lane(&constraint.bias_rate, l, soft.bias_rate)
+    set_lane(&constraint.mass_scale, l, soft.mass_scale)
+    set_lane(&constraint.impulse_scale, l, soft.impulse_scale)
+    point_count = manifold.point_count
+    set_int_lane(&constraint.point_counts, l, point_count)
+    center_a = math.vec3_zero()
+    center_b = math.vec3_zero()
+    total_weight = 0.0
+    point_index = 0
+    while point_index < point_count {
+        mp = dynamics.manifold_point_at(manifold, point_index)
+        cp = wide_point_at(constraint, point_index)
+        r_a = mp.anchor_a
+        r_b = mp.anchor_b
+        s = mp.separation
+        // The friction centre decays with separation (the scalar prepare says why).
+        weight = math.clamp_float(2.0 - s * inv_tau, contact_solver.MIN_FRICTION_WEIGHT, 1.0)
+        center_a = math.mul_add(center_a, weight, r_a)
+        center_b = math.mul_add(center_b, weight, r_b)
+        total_weight = total_weight + weight
+        set_vec3_lane(&cp.anchor_a, l, r_a)
+        set_vec3_lane(&cp.anchor_b, l, r_b)
+        set_lane(&cp.base_separation, l, s - math.dot(math.sub(r_b, r_a), normal))
+        set_lane(&cp.normal_impulse, l, warm_start_scale * mp.normal_impulse)
+        set_lane(&cp.total_normal_impulse, l, 0.0)
+        rn_a = math.cross(r_a, normal)
+        rn_b = math.cross(r_b, normal)
+        k_normal = m_a + m_b + math.dot(rn_a, math.mul_mv(i_a, rn_a)) + math.dot(rn_b, math.mul_mv(i_b, rn_b))
+        normal_mass = 0.0
+        if k_normal > 0.0 { normal_mass = 1.0 / k_normal }
+        set_lane(&cp.normal_mass, l, normal_mass)
+        vr_a = math.add(v_a, math.cross(w_a, r_a))
+        vr_b = math.add(v_b, math.cross(w_b, r_b))
+        set_lane(&cp.relative_velocity, l, math.dot(normal, math.sub(vr_b, vr_a)))
+        point_index = point_index + 1
+    }
+    inv_weight = 1.0 / total_weight
+    center_a = math.mul_sv(inv_weight, center_a)
+    center_b = math.mul_sv(inv_weight, center_b)
+    set_vec3_lane(&constraint.center_a, l, center_a)
+    set_vec3_lane(&constraint.center_b, l, center_b)
+    point_index = 0
+    while point_index < point_count {
+        mp = dynamics.manifold_point_at(manifold, point_index)
+        set_lane(&wide_point_at(constraint, point_index).lever_arm, l, math.distance(mp.anchor_a, center_a))
+        point_index = point_index + 1
+    }
+    rt_a1 = math.cross(center_a, tangent1)
+    rt_a2 = math.cross(center_a, tangent2)
+    rt_b1 = math.cross(center_b, tangent1)
+    rt_b2 = math.cross(center_b, tangent2)
+    kxx = m_a + m_b + math.dot(rt_a1, math.mul_mv(i_a, rt_a1)) + math.dot(rt_b1, math.mul_mv(i_b, rt_b1))
+    kyy = m_a + m_b + math.dot(rt_a2, math.mul_mv(i_a, rt_a2)) + math.dot(rt_b2, math.mul_mv(i_b, rt_b2))
+    kxy = math.dot(rt_a1, math.mul_mv(i_a, rt_a2)) + math.dot(rt_b1, math.mul_mv(i_b, rt_b2))
+    k = Matrix2 { cx: Vec2 { x: kxx, y: kxy }, cy: Vec2 { x: kxy, y: kyy } }
+    tangent_mass = math.invert2(k)
+    set_lane(&constraint.tangent_mass.cxx, l, tangent_mass.cx.x)
+    set_lane(&constraint.tangent_mass.cxy, l, tangent_mass.cx.y)
+    set_lane(&constraint.tangent_mass.cyy, l, tangent_mass.cy.y)
+    set_lane(&constraint.friction_impulse.x, l, warm_start_scale * math.dot(manifold.friction_impulse, tangent1))
+    set_lane(&constraint.friction_impulse.y, l, warm_start_scale * math.dot(manifold.friction_impulse, tangent2))
+    k_twist = math.dot(normal, math.mul_mv(math.add_mm(i_a, i_b), normal))
+    twist_mass = 0.0
+    if k_twist > 0.0 { twist_mass = 1.0 / k_twist }
+    set_lane(&constraint.twist_mass, l, twist_mass)
+    set_lane(&constraint.twist_impulse, l, warm_start_scale * manifold.twist_impulse)
+    set_sym3_lane(&constraint.rolling_mass, l, math.invert_matrix(math.add_mm(i_a, i_b)))
+    set_vec3_lane(&constraint.rolling_impulse, l, math.mul_sv(warm_start_scale, manifold.rolling_impulse))
+    // The points the manifold lacks are zero: nothing reaches the bodies through them.
+    point_index = point_count
+    while point_index < dynamics.MAX_MANIFOLD_POINTS {
+        cp = wide_point_at(constraint, point_index)
+        set_vec3_lane(&cp.anchor_a, l, math.vec3_zero())
+        set_vec3_lane(&cp.anchor_b, l, math.vec3_zero())
+        set_lane(&cp.base_separation, l, 0.0)
+        set_lane(&cp.normal_impulse, l, 0.0)
+        set_lane(&cp.total_normal_impulse, l, 0.0)
+        set_lane(&cp.normal_mass, l, 0.0)
+        set_lane(&cp.relative_velocity, l, 0.0)
+        set_lane(&cp.lever_arm, l, 0.0)
+        point_index = point_index + 1
+    }
+}
+
+// A colour's convex contacts into its wide constraints, four to a slot
+// in the order of the colour's array; the tail slot's spare lanes zeroed.
+prepare_wide_contacts(ctx: *StepContext, color: *GraphColor) {
+    w = ctx.world
+    count = color.convex_contacts.count
+    if count == 0 { return }
+    base = color.wide_constraints
+    if count % WIDTH != 0 {
+        memset(base + (color.wide_constraint_count - 1) * sizeof(WideConstraint), 0, sizeof(WideConstraint))
+    }
+    i = 0
+    while i < count {
+        c = dynamics.contact_at(w, core.ints_get(&color.convex_contacts, i))
+        prepare_lane(ctx, c, wide_constraint_at(base, i / WIDTH), i % WIDTH)
+        i = i + 1
+    }
+}
+
+// Last step's impulses applied before solving (b3WarmStartContacts_Convex).
+warm_start_wide_contacts(ctx: *StepContext, constraints: ptr, count: int) {
+    states = ctx.states
+    if g_native_lanes {
+        aephysics_wide_warm_start(states, constraints, count)
+        return
+    }
+    index = 0
+    while index < count {
+        c = wide_constraint_at(constraints, index)
+        b_a = gather_bodies(states, &c.index_a)
+        b_b = gather_bodies(states, &c.index_b)
+        point_count = max_point_count(c)
+        j = 0
+        while j < point_count {
+            cp = wide_point_at(c, j)
+            impulse = mul_sv_w(cp.normal_impulse, c.normal)
+            b_a.w = mul_sub_mv_w(b_a.w, c.inv_inertia_a, cross_w(cp.anchor_a, impulse))
+            b_a.v = mul_sub_sv_w(b_a.v, c.inv_mass_a, impulse)
+            b_b.w = mul_add_mv_w(b_b.w, c.inv_inertia_b, cross_w(cp.anchor_b, impulse))
+            b_b.v = mul_add_sv_w(b_b.v, c.inv_mass_b, impulse)
+            j = j + 1
+        }
+        // Central friction.
+        friction = mul_add_sv_w(mul_sv_w(c.friction_impulse.x, c.tangent1), c.friction_impulse.y, c.tangent2)
+        b_a.w = mul_sub_mv_w(b_a.w, c.inv_inertia_a, cross_w(c.center_a, friction))
+        b_a.v = mul_sub_sv_w(b_a.v, c.inv_mass_a, friction)
+        b_b.w = mul_add_mv_w(b_b.w, c.inv_inertia_b, cross_w(c.center_b, friction))
+        b_b.v = mul_add_sv_w(b_b.v, c.inv_mass_b, friction)
+        // Twist friction and rolling resistance.
+        twist = mul_sv_w(c.twist_impulse, c.normal)
+        b_a.w = mul_sub_mv_w(b_a.w, c.inv_inertia_a, twist)
+        b_b.w = mul_add_mv_w(b_b.w, c.inv_inertia_b, twist)
+        b_a.w = mul_sub_mv_w(b_a.w, c.inv_inertia_a, c.rolling_impulse)
+        b_b.w = mul_add_mv_w(b_b.w, c.inv_inertia_b, c.rolling_impulse)
+        scatter_bodies(states, &c.index_a, &b_a)
+        scatter_bodies(states, &c.index_b, &b_b)
+        index = index + 1
+    }
+}
+
+// One sequential impulse pass over four contacts at a time
+// (b3SolveContacts_Convex): the scalar solve's steps with the branches
+// as masks: a lane apart gets the speculative bias, a lane penetrating
+// the soft constraint's when biased; then, without bias only, the
+// rolling resistance, twist friction and central friction.
+solve_wide_contacts(ctx: *StepContext, constraints: ptr, count: int, use_bias: bool) {
+    states = ctx.states
+    if g_native_lanes {
+        bias_flag = 0
+        if use_bias { bias_flag = 1 }
+        aephysics_wide_solve(states, constraints, count, bias_flag, ctx.inv_h, ctx.world.contact_speed, math.EPSILON)
+        return
+    }
+    inv_h = splat_w(ctx.inv_h)
+    contact_speed = splat_w(0.0 - ctx.world.contact_speed)
+    one = splat_w(1.0)
+    zero = zero_w()
+    epsilon = splat_w(math.EPSILON)
+    index = 0
+    while index < count {
+        c = wide_constraint_at(constraints, index)
+        point_count = max_point_count(c)
+        b_a = gather_bodies(states, &c.index_a)
+        b_b = gather_bodies(states, &c.index_b)
+        bias_rate = zero
+        mass_scale = one
+        impulse_scale = zero
+        if use_bias {
+            bias_rate = mul_w(c.mass_scale, c.bias_rate)
+            mass_scale = c.mass_scale
+            impulse_scale = c.impulse_scale
+        }
+        dp = sub_v_w(b_b.dp, b_a.dp)
+        total_normal_impulse = zero
+        total_twist_limit = zero
+        point_index = 0
+        while point_index < point_count {
+            cp = wide_point_at(c, point_index)
+            r_a = cp.anchor_a
+            r_b = cp.anchor_b
+            // The anchors turned with the bodies give the current separation.
+            rs_a = rotate_vector_w(b_a.dq, r_a)
+            rs_b = rotate_vector_w(b_b.dq, r_b)
+            ds = add_v_w(dp, sub_v_w(rs_b, rs_a))
+            s = add_w(dot_w(c.normal, ds), cp.base_separation)
+            apart = greater_w(s, zero)
+            spec_bias = mul_w(s, inv_h)
+            soft_bias = max_w(mul_w(bias_rate, s), contact_speed)
+            bias = blend_w(soft_bias, spec_bias, apart)
+            point_mass_scale = blend_w(mass_scale, one, apart)
+            point_impulse_scale = blend_w(impulse_scale, zero, apart)
+            vr_a = add_v_w(b_a.v, cross_w(b_a.w, r_a))
+            vr_b = add_v_w(b_b.v, cross_w(b_b.w, r_b))
+            vn = dot_w(sub_v_w(vr_b, vr_a), c.normal)
+            neg_impulse = add_w(mul_w(cp.normal_mass, add_w(mul_w(point_mass_scale, vn), bias)), mul_w(point_impulse_scale, cp.normal_impulse))
+            new_impulse = max_w(sub_w(cp.normal_impulse, neg_impulse), zero)
+            delta_impulse = sub_w(new_impulse, cp.normal_impulse)
+            cp.normal_impulse = new_impulse
+            cp.total_normal_impulse = add_w(cp.total_normal_impulse, new_impulse)
+            total_normal_impulse = add_w(total_normal_impulse, new_impulse)
+            total_twist_limit = add_w(total_twist_limit, mul_w(cp.lever_arm, new_impulse))
+            p = mul_sv_w(delta_impulse, c.normal)
+            b_a.w = mul_sub_mv_w(b_a.w, c.inv_inertia_a, cross_w(r_a, p))
+            b_a.v = mul_sub_sv_w(b_a.v, c.inv_mass_a, p)
+            b_b.w = mul_add_mv_w(b_b.w, c.inv_inertia_b, cross_w(r_b, p))
+            b_b.v = mul_add_sv_w(b_b.v, c.inv_mass_b, p)
+            point_index = point_index + 1
+        }
+        if use_bias == false {
+            // Rolling resistance, when any lane has it.
+            if all_zero_w(c.rolling_resistance) == false {
+                delta_rolling = mul_mv_w(c.rolling_mass, sub_v_w(b_a.w, b_b.w))
+                old_rolling = c.rolling_impulse
+                c.rolling_impulse = add_v_w(old_rolling, delta_rolling)
+                max_rolling = mul_w(c.rolling_resistance, total_normal_impulse)
+                length_squared = dot_w(c.rolling_impulse, c.rolling_impulse)
+                over = greater_w(length_squared, mul_add_w(epsilon, max_rolling, max_rolling))
+                normalize = div_w(max_rolling, add_w(sqrt_w(length_squared), epsilon))
+                scale = blend_w(one, normalize, over)
+                // A lane without rolling resistance keeps no impulse.
+                scale = blend_w(zero, scale, greater_w(c.rolling_resistance, zero))
+                c.rolling_impulse = mul_sv_w(scale, c.rolling_impulse)
+                delta_rolling = sub_v_w(c.rolling_impulse, old_rolling)
+                b_a.w = mul_sub_mv_w(b_a.w, c.inv_inertia_a, delta_rolling)
+                b_b.w = mul_add_mv_w(b_b.w, c.inv_inertia_b, delta_rolling)
+            }
+            // Central twist friction.
+            twist_speed = dot_w(c.normal, sub_v_w(b_b.w, b_a.w))
+            max_twist = mul_w(c.friction, total_twist_limit)
+            old_twist = c.twist_impulse
+            c.twist_impulse = sym_clamp_w(sub_w(old_twist, mul_w(c.twist_mass, twist_speed)), max_twist)
+            delta_twist = sub_w(c.twist_impulse, old_twist)
+            twist = mul_sv_w(delta_twist, c.normal)
+            b_a.w = mul_sub_mv_w(b_a.w, c.inv_inertia_a, twist)
+            b_b.w = mul_add_mv_w(b_b.w, c.inv_inertia_b, twist)
+            // Central friction.
+            c_a = c.center_a
+            c_b = c.center_b
+            vr_a = add_v_w(b_a.v, cross_w(b_a.w, c_a))
+            vr_b = add_v_w(b_b.v, cross_w(b_b.w, c_b))
+            vr = sub_v_w(vr_b, vr_a)
+            vt = Vec2W { x: sub_w(dot_w(vr, c.tangent1), c.tangent_velocity1), y: sub_w(dot_w(vr, c.tangent2), c.tangent_velocity2) }
+            tm = mul_mv2_w(c.tangent_mass, vt)
+            new_friction = Vec2W { x: sub_w(c.friction_impulse.x, tm.x), y: sub_w(c.friction_impulse.y, tm.y) }
+            max_friction = mul_w(c.friction, total_normal_impulse)
+            length_squared = add_w(mul_w(new_friction.x, new_friction.x), mul_w(new_friction.y, new_friction.y))
+            over = greater_w(length_squared, mul_w(max_friction, max_friction))
+            normalize = div_w(max_friction, add_w(sqrt_w(length_squared), epsilon))
+            scale = blend_w(one, normalize, over)
+            new_friction = Vec2W { x: mul_w(scale, new_friction.x), y: mul_w(scale, new_friction.y) }
+            delta_friction = Vec2W { x: sub_w(new_friction.x, c.friction_impulse.x), y: sub_w(new_friction.y, c.friction_impulse.y) }
+            c.friction_impulse = new_friction
+            p = add_v_w(mul_sv_w(delta_friction.x, c.tangent1), mul_sv_w(delta_friction.y, c.tangent2))
+            b_a.w = mul_sub_mv_w(b_a.w, c.inv_inertia_a, cross_w(c_a, p))
+            b_a.v = mul_sub_sv_w(b_a.v, c.inv_mass_a, p)
+            b_b.w = mul_add_mv_w(b_b.w, c.inv_inertia_b, cross_w(c_b, p))
+            b_b.v = mul_add_sv_w(b_b.v, c.inv_mass_b, p)
+        }
+        scatter_bodies(states, &c.index_a, &b_a)
+        scatter_bodies(states, &c.index_b, &b_b)
+        index = index + 1
+    }
+}
+
+// The bounce (b3ApplyRestitution_Convex): a slot with no restitution
+// in any lane is skipped; in the rest, a lane's point gets a zero mass
+// unless it approached faster than the threshold with an impulse.
+apply_wide_restitution(ctx: *StepContext, constraints: ptr, count: int) {
+    states = ctx.states
+    if g_native_lanes {
+        aephysics_wide_restitution(states, constraints, count, ctx.restitution_threshold)
+        return
+    }
+    threshold = splat_w(ctx.restitution_threshold)
+    zero = zero_w()
+    index = 0
+    while index < count {
+        c = wide_constraint_at(constraints, index)
+        if all_zero_w(c.restitution) == false {
+            point_count = max_point_count(c)
+            b_a = gather_bodies(states, &c.index_a)
+            b_b = gather_bodies(states, &c.index_b)
+            no_restitution = equals_w(c.restitution, zero)
+            point_index = 0
+            while point_index < point_count {
+                cp = wide_point_at(c, point_index)
+                slow = greater_w(add_w(cp.relative_velocity, threshold), zero)
+                untouched = equals_w(cp.total_normal_impulse, zero)
+                skip = or_w(or_w(slow, untouched), no_restitution)
+                mass = blend_w(cp.normal_mass, zero, skip)
+                r_a = cp.anchor_a
+                r_b = cp.anchor_b
+                vr_a = add_v_w(b_a.v, cross_w(b_a.w, r_a))
+                vr_b = add_v_w(b_b.v, cross_w(b_b.w, r_b))
+                vn = dot_w(sub_v_w(vr_b, vr_a), c.normal)
+                neg_impulse = mul_w(mass, add_w(vn, mul_w(c.restitution, cp.relative_velocity)))
+                new_impulse = max_w(sub_w(cp.normal_impulse, neg_impulse), zero)
+                delta_impulse = sub_w(new_impulse, cp.normal_impulse)
+                cp.normal_impulse = new_impulse
+                cp.total_normal_impulse = add_w(cp.total_normal_impulse, delta_impulse)
+                p = mul_sv_w(delta_impulse, c.normal)
+                b_a.w = mul_sub_mv_w(b_a.w, c.inv_inertia_a, cross_w(r_a, p))
+                b_a.v = mul_sub_sv_w(b_a.v, c.inv_mass_a, p)
+                b_b.w = mul_add_mv_w(b_b.w, c.inv_inertia_b, cross_w(r_b, p))
+                b_b.v = mul_add_sv_w(b_b.v, c.inv_mass_b, p)
+                point_index = point_index + 1
+            }
+            scatter_bodies(states, &c.index_a, &b_a)
+            scatter_bodies(states, &c.index_b, &b_b)
+        }
+        index = index + 1
+    }
+}
+
+// The impulses back into the lanes' manifolds (b3StoreImpulses_Convex)
+// for next step's warm start and the user's queries; a contact that
+// wants hit events and closed faster than the threshold with an impulse
+// sets its bit. Whether any did.
+store_wide_impulses(ctx: *StepContext, color: *GraphColor, hit_bits: *BitSet) -> bool {
+    w = ctx.world
+    has_hits = false
+    neg_threshold = 0.0 - w.hit_event_threshold
+    count = color.convex_contacts.count
+    i = 0
+    while i < count {
+        c = wide_constraint_at(color.wide_constraints, i / WIDTH)
+        l = i % WIDTH
+        m = ptr_lane(&c.manifolds, l) as *Manifold
+        f1 = lane(&c.friction_impulse.x, l)
+        f2 = lane(&c.friction_impulse.y, l)
+        m.friction_impulse = math.vec3(f1 * lane(&c.tangent1.x, l) + f2 * lane(&c.tangent2.x, l),
+                                       f1 * lane(&c.tangent1.y, l) + f2 * lane(&c.tangent2.y, l),
+                                       f1 * lane(&c.tangent1.z, l) + f2 * lane(&c.tangent2.z, l))
+        m.twist_impulse = lane(&c.twist_impulse, l)
+        m.rolling_impulse = math.vec3(lane(&c.rolling_impulse.x, l), lane(&c.rolling_impulse.y, l), lane(&c.rolling_impulse.z, l))
+        point_count = m.point_count
+        point_index = 0
+        while point_index < point_count {
+            cp = wide_point_at(c, point_index)
+            mp = dynamics.manifold_point_at(m, point_index)
+            mp.normal_impulse = lane(&cp.normal_impulse, l)
+            mp.total_normal_impulse = lane(&cp.total_normal_impulse, l)
+            mp.normal_velocity = lane(&cp.relative_velocity, l)
+            point_index = point_index + 1
+        }
+        contact = dynamics.contact_at(w, core.ints_get(&color.convex_contacts, i))
+        if (contact.flags & dynamics.SIM_ENABLE_HIT_EVENT) != 0 {
+            point_index = 0
+            while point_index < point_count {
+                mp = dynamics.manifold_point_at(m, point_index)
+                if mp.normal_velocity < neg_threshold && mp.total_normal_impulse > 0.0 {
+                    core.bitset_set_grow(hit_bits, contact.contact_id)
+                    has_hits = true
+                    break
+                }
+                point_index = point_index + 1
+            }
+        }
+        i = i + 1
+    }
+    return has_hits
+}
