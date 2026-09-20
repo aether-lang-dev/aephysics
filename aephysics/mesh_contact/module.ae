@@ -1,0 +1,710 @@
+// aephysics.mesh_contact -- a convex shape against a mesh or a height
+// field: the triangles under the shape's bounds are cached (refreshed
+// only when the shape leaves the bounds it was queried with, each
+// triangle keeping its own simplex or separating-axis cache), every
+// triangle gives a manifold in the shape's frame, the manifolds are
+// accepted or held back so a shape crossing an interior edge or vertex
+// never collides with the seam (the ghost collision), the accepted
+// manifolds are clustered by their normals, and each cluster is reduced
+// to four points spanning the largest area.
+//
+// This is the world-free part of Box3D's mesh_contact.c (Erin Catto,
+// MIT), the reference this engine is measured against: the cache
+// matching by sorted triangle index, the acceptance rules (a triangle
+// face always; a hull face when it lies with the triangle or is deep;
+// the rest tentative, spheres taking the nearest tentative triangles
+// whose feature no accepted triangle already owns, hulls and capsules
+// skipping only the flat edges an accepted triangle owns), the cluster
+// threshold of cos 5 degrees, and the four-point cull by farthest pair,
+// largest triangle, most area outside. Names are the reference's
+// without its prefix, in snake case: b3ComputeMeshManifolds is
+// compute_mesh_manifolds. What the reference does after the clusters
+// (matching the old manifolds for warm starting, the materials'
+// friction and restitution, the rolling resistance and tangent
+// velocity) belongs to the contact and comes with the dynamics.
+//
+// Differences: the per-triangle cache holds both a simplex cache and a
+// separating-axis cache where the reference has a union; the results
+// live in the caller's arena from where this function started bumping.
+import std.string
+import aephysics.math
+import aephysics.core
+import aephysics.hull
+import aephysics.distance
+import aephysics.manifold
+import aephysics.triangle_manifold
+import aephysics.mesh
+import aephysics.height_field
+import aephysics.material
+import aephysics.sphere
+import aephysics.capsule
+import aephysics.compound
+import aephysics.shape
+
+exports (
+    TriangleCache, MeshContactCache, Cluster, MeshManifolds,
+    MAX_MESH_CONTACT_TRIANGLES, MAX_POINTS_PER_TRIANGLE, MAX_MANIFOLD_POINTS, MESH_REST_OFFSET, NULL_INDEX,
+    mesh_contact_cache_create, mesh_contact_cache_destroy, refresh_cache, compute_mesh_manifolds,
+    cull_points, reduce_cluster
+)
+
+extern memcpy(dst: ptr, src: ptr, size: int) -> ptr
+
+const NULL_INDEX = 0 - 1
+const MAX_MESH_CONTACT_TRIANGLES = 256
+const MAX_POINTS_PER_TRIANGLE = 32
+const MAX_MANIFOLD_POINTS = 4
+const MAX_EDGE_COUNT = 64
+const MAX_VERTEX_COUNT = 64
+// The gap left after a time of impact (the "rest offset").
+const MESH_REST_OFFSET = 0.005
+const MAX_AABB_MARGIN = 0.05
+const SPECULATIVE_DISTANCE = 0.02
+// A triangle's manifold and one accepted for the reduction: the
+// triangle_manifold module's features and the manifold module's axes,
+// restated (a module constant does not reach every expression).
+const FEATURE_NONE = 0
+const FEATURE_TRIANGLE_FACE = 1
+const FEATURE_HULL_FACE = 2
+const FEATURE_EDGE1 = 3
+const FEATURE_EDGE2 = 4
+const FEATURE_EDGE3 = 5
+const FEATURE_VERTEX1 = 6
+const FEATURE_VERTEX2 = 7
+const FEATURE_VERTEX3 = 8
+const AXIS_EDGE_PAIR = 4
+const FLAT_EDGE1 = 0x11
+const FLAT_EDGE2 = 0x22
+const FLAT_EDGE3 = 0x44
+const ALL_FLAT_EDGES = 0x77
+const KIND_SPHERE = 0
+const KIND_CAPSULE = 1
+const KIND_HULL = 2
+const KIND_MESH = 3
+const KIND_HEIGHT_FIELD = 4
+
+// A triangle under the shape and its warm start.
+struct TriangleCache {
+    triangle_index: int
+    simplex_cache: SimplexCache   // a capsule's
+    sat_cache: SATCache           // a hull's
+}
+
+// The contact's memory of the mesh: the bounds the triangles were
+// queried with and the triangles, sorted by index.
+struct MeshContactCache {
+    query_bounds: AABB
+    triangles: ptr               // TriangleCache[]
+    count: int
+    capacity: int
+}
+
+// A cluster of accepted manifolds with alike normals, reduced.
+struct Cluster {
+    manifold_normal: Vec3        // in the convex shape's frame
+    triangle_normal: Vec3
+    points: ptr                  // LocalManifoldPoint[], in the convex shape's frame
+    point_capacity: int
+    point_count: int
+}
+
+// What compute_mesh_manifolds leaves in the arena.
+struct MeshManifolds {
+    clusters: ptr                // Cluster[]
+    cluster_count: int
+    sat_calls: int               // diagnostics: hull collisions, and how many the cache answered
+    sat_cache_hits: int
+}
+
+mesh_contact_cache_create() -> MeshContactCache {
+    return MeshContactCache { query_bounds: math.aabb_empty(), triangles: null, count: 0, capacity: 0 }
+}
+
+mesh_contact_cache_destroy(cache: *MeshContactCache) {
+    core.free_bytes(cache.triangles, cache.capacity * sizeof(TriangleCache))
+    cache.triangles = null
+    cache.count = 0
+    cache.capacity = 0
+}
+
+empty_triangle_cache(triangle_index: int) -> TriangleCache {
+    return TriangleCache { triangle_index: triangle_index, simplex_cache: distance.empty_cache(), sat_cache: manifold.empty_sat_cache() }
+}
+
+// --- the triangle cache ------------------------------------------------------------------------
+
+struct TriangleQuery {
+    indices: ptr                 // int[]
+    capacity: int
+    count: int
+}
+
+collect_triangle(a: Vec3, b: Vec3, c: Vec3, triangle_index: int, context: ptr) -> bool {
+    q = context as *TriangleQuery
+    if q.count == q.capacity { return false }
+    indices = q.indices as int[]
+    indices[q.count] = triangle_index
+    q.count = q.count + 1
+    return q.count < q.capacity
+}
+
+var g_indices: ptr = null      // int[MAX_MESH_CONTACT_TRIANGLES]
+var g_matched: ptr = null      // TriangleCache[MAX_MESH_CONTACT_TRIANGLES]
+var g_edges: ptr = null        // long[MAX_EDGE_COUNT]
+var g_vertices: ptr = null     // int[MAX_VERTEX_COUNT]
+var g_triangle: ptr = null     // Vec3[3]
+
+scratch_ready() {
+    if g_indices == null {
+        g_indices = core.alloc(MAX_MESH_CONTACT_TRIANGLES * 4)
+        g_matched = core.alloc(MAX_MESH_CONTACT_TRIANGLES * sizeof(TriangleCache))
+        g_edges = core.alloc(MAX_EDGE_COUNT * 8)
+        g_vertices = core.alloc(MAX_VERTEX_COUNT * 4)
+        g_triangle = core.alloc(3 * sizeof(Vec3))
+    }
+}
+
+// The triangles under the convex shape's world bounds, kept while the
+// shape stays inside the bounds they were last queried with (enlarged
+// by the margin and the speculative distance); a refresh keeps each
+// surviving triangle's warm start.
+refresh_cache(cache: *MeshContactCache, mesh_shape: *Shape, xf_a: Transform, bounds: AABB) {
+    if math.aabb_contains(cache.query_bounds, bounds) { return }
+    scratch_ready()
+    radius = MAX_AABB_MARGIN + SPECULATIVE_DISTANCE
+    extension = math.vec3(radius, radius, radius)
+    cache.query_bounds = AABB { lower: math.sub(bounds.lower, extension), upper: math.add(bounds.upper, extension) }
+    local_bounds = math.aabb_transform(math.invert_transform(xf_a), cache.query_bounds)
+    q = TriangleQuery { indices: g_indices, capacity: MAX_MESH_CONTACT_TRIANGLES, count: 0 }
+    if mesh_shape.kind == KIND_MESH {
+        mesh.query_mesh(mesh_shape.mesh, local_bounds, collect_triangle, (&q) as ptr)
+    } else {
+        height_field.query_height_field(mesh_shape.height_field, local_bounds, collect_triangle, (&q) as ptr)
+    }
+    indices = g_indices as int[]
+    triangle_count = q.count
+    // The indices arrive sorted (both queries walk in index order), so
+    // the old cache is matched in one pass.
+    old = cache.triangles as TriangleCache[]
+    matched = g_matched as TriangleCache[]
+    index2 = 0
+    index1 = 0
+    while index1 < triangle_count {
+        matched[index1] = empty_triangle_cache(indices[index1])
+        while index2 < cache.count && old[index2].triangle_index < indices[index1] { index2 = index2 + 1 }
+        if index2 < cache.count && old[index2].triangle_index == indices[index1] {
+            matched[index1].simplex_cache = old[index2].simplex_cache
+            matched[index1].sat_cache = old[index2].sat_cache
+        }
+        index1 = index1 + 1
+    }
+    if triangle_count > cache.capacity {
+        core.free_bytes(cache.triangles, cache.capacity * sizeof(TriangleCache))
+        cache.capacity = math.max_int(triangle_count, 8)
+        cache.triangles = core.alloc(cache.capacity * sizeof(TriangleCache))
+    }
+    if triangle_count > 0 { memcpy(cache.triangles, g_matched, triangle_count * sizeof(TriangleCache)) }
+    cache.count = triangle_count
+}
+
+// --- the seams -------------------------------------------------------------------------------------
+
+// The edges and vertices the accepted triangles own, so a tentative
+// triangle cannot collide with a seam twice. Full lists let a ghost
+// through rather than dropping a contact.
+struct Found {
+    edge_count: int
+    vertex_count: int
+}
+
+edge_key(vertex1: int, vertex2: int) -> long {
+    return ((math.min_int(vertex1, vertex2) as long) << 32) | (math.max_int(vertex1, vertex2) as long)
+}
+
+// True when the edge was not there (and is now, if there was room).
+add_edge(found: *Found, vertex1: int, vertex2: int) -> bool {
+    key = edge_key(vertex1, vertex2)
+    keys = g_edges as long[]
+    i = 0
+    while i < found.edge_count {
+        if keys[i] == key { return false }
+        i = i + 1
+    }
+    if found.edge_count == MAX_EDGE_COUNT { return true }
+    keys[found.edge_count] = key
+    found.edge_count = found.edge_count + 1
+    return true
+}
+
+find_edge(found: *Found, vertex1: int, vertex2: int) -> bool {
+    key = edge_key(vertex1, vertex2)
+    keys = g_edges as long[]
+    i = 0
+    while i < found.edge_count {
+        if keys[i] == key { return true }
+        i = i + 1
+    }
+    return false
+}
+
+add_vertex(found: *Found, vertex: int) -> bool {
+    keys = g_vertices as int[]
+    i = 0
+    while i < found.vertex_count {
+        if keys[i] == vertex { return false }
+        i = i + 1
+    }
+    if found.vertex_count == MAX_VERTEX_COUNT { return true }
+    keys[found.vertex_count] = vertex
+    found.vertex_count = found.vertex_count + 1
+    return true
+}
+
+add_triangle(found: *Found, i1: int, i2: int, i3: int) {
+    add_edge(found, i1, i2)
+    add_edge(found, i2, i3)
+    add_edge(found, i3, i1)
+    add_vertex(found, i1)
+    add_vertex(found, i2)
+    add_vertex(found, i3)
+}
+
+// --- the reduction ---------------------------------------------------------------------------------
+
+// Whether (score, separation) beats (best score, best separation): a
+// clearly larger score, or a tie broken by the deeper separation.
+is_better_cull_candidate(score: float, separation: float, best_score: float, best_separation: float, score_tol: float, separation_tol: float) -> bool {
+    if score > best_score + score_tol { return true }
+    if score < best_score - score_tol { return false }
+    return separation < best_separation - separation_tol
+}
+
+var g_final: ptr = null    // Point2D[4]
+
+// Up to four of the points, in place: the farthest pair, then the point
+// making the largest triangle with them, then the point adding the most
+// area outside that triangle; ties to the deeper point. Returns how many.
+cull_points(points: Point2D[], count: int) -> int {
+    if count <= 1 { return count }
+    if g_final == null { g_final = core.alloc(4 * sizeof(Point2D)) }
+    final = g_final as Point2D[]
+    tol = 0.25 * math.LINEAR_SLOP
+    tol_sqr = tol * tol
+    separation_tol = math.LINEAR_SLOP
+    count1 = count
+
+    // The two farthest apart.
+    best_score = 0.0
+    best_separation = math.MAX_FLOAT
+    best_index1 = NULL_INDEX
+    best_index2 = NULL_INDEX
+    i = 0
+    while i < count1 {
+        p1 = points[i].p
+        j = i + 1
+        while j < count1 {
+            score = math.distance_squared_2(p1, points[j].p)
+            separation = points[i].separation + points[j].separation
+            if is_better_cull_candidate(score, separation, best_score, best_separation, tol_sqr, separation_tol) {
+                best_index1 = i
+                best_index2 = j
+                best_score = score
+                best_separation = separation
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    if best_score < tol_sqr {
+        // All in one place: the deepest.
+        deepest = 0
+        i = 1
+        while i < count1 {
+            if points[i].separation < points[deepest].separation { deepest = i }
+            i = i + 1
+        }
+        if deepest != 0 { points[0] = points[deepest] }
+        return 1
+    }
+    final[0] = points[best_index1]
+    final[1] = points[best_index2]
+    points[best_index2] = points[count1 - 1]
+    points[best_index1] = points[count1 - 2]
+    count1 = count1 - 2
+    if count1 == 0 {
+        points[0] = final[0]
+        points[1] = final[1]
+        return 2
+    }
+
+    // The largest triangle on the pair.
+    a = final[0].p
+    b = final[1].p
+    ba = math.vec2(b.x - a.x, b.y - a.y)
+    best_score = 0.0
+    best_separation = math.MAX_FLOAT
+    best_index = NULL_INDEX
+    best_signed_area = 0.0
+    i = 0
+    while i < count1 {
+        p = points[i].p
+        signed_area = ba.x * (p.y - a.y) - ba.y * (p.x - a.x)
+        score = math.abs_float(signed_area)
+        if is_better_cull_candidate(score, points[i].separation, best_score, best_separation, tol_sqr, separation_tol) {
+            best_signed_area = signed_area
+            best_score = score
+            best_separation = points[i].separation
+            best_index = i
+        }
+        i = i + 1
+    }
+    if best_index == NULL_INDEX {
+        // All collinear.
+        points[0] = final[0]
+        points[1] = final[1]
+        return 2
+    }
+    final[2] = points[best_index]
+    if count1 == 1 {
+        points[0] = final[0]
+        points[1] = final[1]
+        points[2] = final[2]
+        return 3
+    }
+    points[best_index] = points[count1 - 1]
+    count1 = count1 - 1
+
+    // The point adding the most area outside the triangle, wound counter-clockwise.
+    c = final[2].p
+    if best_signed_area < 0.0 {
+        swap = b
+        b = c
+        c = swap
+        ba = math.vec2(b.x - a.x, b.y - a.y)
+    }
+    cb = math.vec2(c.x - b.x, c.y - b.y)
+    ac = math.vec2(a.x - c.x, a.y - c.y)
+    best_score = 0.0
+    best_separation = math.MAX_FLOAT
+    best_index = NULL_INDEX
+    i = 0
+    while i < count1 {
+        p = points[i].p
+        u1 = (p.x - a.x) * ba.y - (p.y - a.y) * ba.x
+        u2 = (p.x - b.x) * cb.y - (p.y - b.y) * cb.x
+        u3 = (p.x - c.x) * ac.y - (p.y - c.y) * ac.x
+        score = math.max_float(u1, math.max_float(u2, u3))
+        if is_better_cull_candidate(score, points[i].separation, best_score, best_separation, tol_sqr, separation_tol) {
+            best_score = score
+            best_separation = points[i].separation
+            best_index = i
+        }
+        i = i + 1
+    }
+    if best_index == NULL_INDEX {
+        points[0] = final[0]
+        points[1] = final[1]
+        points[2] = final[2]
+        return 3
+    }
+    final[3] = points[best_index]
+    points[0] = final[0]
+    points[1] = final[1]
+    points[2] = final[2]
+    points[3] = final[3]
+    return 4
+}
+
+// A cluster's points projected onto the plane of the triangle normal,
+// culled to four, and the survivors moved to the front. Returns how many.
+reduce_cluster(points: LocalManifoldPoint[], count: int, normal: Vec3, arena: *Arena) -> int {
+    if count <= 1 { return count }
+    pts_block = core.arena_bump(arena, count * sizeof(Point2D))
+    pts = pts_block as Point2D[]
+    u = math.perp(normal)
+    v = math.cross(normal, u)
+    origin = points[0].point
+    i = 0
+    while i < count {
+        d = math.sub(points[i].point, origin)
+        pts[i] = Point2D { p: math.vec2(math.dot(d, u), math.dot(d, v)), separation: points[i].separation, original_index: i }
+        i = i + 1
+    }
+    count2 = cull_points(pts, count)
+    final_block = core.arena_bump(arena, MAX_MANIFOLD_POINTS * sizeof(LocalManifoldPoint))
+    final = final_block as LocalManifoldPoint[]
+    i = 0
+    while i < count2 {
+        final[i] = points[pts[i].original_index]
+        i = i + 1
+    }
+    i = 0
+    while i < count2 {
+        points[i] = final[i]
+        i = i + 1
+    }
+    return count2
+}
+
+// --- the manifolds ---------------------------------------------------------------------------------
+
+struct Tentative {
+    squared_distance: float
+    index: int
+}
+
+// The clusters of a convex shape (a sphere, capsule or hull, with its
+// transform) against a mesh or height field shape (with its transform),
+// through the contact's triangle cache; bounds_b is the convex shape's
+// world bounds. Everything is computed in the convex shape's frame. The
+// clusters and their points live in the arena from where it stood at
+// the call; the caller reads them and winds the arena back. is_fast
+// drops a cached edge axis (a fast hull can turn around an edge and
+// tunnel); enable_speculative keeps points ahead of contact.
+compute_mesh_manifolds(cache: *MeshContactCache, mesh_shape: *Shape, xf_a: Transform, convex: *Shape, xf_b: Transform,
+                       bounds_b: AABB, is_fast: bool, enable_speculative: bool, arena: *Arena) -> MeshManifolds {
+    scratch_ready()
+    result = MeshManifolds { clusters: null, cluster_count: 0, sat_calls: 0, sat_cache_hits: 0 }
+    refresh_cache(cache, mesh_shape, xf_a, bounds_b)
+    triangle_count = cache.count
+    if triangle_count == 0 { return result }
+
+    accepted_block = core.arena_bump(arena, triangle_count * 4)
+    accepted = accepted_block as int[]          // manifold indices
+    accepted_count = 0
+    tentative_block = core.arena_bump(arena, triangle_count * 4)
+    tentative = tentative_block as int[]
+    tentative_count = 0
+    tentative_triangles_block = core.arena_bump(arena, triangle_count * sizeof(Tentative))
+    tentative_triangles = tentative_triangles_block as Tentative[]
+    found = Found { edge_count: 0, vertex_count: 0 }
+
+    // From the mesh's frame into the convex shape's.
+    transform_a_to_b = math.inv_mul_transforms(xf_b, xf_a)
+    relative = math.make_matrix_from_quat(transform_a_to_b.q)
+    linear_slop = math.LINEAR_SLOP
+
+    point_capacity_total = MAX_POINTS_PER_TRIANGLE * triangle_count
+    point_buffer = core.arena_bump(arena, point_capacity_total * sizeof(LocalManifoldPoint))
+    total_point_count = 0
+    manifold_buffer = core.arena_bump(arena, triangle_count * sizeof(LocalManifold))
+    manifolds = manifold_buffer as LocalManifold[]
+    manifold_count = 0
+    kind_b = convex.kind
+    tri = g_triangle as Vec3[]
+
+    index = 0
+    while index < triangle_count && total_point_count + 3 < point_capacity_total {
+        tc = (cache.triangles + index * sizeof(TriangleCache)) as *TriangleCache
+        triangle_index = tc.triangle_index
+        triangle = Triangle { v1: math.vec3_zero(), v2: math.vec3_zero(), v3: math.vec3_zero(), i1: 0, i2: 0, i3: 0, flags: 0 }
+        if mesh_shape.kind == KIND_MESH {
+            triangle = mesh.get_mesh_triangle(mesh_shape.mesh, triangle_index)
+        } else {
+            triangle = height_field.get_height_field_triangle(mesh_shape.height_field, triangle_index)
+        }
+        tri[0] = math.add(math.mul_mv(relative, triangle.v1), transform_a_to_b.p)
+        tri[1] = math.add(math.mul_mv(relative, triangle.v2), transform_a_to_b.p)
+        tri[2] = math.add(math.mul_mv(relative, triangle.v3), transform_a_to_b.p)
+
+        point_capacity = point_capacity_total - total_point_count
+        m = (manifold_buffer + manifold_count * sizeof(LocalManifold)) as *LocalManifold
+        mm = manifold.local_manifold(point_buffer + total_point_count * sizeof(LocalManifoldPoint))
+        mm.triangle_flags = triangle.flags
+        manifolds[manifold_count] = mm
+        if kind_b == KIND_CAPSULE {
+            triangle_manifold.collide_triangle_and_capsule(m, point_capacity, tri[0], tri[1], tri[2], convex.capsule, &tc.simplex_cache)
+        } else if kind_b == KIND_HULL {
+            // A cached edge pair is dangerous at speed: the hull can turn around the edge and tunnel.
+            if is_fast && tc.sat_cache.kind == AXIS_EDGE_PAIR { manifold.clear_sat_cache(&tc.sat_cache) }
+            triangle_manifold.collide_triangle_and_hull(m, point_capacity, tri[0], tri[1], tri[2], triangle.flags, convex.hull,
+                                                        &tc.sat_cache, enable_speculative)
+            result.sat_calls = result.sat_calls + 1
+            result.sat_cache_hits = result.sat_cache_hits + tc.sat_cache.hit
+        } else {
+            triangle_manifold.collide_triangle_and_sphere(m, point_capacity, tri[0], tri[1], tri[2], convex.sphere)
+        }
+
+        point_count = m.point_count
+        if point_count > 0 {
+            manifold_count = manifold_count + 1
+            total_point_count = total_point_count + point_count
+            m.triangle_index = triangle_index
+            m.triangle_normal = math.make_normal_from_points(tri[0], tri[1], tri[2])
+            m.i1 = triangle.i1
+            m.i2 = triangle.i2
+            m.i3 = triangle.i3
+            this_manifold = manifold_count - 1
+            if m.feature == FEATURE_TRIANGLE_FACE {
+                add_triangle(&found, triangle.i1, triangle.i2, triangle.i3)
+                accepted[accepted_count] = this_manifold
+                accepted_count = accepted_count + 1
+            } else if m.feature == FEATURE_HULL_FACE {
+                cos_normal_angle = math.dot(m.triangle_normal, m.normal)
+                if cos_normal_angle > 0.5 {
+                    add_triangle(&found, triangle.i1, triangle.i2, triangle.i3)
+                    accepted[accepted_count] = this_manifold
+                    accepted_count = accepted_count + 1
+                } else {
+                    min_separation = manifold.manifold_point(m, 0).separation
+                    i = 1
+                    while i < point_count {
+                        min_separation = math.min_float(min_separation, manifold.manifold_point(m, i).separation)
+                        i = i + 1
+                    }
+                    if min_separation < 0.0 - 2.0 * linear_slop {
+                        // Deep: accepted whatever the angle.
+                        add_triangle(&found, triangle.i1, triangle.i2, triangle.i3)
+                        accepted[accepted_count] = this_manifold
+                        accepted_count = accepted_count + 1
+                    } else {
+                        tentative_triangles[tentative_count] = Tentative { squared_distance: m.squared_distance, index: tentative_count }
+                        tentative[tentative_count] = this_manifold
+                        tentative_count = tentative_count + 1
+                    }
+                }
+            } else {
+                tentative_triangles[tentative_count] = Tentative { squared_distance: m.squared_distance, index: tentative_count }
+                tentative[tentative_count] = this_manifold
+                tentative_count = tentative_count + 1
+            }
+        }
+        index = index + 1
+    }
+
+    if kind_b == KIND_SPHERE {
+        // The nearest tentative triangles first; each collides only when
+        // no accepted triangle owns the feature it touched.
+        sort_tentative(tentative_triangles, tentative_count)
+        i = 0
+        while i < tentative_count {
+            m = (manifold_buffer + tentative[tentative_triangles[i].index] * sizeof(LocalManifold)) as *LocalManifold
+            added_edge1 = add_edge(&found, m.i1, m.i2)
+            added_edge2 = add_edge(&found, m.i2, m.i3)
+            added_edge3 = add_edge(&found, m.i3, m.i1)
+            added_vertex1 = add_vertex(&found, m.i1)
+            added_vertex2 = add_vertex(&found, m.i2)
+            added_vertex3 = add_vertex(&found, m.i3)
+            should_collide = false
+            feature = m.feature
+            if feature == FEATURE_EDGE1 { should_collide = added_edge1 }
+            else if feature == FEATURE_EDGE2 { should_collide = added_edge2 }
+            else if feature == FEATURE_EDGE3 { should_collide = added_edge3 }
+            else if feature == FEATURE_VERTEX1 { should_collide = added_vertex1 }
+            else if feature == FEATURE_VERTEX2 { should_collide = added_vertex2 }
+            else if feature == FEATURE_VERTEX3 { should_collide = added_vertex3 }
+            if should_collide {
+                accepted[accepted_count] = tentative[tentative_triangles[i].index]
+                accepted_count = accepted_count + 1
+            }
+            i = i + 1
+        }
+    } else {
+        // A hull can tunnel at a concave edge (a flat box sliding down a
+        // ramp onto the floor), so only the flat edges an accepted
+        // triangle owns are skipped.
+        i = 0
+        while i < tentative_count {
+            m = (manifold_buffer + tentative[i] * sizeof(LocalManifold)) as *LocalManifold
+            flags = m.triangle_flags
+            skip = false
+            if (flags & ALL_FLAT_EDGES) == ALL_FLAT_EDGES { skip = true }
+            if skip == false && (flags & FLAT_EDGE1) == FLAT_EDGE1 && find_edge(&found, m.i1, m.i2) { skip = true }
+            if skip == false && (flags & FLAT_EDGE2) == FLAT_EDGE2 && find_edge(&found, m.i2, m.i3) { skip = true }
+            if skip == false && (flags & FLAT_EDGE3) == FLAT_EDGE3 && find_edge(&found, m.i3, m.i1) { skip = true }
+            if skip == false {
+                accepted[accepted_count] = tentative[i]
+                accepted_count = accepted_count + 1
+            }
+            i = i + 1
+        }
+    }
+    if accepted_count == 0 { return result }
+
+    // Clusters by the manifold and triangle normals, within cos 5 degrees
+    // (tighter than the warm start's matching); the first fit is taken.
+    clusters_block = core.arena_bump(arena, accepted_count * sizeof(Cluster))
+    clusters = clusters_block as Cluster[]
+    memberships_block = core.arena_bump(arena, accepted_count * 4)
+    memberships = memberships_block as int[]
+    cluster_threshold = 0.996
+    cluster_count = 0
+    cluster_point_count = 0
+    i = 0
+    while i < accepted_count {
+        memberships[i] = NULL_INDEX
+        m = (manifold_buffer + accepted[i] * sizeof(LocalManifold)) as *LocalManifold
+        cluster_point_count = cluster_point_count + m.point_count
+        manifold_normal = m.normal
+        triangle_normal = m.triangle_normal
+        cluster_index = NULL_INDEX
+        j = 0
+        while j < cluster_count && cluster_index == NULL_INDEX {
+            if math.dot(clusters[j].manifold_normal, manifold_normal) > cluster_threshold &&
+               math.dot(clusters[j].triangle_normal, triangle_normal) > cluster_threshold {
+                cluster_index = j
+            }
+            j = j + 1
+        }
+        if cluster_index != NULL_INDEX {
+            memberships[i] = cluster_index
+            clusters[cluster_index].point_capacity = clusters[cluster_index].point_capacity + m.point_count
+        } else {
+            clusters[cluster_count] = Cluster { manifold_normal: manifold_normal, triangle_normal: triangle_normal, points: null,
+                                                point_capacity: m.point_count, point_count: 0 }
+            memberships[i] = cluster_count
+            cluster_count = cluster_count + 1
+        }
+        i = i + 1
+    }
+    if cluster_point_count == 0 { return result }
+
+    cluster_points = core.arena_bump(arena, cluster_point_count * sizeof(LocalManifoldPoint))
+    point_offset = 0
+    i = 0
+    while i < cluster_count {
+        clusters[i].points = cluster_points + point_offset * sizeof(LocalManifoldPoint)
+        clusters[i].point_count = 0
+        point_offset = point_offset + clusters[i].point_capacity
+        i = i + 1
+    }
+    i = 0
+    while i < accepted_count {
+        cluster_index = memberships[i]
+        m = (manifold_buffer + accepted[i] * sizeof(LocalManifold)) as *LocalManifold
+        target = clusters[cluster_index].points as LocalManifoldPoint[]
+        j = 0
+        while j < m.point_count {
+            p = manifold.manifold_point(m, j)
+            p.triangle_index = m.triangle_index
+            target[clusters[cluster_index].point_count] = p
+            clusters[cluster_index].point_count = clusters[cluster_index].point_count + 1
+            j = j + 1
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < cluster_count {
+        clusters[i].point_count = reduce_cluster(clusters[i].points as LocalManifoldPoint[], clusters[i].point_count, clusters[i].triangle_normal, arena)
+        i = i + 1
+    }
+    result.clusters = clusters_block
+    result.cluster_count = cluster_count
+    return result
+}
+
+// The tentative triangles by squared distance, an insertion sort (the
+// reference's qsort; the counts are small).
+sort_tentative(items: Tentative[], count: int) {
+    i = 1
+    while i < count {
+        v = items[i]
+        j = i - 1
+        while j >= 0 && items[j].squared_distance > v.squared_distance {
+            items[j + 1] = items[j]
+            j = j - 1
+        }
+        items[j + 1] = v
+        i = i + 1
+    }
+}

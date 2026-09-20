@@ -1,0 +1,98 @@
+// The mesh contact on its own: a box, a sphere and a capsule each
+// dragged 100,000 steps across a 100 x 100 wave mesh (a small move each
+// step, so the triangle cache mostly holds and the warm starts answer),
+// the manifolds computed at every step. The reference's
+// b3ComputeMeshManifolds lives inside its world (it needs a contact, a
+// worker context and the world's callbacks), so it has no free-standing
+// counterpart; it is measured against ours through the world
+// benchmarks. Single thread, wall time per shape, with the cluster and
+// point counts and the separation sum as the checksum.
+import std.string
+import std.os
+import aephysics.math
+import aephysics.core
+import aephysics.hull
+import aephysics.distance
+import aephysics.manifold
+import aephysics.triangle_manifold
+import aephysics.mesh
+import aephysics.height_field
+import aephysics.material
+import aephysics.sphere
+import aephysics.capsule
+import aephysics.compound
+import aephysics.shape
+import aephysics.mesh_contact
+
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+extern sin(x: float) -> float
+extern cos(x: float) -> float
+
+clock() -> long { return os.now_monotonic_ns() }
+ms(ns: long) -> float { return (ns as float) / 1000000.0 }
+
+const STEPS = 100000
+
+var g_arena: ptr = null
+
+run(name: string, ground: *Shape, convex: *Shape, radius: float) {
+    arena = g_arena as *Arena
+    cache = mesh_contact.mesh_contact_cache_create()
+    xf_a = math.transform_identity()
+    clusters = 0
+    points = 0
+    separation_sum = 0.0
+    hits = 0
+    t0 = clock()
+    i = 0
+    while i < STEPS {
+        t = (i as float) / (STEPS as float)
+        x = 0.0 - 20.0 + 40.0 * t
+        z = 10.0 * sin(6.2831853 * 3.0 * t)
+        // The surface height under the shape, so it rides just inside it.
+        out = mesh.ray_cast_mesh(ground.mesh, math.vec3(x, 5.0, z), math.vec3(0.0, 0.0 - 10.0, 0.0), 1.0)
+        y = out.point.y + radius - 0.01
+        xf_b = Transform { p: math.vec3(x, y, z), q: math.make_quat_from_axis_angle(math.vec3_axis_y(), 0.3 * t) }
+        arena.index = 0
+        r = mesh_contact.compute_mesh_manifolds(&cache, ground, xf_a, convex, xf_b, shape.compute_shape_aabb(convex, xf_b), false, true, arena)
+        clusters = clusters + r.cluster_count
+        hits = hits + r.sat_cache_hits
+        cs = r.clusters as Cluster[]
+        k = 0
+        while k < r.cluster_count {
+            points = points + cs[k].point_count
+            pts = cs[k].points as LocalManifoldPoint[]
+            j = 0
+            while j < cs[k].point_count {
+                separation_sum = separation_sum + pts[j].separation
+                j = j + 1
+            }
+            k = k + 1
+        }
+        i = i + 1
+    }
+    t1 = clock()
+    println("aephysics mesh_contact: ${name} ${STEPS} steps ${ms(t1 - t0)} ms (${clusters} clusters, ${points} points, separation sum ${separation_sum}, ${hits} cache hits)")
+    mesh_contact.mesh_contact_cache_destroy(&cache)
+}
+
+main() {
+    g_arena = calloc(1, sizeof(Arena))
+    arena = g_arena as *Arena
+    made = core.arena_create(1 << 20)
+    arena.memory = made.memory
+    arena.capacity = made.capacity
+    arena.overflows = made.overflows
+    wave = mesh.create_wave_mesh(100, 100, 0.5, 0.3, 0.2, 0.3)
+    ground = shape.mesh_shape(mesh.mesh(wave, math.vec3_one()), 1)
+    box = hull.make_box_hull(0.4, 0.4, 0.4)
+    b = shape.hull_shape(box, 1.0)
+    run("box", &ground, &b, 0.4)
+    s = shape.sphere_shape(manifold.sphere(math.vec3_zero(), 0.4), 1.0)
+    run("sphere", &ground, &s, 0.4)
+    c = shape.capsule_shape(manifold.capsule(math.vec3(0.0 - 0.5, 0.0, 0.0), math.vec3(0.5, 0.0, 0.0), 0.3), 1.0)
+    run("capsule", &ground, &c, 0.3)
+    hull.destroy_hull(box)
+    mesh.destroy_mesh(wave)
+}

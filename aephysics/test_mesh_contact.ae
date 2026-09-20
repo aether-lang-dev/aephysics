@@ -1,0 +1,406 @@
+// aephysics.mesh_contact: the reference tests its mesh contact through
+// its world, so this one is ours: the four-point cull on hand-placed
+// points, a box resting on a grid mesh (one cluster of four points, the
+// cache kept while the box stays in its query bounds and its warm start
+// surviving a refresh), a sphere on an interior edge and on an interior
+// vertex (one point, no ghost), a sphere touching a seam from one
+// triangle only, a capsule lying across triangles, a box on a height
+// field, a box straddling a ridge (two clusters), and the mesh under a
+// transform.
+
+import std.string
+import aephysics.math
+import aephysics.core
+import aephysics.hull
+import aephysics.distance
+import aephysics.manifold
+import aephysics.triangle_manifold
+import aephysics.mesh
+import aephysics.height_field
+import aephysics.material
+import aephysics.sphere
+import aephysics.capsule
+import aephysics.compound
+import aephysics.shape
+import aephysics.mesh_contact
+
+extern calloc(count: int, size: int) -> ptr
+extern exit(code: int)
+extern free(p: ptr)
+
+var failures = 0
+var checks = 0
+
+ensure(name: string, ok: bool) {
+    checks = checks + 1
+    if !ok {
+        println("mesh_contact: FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+small(name: string, value: float, tolerance: float) {
+    ensure("${name} (${value})", math.abs_float(value) < tolerance)
+}
+
+var g_arena_block: ptr = null
+
+arena() -> *Arena {
+    if g_arena_block == null {
+        g_arena_block = calloc(1, sizeof(Arena))
+        a = g_arena_block as *Arena
+        made = core.arena_create(1 << 20)
+        a.memory = made.memory
+        a.capacity = made.capacity
+        a.index = 0
+        a.max_index = 0
+        a.overflows = made.overflows
+        a.overflow_bytes = 0
+        a.peak_demand = 0
+    }
+    a = g_arena_block as *Arena
+    a.index = 0
+    return a
+}
+
+// One update of a convex shape against a mesh shape.
+manifolds(cache: *MeshContactCache, mesh_shape: *Shape, xf_a: Transform, convex: *Shape, xf_b: Transform, is_fast: bool) -> MeshManifolds {
+    bounds = shape.compute_shape_aabb(convex, xf_b)
+    return mesh_contact.compute_mesh_manifolds(cache, mesh_shape, xf_a, convex, xf_b, bounds, is_fast, true, arena())
+}
+
+cluster(r: MeshManifolds, i: int) -> Cluster {
+    clusters = r.clusters as Cluster[]
+    return clusters[i]
+}
+
+cluster_point(c: Cluster, i: int) -> LocalManifoldPoint {
+    points = c.points as LocalManifoldPoint[]
+    return points[i]
+}
+
+// Every point of every cluster lies in the convex shape's frame within
+// the tolerance of the plane through the cluster's normal.
+min_separation(r: MeshManifolds) -> float {
+    lowest = math.MAX_FLOAT
+    i = 0
+    while i < r.cluster_count {
+        c = cluster(r, i)
+        j = 0
+        while j < c.point_count {
+            lowest = math.min_float(lowest, cluster_point(c, j).separation)
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return lowest
+}
+
+test_cull() {
+    block = calloc(8, sizeof(Point2D))
+    points = block as Point2D[]
+    // A square's corners with two interior points: the four corners survive.
+    points[0] = Point2D { p: math.vec2(0.0, 0.0), separation: 0.0, original_index: 0 }
+    points[1] = Point2D { p: math.vec2(0.4, 0.5), separation: 0.0, original_index: 1 }
+    points[2] = Point2D { p: math.vec2(1.0, 0.0), separation: 0.0, original_index: 2 }
+    points[3] = Point2D { p: math.vec2(1.0, 1.0), separation: 0.0, original_index: 3 }
+    points[4] = Point2D { p: math.vec2(0.6, 0.4), separation: 0.0, original_index: 4 }
+    points[5] = Point2D { p: math.vec2(0.0, 1.0), separation: 0.0, original_index: 5 }
+    n = mesh_contact.cull_points(points, 6)
+    ensure("cull keeps four", n == 4)
+    corners = 0
+    i = 0
+    while i < n {
+        o = points[i].original_index
+        if o == 0 || o == 2 || o == 3 || o == 5 { corners = corners + 1 }
+        i = i + 1
+    }
+    ensure("cull keeps the corners", corners == 4)
+    // Collinear points: the two ends lead. (The reference's tie rule lets
+    // a zero-area point through on its separation, so more may follow.)
+    i = 0
+    while i < 5 {
+        points[i] = Point2D { p: math.vec2(0.2 * (i as float), 0.0), separation: 0.0, original_index: i }
+        i = i + 1
+    }
+    n = mesh_contact.cull_points(points, 5)
+    ensure("collinear keeps the ends", n >= 2 && ((points[0].original_index == 0 && points[1].original_index == 4) || (points[0].original_index == 4 && points[1].original_index == 0)))
+    // Coincident points: the deepest.
+    i = 0
+    while i < 4 {
+        points[i] = Point2D { p: math.vec2(0.0, 0.0), separation: 0.0 - 0.1 * (i as float), original_index: i }
+        i = i + 1
+    }
+    n = mesh_contact.cull_points(points, 4)
+    ensure("coincident keeps the deepest", n == 1 && points[0].original_index == 3)
+    // A triangle: three.
+    points[0] = Point2D { p: math.vec2(0.0, 0.0), separation: 0.0, original_index: 0 }
+    points[1] = Point2D { p: math.vec2(1.0, 0.0), separation: 0.0, original_index: 1 }
+    points[2] = Point2D { p: math.vec2(0.0, 1.0), separation: 0.0, original_index: 2 }
+    ensure("triangle keeps three", mesh_contact.cull_points(points, 3) == 3)
+    ensure("one stays one", mesh_contact.cull_points(points, 1) == 1)
+    ensure("none stays none", mesh_contact.cull_points(points, 0) == 0)
+    // A tie on distance broken by the deeper pair.
+    points[0] = Point2D { p: math.vec2(0.0, 0.0), separation: 0.0, original_index: 0 }
+    points[1] = Point2D { p: math.vec2(1.0, 0.0), separation: 0.0, original_index: 1 }
+    points[2] = Point2D { p: math.vec2(0.0, 0.0), separation: 0.0 - 0.1, original_index: 2 }
+    points[3] = Point2D { p: math.vec2(1.0, 0.0), separation: 0.0 - 0.1, original_index: 3 }
+    n = mesh_contact.cull_points(points, 4)
+    ensure("tie goes to the deeper", n >= 2 && ((points[0].original_index == 2 && points[1].original_index == 3) || (points[0].original_index == 3 && points[1].original_index == 2)))
+    free(block)
+}
+
+test_box_on_grid() {
+    grid = mesh.create_grid_mesh(8, 8, 1.0, 1, true)
+    ground = shape.mesh_shape(mesh.mesh(grid, math.vec3_one()), 1)
+    box = hull.make_box_hull(0.5, 0.5, 0.5)
+    b = shape.hull_shape(box, 1.0)
+    xf_a = math.transform_identity()
+    xf_b = Transform { p: math.vec3(0.3, 0.49, 0.2), q: math.quat_identity() }
+    cache = mesh_contact.mesh_contact_cache_create()
+    r = manifolds(&cache, &ground, xf_a, &b, xf_b, false)
+    ensure("box: triangles cached (${cache.count})", cache.count == 8)
+    ensure("box: one cluster (${r.cluster_count})", r.cluster_count == 1)
+    if r.cluster_count == 1 {
+        c = cluster(r, 0)
+        ensure("box: four points (${c.point_count})", c.point_count == 4)
+        small("box: normal up", c.manifold_normal.y - 1.0, 0.000001)
+        small("box: triangle normal up", c.triangle_normal.y - 1.0, 0.000001)
+        i = 0
+        while i < c.point_count {
+            p = cluster_point(c, i)
+            small("box: point ${i} separation", p.separation + 0.01, 0.0001)
+            small("box: point ${i} on the bottom face", p.point.y + 0.5, 0.011)
+            ensure("box: point ${i} triangle", p.triangle_index >= 0 && p.triangle_index < grid.triangle_count)
+            i = i + 1
+        }
+        // The four span the box's bottom: two at x = -0.5 and two at 0.5 in the box's frame.
+        left = 0
+        i = 0
+        while i < c.point_count {
+            if cluster_point(c, i).point.x < 0.0 { left = left + 1 }
+            i = i + 1
+        }
+        ensure("box: points span the face", left == 2)
+    }
+    ensure("box: eight hull collisions", r.sat_calls == 8)
+    // The same again: the caches answer.
+    r = manifolds(&cache, &ground, xf_a, &b, xf_b, false)
+    ensure("box: cache hits on repeat (${r.sat_cache_hits})", r.sat_cache_hits > 0)
+    // A small move stays in the query bounds: the same triangles, the caches kept.
+    query_before = cache.query_bounds
+    xf_b.p = math.vec3(0.32, 0.49, 0.21)
+    r = manifolds(&cache, &ground, xf_a, &b, xf_b, false)
+    ensure("box: query bounds kept", cache.query_bounds.lower.x == query_before.lower.x && cache.count == 8)
+    ensure("box: still one cluster of four", r.cluster_count == 1 && cluster(r, 0).point_count == 4)
+    // A move out of the bounds refreshes; the surviving triangles keep their warm start.
+    xf_b.p = math.vec3(1.3, 0.49, 0.2)
+    r = manifolds(&cache, &ground, xf_a, &b, xf_b, false)
+    ensure("box: query bounds refreshed", cache.query_bounds.lower.x != query_before.lower.x)
+    ensure("box: refreshed to one cluster of four", r.cluster_count == 1 && cluster(r, 0).point_count == 4 && cache.count == 8)
+    // Lifted clear of the speculative band: nothing.
+    xf_b.p = math.vec3(1.3, 0.6, 0.2)
+    r = manifolds(&cache, &ground, xf_a, &b, xf_b, false)
+    ensure("box: lifted, no clusters", r.cluster_count == 0)
+    // Just above, within the speculative distance: points with positive separation.
+    xf_b.p = math.vec3(1.3, 0.51, 0.2)
+    r = manifolds(&cache, &ground, xf_a, &b, xf_b, false)
+    ensure("box: speculative points", r.cluster_count == 1)
+    if r.cluster_count == 1 { small("box: speculative separation", min_separation(r) - 0.01, 0.0001) }
+    // A tilted box resting on one edge: the two faces at the edge each
+    // give a hull-face manifold (the reference keeps the far clip points
+    // as speculative ones), so two clusters whose normals are the box's
+    // own x and y, each touching at the edge.
+    xf_b = Transform { p: math.vec3(2.0, 0.7071 - 0.01, 2.0), q: math.make_quat_from_axis_angle(math.vec3_axis_z(), 0.25 * math.PI) }
+    r = manifolds(&cache, &ground, xf_a, &b, xf_b, false)
+    ensure("tilted box: two clusters (${r.cluster_count})", r.cluster_count == 2)
+    if r.cluster_count == 2 {
+        n0 = cluster(r, 0).manifold_normal
+        n1 = cluster(r, 1).manifold_normal
+        ensure("tilted box: the faces at the edge", math.abs_float(n0.x + n1.x - 1.0) < 0.0001 && math.abs_float(n0.y + n1.y - 1.0) < 0.0001)
+        ensure("tilted box: touching (${min_separation(r)})", min_separation(r) < 0.0 && min_separation(r) > 0.0 - 0.02)
+    }
+    mesh_contact.mesh_contact_cache_destroy(&cache)
+    hull.destroy_hull(box)
+    mesh.destroy_mesh(grid)
+}
+
+test_sphere_seams() {
+    grid = mesh.create_grid_mesh(8, 8, 1.0, 1, true)
+    ground = shape.mesh_shape(mesh.mesh(grid, math.vec3_one()), 1)
+    s = shape.sphere_shape(manifold.sphere(math.vec3_zero(), 0.5), 1.0)
+    xf_a = math.transform_identity()
+    cache = mesh_contact.mesh_contact_cache_create()
+    // On an interior vertex of the grid (a whole number of cells from the corner): one point.
+    xf_b = Transform { p: math.vec3(1.0, 0.49, 1.0), q: math.quat_identity() }
+    r = manifolds(&cache, &ground, xf_a, &s, xf_b, false)
+    ensure("sphere on a vertex: one cluster (${r.cluster_count})", r.cluster_count == 1)
+    if r.cluster_count == 1 {
+        c = cluster(r, 0)
+        ensure("sphere on a vertex: one point (${c.point_count})", c.point_count == 1)
+        small("sphere on a vertex: normal up", c.manifold_normal.y - 1.0, 0.0001)
+        small("sphere on a vertex: separation", cluster_point(c, 0).separation + 0.01, 0.0001)
+    }
+    // On an interior edge: one point, no ghost from the neighbour.
+    xf_b.p = math.vec3(1.5, 0.49, 1.0)
+    r = manifolds(&cache, &ground, xf_a, &s, xf_b, false)
+    ensure("sphere on an edge: one cluster", r.cluster_count == 1)
+    if r.cluster_count == 1 { ensure("sphere on an edge: one point", cluster(r, 0).point_count == 1) }
+    // Inside a triangle: one point on its face.
+    xf_b.p = math.vec3(1.2, 0.49, 1.7)
+    r = manifolds(&cache, &ground, xf_a, &s, xf_b, false)
+    ensure("sphere on a face: one cluster of one", r.cluster_count == 1 && cluster(r, 0).point_count == 1)
+    // A wave: the sphere in a valley touches two sloped faces meeting at a concave edge.
+    mesh.destroy_mesh(grid)
+    wave = mesh.create_wave_mesh(20, 20, 1.0, 0.5, 0.25, 0.0)
+    ground = shape.mesh_shape(mesh.mesh(wave, math.vec3_one()), 1)
+    mesh_contact.mesh_contact_cache_destroy(&cache)
+    cache = mesh_contact.mesh_contact_cache_create()
+    // Sampling the surface for the lowest point along x at the mesh's middle row.
+    lowest = math.MAX_FLOAT
+    lowest_x = 0.0
+    x = 0.0 - 9.0
+    while x < 9.0 {
+        out = mesh.ray_cast_mesh(mesh.mesh(wave, math.vec3_one()), math.vec3(x, 5.0, 0.25), math.vec3(0.0, 0.0 - 10.0, 0.0), 1.0)
+        if out.hit && out.point.y < lowest {
+            lowest = out.point.y
+            lowest_x = x
+        }
+        x = x + 0.05
+    }
+    xf_b.p = math.vec3(lowest_x, lowest + 0.49, 0.25)
+    r = manifolds(&cache, &ground, xf_a, &s, xf_b, false)
+    ensure("sphere in a valley: clusters (${r.cluster_count})", r.cluster_count >= 1 && r.cluster_count <= 2)
+    ensure("sphere in a valley: touching", min_separation(r) < 0.02)
+    mesh_contact.mesh_contact_cache_destroy(&cache)
+    mesh.destroy_mesh(wave)
+}
+
+test_capsule_and_field() {
+    grid = mesh.create_grid_mesh(8, 8, 1.0, 1, true)
+    ground = shape.mesh_shape(mesh.mesh(grid, math.vec3_one()), 1)
+    xf_a = math.transform_identity()
+    cache = mesh_contact.mesh_contact_cache_create()
+    // A capsule lying along x across three triangles: one cluster, two points at its ends.
+    c_shape = shape.capsule_shape(manifold.capsule(math.vec3(0.0 - 1.0, 0.0, 0.0), math.vec3(1.0, 0.0, 0.0), 0.3), 1.0)
+    xf_b = Transform { p: math.vec3(0.4, 0.29, 0.3), q: math.quat_identity() }
+    r = manifolds(&cache, &ground, xf_a, &c_shape, xf_b, false)
+    ensure("capsule: one cluster (${r.cluster_count})", r.cluster_count == 1)
+    if r.cluster_count == 1 {
+        c = cluster(r, 0)
+        ensure("capsule: two to four points (${c.point_count})", c.point_count >= 2 && c.point_count <= 4)
+        small("capsule: normal up", c.manifold_normal.y - 1.0, 0.0001)
+        small("capsule: separation", min_separation(r) + 0.01, 0.001)
+        on_axis = true
+        ends = 0
+        i = 0
+        while i < c.point_count {
+            p = cluster_point(c, i)
+            if math.abs_float(p.point.y + 0.295) > 0.001 || math.abs_float(p.point.z) > 0.001 { on_axis = false }
+            if math.abs_float(math.abs_float(p.point.x) - 1.0) < 0.001 { ends = ends + 1 }
+            i = i + 1
+        }
+        ensure("capsule: points under the axis", on_axis)
+        ensure("capsule: both ends kept", ends == 2)
+    }
+    mesh_contact.mesh_contact_cache_destroy(&cache)
+    mesh.destroy_mesh(grid)
+
+    // The box on a flat height field: the same one cluster of four.
+    field = height_field.create_grid(6, 6, math.vec3(1.0, 1.0, 1.0), false)
+    f_shape = shape.height_field_shape(field, 1)
+    box = hull.make_box_hull(0.5, 0.5, 0.5)
+    b = shape.hull_shape(box, 1.0)
+    cache = mesh_contact.mesh_contact_cache_create()
+    xf_b = Transform { p: math.vec3(2.3, 0.49, 2.2), q: math.quat_identity() }
+    r = manifolds(&cache, &f_shape, xf_a, &b, xf_b, false)
+    ensure("field: triangles cached (${cache.count})", cache.count >= 2 && cache.count <= 8)
+    ensure("field: one cluster of four", r.cluster_count == 1 && cluster(r, 0).point_count == 4)
+    if r.cluster_count == 1 {
+        small("field: normal up", cluster(r, 0).manifold_normal.y - 1.0, 0.0001)
+        // The grid's quantum puts its surface 0.0039 under y = 0.
+        small("field: separation", min_separation(r) + 0.01 - 0.0039, 0.001)
+    }
+    mesh_contact.mesh_contact_cache_destroy(&cache)
+    height_field.destroy_height_field(field)
+
+    // A ridge: a field rising to a crest along z at x = 3; a box straddling the crest
+    // touches two faces with different normals: two clusters.
+    heights_block = calloc(36, 8)
+    heights = heights_block as float[]
+    i = 0
+    while i < 36 {
+        col = i % 6
+        h = 0.0
+        if col == 3 { h = 0.5 }
+        if col == 2 || col == 4 { h = 0.25 }
+        heights[i] = h
+        i = i + 1
+    }
+    def = height_field.height_field_def()
+    def.heights = heights_block
+    def.count_x = 6
+    def.count_z = 6
+    def.global_minimum_height = 0.0 - 1.0
+    def.global_maximum_height = 1.0
+    ridge = height_field.create_height_field(&def)
+    r_shape = shape.height_field_shape(ridge, 1)
+    cache = mesh_contact.mesh_contact_cache_create()
+    xf_b = Transform { p: math.vec3(3.0, 0.5 + 0.5 - 0.01, 2.5), q: math.quat_identity() }
+    r = manifolds(&cache, &r_shape, xf_a, &b, xf_b, false)
+    ensure("ridge: clusters (${r.cluster_count})", r.cluster_count >= 2)
+    leaning_left = 0
+    leaning_right = 0
+    i = 0
+    while i < r.cluster_count {
+        // The box's bottom face is the manifold normal on both sides; the triangle normals lean.
+        n = cluster(r, i).triangle_normal
+        if n.x < 0.0 - 0.1 { leaning_left = leaning_left + 1 }
+        if n.x > 0.1 { leaning_right = leaning_right + 1 }
+        i = i + 1
+    }
+    ensure("ridge: triangle normals lean both ways", leaning_left >= 1 && leaning_right >= 1)
+    ensure("ridge: touching", min_separation(r) < 0.0 && min_separation(r) > 0.0 - 0.05)
+    mesh_contact.mesh_contact_cache_destroy(&cache)
+    height_field.destroy_height_field(ridge)
+    free(heights_block)
+
+    // The mesh under a transform: the grid turned a quarter about z at
+    // (10, 20, 30); the box against its local +y face from world -x.
+    grid = mesh.create_grid_mesh(8, 8, 1.0, 1, true)
+    ground = shape.mesh_shape(mesh.mesh(grid, math.vec3_one()), 1)
+    q = math.make_quat_from_axis_angle(math.vec3_axis_z(), 0.5 * math.PI)
+    xf_a = Transform { p: math.vec3(10.0, 20.0, 30.0), q: q }
+    // Local (0.3, 0.49, 0.2) in world: p + q * local = (10 - 0.49, 20 + 0.3, 30.2).
+    xf_b = Transform { p: math.transform_point(xf_a, math.vec3(0.3, 0.49, 0.2)), q: q }
+    cache = mesh_contact.mesh_contact_cache_create()
+    r = manifolds(&cache, &ground, xf_a, &b, xf_b, false)
+    ensure("moved mesh: one cluster of four", r.cluster_count == 1 && cluster(r, 0).point_count == 4)
+    if r.cluster_count == 1 {
+        // In the box's frame the normal is still its local +y.
+        small("moved mesh: normal in the box's frame", cluster(r, 0).manifold_normal.y - 1.0, 0.0001)
+        small("moved mesh: separation", min_separation(r) + 0.01, 0.0001)
+    }
+    mesh_contact.mesh_contact_cache_destroy(&cache)
+    mesh.destroy_mesh(grid)
+    hull.destroy_hull(box)
+}
+
+main() {
+    before = core.alloc_count()
+    test_cull()
+    test_box_on_grid()
+    test_sphere_seams()
+    test_capsule_and_field()
+    // The scratch stays allocated: this module's six blocks, mesh's three, the height field's
+    // three, triangle_manifold's three; the test's arena is not counted.
+    ensure("every other counted allocation was freed (${core.alloc_count() - before})", core.alloc_count() == before + 15)
+
+    println("mesh_contact: ${checks} checks")
+    if failures == 0 {
+        println("mesh_contact: all checks passed")
+    } else {
+        println("mesh_contact: ${failures} failure(s)")
+        exit(1)
+    }
+}

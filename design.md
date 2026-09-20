@@ -135,11 +135,24 @@ started until its tests pass.
    constraint_graph.c, sensor.c, broad_phase.c and half of
    physics_world.c call into each other), so the cut into Aether's
    acyclic modules is:
-   - `aephysics.mesh_contact`: mesh_contact.c's cluster reduction of a
-     mesh's or height field's triangle manifolds against a convex shape
-     (the point culling and the per-cluster reduction are pure; the
-     triangle cache it refreshes is the contact's, so the entry point
-     takes the cache as a struct).
+   - `aephysics.mesh_contact` (done): mesh_contact.c's world-free
+     part: the triangle cache refreshed when the shape leaves its query
+     bounds (each triangle keeping a simplex and a separating-axis
+     cache; the reference's union is two fields), the manifold per
+     triangle in the convex shape's frame, the acceptance rules against
+     ghost collisions (a triangle face always; a hull face when aligned
+     or deep; the rest tentative, spheres by nearest-first feature
+     ownership, hulls and capsules skipping only owned flat edges),
+     clusters within cos 5 degrees, the four-point cull. The results
+     live in the caller's arena. What follows in the reference (the
+     warm-start matching, materials, rolling resistance, tangent
+     velocity) is the contact's and comes with the dynamics. 64 checks
+     of our own (the reference tests this through its world): the cull,
+     a box on a grid, the cache kept and refreshed, a sphere on seams, a
+     capsule, a height field, a ridge, a moved mesh. Two reference
+     quirks kept: the cull's tie rule lets zero-area points through on
+     their separation (collinear points can keep four), and a hull
+     face's far clip points stay as speculative ones.
    - `aephysics.broad_phase` (done): broad_phase.c's trees per body
      type, proxies keyed by type in the low bits, the moved-sibling
      gathering, the self and cross pair walks and the pair set; the pair
