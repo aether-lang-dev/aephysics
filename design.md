@@ -195,7 +195,7 @@ started until its tests pass.
      reference's rules on a cube on a slab, a stack, a row split, a
      sphere on a mesh and a cube on a compound child. Bench: the
      reference's zero-time step collides without solving, so the pass
-     compares (1.7x, aephysics#12 to profile with the solver).
+     compares (1.7x, aephysics#17 to profile with the solver).
      Next in this module: the joints' creation and bases (the seven
      kinds' sims come with the joint solver), the sensors, and the
      step-free parts of test_joint.c and test_world.c that need them.
