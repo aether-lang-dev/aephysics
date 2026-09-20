@@ -178,11 +178,27 @@ started until its tests pass.
      sets validated throughout. The reference's hull database (hulls
      deduplicated by content and refcounted across shapes) and its name
      cache are not ported; a hull shape keeps the pointer it was given.
-     Next in this module: the contact (creation from a pair, the edges
-     on both bodies, the manifold update through the manifold functions
-     and the mesh contact, begin/end touching), the constraint graph
-     colouring, the islands' linking and splitting, the joints' bases,
-     the sensors, and waking with contacts and joints.
+     Second slice: the contact (creation from the broad phase's pair
+     keys through the pair visitors, the edges on both bodies, the
+     manifold update -- convex pairs through the manifold module,
+     mesh and height field pairs and a compound's children through the
+     mesh contact with the reference's tail: the old manifolds matched
+     by normal and the points by feature and triangle, the materials
+     mixed or averaged per triangle, rolling resistance, tangent
+     velocity -- the recycling of a barely-moved pair, the collide pass
+     with the state changes in id order and the begin/end events), the
+     constraint graph's colouring (dynamic pairs from the front, static
+     pairs from the back, an overflow colour), the islands linked by
+     touching contacts, merged, and split by union-find, sleeping sets
+     with their touching contacts and waking them back into the graph.
+     231 checks in all, contacts and islands checked against the
+     reference's rules on a cube on a slab, a stack, a row split, a
+     sphere on a mesh and a cube on a compound child. Bench: the
+     reference's zero-time step collides without solving, so the pass
+     compares (1.7x, aephysics#12 to profile with the solver).
+     Next in this module: the joints' creation and bases (the seven
+     kinds' sims come with the joint solver), the sensors, and the
+     step-free parts of test_joint.c and test_world.c that need them.
    - `aephysics.contact_solver`: contact_solver.c scalar (the prepare,
      warm start, solve, restitution and store passes; the wide SIMD path
      later, measured).

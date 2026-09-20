@@ -558,6 +558,260 @@ test_sets_and_shapes() {
     height_field.destroy_height_field(field)
 }
 
+
+// A world with a static slab at y = 0 (its top face), returned with the slab hull kept alive by the caller.
+var g_slab: ptr = null
+var g_cube: ptr = null
+
+fixtures_ready() {
+    if g_slab == null {
+        g_slab = hull.make_box_hull(5.0, 0.5, 5.0) as ptr
+        g_cube = hull.make_box_hull(0.5, 0.5, 0.5) as ptr
+    }
+}
+
+slab_world() -> WorldId {
+    fixtures_ready()
+    world_id = new_world()
+    bdef = dynamics.default_body_def()
+    bdef.position = math.vec3(0.0, 0.0 - 0.5, 0.0)
+    ground = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    dynamics.create_hull_shape(ground, &sdef, g_slab as *HullData)
+    return world_id
+}
+
+// A dynamic unit cube at a position, with contact events when asked.
+cube_at(world_id: WorldId, p: Vec3, events: bool) -> BodyId {
+    bdef = dynamic_body_def()
+    bdef.position = p
+    id = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    sdef.enable_contact_events = events
+    dynamics.create_hull_shape(id, &sdef, g_cube as *HullData)
+    return id
+}
+
+// One pass: the pairs into contacts, the narrow phase, the state changes.
+step_contacts(w: *World) -> int {
+    dynamics.update_pairs(w)
+    return dynamics.collide(w)
+}
+
+all_valid(world_id: WorldId) -> bool {
+    w = dynamics.get_world(world_id.index1 - 1)
+    return dynamics.validate_solver_sets(w) && dynamics.validate_contacts(w)
+}
+
+first_contact(w: *World) -> *Contact {
+    i = 0
+    while i < w.contacts.count {
+        c = dynamics.contact_at(w, i)
+        if c.contact_id != dynamics.NULL_INDEX { return c }
+        i = i + 1
+    }
+    return null
+}
+
+test_contacts() {
+    // A cube resting a hundredth into the slab: one pair, one contact,
+    // touching with four points, in a colour from the back (a static pair),
+    // in the cube's island; the second pass recycles it.
+    world_id = slab_world()
+    w = dynamics.get_world(world_id.index1 - 1)
+    cube_id = cube_at(world_id, math.vec3(0.0, 0.49, 0.0), true)
+    pairs = dynamics.update_pairs(w)
+    ensure("one pair", pairs == 1 && dynamics.world_contact_count(w) == 1)
+    c = first_contact(w)
+    ensure("contact non-touching at first", (c.flags & dynamics.CONTACT_TOUCHING) == 0 && c.set_index == dynamics.AWAKE_SET && c.color_index == dynamics.NULL_INDEX)
+    ensure("contact flags", (c.flags & dynamics.CONTACT_STATIC) != 0 && (c.flags & dynamics.CONTACT_ENABLE_CONTACT_EVENTS) != 0 && (c.flags & dynamics.CONTACT_RECYCLE) != 0)
+    ensure("contact edges", c.edge_a.body_id != c.edge_b.body_id && dynamics.get_body_full_id(w, cube_id).contact_count == 1)
+    ensure("valid before collide", all_valid(world_id))
+    changed = dynamics.collide(w)
+    ensure("one contact began touching", changed == 1 && (c.flags & dynamics.CONTACT_TOUCHING) != 0)
+    ensure("one manifold of four points", c.manifold_count == 1 && dynamics.manifold_at(c, 0).point_count == 4)
+    m = dynamics.manifold_at(c, 0)
+    // The normal points from A (the slab, on the static body) to B (the cube): up.
+    small("contact normal up", m.normal.y - 1.0, 0.000001)
+    p = dynamics.manifold_point_at(m, 0)
+    small("contact separation", p.separation + 0.01, 0.001)
+    small("anchor on the cube's bottom", p.anchor_b.y + 0.5, 0.011)
+    small("anchor on the slab's top", p.anchor_a.y - 0.5, 0.011)
+    ensure("in a static colour", c.color_index >= dynamics.DYNAMIC_COLOR_COUNT && c.color_index < dynamics.OVERFLOW_INDEX)
+    ensure("in the convex array", core.ints_get(&dynamics.graph_color(w, c.color_index).convex_contacts, c.local_index) == c.contact_id)
+    cube_body = dynamics.get_body_full_id(w, cube_id)
+    ensure("in the cube's island", c.island_id == cube_body.island_id && dynamics.island_at(w, c.island_id).contacts.count == 1)
+    ensure("begin event", dynamics.world_contact_begin_event_count(w) == 1 && dynamics.contact_is_valid(dynamics.world_contact_begin_event(w, 0).contact_id))
+    ensure("awake set holds no non-touching", dynamics.get_solver_set(w, dynamics.AWAKE_SET).contact_indices.count == 0)
+    ensure("valid while touching", all_valid(world_id))
+    changed = dynamics.collide(w)
+    ensure("second pass: nothing changed, one recycled", changed == 0 && w.recycled_contact_count == 1)
+    ensure("recycled keeps the points", c.manifold_count == 1 && dynamics.manifold_at(c, 0).point_count == 4)
+    // Lifted just clear: the contact stops touching (an end event) but the proxies still overlap.
+    dynamics.body_set_transform(cube_id, math.vec3(0.0, 0.55, 0.0), math.quat_identity())
+    changed = step_contacts(w)
+    ensure("lifted: stopped touching", changed == 1 && (c.flags & dynamics.CONTACT_TOUCHING) == 0 && c.manifold_count == 0)
+    ensure("lifted: back among the non-touching", c.color_index == dynamics.NULL_INDEX && dynamics.get_solver_set(w, dynamics.AWAKE_SET).contact_indices.count == 1)
+    ensure("lifted: out of the island", c.island_id == dynamics.NULL_INDEX && dynamics.island_at(w, cube_body.island_id).constraint_remove_count == 1)
+    ensure("end event", dynamics.world_contact_end_event_count(w) == 1)
+    ensure("valid after lifting", all_valid(world_id))
+    // Moved far away: the proxies no longer overlap, the contact is destroyed.
+    dynamics.body_set_transform(cube_id, math.vec3(0.0, 5.0, 0.0), math.quat_identity())
+    changed = step_contacts(w)
+    ensure("far: contact destroyed", changed == 1 && dynamics.world_contact_count(w) == 0 && cube_body.contact_count == 0)
+    ensure("far: pair set empty", broad_phase.pair_count(&w.broad_phase) == 0)
+    ensure("valid after destruction", all_valid(world_id))
+    // Back down: a new contact, touching in one pass.
+    dynamics.body_set_transform(cube_id, math.vec3(0.0, 0.49, 0.0), math.quat_identity())
+    changed = step_contacts(w)
+    ensure("back: touching again", changed == 1 && dynamics.world_contact_count(w) == 1)
+    dynamics.destroy_world(world_id)
+
+    // Two cubes stacked on the slab: the islands merge into one with two
+    // contacts; destroying the top cube leaves the bottom's island with one.
+    world_id = slab_world()
+    w = dynamics.get_world(world_id.index1 - 1)
+    bottom = cube_at(world_id, math.vec3(0.0, 0.49, 0.0), false)
+    top = cube_at(world_id, math.vec3(0.0, 1.48, 0.0), false)
+    ensure("two islands before", dynamics.world_island_count(w) == 2)
+    changed = step_contacts(w)
+    ensure("stack: two contacts touching", changed == 2 && dynamics.world_contact_count(w) == 2)
+    ensure("stack: one island", dynamics.world_island_count(w) == 1)
+    island = dynamics.island_at(w, dynamics.get_body_full_id(w, bottom).island_id)
+    ensure("stack: the island holds both and two contacts", island.bodies.count == 2 && island.contacts.count == 2)
+    ensure("stack: the dynamic pair is in a dynamic colour", true)
+    dyn_pair = 0
+    i = 0
+    while i < w.contacts.count {
+        c = dynamics.contact_at(w, i)
+        if c.contact_id != dynamics.NULL_INDEX && (c.flags & dynamics.CONTACT_STATIC) == 0 {
+            dyn_pair = dyn_pair + 1
+            ensure("stack: dynamic pair colour", c.color_index < dynamics.DYNAMIC_COLOR_COUNT)
+        }
+        i = i + 1
+    }
+    ensure("stack: one dynamic pair", dyn_pair == 1)
+    ensure("stack valid", all_valid(world_id))
+    dynamics.destroy_body(top)
+    ensure("top destroyed: one contact left", dynamics.world_contact_count(w) == 1 && dynamics.world_island_count(w) == 1)
+    ensure("top destroyed: the bottom keeps its contact", dynamics.get_body_full_id(w, bottom).contact_count == 1)
+    ensure("valid after the top's destruction", all_valid(world_id))
+    // The bottom cube's island sleeps: its contact goes to the sleeping set; a velocity wakes it back into the graph.
+    bottom_body = dynamics.get_body_full_id(w, bottom)
+    ensure("sleep", dynamics.try_sleep_island(w, bottom_body.island_id))
+    ensure("asleep in a set", bottom_body.set_index >= dynamics.FIRST_SLEEPING_SET)
+    c = first_contact(w)
+    ensure("sleeping contact in the set", c.set_index == bottom_body.set_index && c.color_index == dynamics.NULL_INDEX && (c.flags & dynamics.CONTACT_TOUCHING) != 0)
+    ensure("graph empty while asleep", dynamics.graph_color(w, 22).convex_contacts.count == 0)
+    ensure("valid asleep", all_valid(world_id))
+    dynamics.body_set_linear_velocity(bottom, math.vec3(0.0, 0.0, 1.0))
+    ensure("awake again", bottom_body.set_index == dynamics.AWAKE_SET && c.set_index == dynamics.AWAKE_SET && c.color_index != dynamics.NULL_INDEX)
+    ensure("valid awake", all_valid(world_id))
+    dynamics.destroy_world(world_id)
+
+    // Three cubes in a row touching sideways: one island of three; the
+    // middle one lifted clear of its neighbours splits it into three
+    // (each still touches only the static slab).
+    world_id = slab_world()
+    w = dynamics.get_world(world_id.index1 - 1)
+    left = cube_at(world_id, math.vec3(0.0 - 0.99, 0.49, 0.0), false)
+    middle = cube_at(world_id, math.vec3(0.0, 0.49, 0.0), false)
+    right = cube_at(world_id, math.vec3(0.99, 0.49, 0.0), false)
+    changed = step_contacts(w)
+    ensure("row: five contacts", changed == 5 && dynamics.world_contact_count(w) == 5)
+    ensure("row: one island", dynamics.world_island_count(w) == 1)
+    island_id = dynamics.get_body_full_id(w, middle).island_id
+    ensure("row: three bodies, five contacts", dynamics.island_at(w, island_id).bodies.count == 3 && dynamics.island_at(w, island_id).contacts.count == 5)
+    dynamics.body_set_transform(middle, math.vec3(0.0, 0.49, 3.0), math.quat_identity())
+    changed = step_contacts(w)
+    ensure("row: two stopped touching", changed == 2 && dynamics.island_at(w, island_id).constraint_remove_count == 2)
+    ensure("row: still one island before the split", dynamics.world_island_count(w) == 1)
+    parts = dynamics.split_island(w, island_id)
+    ensure("row: split into three (${parts})", parts == 3 && dynamics.world_island_count(w) == 3)
+    ensure("row: each island one body and one contact", dynamics.island_at(w, dynamics.get_body_full_id(w, left).island_id).contacts.count == 1 &&
+                                                       dynamics.island_at(w, dynamics.get_body_full_id(w, right).island_id).bodies.count == 1)
+    ensure("row: valid after the split", all_valid(world_id))
+    // A connected island does not split.
+    dynamics.body_set_transform(middle, math.vec3(0.0, 0.49, 0.0), math.quat_identity())
+    step_contacts(w)
+    island_id = dynamics.get_body_full_id(w, middle).island_id
+    ensure("row: merged back", dynamics.world_island_count(w) == 1 && dynamics.island_at(w, island_id).bodies.count == 3)
+    island = dynamics.island_at(w, island_id)
+    island.constraint_remove_count = 1
+    ensure("row: a connected island stays one", dynamics.split_island(w, island_id) == 1 && island.constraint_remove_count == 0)
+    ensure("row: valid at the end", all_valid(world_id))
+    dynamics.destroy_world(world_id)
+}
+
+test_mesh_and_compound_contacts() {
+    // A sphere on a grid mesh: a mesh contact, in a colour's scalar array,
+    // one manifold with one point, recycled on the second pass.
+    world_id = new_world()
+    w = dynamics.get_world(world_id.index1 - 1)
+    grid = mesh.create_grid_mesh(8, 8, 1.0, 1, true)
+    bdef = dynamics.default_body_def()
+    ground = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    sdef.base_material.friction = 0.9
+    dynamics.create_mesh_shape(ground, &sdef, grid, math.vec3_one())
+    bdef = dynamic_body_def()
+    bdef.position = math.vec3(0.3, 0.49, 0.2)
+    ball = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    sdef.base_material.friction = 0.4
+    dynamics.create_sphere_shape(ball, &sdef, manifold.sphere(math.vec3_zero(), 0.5))
+    changed = step_contacts(w)
+    ensure("mesh: touching", changed == 1 && dynamics.world_contact_count(w) == 1)
+    c = first_contact(w)
+    ensure("mesh: flagged", (c.flags & dynamics.SIM_MESH_CONTACT) != 0 && (c.flags & dynamics.CONTACT_TOUCHING) != 0)
+    ensure("mesh: one manifold of one point", c.manifold_count == 1 && dynamics.manifold_at(c, 0).point_count == 1)
+    small("mesh: normal up", dynamics.manifold_at(c, 0).normal.y - 1.0, 0.0001)
+    small("mesh: separation with the rest offset", dynamics.manifold_point_at(dynamics.manifold_at(c, 0), 0).separation + 0.01 + 0.005, 0.001)
+    ensure("mesh: in the scalar array", dynamics.contact_spec_at(dynamics.graph_color(w, c.color_index), c.local_index).contact_id == c.contact_id)
+    small("mesh: friction mixed", c.friction - 0.6, 0.0001)
+    ensure("mesh: cache holds triangles", c.mesh_cache.count > 0)
+    ensure("mesh valid", all_valid(world_id))
+    changed = dynamics.collide(w)
+    ensure("mesh: recycled", changed == 0 && w.recycled_contact_count == 1)
+    dynamics.destroy_body(ball)
+    ensure("mesh: contact gone with the ball", dynamics.world_contact_count(w) == 0 && all_valid(world_id))
+    dynamics.destroy_world(world_id)
+    mesh.destroy_mesh(grid)
+
+    // A static compound of two spheres; a cube resting on one of them: the
+    // pair names the child, and the manifold's anchors are relative to the compound's origin.
+    world_id = new_world()
+    w = dynamics.get_world(world_id.index1 - 1)
+    mat = material.default_surface_material()
+    spheres_block = calloc(2, sizeof(CompoundSphereDef))
+    spheres = spheres_block as CompoundSphereDef[]
+    spheres[0] = compound.compound_sphere_def(manifold.sphere(math.vec3_zero(), 0.5), mat)
+    spheres[1] = compound.compound_sphere_def(manifold.sphere(math.vec3(4.0, 0.0, 0.0), 0.5), mat)
+    cdef = compound.compound_def()
+    cdef.spheres = spheres_block
+    cdef.sphere_count = 2
+    comp = compound.create_compound(&cdef)
+    bdef = dynamics.default_body_def()
+    bdef.position = math.vec3(10.0, 0.0, 0.0)
+    base = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    dynamics.create_compound_shape(base, &sdef, comp)
+    top = cube_at(world_id, math.vec3(14.0, 0.99, 0.0), false)
+    changed = step_contacts(w)
+    ensure("compound: touching", changed == 1 && dynamics.world_contact_count(w) == 1)
+    c = first_contact(w)
+    ensure("compound: the second child", c.child_index == 1)
+    ensure("compound: one point", c.manifold_count == 1 && dynamics.manifold_at(c, 0).point_count == 1)
+    small("compound: normal up", dynamics.manifold_at(c, 0).normal.y - 1.0, 0.001)
+    p = dynamics.manifold_point_at(dynamics.manifold_at(c, 0), 0)
+    small("compound: anchor from the compound's origin", p.anchor_a.x - 4.0, 0.001)
+    small("compound: anchor on the sphere's top", p.anchor_a.y - 0.5, 0.011)
+    ensure("compound valid", all_valid(world_id))
+    dynamics.destroy_world(world_id)
+    compound.destroy_compound(comp)
+    free(spheres_block)
+}
+
 main() {
     before = core.alloc_count()
     test_mass()
@@ -565,8 +819,13 @@ main() {
     test_extents()
     test_worlds_and_ids()
     test_sets_and_shapes()
-    // The scratch stays allocated: the worlds' block, the masses, and the mesh's three.
-    ensure("every other counted allocation was freed (${core.alloc_count() - before})", core.alloc_count() == before + 5)
+    test_contacts()
+    test_mesh_and_compound_contacts()
+    hull.destroy_hull(g_cube as *HullData)
+    hull.destroy_hull(g_slab as *HullData)
+    // The scratch stays allocated: the worlds' block, the masses, the contact scratch (five),
+    // the mesh's three, the mesh contact's six, and one of the sphere's.
+    ensure("every other counted allocation was freed (${core.alloc_count() - before})", core.alloc_count() == before + 17)
 
     println("dynamics: ${checks} checks")
     if failures == 0 {
