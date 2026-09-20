@@ -88,20 +88,38 @@ started until its tests pass.
    query and the mover. The same results as the reference; the query at
    parity, the casts 1.4-2x. The heights, materials and flags are ints
    for want of 16- and 8-bit arrays, 3x the reference's bytes.
-10. **shape**: shape.c (mass properties, ray and shape casts per shape,
-   compounds). Test: `test_shape`.
-11. **dynamics**: `body`, `contact`, `constraint_graph` (graph colouring),
+10. **shape** (done): sphere.c, capsule.c and the geometric half of
+   shape.c as `aephysics.shape`: the sphere's and capsule's mass, bounds,
+   ray casts (the closest-point forms that hold their precision far from
+   the origin), casts, overlap and mover planes, the hull's mover, and
+   the Shape of any kind with its dispatch under a transform (bounds,
+   swept and fat bounds, centroid, areas, mass, extent, ray and shape
+   casts, overlap, mover, proxy) and the collision filters. 440 checks:
+   test_shape.c's masses (sphere, analytic and transformed boxes, the
+   capsule bracketed by hulls), bounds, the sphere and capsule ray cases,
+   the overlap convention, the far-origin precision (our doubles sit
+   three orders under the reference's float floor and still hit at ten
+   million units), the cast through the dispatch; plus every kind under
+   one transform through every query, and the filters. Rays and masses
+   at parity; the GJK cast and overlap on proxies with radii 2-2.5x,
+   to profile (aephysics#8). The world-bound half of shape.c (creation
+   on a body, the broad-phase proxy, materials, events) comes with the
+   dynamics.
+11. **compound**: compound.c (the baked compound: children under a
+   static tree, materials and hulls shared by content) with
+   test_compound.c, and the compound branch of the shape dispatch.
+12. **dynamics**: `body`, `contact`, `constraint_graph` (graph colouring),
    `solver_set`, `island`, `solver` (the Soft Step: sub-stepping, relax
    iterations, restitution), `contact_solver` (scalar first; the wide SIMD
    path second, measured), the joints (revolute, prismatic, distance,
    motor, weld, wheel, spherical), `sensor`, `mover` (the character mover),
    `physics_world`. Tests: `test_body`, `test_joint`, `test_world`,
    `test_mover`, `test_determinism`, `test_large_world`.
-12. **parallel**: `parallel_for` and the scheduler over Aether's actors;
+13. **parallel**: `parallel_for` and the scheduler over Aether's actors;
    the benchmarks by thread count as the original records them.
-13. **recording and replay**, `world_snapshot`: last, since they are the
+14. **recording and replay**, `world_snapshot`: last, since they are the
    tooling and not the engine.
-14. **benchmarks**: `reference/benchmark/main.c`'s nine scenes ported, run
+15. **benchmarks**: `reference/benchmark/main.c`'s nine scenes ported, run
    against the C build on the same machine, recorded under `benchmark/`.
 
 ## Measures

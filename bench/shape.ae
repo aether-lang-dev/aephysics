@@ -1,0 +1,134 @@
+// The shapes on the same scenes as bench/shape_box3d.c: 1,000,000 rays
+// at a unit sphere and 1,000,000 at a capsule from a fan of origins (a
+// third missing), 100,000 sphere shape casts at a capsule under a
+// transform through the dispatch, 100,000 overlaps, 100,000 mover planes
+// against a capsule, and 100,000 capsule masses. Single thread, wall
+// time per phase, with the hit counts and sums as the checksum.
+import std.string
+import std.os
+import aephysics.math
+import aephysics.distance
+import aephysics.manifold
+import aephysics.mesh
+import aephysics.shape
+
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+extern sin(x: float) -> float
+extern cos(x: float) -> float
+
+clock() -> long { return os.now_monotonic_ns() }
+ms(ns: long) -> float { return (ns as float) / 1000000.0 }
+
+const RAYS = 1000000
+const CASTS = 100000
+const OVERLAPS = 100000
+const MOVERS = 100000
+const MASSES = 100000
+
+main() {
+    sphere = manifold.sphere(math.vec3_zero(), 1.0)
+    capsule = manifold.capsule(math.vec3(0.0 - 2.0, 0.0, 0.0), math.vec3(2.0, 0.0, 0.0), 1.0)
+
+    t0 = clock()
+    sphere_hits = 0
+    sphere_sum = 0.0
+    i = 0
+    while i < RAYS {
+        t = (i as float) / (RAYS as float)
+        a = 6.2831853 * t
+        origin = math.vec3(5.0 * cos(7.0 * a), 5.0 * sin(7.0 * a), 5.0 * sin(3.0 * a))
+        target = math.vec3(1.5 * sin(11.0 * a), 1.5 * cos(13.0 * a), 0.0)
+        out = shape.ray_cast_sphere(sphere, origin, math.sub(target, origin), 1.0)
+        if out.hit {
+            sphere_hits = sphere_hits + 1
+            sphere_sum = sphere_sum + out.fraction
+        }
+        i = i + 1
+    }
+    t1 = clock()
+
+    capsule_hits = 0
+    capsule_sum = 0.0
+    i = 0
+    while i < RAYS {
+        t = (i as float) / (RAYS as float)
+        a = 6.2831853 * t
+        origin = math.vec3(6.0 * cos(7.0 * a), 5.0 * sin(7.0 * a), 5.0 * sin(3.0 * a))
+        target = math.vec3(3.0 * sin(11.0 * a), 1.5 * cos(13.0 * a), 0.0)
+        out = shape.ray_cast_capsule(capsule, origin, math.sub(target, origin), 1.0)
+        if out.hit {
+            capsule_hits = capsule_hits + 1
+            capsule_sum = capsule_sum + out.fraction
+        }
+        i = i + 1
+    }
+    t2 = clock()
+
+    sh = shape.capsule_shape(capsule, 1.0)
+    q = math.make_quat_from_axis_angle(math.normalize(math.vec3(1.0, 2.0, 3.0)), 0.7)
+    transform = Transform { p: math.vec3(10.0, 20.0, 30.0), q: q }
+    start_block = calloc(1, sizeof(Vec3))
+    start = start_block as Vec3[]
+    cast_hits = 0
+    cast_sum = 0.0
+    i = 0
+    while i < CASTS {
+        t = (i as float) / (CASTS as float)
+        a = 6.2831853 * t
+        local = math.vec3(2.5 * cos(5.0 * a), 4.0, 1.2 * sin(5.0 * a))
+        start[0] = math.transform_point(transform, local)
+        translation = math.rotate_vector(q, math.vec3(0.0, 0.0 - 8.0, 0.5 * sin(9.0 * a)))
+        out = shape.shape_cast_shape(&sh, transform, distance.shape_proxy(start_block, 1, 0.3), translation, 1.0, false)
+        if out.hit {
+            cast_hits = cast_hits + 1
+            cast_sum = cast_sum + out.fraction
+        }
+        i = i + 1
+    }
+    t3 = clock()
+
+    overlap_hits = 0
+    i = 0
+    while i < OVERLAPS {
+        t = (i as float) / (OVERLAPS as float)
+        a = 6.2831853 * t
+        local = math.vec3(3.0 * cos(5.0 * a), 1.6 * sin(3.0 * a), 1.2 * sin(5.0 * a))
+        start[0] = math.transform_point(transform, local)
+        if shape.overlap_shape(&sh, transform, distance.shape_proxy(start_block, 1, 0.5)) { overlap_hits = overlap_hits + 1 }
+        i = i + 1
+    }
+    t4 = clock()
+
+    planes_block = calloc(4, sizeof(PlaneResult))
+    planes = planes_block as PlaneResult[]
+    mover_planes = 0
+    mover_sum = 0.0
+    i = 0
+    while i < MOVERS {
+        t = (i as float) / (MOVERS as float)
+        a = 6.2831853 * t
+        local = math.vec3(3.0 * cos(5.0 * a), 1.0 + 0.6 * sin(3.0 * a), 1.0 * sin(5.0 * a))
+        mover = manifold.capsule(math.transform_point(transform, local), math.transform_point(transform, math.add(local, math.vec3(0.0, 1.0, 0.0))), 0.3)
+        count = shape.collide_mover(planes, 4, &sh, transform, mover)
+        mover_planes = mover_planes + count
+        if count > 0 { mover_sum = mover_sum + planes[0].plane.offset }
+        i = i + 1
+    }
+    t5 = clock()
+
+    mass_sum = 0.0
+    i = 0
+    while i < MASSES {
+        t = (i as float) / (MASSES as float)
+        c = manifold.capsule(math.vec3(0.0 - 1.0 - t, 0.0, 0.0), math.vec3(1.0, t, 0.0), 0.5 + 0.5 * t)
+        md = shape.compute_capsule_mass(c, 1.0)
+        mass_sum = mass_sum + md.mass + md.inertia.cx.x + md.inertia.cy.y + md.inertia.cz.z
+        i = i + 1
+    }
+    t6 = clock()
+
+    println("aephysics shape: ${RAYS} sphere rays ${ms(t1 - t0)} ms (${sphere_hits} hits, sum ${sphere_sum}), ${RAYS} capsule rays ${ms(t2 - t1)} ms (${capsule_hits} hits, sum ${capsule_sum}), ${CASTS} shape casts ${ms(t3 - t2)} ms (${cast_hits} hits, sum ${cast_sum}), ${OVERLAPS} overlaps ${ms(t4 - t3)} ms (${overlap_hits} hits), ${MOVERS} movers ${ms(t5 - t4)} ms (${mover_planes} planes, sum ${mover_sum}), ${MASSES} masses ${ms(t6 - t5)} ms (sum ${mass_sum})")
+    free(planes_block)
+    free(start_block)
+}
