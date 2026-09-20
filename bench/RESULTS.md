@@ -485,3 +485,25 @@ time in doubles (Aether's float). The wide contact path, laid over the
 same constraint data, is the next performance layer (issue #22); the
 narrow phase's 1.7x (issue #17) is the rest.
 
+## physics_world
+
+`bench/physics_world.ae` and `bench/physics_world_box3d.c`: the
+reference's own benchmark scenes (its shared/benchmarks.c) stepped by
+our world and by b3World_Step, one thread, 1/60 with four sub-steps,
+sleeping off as the reference runs them.
+
+| scene | aephysics per step | Box3D per step |
+|---|---|---|
+| large pyramid: 5,050 cubes on a base of 100, 200 steps | 24.5 ms | **10.9** |
+| many pyramids: 196 pyramids of base 10, 10,780 cubes, 100 steps | 53.0 | **22.0** |
+| joint grid: 10,000 spheres on 19,800 spherical joints, 100 steps | 20.0 | **11.1** |
+
+The same height sums (167,556, 37,695 and -496,893), contact counts
+(14,950 and 28,420) and joint count. The pyramids are 2.2-2.4x: the
+reference's SIMD wide contacts (issue #22) and single precision. The
+joint grid has no contacts and is still 1.8x, so half the gap is not
+the wide path: joints are scalar in both, and the difference is single
+against double precision plus whatever the generated C loses on the
+struct-heavy code; a profile of the joint grid is the place to look
+next (issue #22 notes it).
+

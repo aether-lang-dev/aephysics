@@ -275,13 +275,33 @@ started until its tests pass.
      heights, awake and contact counts: the reference's convex contacts
      go four wide in SIMD and it computes in floats; ours are scalar
      doubles. The wide path is the next performance layer (issue #22).
-   - `aephysics.physics_world`: the step (collide, solve, events), the
-     world queries (overlap, casts, the mover's planes and time of
-     impact through the broad phase), the events, the public setters.
-     Tests: test_body.c, test_joint.c, test_world.c, test_body_query.c,
-     the world parts of test_mover.c, test_determinism.c,
-     test_large_world.c; bench pairs on the reference's benchmark
-     scenes as each becomes possible.
+   - `aephysics.physics_world` (done, PR #23): the step (the events
+     cleared, the pairs, the context with the contact hertz reduced for
+     large steps, the narrow phase, the solve when time passes, the
+     sensors, the stack grown, the end events swapped, the world locked
+     throughout), the events read back (end events from the buffer the
+     last step filled), the settings (sleeping off wakes every set), the
+     counters and bounds, the queries over the three trees re-centred on
+     their origin (overlap of a box or a proxy, the mover's planes, ray,
+     shape and mover casts, the closest ray hit) and body.c's queries at
+     a transform of the caller's (ray, shape, overlap, mover planes, the
+     mover's time of impact), explosions. 94 checks: test_world.c's
+     HelloWorld, contact and hit events with their materials, the
+     continuous move event matching the transform, the bullet through a
+     sensor, the explosion near and a ten million away; test_body_query.c
+     end to end; the world queries; a wave pile of sixty cubes stepping
+     alike twice with its sleep step as the checksum. Found on the way:
+     struct names are one namespace across modules (a QueryContext
+     already lived in compound), and a struct literal in a return with
+     module calls inside reaches C undeclared, as constants did. The
+     pair on the reference's own benchmark scenes matches its checksums
+     (heights, contacts, joints) at 1.8-2.4x.
+     Still to port from the reference's tests: the world parts of
+     test_mover.c, test_determinism.c's ragdoll, wave pile, query spawn
+     and mesh drop scenes (their golden hashes are single precision;
+     ours are doubles, so repeatability is the check), test_large_world.c,
+     and test_world.c's compound hit events, overflow colour pile and
+     hull database (not ported).
 14. **parallel**: `parallel_for` and the scheduler over Aether's actors;
    the benchmarks by thread count as the original records them.
 15. **recording and replay**, `world_snapshot`: last, since they are the

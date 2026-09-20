@@ -1,0 +1,632 @@
+// aephysics.physics_world against the reference's tests: test_world.c's
+// HelloWorld (a cube on the ground after ninety steps), the contact
+// events of a bouncing sphere, the hit events with their materials, a
+// ball stopped by a thin wall with its move event matching its
+// transform, a sensor swept by a bullet (one begin, one end), an
+// explosion pushing a sphere the same near and far from the origin;
+// test_body_query.c's casts, overlaps and mover queries against one
+// body at a transform of the caller's, far from the origin too; the
+// world queries over every shape; and a wave pile stepping alike
+// twice, with its sleep step as the checksum.
+import std.string
+import aephysics.math
+import aephysics.core
+import aephysics.hull
+import aephysics.manifold
+import aephysics.mesh
+import aephysics.compound
+import aephysics.shape
+import aephysics.distance
+import aephysics.broad_phase
+import aephysics.dynamics
+import aephysics.physics_world
+
+extern exit(code: int)
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+
+var failures = 0
+var checks = 0
+
+ensure(name: string, ok: bool) {
+    checks = checks + 1
+    if !ok {
+        println("physics_world: FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+small(name: string, value: float, tolerance: float) {
+    ensure("${name} (${value})", math.abs_float(value) < tolerance)
+}
+
+same_shape(a: ShapeId, b: ShapeId) -> bool { return a.index1 == b.index1 && a.world0 == b.world0 && a.generation == b.generation }
+same_body(a: BodyId, b: BodyId) -> bool { return a.index1 == b.index1 && a.world0 == b.world0 && a.generation == b.generation }
+
+identity_at(x: float, y: float, z: float) -> Transform { return Transform { p: math.vec3(x, y, z), q: math.quat_identity() } }
+
+var g_point: ptr = null   // Vec3[1]: a one-point proxy's point
+
+point_proxy(p: Vec3, radius: float) -> ShapeProxy {
+    if g_point == null { g_point = core.alloc(sizeof(Vec3)) }
+    points = g_point as Vec3[]
+    points[0] = p
+    return distance.shape_proxy(g_point, 1, radius)
+}
+
+// --- test_world.c ------------------------------------------------------------------------------------------------
+
+test_hello_world() {
+    wdef = dynamics.default_world_def()
+    wdef.gravity = math.vec3(0.0, 0.0 - 10.0, 0.0)
+    world_id = dynamics.create_world(&wdef)
+    ensure("hello: a valid world", physics_world.is_valid(world_id))
+    gdef = dynamics.default_body_def()
+    gdef.position = math.vec3(0.0, 0.0 - 10.0, 0.0)
+    ground = dynamics.create_body(world_id, &gdef)
+    ground_box = hull.make_box_hull(50.0, 10.0, 50.0)
+    gsdef = dynamics.default_shape_def()
+    dynamics.create_hull_shape(ground, &gsdef, ground_box)
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.position = math.vec3(0.0, 4.0, 0.0)
+    body = dynamics.create_body(world_id, &bdef)
+    cube = hull.make_box_hull(1.0, 1.0, 1.0)
+    sdef = dynamics.default_shape_def()
+    sdef.density = 1.0
+    sdef.base_material.friction = 0.3
+    dynamics.create_hull_shape(body, &sdef, cube)
+    i = 0
+    while i < 90 {
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        i = i + 1
+    }
+    position = dynamics.body_get_position(body)
+    rotation = dynamics.body_get_rotation(body)
+    dynamics.destroy_world(world_id)
+    small("hello: resting a unit above the ground", position.y - 1.0, 0.01)
+    small("hello: upright x", rotation.v.x, 0.01)
+    small("hello: upright z", rotation.v.z, 0.01)
+    ensure("hello: the world is gone", physics_world.is_valid(world_id) == false && physics_world.body_event_count(world_id) == 0)
+    hull.destroy_hull(ground_box)
+    hull.destroy_hull(cube)
+}
+
+test_contact_events() {
+    wdef = dynamics.default_world_def()
+    world_id = dynamics.create_world(&wdef)
+    gdef = dynamics.default_body_def()
+    gdef.position = math.vec3(0.0, 0.0 - 0.5, 0.0)
+    ground = dynamics.create_body(world_id, &gdef)
+    ground_box = hull.make_box_hull(10.0, 0.5, 10.0)
+    gsdef = dynamics.default_shape_def()
+    ground_shape = dynamics.create_hull_shape(ground, &gsdef, ground_box)
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.position = math.vec3(0.0, 5.0, 0.0)
+    ball = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    sdef.density = 1.0
+    sdef.enable_contact_events = true
+    sdef.base_material.restitution = 0.6
+    ball_shape = dynamics.create_sphere_shape(ball, &sdef, manifold.sphere(math.vec3_zero(), 0.5))
+    begins = 0
+    ends = 0
+    ids_checked = false
+    i = 0
+    while i < 120 {
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        begin_count = physics_world.contact_begin_event_count(world_id)
+        if begin_count > 0 && ids_checked == false {
+            be = physics_world.contact_begin_event(world_id, 0)
+            a_ball = same_shape(be.shape_id_a, ball_shape)
+            b_ball = same_shape(be.shape_id_b, ball_shape)
+            a_ground = same_shape(be.shape_id_a, ground_shape)
+            b_ground = same_shape(be.shape_id_b, ground_shape)
+            ensure("events: the pair", (a_ball && b_ground) || (a_ground && b_ball))
+            ensure("events: a valid contact id", dynamics.contact_is_valid(be.contact_id))
+            ids_checked = true
+        }
+        begins = begins + begin_count
+        ends = ends + physics_world.contact_end_event_count(world_id)
+        i = i + 1
+    }
+    dynamics.destroy_world(world_id)
+    ensure("events: ids checked", ids_checked)
+    ensure("events: began (${begins}) and ended (${ends}) touching", begins >= 1 && ends >= 1)
+    hull.destroy_hull(ground_box)
+}
+
+test_hit_events() {
+    wdef = dynamics.default_world_def()
+    wdef.hit_event_threshold = 1.0
+    world_id = dynamics.create_world(&wdef)
+    gdef = dynamics.default_body_def()
+    gdef.position = math.vec3(0.0, 0.0 - 0.5, 0.0)
+    ground = dynamics.create_body(world_id, &gdef)
+    ground_box = hull.make_box_hull(10.0, 0.5, 10.0)
+    gsdef = dynamics.default_shape_def()
+    dynamics.create_hull_shape(ground, &gsdef, ground_box)
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.gravity_scale = 0.0
+    bdef.position = math.vec3(0.0, 2.0, 0.0)
+    bdef.linear_velocity = math.vec3(0.0, 0.0 - 30.0, 0.0)
+    ball = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    sdef.density = 1.0
+    sdef.enable_hit_events = true
+    sdef.base_material.user_material_id = 7 as long
+    dynamics.create_sphere_shape(ball, &sdef, manifold.sphere(math.vec3_zero(), 0.5))
+    hits = 0
+    speed = 0.0
+    normal = math.vec3_zero()
+    material_a = 0 as long
+    material_b = 0 as long
+    i = 0
+    while i < 30 {
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        count = physics_world.contact_hit_event_count(world_id)
+        if count > 0 && hits == 0 {
+            hit = physics_world.contact_hit_event(world_id, 0)
+            speed = hit.approach_speed
+            normal = hit.normal
+            material_a = hit.user_material_id_a
+            material_b = hit.user_material_id_b
+        }
+        hits = hits + count
+        i = i + 1
+    }
+    dynamics.destroy_world(world_id)
+    ensure("hit: at least one (${hits})", hits >= 1)
+    ensure("hit: fast (${speed})", speed > 1.0)
+    small("hit: normal along y (x)", normal.x, 0.01)
+    small("hit: normal along y (z)", normal.z, 0.01)
+    ensure("hit: the sphere's material id", material_a == (7 as long) || material_b == (7 as long))
+    hull.destroy_hull(ground_box)
+}
+
+test_continuous_move_event() {
+    wdef = dynamics.default_world_def()
+    world_id = dynamics.create_world(&wdef)
+    physics_world.enable_continuous(world_id, true)
+    wall_def = dynamics.default_body_def()
+    wall = dynamics.create_body(world_id, &wall_def)
+    wall_box = hull.make_box_hull(0.1, 5.0, 5.0)
+    sdef = dynamics.default_shape_def()
+    dynamics.create_hull_shape(wall, &sdef, wall_box)
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.gravity_scale = 0.0
+    bdef.position = math.vec3(3.0, 0.0, 0.0)
+    bdef.linear_velocity = math.vec3(0.0 - 30.0, 0.0, 0.0)
+    ball = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    sdef.density = 1.0
+    dynamics.create_sphere_shape(ball, &sdef, manifold.sphere(math.vec3_zero(), 0.25))
+    have_move = false
+    all_match = true
+    s = 0
+    while s < 30 {
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        xf = dynamics.body_get_transform(ball)
+        i = 0
+        while i < physics_world.body_event_count(world_id) {
+            event = physics_world.body_event(world_id, i)
+            if same_body(event.body_id, ball) {
+                have_move = true
+                if event.transform.p.x != xf.p.x || event.transform.p.y != xf.p.y || event.transform.p.z != xf.p.z { all_match = false }
+                if event.transform.q.v.x != xf.q.v.x || event.transform.q.s != xf.q.s { all_match = false }
+            }
+            i = i + 1
+        }
+        s = s + 1
+    }
+    ensure("continuous: move events for the ball", have_move)
+    ensure("continuous: the move event carries the impact pose", all_match)
+    final = dynamics.body_get_position(ball)
+    ensure("continuous: stopped at the wall (${final.x})", 0.2 < final.x && final.x < 0.8)
+    dynamics.destroy_world(world_id)
+    hull.destroy_hull(wall_box)
+}
+
+test_sensor_stepped() {
+    // The reference's TestSensor: a bullet through a wall that reports sensor events, one begin and one end.
+    wdef = dynamics.default_world_def()
+    world_id = dynamics.create_world(&wdef)
+    wall_def = dynamics.default_body_def()
+    wall_def.position = math.vec3(1.5, 11.0, 0.0)
+    wall = dynamics.create_body(world_id, &wall_def)
+    wall_box = hull.make_box_hull(0.5, 10.0, 1.0)
+    sdef = dynamics.default_shape_def()
+    sdef.enable_sensor_events = true
+    dynamics.create_hull_shape(wall, &sdef, wall_box)
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.is_bullet = true
+    bdef.gravity_scale = 0.0
+    bdef.position = math.vec3(7.39814, 4.0, 0.0)
+    bdef.linear_velocity = math.vec3(0.0 - 20.0, 0.0, 0.0)
+    bullet = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    sdef.is_sensor = true
+    sdef.enable_sensor_events = true
+    dynamics.create_sphere_shape(bullet, &sdef, manifold.sphere(math.vec3_zero(), 0.1))
+    begins = 0
+    ends = 0
+    steps = 0
+    while steps < 200 {
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        if physics_world.sensor_begin_event_count(world_id) > 0 { begins = begins + 1 }
+        if physics_world.sensor_end_event_count(world_id) > 0 { ends = ends + 1 }
+        steps = steps + 1
+        if dynamics.body_get_position(bullet).x < 0.0 - 1.0 { steps = 1000 }
+    }
+    dynamics.destroy_world(world_id)
+    ensure("sensor: one begin (${begins})", begins == 1)
+    ensure("sensor: one end (${ends})", ends == 1)
+    hull.destroy_hull(wall_box)
+}
+
+run_explosion(base: Vec3) -> Vec3 {
+    wdef = dynamics.default_world_def()
+    wdef.gravity = math.vec3_zero()
+    world_id = dynamics.create_world(&wdef)
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.position = base
+    body = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    dynamics.create_sphere_shape(body, &sdef, manifold.sphere(math.vec3_zero(), 1.0))
+    edef = physics_world.default_explosion_def()
+    edef.position = math.add(base, math.vec3(3.0, 0.0, 0.0))
+    edef.radius = 5.0
+    edef.falloff = 0.0
+    edef.impulse_per_area = 10.0
+    physics_world.explode(world_id, &edef)
+    v = dynamics.body_get_linear_velocity(body)
+    w = dynamics.body_get_angular_velocity(body)
+    ensure("explosion: no spin", math.length(w) < 0.000001)
+    dynamics.destroy_world(world_id)
+    return v
+}
+
+test_explosion() {
+    near = run_explosion(math.vec3_zero())
+    ensure("explosion: pushed back along -x (${near.x})", near.x < 0.0 - 0.0001)
+    small("explosion: no y", near.y, 0.000001)
+    small("explosion: no z", near.z, 0.000001)
+    far = run_explosion(math.vec3(10000000.0, 10000000.0, 10000000.0))
+    small("explosion: the same far from the origin", math.length(math.sub(far, near)), 0.00001)
+}
+
+// --- test_body_query.c ----------------------------------------------------------------------------------------------
+
+query_world(body: BodyId[]) -> WorldId {
+    wdef = dynamics.default_world_def()
+    world_id = dynamics.create_world(&wdef)
+    bdef = dynamics.default_body_def()
+    body[0] = dynamics.create_body(world_id, &bdef)
+    return world_id
+}
+
+test_body_queries() {
+    ids_block = calloc(2, sizeof(BodyId))
+    ids = ids_block as BodyId[]
+    filter = shape.default_query_filter()
+    sdef = dynamics.default_shape_def()
+
+    // CastRayHitsSphere: a sphere at (5, 0, 0), a ray along +x.
+    world_id = query_world(ids)
+    dynamics.create_sphere_shape(ids[0], &sdef, manifold.sphere(math.vec3_zero(), 1.0))
+    result = physics_world.body_cast_ray(ids[0], math.vec3_zero(), math.vec3(10.0, 0.0, 0.0), filter, 1.0, identity_at(5.0, 0.0, 0.0))
+    ensure("ray: hit", result.hit && dynamics.shape_is_valid(result.shape_id))
+    small("ray: fraction 0.4", result.fraction - 0.4, 0.00001)
+    small("ray: normal -x", result.normal.x + 1.0, 0.00001)
+    small("ray: point at 4", result.point.x - 4.0, 0.0001)
+    // CastRayMiss.
+    result = physics_world.body_cast_ray(ids[0], math.vec3_zero(), math.vec3(0.0, 10.0, 0.0), filter, 1.0, identity_at(5.0, 0.0, 0.0))
+    ensure("ray: miss", result.hit == false)
+    dynamics.destroy_world(world_id)
+
+    // CastRayClosestShape: the nearer of two spheres, whatever the list order.
+    world_id = query_world(ids)
+    near_id = dynamics.create_sphere_shape(ids[0], &sdef, manifold.sphere(math.vec3_zero(), 1.0))
+    dynamics.create_sphere_shape(ids[0], &sdef, manifold.sphere(math.vec3(4.0, 0.0, 0.0), 1.0))
+    result = physics_world.body_cast_ray(ids[0], math.vec3(0.0 - 5.0, 0.0, 0.0), math.vec3(10.0, 0.0, 0.0), filter, 1.0, identity_at(0.0, 0.0, 0.0))
+    ensure("ray: the nearer shape", result.hit && same_shape(result.shape_id, near_id))
+    small("ray: its fraction", result.fraction - 0.4, 0.00001)
+    dynamics.destroy_world(world_id)
+
+    // CastRayRotatedBody: the local (0, 2, 0) sphere turned a quarter about z sits at (-2, 0, 0).
+    world_id = query_world(ids)
+    dynamics.create_sphere_shape(ids[0], &sdef, manifold.sphere(math.vec3(0.0, 2.0, 0.0), 0.5))
+    turned = Transform { p: math.vec3_zero(), q: math.make_quat_from_axis_angle(math.vec3_axis_z(), 0.5 * math.PI) }
+    result = physics_world.body_cast_ray(ids[0], math.vec3_zero(), math.vec3(0.0 - 4.0, 0.0, 0.0), filter, 1.0, turned)
+    ensure("ray: hit the turned sphere", result.hit)
+    small("ray: fraction 0.375", result.fraction - 0.375, 0.00001)
+    small("ray: normal +x", result.normal.x - 1.0, 0.00001)
+    small("ray: point at -1.5", result.point.x + 1.5, 0.0001)
+    dynamics.destroy_world(world_id)
+
+    // CastRayFarFromOrigin: the same hit a million away.
+    world_id = query_world(ids)
+    dynamics.create_sphere_shape(ids[0], &sdef, manifold.sphere(math.vec3_zero(), 1.0))
+    origin = math.vec3(1000000.0, 0.0 - 2000000.0, 500000.0)
+    result = physics_world.body_cast_ray(ids[0], origin, math.vec3(10.0, 0.0, 0.0), filter, 1.0, Transform { p: math.add(origin, math.vec3(5.0, 0.0, 0.0)), q: math.quat_identity() })
+    ensure("ray far: hit", result.hit)
+    small("ray far: fraction 0.4", result.fraction - 0.4, 0.00001)
+    small("ray far: normal -x", result.normal.x + 1.0, 0.00001)
+    small("ray far: normal y", result.normal.y, 0.00001)
+    dynamics.destroy_world(world_id)
+
+    // CastShapeHitsBox: a sphere proxy of 0.5 into a unit box whose face is at x = 4.
+    world_id = query_world(ids)
+    box = hull.make_box_hull(1.0, 1.0, 1.0)
+    dynamics.create_hull_shape(ids[0], &sdef, box)
+    proxy = point_proxy(math.vec3_zero(), 0.5)
+    result = physics_world.body_cast_shape(ids[0], math.vec3_zero(), proxy, math.vec3(10.0, 0.0, 0.0), filter, 1.0, false, identity_at(5.0, 0.0, 0.0))
+    ensure("shape cast: hit", result.hit && dynamics.shape_is_valid(result.shape_id))
+    small("shape cast: fraction 0.35 (with the cast's skin)", result.fraction - 0.35, 0.01)
+    small("shape cast: normal -x", result.normal.x + 1.0, 0.0001)
+    small("shape cast: point at 4", result.point.x - 4.0, 0.001)
+    // CastShapeMiss.
+    result = physics_world.body_cast_shape(ids[0], math.vec3_zero(), proxy, math.vec3(0.0, 10.0, 0.0), filter, 1.0, false, identity_at(5.0, 0.0, 0.0))
+    ensure("shape cast: miss", result.hit == false)
+    // CastShapeFarFromOrigin.
+    result = physics_world.body_cast_shape(ids[0], origin, proxy, math.vec3(10.0, 0.0, 0.0), filter, 1.0, false, Transform { p: math.add(origin, math.vec3(5.0, 0.0, 0.0)), q: math.quat_identity() })
+    ensure("shape cast far: hit", result.hit)
+    small("shape cast far: fraction", result.fraction - 0.35, 0.01)
+    small("shape cast far: normal", result.normal.x + 1.0, 0.0001)
+    // OverlapTrue / OverlapFalse / OverlapRespectsBodyTransform / OverlapFilter.
+    ensure("overlap: at the box's centre", physics_world.body_overlap_shape(ids[0], math.vec3(5.0, 0.0, 0.0), proxy, filter, identity_at(5.0, 0.0, 0.0)))
+    ensure("overlap: far away", physics_world.body_overlap_shape(ids[0], math.vec3(20.0, 0.0, 0.0), proxy, filter, identity_at(5.0, 0.0, 0.0)) == false)
+    ensure("overlap: the given transform decides", physics_world.body_overlap_shape(ids[0], math.vec3_zero(), proxy, filter, identity_at(0.0, 0.0, 0.0)) &&
+                                                     physics_world.body_overlap_shape(ids[0], math.vec3_zero(), proxy, filter, identity_at(20.0, 0.0, 0.0)) == false)
+    no_mask = shape.default_query_filter()
+    no_mask.mask_bits = 0 as long
+    ensure("overlap: a zero mask rejects", physics_world.body_overlap_shape(ids[0], math.vec3_zero(), proxy, no_mask, identity_at(0.0, 0.0, 0.0)) == false)
+    dynamics.destroy_world(world_id)
+    hull.destroy_hull(box)
+
+    // CastShapeRotatedBody.
+    world_id = query_world(ids)
+    dynamics.create_sphere_shape(ids[0], &sdef, manifold.sphere(math.vec3(0.0, 2.0, 0.0), 1.0))
+    result = physics_world.body_cast_shape(ids[0], math.vec3_zero(), proxy, math.vec3(0.0 - 4.0, 0.0, 0.0), filter, 1.0, false, turned)
+    ensure("shape cast turned: hit", result.hit)
+    small("shape cast turned: fraction 0.125", result.fraction - 0.125, 0.01)
+    small("shape cast turned: normal +x", result.normal.x - 1.0, 0.0001)
+    small("shape cast turned: point at -1", result.point.x + 1.0, 0.001)
+    dynamics.destroy_world(world_id)
+
+    // MoverTouchesBox / MoverSeparated / MoverRotatedBody / MoverCapacity.
+    world_id = query_world(ids)
+    half = hull.make_box_hull(0.5, 0.5, 0.5)
+    dynamics.create_hull_shape(ids[0], &sdef, half)
+    planes_block = calloc(4, sizeof(BodyPlaneResult))
+    planes = planes_block as BodyPlaneResult[]
+    mover = Capsule { center1: math.vec3(0.0 - 0.3, 0.6, 0.0), center2: math.vec3(0.3, 0.6, 0.0), radius: 0.2 }
+    count = physics_world.body_collide_mover(ids[0], planes, 4, math.vec3_zero(), mover, filter, identity_at(0.0, 0.0, 0.0))
+    ensure("mover: one plane", count == 1 && dynamics.shape_is_valid(planes[0].shape_id))
+    ensure("mover: the plane faces up", math.is_normalized(planes[0].result.plane.normal) && planes[0].result.plane.normal.y > 0.99)
+    small("mover: a tenth in", planes[0].result.plane.offset - 0.1, 0.0001)
+    mover.center1.y = 5.0
+    mover.center2.y = 5.0
+    ensure("mover: separated", physics_world.body_collide_mover(ids[0], planes, 4, math.vec3_zero(), mover, filter, identity_at(0.0, 0.0, 0.0)) == 0)
+    mover = Capsule { center1: math.vec3(0.0 - 0.3, 0.0, 0.6), center2: math.vec3(0.3, 0.0, 0.6), radius: 0.2 }
+    about_x = Transform { p: math.vec3_zero(), q: math.make_quat_from_axis_angle(math.vec3_axis_x(), 0.5 * math.PI) }
+    count = physics_world.body_collide_mover(ids[0], planes, 4, math.vec3_zero(), mover, filter, about_x)
+    ensure("mover turned: the plane faces +z", count == 1 && planes[0].result.plane.normal.z > 0.99)
+    small("mover turned: a tenth in", planes[0].result.plane.offset - 0.1, 0.0001)
+    dynamics.destroy_world(world_id)
+    world_id = query_world(ids)
+    dynamics.create_sphere_shape(ids[0], &sdef, manifold.sphere(math.vec3(0.0 - 0.4, 0.6, 0.0), 0.5))
+    dynamics.create_sphere_shape(ids[0], &sdef, manifold.sphere(math.vec3(0.4, 0.6, 0.0), 0.5))
+    mover = Capsule { center1: math.vec3(0.0 - 1.0, 0.0, 0.0), center2: math.vec3(1.0, 0.0, 0.0), radius: 0.2 }
+    ensure("mover: capped at the capacity", physics_world.body_collide_mover(ids[0], planes, 1, math.vec3_zero(), mover, filter, identity_at(0.0, 0.0, 0.0)) == 1)
+    ensure("mover: both spheres", physics_world.body_collide_mover(ids[0], planes, 4, math.vec3_zero(), mover, filter, identity_at(0.0, 0.0, 0.0)) == 2)
+    dynamics.destroy_world(world_id)
+
+    // MoverTOIHitsBox / Separated / Overlapped / ClosestShape.
+    standing = Capsule { center1: math.vec3_zero(), center2: math.vec3(0.0, 1.0, 0.0), radius: 0.25 }
+    world_id = query_world(ids)
+    box_shape = dynamics.create_hull_shape(ids[0], &sdef, half)
+    toi = physics_world.body_time_of_impact_mover(ids[0], math.vec3_zero(), standing, math.vec3(10.0, 0.0, 0.0), filter, identity_at(5.0, 0.0, 0.0), identity_at(5.0, 0.0, 0.0))
+    small("mover toi: 4.25 of 10 free", toi.fraction - 0.425, 0.01)
+    ensure("mover toi: normal -x", math.is_normalized(toi.normal) && math.abs_float(toi.normal.x + 1.0) < 0.001)
+    ensure("mover toi: the shape identified", dynamics.shape_is_valid(toi.shape_id) && same_shape(toi.shape_id, box_shape))
+    toi = physics_world.body_time_of_impact_mover(ids[0], math.vec3_zero(), standing, math.vec3(0.0, 10.0, 0.0), filter, identity_at(5.0, 0.0, 0.0), identity_at(5.0, 0.0, 0.0))
+    ensure("mover toi: separated", math.abs_float(toi.fraction - 1.0) < 0.000001 && dynamics.shape_is_valid(toi.shape_id) == false)
+    toi = physics_world.body_time_of_impact_mover(ids[0], math.vec3_zero(), standing, math.vec3(10.0, 0.0, 0.0), filter, identity_at(0.0, 0.0, 0.0), identity_at(0.0, 0.0, 0.0))
+    ensure("mover toi: an overlap is ignored", math.abs_float(toi.fraction - 1.0) < 0.000001 && toi.shape_id.index1 == 0)
+    dynamics.destroy_world(world_id)
+    world_id = query_world(ids)
+    other_def = dynamics.default_body_def()
+    ids[1] = dynamics.create_body(world_id, &other_def)
+    near_first = dynamics.create_sphere_shape(ids[0], &sdef, manifold.sphere(math.vec3(5.0, 0.0, 0.0), 0.5))
+    dynamics.create_sphere_shape(ids[0], &sdef, manifold.sphere(math.vec3(9.0, 0.0, 0.0), 0.5))
+    dynamics.create_sphere_shape(ids[1], &sdef, manifold.sphere(math.vec3(9.0, 0.0, 0.0), 0.5))
+    near_last = dynamics.create_sphere_shape(ids[1], &sdef, manifold.sphere(math.vec3(5.0, 0.0, 0.0), 0.5))
+    toi = physics_world.body_time_of_impact_mover(ids[0], math.vec3_zero(), standing, math.vec3(10.0, 0.0, 0.0), filter, identity_at(0.0, 0.0, 0.0), identity_at(0.0, 0.0, 0.0))
+    ensure("mover toi: the nearer, listed first", same_shape(toi.shape_id, near_first))
+    small("mover toi: its fraction (4.25 of 10)", toi.fraction - 0.425, 0.01)
+    toi = physics_world.body_time_of_impact_mover(ids[1], math.vec3_zero(), standing, math.vec3(10.0, 0.0, 0.0), filter, identity_at(0.0, 0.0, 0.0), identity_at(0.0, 0.0, 0.0))
+    ensure("mover toi: the nearer, listed last", same_shape(toi.shape_id, near_last))
+    dynamics.destroy_world(world_id)
+    hull.destroy_hull(half)
+    free(planes_block)
+    free(ids_block)
+}
+
+// --- the world queries ----------------------------------------------------------------------------------------------
+
+count_overlap(id: ShapeId, context: ptr) -> bool {
+    counter = context as int[]
+    counter[0] = counter[0] + 1
+    return true
+}
+
+count_and_clip(id: ShapeId, point: Vec3, normal: Vec3, fraction: float, material: long, triangle: int, child: int, context: ptr) -> float {
+    counter = context as int[]
+    counter[0] = counter[0] + 1
+    return 1.0
+}
+
+count_planes(id: ShapeId, planes: PlaneResult[], count: int, context: ptr) -> bool {
+    counter = context as int[]
+    counter[0] = counter[0] + count
+    return true
+}
+
+test_world_queries() {
+    wdef = dynamics.default_world_def()
+    world_id = dynamics.create_world(&wdef)
+    sdef = dynamics.default_shape_def()
+    filter = shape.default_query_filter()
+    // Three spheres along x at 5, 10 and 15, on two bodies (a static and a dynamic one).
+    adef = dynamics.default_body_def()
+    a = dynamics.create_body(world_id, &adef)
+    first = dynamics.create_sphere_shape(a, &sdef, manifold.sphere(math.vec3(5.0, 0.0, 0.0), 1.0))
+    dynamics.create_sphere_shape(a, &sdef, manifold.sphere(math.vec3(15.0, 0.0, 0.0), 1.0))
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.position = math.vec3(10.0, 0.0, 0.0)
+    b = dynamics.create_body(world_id, &bdef)
+    sdef.density = 1.0
+    dynamics.create_sphere_shape(b, &sdef, manifold.sphere(math.vec3_zero(), 1.0))
+    counter_block = calloc(1, 4)
+    counter = counter_block as int[]
+    // The closest ray hit is the first sphere.
+    ray = physics_world.cast_ray_closest(world_id, math.vec3_zero(), math.vec3(20.0, 0.0, 0.0), filter)
+    ensure("world ray: the first sphere", ray.hit && same_shape(ray.shape_id, first))
+    small("world ray: fraction 0.2", ray.fraction - 0.2, 0.00001)
+    small("world ray: point at 4", ray.point.x - 4.0, 0.0001)
+    ensure("world ray: visited the trees", ray.node_visits > 0)
+    ray = physics_world.cast_ray_closest(world_id, math.vec3(0.0, 5.0, 0.0), math.vec3(20.0, 0.0, 0.0), filter)
+    ensure("world ray: miss", ray.hit == false)
+    // Every hit along the ray with a callback that keeps going: three.
+    counter[0] = 0
+    physics_world.cast_ray(world_id, math.vec3_zero(), math.vec3(20.0, 0.0, 0.0), filter, count_and_clip, counter_block)
+    ensure("world ray: all three (${counter[0]})", counter[0] == 3)
+    // Overlaps by box and by proxy.
+    counter[0] = 0
+    physics_world.overlap_aabb(world_id, AABB { lower: math.vec3(3.0, 0.0 - 1.0, 0.0 - 1.0), upper: math.vec3(11.5, 1.0, 1.0) }, filter, count_overlap, counter_block)
+    ensure("world overlap box: two (${counter[0]})", counter[0] == 2)
+    counter[0] = 0
+    physics_world.overlap_shape(world_id, math.vec3(10.0, 0.0, 0.0), point_proxy(math.vec3_zero(), 1.5), filter, count_overlap, counter_block)
+    ensure("world overlap shape: the middle one (${counter[0]})", counter[0] == 1)
+    counter[0] = 0
+    physics_world.overlap_shape(world_id, math.vec3(10.0, 5.0, 0.0), point_proxy(math.vec3_zero(), 1.5), filter, count_overlap, counter_block)
+    ensure("world overlap shape: none above", counter[0] == 0)
+    // A shape cast along the row: three hits when nothing clips.
+    counter[0] = 0
+    physics_world.cast_shape(world_id, math.vec3_zero(), point_proxy(math.vec3_zero(), 0.25), math.vec3(20.0, 0.0, 0.0), filter, count_and_clip, counter_block)
+    ensure("world shape cast: all three (${counter[0]})", counter[0] == 3)
+    // The mover's cast stops before the first sphere; its planes near the first.
+    standing = Capsule { center1: math.vec3_zero(), center2: math.vec3(0.0, 1.0, 0.0), radius: 0.25 }
+    fraction = physics_world.cast_mover(world_id, math.vec3_zero(), standing, math.vec3(10.0, 0.0, 0.0), filter, false, count_overlap, null)
+    ensure("world mover cast: stops at the first sphere (${fraction})", fraction > 0.35 && fraction < 0.4)
+    counter[0] = 0
+    physics_world.collide_mover(world_id, math.vec3(4.0, 0.0, 0.0), Capsule { center1: math.vec3(0.0, 0.0 - 0.5, 0.0), center2: math.vec3(0.0, 0.5, 0.0), radius: 0.3 }, filter, count_planes, counter_block)
+    ensure("world mover planes: the first sphere's (${counter[0]})", counter[0] == 1)
+    // The bounds and counters.
+    bounds = physics_world.get_bounds(world_id)
+    ensure("world bounds: spans the row", bounds.lower.x < 4.1 && bounds.upper.x > 15.9)
+    counters = physics_world.get_counters(world_id)
+    ensure("world counters", counters.body_count == 2 && counters.shape_count == 3 && counters.contact_count == 0)
+    // Settings round trip.
+    physics_world.set_gravity(world_id, math.vec3(0.0, 0.0 - 5.0, 0.0))
+    ensure("gravity set", physics_world.get_gravity(world_id).y == 0.0 - 5.0)
+    physics_world.set_hit_event_threshold(world_id, 2.0)
+    ensure("hit threshold set", physics_world.get_hit_event_threshold(world_id) == 2.0)
+    physics_world.enable_sleeping(world_id, false)
+    ensure("sleeping off", physics_world.is_sleeping_enabled(world_id) == false)
+    physics_world.enable_sleeping(world_id, true)
+    ensure("sleeping on", physics_world.is_sleeping_enabled(world_id))
+    ensure("one awake body", physics_world.get_awake_body_count(world_id) == 1)
+    free(counter_block)
+    dynamics.destroy_world(world_id)
+}
+
+// --- determinism ----------------------------------------------------------------------------------------------------
+
+// A wave pile of cubes: the step every body fell asleep on, and a hash of the resting positions.
+wave_pile(cube: *HullData) -> long {
+    wdef = dynamics.default_world_def()
+    world_id = dynamics.create_world(&wdef)
+    gdef = dynamics.default_body_def()
+    gdef.position = math.vec3(0.0, 0.0 - 0.5, 0.0)
+    ground = dynamics.create_body(world_id, &gdef)
+    slab = hull.make_box_hull(20.0, 0.5, 20.0)
+    gsdef = dynamics.default_shape_def()
+    dynamics.create_hull_shape(ground, &gsdef, slab)
+    sdef = dynamics.default_shape_def()
+    sdef.density = 1.0
+    count = 60
+    i = 0
+    while i < count {
+        bdef = dynamics.default_body_def()
+        bdef.kind = dynamics.BODY_DYNAMIC
+        x = (i % 6) as float * 1.1 - 2.75
+        z = ((i / 6) % 5) as float * 1.1 - 2.2
+        y = 1.0 + (i / 30) as float * 1.2 + 0.3 * math.sin_approx(0.7 * (i as float))
+        bdef.position = math.vec3(x, y, z)
+        id = dynamics.create_body(world_id, &bdef)
+        dynamics.create_hull_shape(id, &sdef, cube)
+        i = i + 1
+    }
+    sleep_step = 0
+    step = 0
+    while step < 600 && sleep_step == 0 {
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        step = step + 1
+        if physics_world.get_awake_body_count(world_id) == 0 { sleep_step = step }
+    }
+    // The checksum: the positions summed with weights (no integer overflow, exact to compare).
+    hash = 0.0
+    i = 1
+    while i <= count {
+        p = dynamics.body_get_position(dynamics.make_body_id(dynamics.get_world(world_id.index1 - 1), i))
+        hash = hash + p.x * 1.0 + p.y * 0.001 + p.z * 1000.0
+        i = i + 1
+    }
+    dynamics.destroy_world(world_id)
+    hull.destroy_hull(slab)
+    println("physics_world: wave pile slept at step ${sleep_step}, checksum ${hash}")
+    g_sleep_step = sleep_step
+    return hash
+}
+
+var g_sleep_step = 0
+
+test_determinism() {
+    cube = hull.make_box_hull(0.5, 0.5, 0.5)
+    first = wave_pile(cube)
+    first_step = g_sleep_step
+    second = wave_pile(cube)
+    ensure("determinism: the wave pile repeats", first == second && g_sleep_step == first_step)
+    ensure("determinism: it slept", first_step > 0)
+    hull.destroy_hull(cube)
+}
+
+main() {
+    before = core.alloc_count()
+    test_hello_world()
+    test_contact_events()
+    test_hit_events()
+    test_continuous_move_event()
+    test_sensor_stepped()
+    test_explosion()
+    test_body_queries()
+    test_world_queries()
+    test_determinism()
+    // The scratch stays allocated: the worlds, the masses, the contact, sphere, sweep and query buffers, the solvers' dummies.
+    ensure("every other counted allocation was freed (${core.alloc_count() - before})", core.alloc_count() == before + 25)
+    println("physics_world: ${checks} checks")
+    if failures == 0 {
+        println("physics_world: all checks passed")
+    } else {
+        println("physics_world: ${failures} failure(s)")
+        exit(1)
+    }
+}

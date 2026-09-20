@@ -1,0 +1,860 @@
+// aephysics.physics_world -- the world's face: the step (the pairs, the
+// narrow phase, the Soft Step solve, the sensors, the events cleared
+// and swapped), the events read back, the settings, the counters, the
+// queries against every shape in the world (overlap of a box or a
+// proxy, the character mover's planes, ray, shape and mover casts, the
+// closest ray hit) and against one body at a transform of the caller's
+// choosing, and explosions.
+//
+// This is Box3D's physics_world.c and the query half of body.c (Erin
+// Catto, MIT), the reference this engine is measured against, on one
+// thread and without its recording hooks. Names are the reference's
+// without its prefix, in snake case: b3World_Step is step,
+// b3World_CastRayClosest is cast_ray_closest, b3Body_CastRay is
+// body_cast_ray. Every query re-centres on its origin so the collision
+// math keeps its precision far from the world's origin, as the
+// reference does.
+import std.string
+import aephysics.math
+import aephysics.core
+import aephysics.dynamic_tree
+import aephysics.distance
+import aephysics.mesh
+import aephysics.shape
+import aephysics.broad_phase
+import aephysics.dynamics
+import aephysics.contact_solver
+import aephysics.joint_solver
+import aephysics.solver
+
+exports (
+    RayResult, BodyCastResult, BodyPlaneResult, BodyTOIResult, ExplosionDef, Counters,
+    step, world_of, is_valid,
+    body_event_count, body_event, contact_begin_event_count, contact_begin_event, contact_end_event_count, contact_end_event,
+    contact_hit_event_count, contact_hit_event, sensor_begin_event_count, sensor_begin_event, sensor_end_event_count, sensor_end_event,
+    joint_event_count, joint_event,
+    enable_sleeping, is_sleeping_enabled, enable_warm_starting, is_warm_starting_enabled, enable_continuous, is_continuous_enabled,
+    enable_speculative, set_restitution_threshold, get_restitution_threshold, set_hit_event_threshold, get_hit_event_threshold,
+    set_contact_tuning, set_contact_recycle_distance, get_contact_recycle_distance, set_maximum_linear_speed, get_maximum_linear_speed,
+    set_gravity, get_gravity, set_user_data, get_user_data, set_friction_callback, set_restitution_callback,
+    set_custom_filter_callback, set_pre_solve_callback, get_awake_body_count, get_counters, get_bounds, rebuild_static_tree,
+    overlap_aabb, overlap_shape, collide_mover, cast_ray, cast_ray_closest, cast_shape, cast_mover,
+    body_cast_ray, body_cast_shape, body_overlap_shape, body_collide_mover, body_time_of_impact_mover,
+    default_explosion_def, explode
+)
+
+const NULL_INDEX = 0 - 1
+const BODY_KIND_COUNT = 3
+
+// The closest hit of a ray (b3RayResult).
+struct RayResult {
+    shape_id: ShapeId
+    point: Vec3
+    normal: Vec3
+    user_material_id: long
+    fraction: float
+    triangle_index: int
+    child_index: int
+    node_visits: int
+    leaf_visits: int
+    hit: bool
+}
+
+// A cast against one body's shapes (b3BodyCastResult).
+struct BodyCastResult {
+    shape_id: ShapeId
+    point: Vec3
+    normal: Vec3
+    fraction: float
+    triangle_index: int
+    user_material_id: long
+    iterations: int
+    hit: bool
+}
+
+struct BodyPlaneResult {
+    shape_id: ShapeId
+    result: PlaneResult
+}
+
+// The mover's time of impact against one body (b3BodyTOIResult).
+struct BodyTOIResult {
+    point: Vec3
+    normal: Vec3
+    fraction: float
+    shape_id: ShapeId
+}
+
+struct ExplosionDef {
+    mask_bits: long
+    position: Vec3
+    radius: float
+    falloff: float
+    impulse_per_area: float
+}
+
+struct Counters {
+    body_count: int
+    shape_count: int
+    contact_count: int
+    joint_count: int
+    island_count: int
+    stack_used: int
+    static_tree_height: int
+    tree_height: int
+    sat_call_count: int
+    sat_cache_hit_count: int
+    awake_contact_count: int
+    recycled_contact_count: int
+}
+
+// The world of an id, or null when the id is stale or the world is locked.
+world_of(id: WorldId) -> *World {
+    if dynamics.world_is_valid(id) == false { return null }
+    w = dynamics.get_world(id.index1 - 1)
+    if w.locked { return null }
+    return w
+}
+
+is_valid(id: WorldId) -> bool { return dynamics.world_is_valid(id) }
+
+// --- the step ----------------------------------------------------------------------------------------------------
+
+// One step of the world (b3World_Step): the events cleared, the broad
+// phase's new pairs made contacts, the step's context (the contact
+// hertz reduced for large steps, the static contacts twice as stiff
+// and half as damped), the narrow phase, the solve when time passes,
+// the sensors, the stack grown to the step's peak, the end events
+// swapped. A zero time step collides without solving.
+step(id: WorldId, time_step: float, sub_step_count: int) {
+    w = world_of(id)
+    if w == null { return }
+    w.locked = true
+    core.buffer_clear(&w.body_move_events)
+    core.buffer_clear(&w.sensor_begin_events)
+    core.buffer_clear(&w.contact_begin_events)
+    core.buffer_clear(&w.contact_hit_events)
+    core.buffer_clear(&w.joint_events)
+    dynamics.update_pairs(w)
+    ctx = contact_solver.default_step_context(w)
+    ctx.dt = time_step
+    ctx.sub_step_count = math.max_int(1, sub_step_count)
+    if time_step > 0.0 {
+        ctx.inv_dt = 1.0 / time_step
+        ctx.h = time_step / (ctx.sub_step_count as float)
+        ctx.inv_h = (ctx.sub_step_count as float) * ctx.inv_dt
+    } else {
+        ctx.inv_dt = 0.0
+        ctx.h = 0.0
+        ctx.inv_h = 0.0
+    }
+    w.inv_h = ctx.inv_h
+    w.inv_dt = ctx.inv_dt
+    contact_hertz = math.min_float(w.contact_hertz, 0.125 * ctx.inv_h)
+    ctx.contact_softness = dynamics.make_soft(contact_hertz, w.contact_damping_ratio, ctx.h)
+    ctx.static_softness = dynamics.make_soft(2.0 * contact_hertz, 0.5 * w.contact_damping_ratio, ctx.h)
+    ctx.restitution_threshold = w.restitution_threshold
+    ctx.max_linear_velocity = w.max_linear_speed
+    ctx.enable_warm_starting = w.enable_warm_starting
+    dynamics.collide(w)
+    if time_step > 0.0 { solver.solve(w, &ctx) }
+    dynamics.overlap_sensors(w)
+    core.stack_grow(&w.stack)
+    dynamics.swap_end_events(w)
+    w.locked = false
+}
+
+// --- events ----------------------------------------------------------------------------------------------------------
+
+// The end events are read from the buffer the last step filled (it swapped to the other one).
+previous_end_index(w: *World) -> int { return 1 - w.end_event_index }
+
+body_event_count(id: WorldId) -> int {
+    w = world_of(id)
+    if w == null { return 0 }
+    return w.body_move_events.count
+}
+body_event(id: WorldId, index: int) -> BodyMoveEvent { return dynamics.world_body_move_event(dynamics.get_world(id.index1 - 1), index) }
+contact_begin_event_count(id: WorldId) -> int {
+    w = world_of(id)
+    if w == null { return 0 }
+    return w.contact_begin_events.count
+}
+contact_begin_event(id: WorldId, index: int) -> ContactBeginTouchEvent { return dynamics.world_contact_begin_event(dynamics.get_world(id.index1 - 1), index) }
+contact_end_event_count(id: WorldId) -> int {
+    w = world_of(id)
+    if w == null { return 0 }
+    if previous_end_index(w) == 0 { return w.contact_end_events0.count }
+    return w.contact_end_events1.count
+}
+contact_end_event(id: WorldId, index: int) -> ContactEndTouchEvent {
+    w = dynamics.get_world(id.index1 - 1)
+    events = w.contact_end_events0.data as ContactEndTouchEvent[]
+    if previous_end_index(w) == 1 { events = w.contact_end_events1.data as ContactEndTouchEvent[] }
+    return events[index]
+}
+contact_hit_event_count(id: WorldId) -> int {
+    w = world_of(id)
+    if w == null { return 0 }
+    return w.contact_hit_events.count
+}
+contact_hit_event(id: WorldId, index: int) -> ContactHitEvent { return dynamics.world_contact_hit_event(dynamics.get_world(id.index1 - 1), index) }
+sensor_begin_event_count(id: WorldId) -> int {
+    w = world_of(id)
+    if w == null { return 0 }
+    return w.sensor_begin_events.count
+}
+sensor_begin_event(id: WorldId, index: int) -> SensorBeginTouchEvent { return dynamics.world_sensor_begin_event(dynamics.get_world(id.index1 - 1), index) }
+sensor_end_event_count(id: WorldId) -> int {
+    w = world_of(id)
+    if w == null { return 0 }
+    if previous_end_index(w) == 0 { return w.sensor_end_events0.count }
+    return w.sensor_end_events1.count
+}
+sensor_end_event(id: WorldId, index: int) -> SensorEndTouchEvent {
+    w = dynamics.get_world(id.index1 - 1)
+    events = w.sensor_end_events0.data as SensorEndTouchEvent[]
+    if previous_end_index(w) == 1 { events = w.sensor_end_events1.data as SensorEndTouchEvent[] }
+    return events[index]
+}
+joint_event_count(id: WorldId) -> int {
+    w = world_of(id)
+    if w == null { return 0 }
+    return w.joint_events.count
+}
+joint_event(id: WorldId, index: int) -> JointEvent { return dynamics.world_joint_event(dynamics.get_world(id.index1 - 1), index) }
+
+// --- settings ---------------------------------------------------------------------------------------------------------
+
+// Sleeping off wakes every sleeping set (the sets above the awake one, from the last down).
+enable_sleeping(id: WorldId, flag: bool) {
+    w = world_of(id)
+    if w == null { return }
+    if flag == w.enable_sleep { return }
+    w.enable_sleep = flag
+    if flag == false {
+        i = w.solver_sets.count - 1
+        while i >= dynamics.FIRST_SLEEPING_SET {
+            set = dynamics.get_solver_set(w, i)
+            if set.set_index != NULL_INDEX && set.body_sims.count > 0 { dynamics.wake_solver_set(w, i) }
+            i = i - 1
+        }
+    }
+}
+is_sleeping_enabled(id: WorldId) -> bool { return dynamics.get_world(id.index1 - 1).enable_sleep }
+enable_warm_starting(id: WorldId, flag: bool) {
+    w = world_of(id)
+    if w != null { w.enable_warm_starting = flag }
+}
+is_warm_starting_enabled(id: WorldId) -> bool { return dynamics.get_world(id.index1 - 1).enable_warm_starting }
+enable_continuous(id: WorldId, flag: bool) {
+    w = world_of(id)
+    if w != null { w.enable_continuous = flag }
+}
+is_continuous_enabled(id: WorldId) -> bool { return dynamics.get_world(id.index1 - 1).enable_continuous }
+enable_speculative(id: WorldId, flag: bool) {
+    w = world_of(id)
+    if w != null { w.enable_speculative = flag }
+}
+set_restitution_threshold(id: WorldId, value: float) {
+    w = world_of(id)
+    if w != null { w.restitution_threshold = math.clamp_float(value, 0.0, math.MAX_FLOAT) }
+}
+get_restitution_threshold(id: WorldId) -> float { return dynamics.get_world(id.index1 - 1).restitution_threshold }
+set_hit_event_threshold(id: WorldId, value: float) {
+    w = world_of(id)
+    if w != null { w.hit_event_threshold = math.clamp_float(value, 0.0, math.MAX_FLOAT) }
+}
+get_hit_event_threshold(id: WorldId) -> float { return dynamics.get_world(id.index1 - 1).hit_event_threshold }
+set_contact_tuning(id: WorldId, hertz: float, damping_ratio: float, contact_speed: float) {
+    w = world_of(id)
+    if w == null { return }
+    w.contact_hertz = math.clamp_float(hertz, 0.0, math.MAX_FLOAT)
+    w.contact_damping_ratio = math.clamp_float(damping_ratio, 0.0, math.MAX_FLOAT)
+    w.contact_speed = math.clamp_float(contact_speed, 0.0, math.MAX_FLOAT)
+}
+set_contact_recycle_distance(id: WorldId, distance: float) {
+    w = world_of(id)
+    if w != null { w.contact_recycle_distance = math.clamp_float(distance, 0.0, math.MAX_FLOAT) }
+}
+get_contact_recycle_distance(id: WorldId) -> float { return dynamics.get_world(id.index1 - 1).contact_recycle_distance }
+set_maximum_linear_speed(id: WorldId, speed: float) {
+    w = world_of(id)
+    if w != null { w.max_linear_speed = speed }
+}
+get_maximum_linear_speed(id: WorldId) -> float { return dynamics.get_world(id.index1 - 1).max_linear_speed }
+set_gravity(id: WorldId, gravity: Vec3) {
+    w = world_of(id)
+    if w != null { w.gravity = gravity }
+}
+get_gravity(id: WorldId) -> Vec3 { return dynamics.get_world(id.index1 - 1).gravity }
+set_user_data(id: WorldId, data: ptr) {
+    w = world_of(id)
+    if w != null { w.user_data = data }
+}
+get_user_data(id: WorldId) -> ptr { return dynamics.get_world(id.index1 - 1).user_data }
+set_friction_callback(id: WorldId, callback_fn: fn(float, long, float, long) -> float) {
+    w = world_of(id)
+    if w != null { w.friction_callback = callback_fn }
+}
+set_restitution_callback(id: WorldId, callback_fn: fn(float, long, float, long) -> float) {
+    w = world_of(id)
+    if w != null { w.restitution_callback = callback_fn }
+}
+set_custom_filter_callback(id: WorldId, callback_fn: fn(ShapeId, ShapeId, ptr) -> bool, context: ptr) {
+    w = world_of(id)
+    if w != null { dynamics.world_set_custom_filter(w, callback_fn, context) }
+}
+set_pre_solve_callback(id: WorldId, callback_fn: fn(ShapeId, ShapeId, Vec3, Vec3, ptr) -> bool, context: ptr) {
+    w = world_of(id)
+    if w != null { dynamics.world_set_pre_solve(w, callback_fn, context) }
+}
+get_awake_body_count(id: WorldId) -> int {
+    w = world_of(id)
+    if w == null { return 0 }
+    return dynamics.world_awake_body_count(w)
+}
+
+get_counters(id: WorldId) -> Counters {
+    w = dynamics.get_world(id.index1 - 1)
+    bodies = dynamics.world_body_count(w)
+    shapes = dynamics.world_shape_count(w)
+    contacts = dynamics.world_contact_count(w)
+    joints = dynamics.world_joint_count(w)
+    islands = dynamics.world_island_count(w)
+    stack_used = core.stack_max_allocation(&w.stack)
+    static_height = dynamic_tree.tree_get_height(broad_phase.broad_phase_tree(&w.broad_phase, dynamics.BODY_STATIC))
+    dynamic_height = dynamic_tree.tree_get_height(broad_phase.broad_phase_tree(&w.broad_phase, dynamics.BODY_DYNAMIC))
+    awake_contacts = dynamics.get_solver_set(w, dynamics.AWAKE_SET).contact_indices.count
+    return Counters { body_count: bodies, shape_count: shapes, contact_count: contacts, joint_count: joints, island_count: islands,
+                      stack_used: stack_used, static_tree_height: static_height, tree_height: dynamic_height,
+                      sat_call_count: w.sat_call_count, sat_cache_hit_count: w.sat_cache_hit_count,
+                      awake_contact_count: awake_contacts, recycled_contact_count: w.recycled_contact_count }
+}
+
+// The bounds of everything in the trees.
+get_bounds(id: WorldId) -> AABB {
+    w = dynamics.get_world(id.index1 - 1)
+    bounds = math.aabb_empty()
+    i = 0
+    while i < BODY_KIND_COUNT {
+        tree = broad_phase.broad_phase_tree(&w.broad_phase, i)
+        if dynamic_tree.tree_get_proxy_count(tree) > 0 { bounds = math.aabb_union(bounds, dynamic_tree.tree_get_root_bounds(tree)) }
+        i = i + 1
+    }
+    return bounds
+}
+
+rebuild_static_tree(id: WorldId) {
+    w = world_of(id)
+    if w != null { dynamic_tree.tree_rebuild(broad_phase.broad_phase_tree(&w.broad_phase, dynamics.BODY_STATIC), true) }
+}
+
+// --- the world queries ------------------------------------------------------------------------------------------------
+
+// The user material id of a shape's material by index.
+material_user_id(s: *WorldShape, material_index: int) -> long {
+    index = math.clamp_int(material_index, 0, s.material_count - 1)
+    if s.materials == null { return s.material.user_material_id }
+    materials = s.materials as SurfaceMaterial[]
+    return materials[index].user_material_id
+}
+
+// A body's transform relative to a query origin.
+relative_transform(w: *World, body_id: int, origin: Vec3) -> Transform {
+    t = dynamics.get_body_transform(w, body_id)
+    return Transform { p: math.sub(t.p, origin), q: t.q }
+}
+
+struct WorldQueryContext {
+    w: *World
+    visitor: fn(ShapeId, ptr) -> bool
+    filter: QueryFilter
+    proxy: ShapeProxy
+    origin: Vec3
+    user_context: ptr
+}
+
+aabb_query_visitor(proxy_id: int, user_data: long, context: ptr) -> bool {
+    qc = context as *WorldQueryContext
+    w = qc.w
+    s = dynamics.world_shape_at(w, user_data as int)
+    if shape.should_query_collide(s.filter, qc.filter) == false { return true }
+    visitor = qc.visitor
+    return visitor(dynamics.make_shape_id(w, s), qc.user_context)
+}
+
+// Every shape whose fat bounds overlap the box, through the visitor
+// until it returns false; the tree visits made.
+overlap_aabb(id: WorldId, box: AABB, filter: QueryFilter, visitor: fn(ShapeId, ptr) -> bool, context: ptr) -> TreeStats {
+    stats = TreeStats { node_visits: 0, leaf_visits: 0 }
+    w = world_of(id)
+    if w == null { return stats }
+    qc = WorldQueryContext { w: w, visitor: visitor, filter: filter, proxy: distance.shape_proxy(null, 0, 0.0), origin: math.vec3_zero(), user_context: context }
+    i = 0
+    while i < BODY_KIND_COUNT {
+        result = dynamic_tree.tree_query(broad_phase.broad_phase_tree(&w.broad_phase, i), box, filter.mask_bits, false, aabb_query_visitor, (&qc) as ptr)
+        stats.node_visits = stats.node_visits + result.node_visits
+        stats.leaf_visits = stats.leaf_visits + result.leaf_visits
+        i = i + 1
+    }
+    return stats
+}
+
+shape_overlap_visitor(proxy_id: int, user_data: long, context: ptr) -> bool {
+    qc = context as *WorldQueryContext
+    w = qc.w
+    s = dynamics.world_shape_at(w, user_data as int)
+    if shape.should_query_collide(s.filter, qc.filter) == false { return true }
+    t = relative_transform(w, s.body_id, qc.origin)
+    if shape.overlap_shape(&s.geometry, t, qc.proxy) == false { return true }
+    visitor = qc.visitor
+    return visitor(dynamics.make_shape_id(w, s), qc.user_context)
+}
+
+// Every shape a convex proxy (given relative to the origin) overlaps.
+overlap_shape(id: WorldId, origin: Vec3, proxy: ShapeProxy, filter: QueryFilter, visitor: fn(ShapeId, ptr) -> bool, context: ptr) -> TreeStats {
+    stats = TreeStats { node_visits: 0, leaf_visits: 0 }
+    w = world_of(id)
+    if w == null { return stats }
+    box = math.offset_aabb(math.make_aabb(proxy.points as float[], proxy.count, proxy.radius), origin)
+    qc = WorldQueryContext { w: w, visitor: visitor, filter: filter, proxy: proxy, origin: origin, user_context: context }
+    i = 0
+    while i < BODY_KIND_COUNT {
+        result = dynamic_tree.tree_query(broad_phase.broad_phase_tree(&w.broad_phase, i), box, filter.mask_bits, false, shape_overlap_visitor, (&qc) as ptr)
+        stats.node_visits = stats.node_visits + result.node_visits
+        stats.leaf_visits = stats.leaf_visits + result.leaf_visits
+        i = i + 1
+    }
+    return stats
+}
+
+struct WorldMoverContext {
+    w: *World
+    visitor: fn(ShapeId, PlaneResult[], int, ptr) -> bool
+    filter: QueryFilter
+    mover: Capsule
+    origin: Vec3
+    user_context: ptr
+}
+
+const MOVER_PLANE_CAPACITY = 64
+var g_mover_planes: ptr = null   // PlaneResult[MOVER_PLANE_CAPACITY]
+
+mover_planes() -> PlaneResult[] {
+    if g_mover_planes == null { g_mover_planes = core.alloc(MOVER_PLANE_CAPACITY * sizeof(PlaneResult)) }
+    return g_mover_planes as PlaneResult[]
+}
+
+mover_collide_visitor(proxy_id: int, user_data: long, context: ptr) -> bool {
+    mc = context as *WorldMoverContext
+    w = mc.w
+    s = dynamics.world_shape_at(w, user_data as int)
+    if shape.should_query_collide(s.filter, mc.filter) == false { return true }
+    t = relative_transform(w, s.body_id, mc.origin)
+    planes = mover_planes()
+    count = shape.collide_mover(planes, MOVER_PLANE_CAPACITY, &s.geometry, t, mc.mover)
+    if count > 0 {
+        visitor = mc.visitor
+        return visitor(dynamics.make_shape_id(w, s), planes, count, mc.user_context)
+    }
+    return true
+}
+
+// The planes of every shape the character mover's capsule (relative to
+// the origin) touches, a shape's planes at a time (up to 64), through
+// the visitor until it returns false.
+collide_mover(id: WorldId, origin: Vec3, mover: Capsule, filter: QueryFilter, visitor: fn(ShapeId, PlaneResult[], int, ptr) -> bool, context: ptr) {
+    w = world_of(id)
+    if w == null { return }
+    r = math.vec3(mover.radius, mover.radius, mover.radius)
+    box = math.offset_aabb(AABB { lower: math.sub(math.min_vec3(mover.center1, mover.center2), r), upper: math.add(math.max_vec3(mover.center1, mover.center2), r) }, origin)
+    mc = WorldMoverContext { w: w, visitor: visitor, filter: filter, mover: mover, origin: origin, user_context: context }
+    i = 0
+    while i < BODY_KIND_COUNT {
+        dynamic_tree.tree_query(broad_phase.broad_phase_tree(&w.broad_phase, i), box, filter.mask_bits, false, mover_collide_visitor, (&mc) as ptr)
+        i = i + 1
+    }
+}
+
+struct WorldCastContext {
+    w: *World
+    visitor: fn(ShapeId, Vec3, Vec3, float, long, int, int, ptr) -> float
+    filter: QueryFilter
+    fraction: float
+    origin: Vec3
+    proxy: ShapeProxy
+    translation: Vec3
+    can_encroach: bool
+    user_context: ptr
+}
+
+ray_cast_visitor(input: *RayCastInput, proxy_id: int, user_data: long, context: ptr) -> float {
+    cc = context as *WorldCastContext
+    w = cc.w
+    s = dynamics.world_shape_at(w, user_data as int)
+    if shape.should_query_collide(s.filter, cc.filter) == false { return input.max_fraction }
+    t = relative_transform(w, s.body_id, cc.origin)
+    output = shape.ray_cast_shape(&s.geometry, t, math.vec3_zero(), input.translation, input.max_fraction)
+    if output.hit {
+        visitor = cc.visitor
+        fraction = visitor(dynamics.make_shape_id(w, s), math.add(cc.origin, output.point), output.normal, output.fraction,
+                           material_user_id(s, output.material_index), output.triangle_index, output.child_index, cc.user_context)
+        // A visitor returning -1 skips the shape.
+        if 0.0 <= fraction && fraction <= 1.0 { cc.fraction = fraction }
+        return fraction
+    }
+    return input.max_fraction
+}
+
+// A ray from the origin along the translation: each hit through the
+// visitor, whose return clips the ray (0 stops it, 1 keeps everything,
+// -1 ignores that shape); the tree visits made.
+cast_ray(id: WorldId, origin: Vec3, translation: Vec3, filter: QueryFilter,
+         visitor: fn(ShapeId, Vec3, Vec3, float, long, int, int, ptr) -> float, context: ptr) -> TreeStats {
+    stats = TreeStats { node_visits: 0, leaf_visits: 0 }
+    w = world_of(id)
+    if w == null { return stats }
+    input = RayCastInput { origin: origin, translation: translation, max_fraction: 1.0 }
+    cc = WorldCastContext { w: w, visitor: visitor, filter: filter, fraction: 1.0, origin: origin, proxy: distance.shape_proxy(null, 0, 0.0),
+                       translation: translation, can_encroach: false, user_context: context }
+    i = 0
+    while i < BODY_KIND_COUNT {
+        result = dynamic_tree.tree_ray_cast(broad_phase.broad_phase_tree(&w.broad_phase, i), &input, filter.mask_bits, false, ray_cast_visitor, (&cc) as ptr)
+        stats.node_visits = stats.node_visits + result.node_visits
+        stats.leaf_visits = stats.leaf_visits + result.leaf_visits
+        if cc.fraction == 0.0 { return stats }
+        input.max_fraction = cc.fraction
+        i = i + 1
+    }
+    return stats
+}
+
+closest_ray_visitor(shape_id: ShapeId, point: Vec3, normal: Vec3, fraction: float, user_material_id: long, triangle_index: int, child_index: int, context: ptr) -> float {
+    // An initial overlap is ignored.
+    if fraction == 0.0 { return 0.0 - 1.0 }
+    result = context as *RayResult
+    result.shape_id = shape_id
+    result.point = point
+    result.normal = normal
+    result.fraction = fraction
+    result.user_material_id = user_material_id
+    result.triangle_index = triangle_index
+    result.child_index = child_index
+    result.hit = true
+    return fraction
+}
+
+// The closest hit of a ray, the common query of games.
+cast_ray_closest(id: WorldId, origin: Vec3, translation: Vec3, filter: QueryFilter) -> RayResult {
+    result = RayResult { shape_id: dynamics.null_shape_id(), point: math.vec3_zero(), normal: math.vec3_zero(), user_material_id: 0 as long,
+                         fraction: 0.0, triangle_index: 0, child_index: 0, node_visits: 0, leaf_visits: 0, hit: false }
+    w = world_of(id)
+    if w == null { return result }
+    input = RayCastInput { origin: origin, translation: translation, max_fraction: 1.0 }
+    cc = WorldCastContext { w: w, visitor: closest_ray_visitor, filter: filter, fraction: 1.0, origin: origin, proxy: distance.shape_proxy(null, 0, 0.0),
+                       translation: translation, can_encroach: false, user_context: (&result) as ptr }
+    i = 0
+    while i < BODY_KIND_COUNT {
+        stats = dynamic_tree.tree_ray_cast(broad_phase.broad_phase_tree(&w.broad_phase, i), &input, filter.mask_bits, false, ray_cast_visitor, (&cc) as ptr)
+        result.node_visits = result.node_visits + stats.node_visits
+        result.leaf_visits = result.leaf_visits + stats.leaf_visits
+        if cc.fraction == 0.0 { return result }
+        input.max_fraction = cc.fraction
+        i = i + 1
+    }
+    return result
+}
+
+shape_cast_visitor(input: *BoxCastInput, proxy_id: int, user_data: long, context: ptr) -> float {
+    cc = context as *WorldCastContext
+    w = cc.w
+    s = dynamics.world_shape_at(w, user_data as int)
+    if shape.should_query_collide(s.filter, cc.filter) == false { return input.max_fraction }
+    t = relative_transform(w, s.body_id, cc.origin)
+    output = shape.shape_cast_shape(&s.geometry, t, cc.proxy, cc.translation, input.max_fraction, cc.can_encroach)
+    if output.hit {
+        visitor = cc.visitor
+        fraction = visitor(dynamics.make_shape_id(w, s), math.add(cc.origin, output.point), output.normal, output.fraction,
+                           material_user_id(s, output.material_index), output.triangle_index, output.child_index, cc.user_context)
+        if 0.0 <= fraction && fraction <= 1.0 { cc.fraction = fraction }
+        return fraction
+    }
+    return input.max_fraction
+}
+
+// A convex proxy (relative to the origin) swept along the translation,
+// each hit through the visitor as the ray cast's.
+cast_shape(id: WorldId, origin: Vec3, proxy: ShapeProxy, translation: Vec3, filter: QueryFilter,
+           visitor: fn(ShapeId, Vec3, Vec3, float, long, int, int, ptr) -> float, context: ptr) -> TreeStats {
+    stats = TreeStats { node_visits: 0, leaf_visits: 0 }
+    w = world_of(id)
+    if w == null { return stats }
+    local_box = math.make_aabb(proxy.points as float[], proxy.count, proxy.radius)
+    input = BoxCastInput { box: math.offset_aabb(local_box, origin), translation: translation, max_fraction: 1.0 }
+    cc = WorldCastContext { w: w, visitor: visitor, filter: filter, fraction: 1.0, origin: origin, proxy: proxy, translation: translation,
+                       can_encroach: false, user_context: context }
+    i = 0
+    while i < BODY_KIND_COUNT {
+        result = dynamic_tree.tree_box_cast(broad_phase.broad_phase_tree(&w.broad_phase, i), &input, filter.mask_bits, false, shape_cast_visitor, (&cc) as ptr)
+        stats.node_visits = stats.node_visits + result.node_visits
+        stats.leaf_visits = stats.leaf_visits + result.leaf_visits
+        if cc.fraction == 0.0 { return stats }
+        input.max_fraction = cc.fraction
+        i = i + 1
+    }
+    return stats
+}
+
+struct WorldMoverCastContext {
+    w: *World
+    filter_fn: fn(ShapeId, ptr) -> bool
+    has_filter: bool
+    filter: QueryFilter
+    fraction: float
+    origin: Vec3
+    proxy: ShapeProxy
+    translation: Vec3
+    can_encroach: bool
+    user_context: ptr
+}
+
+mover_cast_visitor(input: *BoxCastInput, proxy_id: int, user_data: long, context: ptr) -> float {
+    mc = context as *WorldMoverCastContext
+    w = mc.w
+    s = dynamics.world_shape_at(w, user_data as int)
+    if shape.should_query_collide(s.filter, mc.filter) == false { return mc.fraction }
+    if mc.has_filter {
+        filter_fn = mc.filter_fn
+        if filter_fn(dynamics.make_shape_id(w, s), mc.user_context) == false { return mc.fraction }
+    }
+    t = relative_transform(w, s.body_id, mc.origin)
+    output = shape.shape_cast_shape(&s.geometry, t, mc.proxy, mc.translation, input.max_fraction, mc.can_encroach)
+    // A shape already overlapped is ignored.
+    if output.fraction == 0.0 { return mc.fraction }
+    mc.fraction = output.fraction
+    return output.fraction
+}
+
+var g_mover_points: ptr = null   // Vec3[2]
+
+// The fraction of the translation the mover's capsule can travel before
+// touching a shape (its filter asked per shape when given).
+cast_mover(id: WorldId, origin: Vec3, mover: Capsule, translation: Vec3, filter: QueryFilter, has_filter: bool, filter_fn: fn(ShapeId, ptr) -> bool, context: ptr) -> float {
+    w = world_of(id)
+    if w == null { return 1.0 }
+    if g_mover_points == null { g_mover_points = core.alloc(2 * sizeof(Vec3)) }
+    points = g_mover_points as Vec3[]
+    points[0] = mover.center1
+    points[1] = mover.center2
+    mc = WorldMoverCastContext { w: w, filter_fn: filter_fn, has_filter: has_filter, filter: filter, fraction: 1.0, origin: origin,
+                            proxy: distance.shape_proxy(g_mover_points, 2, mover.radius), translation: translation,
+                            can_encroach: mover.radius > 0.0, user_context: context }
+    input = BoxCastInput { box: math.offset_aabb(math.make_aabb(g_mover_points as float[], 2, mover.radius), origin), translation: translation, max_fraction: 1.0 }
+    i = 0
+    while i < BODY_KIND_COUNT {
+        dynamic_tree.tree_box_cast(broad_phase.broad_phase_tree(&w.broad_phase, i), &input, filter.mask_bits, false, mover_cast_visitor, (&mc) as ptr)
+        if mc.fraction == 0.0 { return 0.0 }
+        input.max_fraction = mc.fraction
+        i = i + 1
+    }
+    return mc.fraction
+}
+
+// --- the body queries ------------------------------------------------------------------------------------------------
+
+no_body_hit() -> BodyCastResult {
+    return BodyCastResult { shape_id: dynamics.null_shape_id(), point: math.vec3_zero(), normal: math.vec3_zero(), fraction: 0.0,
+                            triangle_index: 0, user_material_id: 0 as long, iterations: 0, hit: false }
+}
+
+body_world(id: BodyId) -> *World {
+    if dynamics.body_is_valid(id) == false { return null }
+    w = dynamics.get_world(id.world0)
+    if w.locked { return null }
+    return w
+}
+
+// A ray against one body's shapes at a transform of the caller's (the
+// body's stored pose is not used), centred on the ray's origin.
+body_cast_ray(id: BodyId, origin: Vec3, translation: Vec3, filter: QueryFilter, max_fraction: float, body_transform: Transform) -> BodyCastResult {
+    result = no_body_hit()
+    w = body_world(id)
+    if w == null { return result }
+    body = dynamics.get_body_full_id(w, id)
+    t = Transform { p: math.sub(body_transform.p, origin), q: body_transform.q }
+    fraction_left = max_fraction
+    shape_id = body.head_shape_id
+    while shape_id != NULL_INDEX {
+        s = dynamics.world_shape_at(w, shape_id)
+        shape_id = s.next_shape_id
+        if shape.should_query_collide(s.filter, filter) == false { continue }
+        output = shape.ray_cast_shape(&s.geometry, t, math.vec3_zero(), translation, fraction_left)
+        if output.hit == false || output.fraction > fraction_left { continue }
+        result = BodyCastResult { shape_id: dynamics.make_shape_id(w, s), point: math.add(origin, output.point), normal: output.normal,
+                                  fraction: output.fraction, triangle_index: output.triangle_index,
+                                  user_material_id: material_user_id(s, output.material_index), iterations: output.iterations, hit: true }
+        fraction_left = output.fraction
+    }
+    return result
+}
+
+body_cast_shape(id: BodyId, origin: Vec3, proxy: ShapeProxy, translation: Vec3, filter: QueryFilter, max_fraction: float, can_encroach: bool, body_transform: Transform) -> BodyCastResult {
+    result = no_body_hit()
+    w = body_world(id)
+    if w == null { return result }
+    body = dynamics.get_body_full_id(w, id)
+    t = Transform { p: math.sub(body_transform.p, origin), q: body_transform.q }
+    fraction_left = max_fraction
+    shape_id = body.head_shape_id
+    while shape_id != NULL_INDEX {
+        s = dynamics.world_shape_at(w, shape_id)
+        shape_id = s.next_shape_id
+        if shape.should_query_collide(s.filter, filter) == false { continue }
+        output = shape.shape_cast_shape(&s.geometry, t, proxy, translation, fraction_left, can_encroach)
+        if output.hit == false || output.fraction > fraction_left { continue }
+        result = BodyCastResult { shape_id: dynamics.make_shape_id(w, s), point: math.add(origin, output.point), normal: output.normal,
+                                  fraction: output.fraction, triangle_index: output.triangle_index,
+                                  user_material_id: material_user_id(s, output.material_index), iterations: output.iterations, hit: true }
+        fraction_left = output.fraction
+    }
+    return result
+}
+
+body_overlap_shape(id: BodyId, origin: Vec3, proxy: ShapeProxy, filter: QueryFilter, body_transform: Transform) -> bool {
+    w = body_world(id)
+    if w == null { return false }
+    body = dynamics.get_body_full_id(w, id)
+    t = Transform { p: math.sub(body_transform.p, origin), q: body_transform.q }
+    shape_id = body.head_shape_id
+    while shape_id != NULL_INDEX {
+        s = dynamics.world_shape_at(w, shape_id)
+        shape_id = s.next_shape_id
+        if shape.should_query_collide(s.filter, filter) == false { continue }
+        if shape.overlap_shape(&s.geometry, t, proxy) { return true }
+    }
+    return false
+}
+
+// The mover's planes against one body's convex shapes (one plane each), up to the capacity.
+body_collide_mover(id: BodyId, planes: BodyPlaneResult[], capacity: int, origin: Vec3, mover: Capsule, filter: QueryFilter, body_transform: Transform) -> int {
+    w = body_world(id)
+    if w == null || capacity == 0 { return 0 }
+    body = dynamics.get_body_full_id(w, id)
+    t = Transform { p: math.sub(body_transform.p, origin), q: body_transform.q }
+    count = 0
+    one = mover_planes()
+    shape_id = body.head_shape_id
+    while shape_id != NULL_INDEX {
+        s = dynamics.world_shape_at(w, shape_id)
+        shape_id = s.next_shape_id
+        if shape.should_query_collide(s.filter, filter) == false { continue }
+        if shape.is_convex(s.geometry.kind) == false { continue }
+        if shape.collide_mover(one, 1, &s.geometry, t, mover) > 0 {
+            planes[count] = BodyPlaneResult { shape_id: dynamics.make_shape_id(w, s), result: one[0] }
+            count = count + 1
+            if count == capacity { return count }
+        }
+    }
+    return count
+}
+
+// The mover's time of impact against one body moving from one transform
+// to another (the body's stored pose is not used); shapes already
+// overlapped are ignored, as the continuous pass ignores them.
+body_time_of_impact_mover(id: BodyId, origin: Vec3, mover: Capsule, mover_translation: Vec3, filter: QueryFilter, transform1: Transform, transform2: Transform) -> BodyTOIResult {
+    result = BodyTOIResult { point: math.vec3_zero(), normal: math.vec3_zero(), fraction: 1.0, shape_id: dynamics.null_shape_id() }
+    w = body_world(id)
+    if w == null { return result }
+    if g_mover_points == null { g_mover_points = core.alloc(2 * sizeof(Vec3)) }
+    points = g_mover_points as Vec3[]
+    points[0] = mover.center1
+    points[1] = mover.center2
+    xf1 = Transform { p: math.sub(transform1.p, origin), q: transform1.q }
+    xf2 = Transform { p: math.sub(transform2.p, origin), q: transform2.q }
+    body = dynamics.get_body_full_id(w, id)
+    local_center = dynamics.get_body_sim(w, body).local_center
+    input = TOIInput { proxy_a: distance.shape_proxy(null, 0, 0.0), proxy_b: distance.shape_proxy(g_mover_points, 2, mover.radius),
+                       sweep_a: Sweep { local_center: local_center, c1: math.transform_point(xf1, local_center), c2: math.transform_point(xf2, local_center), q1: transform1.q, q2: transform2.q },
+                       sweep_b: Sweep { local_center: math.vec3_zero(), c1: math.vec3_zero(), c2: mover_translation, q1: math.quat_identity(), q2: math.quat_identity() },
+                       max_fraction: 1.0 }
+    shape_id = body.head_shape_id
+    while shape_id != NULL_INDEX {
+        s = dynamics.world_shape_at(w, shape_id)
+        shape_id = s.next_shape_id
+        if shape.should_query_collide(s.filter, filter) == false { continue }
+        if shape.is_convex(s.geometry.kind) == false { continue }
+        input.proxy_a = shape.make_shape_proxy(&s.geometry)
+        output = distance.time_of_impact(&input)
+        if 0.0 < output.fraction && output.fraction < result.fraction {
+            input.max_fraction = output.fraction
+            result.point = math.add(origin, output.point)
+            result.normal = output.normal
+            result.fraction = output.fraction
+            result.shape_id = dynamics.make_shape_id(w, s)
+        }
+    }
+    return result
+}
+
+// --- explosions ------------------------------------------------------------------------------------------------------
+
+default_explosion_def() -> ExplosionDef {
+    return ExplosionDef { mask_bits: dynamic_tree.default_mask_bits(), position: math.vec3_zero(), radius: 0.0, falloff: 0.0, impulse_per_area: 0.0 }
+}
+
+struct WorldExplosionContext {
+    w: *World
+    position: Vec3
+    radius: float
+    falloff: float
+    impulse_per_area: float
+    local_position: Vec3
+}
+
+// An impulse on a dynamic shape within reach: along the direction from
+// the explosion to its closest point (its centroid when inside), by the
+// area it presents, fading over the falloff, scaled by the shape's own factor.
+explosion_visitor(proxy_id: int, user_data: long, context: ptr) -> bool {
+    ec = context as *WorldExplosionContext
+    w = ec.w
+    s = dynamics.world_shape_at(w, user_data as int)
+    if s.explosion_scale == 0.0 { return true }
+    body = dynamics.body_at(w, s.body_id)
+    xf = dynamics.get_body_transform(w, s.body_id)
+    ec.local_position = math.inv_transform_point(xf, ec.position)
+    input = DistanceInput { proxy_a: shape.make_shape_proxy(&s.geometry), proxy_b: distance.shape_proxy((&ec.local_position) as ptr, 1, 0.0),
+                            transform: math.transform_identity(), use_radii: true }
+    cache = distance.empty_cache()
+    output = distance.shape_distance(&input, &cache, null, 0)
+    if output.distance > ec.radius + ec.falloff { return true }
+    dynamics.wake_body(w, body)
+    if body.set_index != dynamics.AWAKE_SET { return true }
+    closest = output.point_a
+    if output.distance == 0.0 { closest = shape.get_shape_centroid(&s.geometry) }
+    direction = math.sub(closest, ec.local_position)
+    if math.length_squared(direction) > 100.0 * math.EPSILON * math.EPSILON { direction = math.normalize(direction) } else { direction = math.vec3_axis_x() }
+    area = shape.get_shape_projected_area(&s.geometry, direction)
+    scale = 1.0
+    if output.distance > ec.radius && ec.falloff > 0.0 { scale = math.clamp_float((ec.radius + ec.falloff - output.distance) / ec.falloff, 0.0, 1.0) }
+    magnitude = ec.impulse_per_area * area * scale * s.explosion_scale
+    impulse = math.mul_sv(magnitude, math.rotate_vector(xf.q, direction))
+    set = dynamics.get_solver_set(w, dynamics.AWAKE_SET)
+    state = dynamics.body_state_at(set, body.local_index)
+    sim = dynamics.body_sim_at(set, body.local_index)
+    state.linear_velocity = math.mul_add(state.linear_velocity, sim.inv_mass, impulse)
+    r = math.rotate_vector(xf.q, math.sub(closest, sim.local_center))
+    state.angular_velocity = math.add(state.angular_velocity, math.mul_mv(sim.inv_inertia_world, math.cross(r, impulse)))
+    return true
+}
+
+explode(id: WorldId, def: *ExplosionDef) {
+    w = world_of(id)
+    if w == null { return }
+    w.locked = true
+    ec = WorldExplosionContext { w: w, position: def.position, radius: def.radius, falloff: def.falloff, impulse_per_area: def.impulse_per_area, local_position: math.vec3_zero() }
+    extent = def.radius + def.falloff
+    box = math.offset_aabb(AABB { lower: math.vec3(0.0 - extent, 0.0 - extent, 0.0 - extent), upper: math.vec3(extent, extent, extent) }, def.position)
+    dynamic_tree.tree_query(broad_phase.broad_phase_tree(&w.broad_phase, dynamics.BODY_DYNAMIC), box, def.mask_bits, false, explosion_visitor, (&ec) as ptr)
+    w.locked = false
+}

@@ -1,0 +1,183 @@
+// The reference's benchmark scenes (reference/box3d/shared/benchmarks.c)
+// stepped by our world against b3World_Step in bench/physics_world_box3d.c:
+// the large pyramid (a base of 100 cubes, 5,050 in all, 200 steps),
+// many pyramids (14 by 14 pyramids of base 10, 10,780 cubes, 100
+// steps), and the joint grid (100 by 100 spheres hung by 19,800
+// spherical joints, 100 steps), sleeping off as the reference has it.
+// Single thread, wall time of the steps and the average step, the sum
+// of the bodies' heights as the checksum.
+import std.string
+import std.os
+import aephysics.math
+import aephysics.core
+import aephysics.hull
+import aephysics.manifold
+import aephysics.shape
+import aephysics.broad_phase
+import aephysics.dynamics
+import aephysics.physics_world
+
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+
+clock() -> long { return os.now_monotonic_ns() }
+ms(ns: long) -> float { return (ns as float) / 1000000.0 }
+
+var g_box: ptr = null
+
+ground(world_id: WorldId, extent: float) {
+    bdef = dynamics.default_body_def()
+    bdef.position = math.vec3(0.0, 0.0 - 1.0, 0.0)
+    id = dynamics.create_body(world_id, &bdef)
+    slab = hull.make_box_hull(extent, 1.0, extent)
+    sdef = dynamics.default_shape_def()
+    dynamics.create_hull_shape(id, &sdef, slab)
+    // The hull is kept alive by the world; freed with the boxes at the end.
+    slabs = g_slabs as ptr[]
+    slabs[g_slab_count] = slab as ptr
+    g_slab_count = g_slab_count + 1
+}
+
+var g_slabs: ptr = null
+var g_slab_count = 0
+
+pyramid(world_id: WorldId, base_count: int, extent: float, center_x: float, base_z: float, allow_sleep: bool) {
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.enable_sleep = allow_sleep
+    sdef = dynamics.default_shape_def()
+    sdef.density = 100.0
+    i = 0
+    while i < base_count {
+        y = (2.0 * (i as float) + 1.0) * extent
+        j = i
+        while j < base_count {
+            x = ((i as float) + 1.0) * extent + 2.0 * ((j - i) as float) * extent + center_x
+            bdef.position = math.vec3(x, y, base_z)
+            id = dynamics.create_body(world_id, &bdef)
+            dynamics.create_hull_shape(id, &sdef, g_box as *HullData)
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+height_sum(world_id: WorldId) -> float {
+    w = dynamics.get_world(world_id.index1 - 1)
+    sum = 0.0
+    i = 0
+    while i < w.bodies.count {
+        body = dynamics.body_at(w, i)
+        if body.set_index != dynamics.NULL_INDEX && body.kind == dynamics.BODY_DYNAMIC {
+            sum = sum + dynamics.get_body_sim(w, body).transform.p.y
+        }
+        i = i + 1
+    }
+    return sum
+}
+
+run(name: string, world_id: WorldId, steps: int) {
+    t0 = clock()
+    s = 0
+    while s < steps {
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        s = s + 1
+    }
+    t1 = clock()
+    counters = physics_world.get_counters(world_id)
+    println("aephysics physics_world: ${name}: ${steps} steps of ${counters.body_count} bodies ${ms(t1 - t0)} ms, ${ms(t1 - t0) / (steps as float)} ms per step (height sum ${height_sum(world_id)}, ${counters.contact_count} contacts, ${counters.joint_count} joints)")
+    dynamics.destroy_world(world_id)
+}
+
+main() {
+    g_box = hull.make_box_hull(0.5, 0.5, 0.5) as ptr
+    g_slabs = calloc(8, 8)
+    g_slabs_typed = g_slabs as ptr[]
+
+    // The large pyramid.
+    wdef = dynamics.default_world_def()
+    world_id = dynamics.create_world(&wdef)
+    physics_world.enable_sleeping(world_id, false)
+    ground(world_id, 400.0)
+    base_count = 100
+    pyramid(world_id, base_count, 0.5, 0.0 - 0.5 * (base_count as float), 0.0, true)
+    run("large pyramid", world_id, 200)
+
+    // Many pyramids.
+    world_id = dynamics.create_world(&wdef)
+    base_count = 10
+    extent = 0.5
+    rows = 14
+    columns = 14
+    ground_extent = extent * (columns as float) * ((base_count as float) + 1.0)
+    ground(world_id, ground_extent)
+    base_width = 2.0 * extent * (base_count as float)
+    base_z = 0.0 - ground_extent + 2.0 * extent
+    delta_z = 2.0 * (ground_extent - 2.0 * extent) / ((rows as float) - 1.0)
+    i = 0
+    while i < rows {
+        j = 0
+        while j < columns {
+            center_x = 0.0 - ground_extent + (j as float) * (base_width + 2.0 * extent) + 2.0 * extent
+            pyramid(world_id, base_count, extent, center_x - 0.5, base_z, false)
+            j = j + 1
+        }
+        base_z = base_z + delta_z
+        i = i + 1
+    }
+    run("many pyramids", world_id, 100)
+
+    // The joint grid.
+    world_id = dynamics.create_world(&wdef)
+    physics_world.enable_sleeping(world_id, false)
+    n = 100
+    ids_block = calloc(n * n, sizeof(BodyId))
+    ids = ids_block as BodyId[]
+    sdef = dynamics.default_shape_def()
+    sdef.filter.category_bits = 2 as long
+    sdef.filter.mask_bits = (0 as long) - 1 - (2 as long)
+    bdef = dynamics.default_body_def()
+    bdef.enable_sleep = false
+    index = 0
+    k = 0
+    while k < n {
+        i = 0
+        while i < n {
+            bdef.kind = dynamics.BODY_DYNAMIC
+            if i == 0 { bdef.kind = dynamics.BODY_STATIC }
+            bdef.position = math.vec3(k as float, 0.0 - (i as float), 0.0)
+            body = dynamics.create_body(world_id, &bdef)
+            dynamics.create_sphere_shape(body, &sdef, manifold.sphere(math.vec3_zero(), 0.4))
+            if i > 0 {
+                jdef = dynamics.default_spherical_joint_def()
+                jdef.base.body_id_a = ids[index - 1]
+                jdef.base.body_id_b = body
+                jdef.base.local_frame_a.p = math.vec3(0.0, 0.0 - 0.5, 0.0)
+                jdef.base.local_frame_b.p = math.vec3(0.0, 0.5, 0.0)
+                dynamics.create_spherical_joint(world_id, &jdef)
+            }
+            if k > 0 {
+                jdef = dynamics.default_spherical_joint_def()
+                jdef.base.body_id_a = ids[index - n]
+                jdef.base.body_id_b = body
+                jdef.base.local_frame_a.p = math.vec3(0.5, 0.0, 0.0)
+                jdef.base.local_frame_b.p = math.vec3(0.0 - 0.5, 0.0, 0.0)
+                dynamics.create_spherical_joint(world_id, &jdef)
+            }
+            ids[index] = body
+            index = index + 1
+            i = i + 1
+        }
+        k = k + 1
+    }
+    run("joint grid", world_id, 100)
+    free(ids_block)
+
+    i = 0
+    while i < g_slab_count {
+        hull.destroy_hull(g_slabs_typed[i] as *HullData)
+        i = i + 1
+    }
+    free(g_slabs)
+    hull.destroy_hull(g_box as *HullData)
+}
