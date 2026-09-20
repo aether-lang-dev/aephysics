@@ -42,7 +42,8 @@ so a test written against the reference reads the same here.
 | `aephysics.mover` | the character mover's plane solver: pushes accumulated and clamped over twenty sweeps, the velocity clip | done, `test_mover.ae` (56 checks); [same results as the reference, 0.9x its time](bench/RESULTS.md#mover) |
 | `aephysics.broad_phase` | the broad phase: a tree per body type, proxies keyed by type, the pair update through the moved siblings and cross-tree seeds with the filter and compound lookups as visitors, the pair set, the keys sorted | done, `test_broad_phase.ae` (36 checks against a brute force); [10,000 moving boxes at 4.6 ms a step](bench/RESULTS.md#broad_phase) |
 | `aephysics.mesh_contact` | a convex shape against a mesh or height field: the triangle cache with per-triangle warm starts, the manifolds per triangle, the seam rules against ghost collisions, clusters by normal, the four-point cull | done, `test_mesh_contact.ae` (64 checks); [a box on a wave at 3.2 us a step](bench/RESULTS.md#mesh_contact) |
-| `aephysics.dynamics` | bodies, contacts, the constraint graph, islands, the Soft Step solver, joints (spherical, revolute, prismatic, distance, motor, weld, wheel), sensors, the character mover, the world | |
+| `aephysics.dynamics` | the world's state and bookkeeping: worlds, bodies (creation, mass from shapes or by hand, transforms, velocities, extents, locks, sleep and enable flags) in solver sets, shapes of every kind on bodies with their broad-phase proxies, islands; contacts, joints and sensors next | in progress, `test_dynamics.ae` (156 checks: test_body.c and the step-free test_world.c); [creation 0.93x, transforms 0.7x](bench/RESULTS.md#dynamics-bookkeeping) |
+| `aephysics.solver` | the Soft Step solver, the contact and joint solvers, continuous collision, sleep; then the world's step, queries and events | |
 | `aephysics` | the public API | |
 
 Deliberate choices:

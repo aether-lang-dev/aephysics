@@ -163,21 +163,26 @@ started until its tests pass.
      Found and fixed on the way: core's key_hash multiplied signed
      longs (undefined in C; gcc at -O2 made two inlined copies disagree)
      -- it now mixes in 32-bit products.
-   - `aephysics.dynamics`: one module for the world's state and its
-     bookkeeping -- the World with its arrays (bodies, shapes, contacts,
-     joints, islands, solver sets), the ids with generations, the
-     body's sims and states, the shape's world half (creation on a
-     body, the fat bounds, the proxy, materials, events flags), the
-     contact (creation from a pair, the manifold update through the
-     manifold functions and the mesh contact), the joints' creation and
-     their bases, the constraint graph colouring, the solver sets
-     (awake, static, disabled, sleeping islands), the islands (union by
-     links, split on wake), the sensors. No stepping. Own tests: the
-     world's bookkeeping without a step (bodies and shapes created and
-     destroyed, contacts begun from pairs, islands linked and split,
-     sets moved on sleep and wake), and the parts of test_body.c and
-     test_world.c that need no step (mass data, extents, validity,
-     recycling).
+   - `aephysics.dynamics` (in progress): one module for the world's
+     state and its bookkeeping -- the World with its sparse arrays and
+     id pools, the ids with generations, the body's sims and states in
+     solver sets (static, disabled, awake, one per sleeping island),
+     the shape's world half (creation on a body of every kind, the fat
+     bounds, the proxy in the tree of the body's type, materials, event
+     flags), the islands, the mass from the shapes or by hand, the
+     transforms and velocities, the validation. Done so far: worlds,
+     bodies, shapes, islands of one body, sleeping sets and waking them
+     (bodies and islands only), 156 checks: all of test_body.c and the
+     step-free parts of test_world.c, plus every set and shape kind,
+     transforms, velocities, locks, destruction in every order with the
+     sets validated throughout. The reference's hull database (hulls
+     deduplicated by content and refcounted across shapes) and its name
+     cache are not ported; a hull shape keeps the pointer it was given.
+     Next in this module: the contact (creation from a pair, the edges
+     on both bodies, the manifold update through the manifold functions
+     and the mesh contact, begin/end touching), the constraint graph
+     colouring, the islands' linking and splitting, the joints' bases,
+     the sensors, and waking with contacts and joints.
    - `aephysics.contact_solver`: contact_solver.c scalar (the prepare,
      warm start, solve, restitution and store passes; the wide SIMD path
      later, measured).
