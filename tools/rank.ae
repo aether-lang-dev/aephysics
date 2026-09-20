@@ -1,0 +1,107 @@
+// The ranking half of scripts/profile.sh: reads the sampler's
+// sample_out.txt (a BASE line with the module's load address, then one
+// instruction pointer per sample, hex) and syms.txt (the executable's
+// text symbols as "address name" lines sorted by address, from nm), maps
+// each sample to the symbol at or below it and prints the symbols by
+// sample count.
+//
+//   rank [top]        top defaults to 30
+import std.string
+import std.io
+
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+extern aether_args_count() -> int
+extern aether_args_get(index: int) -> string
+
+// Where a linked PE puts its image: nm's addresses are relative to it.
+const LINK_BASE: long = 5368709120
+
+hex(s: string) -> long {
+    value, err = string.to_int_radix(s, 16)
+    if err != "" { return 0 as long }
+    return value
+}
+
+main() {
+    top = 30
+    if aether_args_count() > 1 {
+        n, err = string.to_int(aether_args_get(1))
+        if err == "" { top = n }
+    }
+    syms_text, err = io.read_file("syms.txt")
+    if err != "" { println("rank: syms.txt: ${err}"); return }
+    samples_text, err2 = io.read_file("sample_out.txt")
+    if err2 != "" { println("rank: sample_out.txt: ${err2}"); return }
+
+    sym_lines = string.split(syms_text, "\n")
+    sym_capacity = string.array_size(sym_lines)
+    addrs_block = calloc(sym_capacity + 1, 8)
+    names_block = calloc(sym_capacity + 1, 8)
+    counts_block = calloc(sym_capacity + 1, 4)
+    addrs = addrs_block as long[]
+    names = names_block as string[]
+    counts = counts_block as int[]
+    sym_count = 0
+    i = 0
+    while i < sym_capacity {
+        line = string.trim(string.array_get(sym_lines, i))
+        space = string.index_of(line, " ")
+        if space > 0 {
+            addrs[sym_count] = hex(string.substring(line, 0, space))
+            names[sym_count] = string.substring(line, space + 1, string.length(line))
+            sym_count = sym_count + 1
+        }
+        i = i + 1
+    }
+
+    sample_lines = string.split(samples_text, "\n")
+    sample_capacity = string.array_size(sample_lines)
+    base = 0 as long
+    total = 0
+    unknown = 0
+    i = 0
+    while i < sample_capacity {
+        line = string.trim(string.array_get(sample_lines, i))
+        if string.starts_with(line, "BASE ") == 1 {
+            base = hex(string.substring(line, 5, string.length(line)))
+        } else if string.length(line) > 0 {
+            rva = hex(line) - base + LINK_BASE
+            // The last symbol at or below the sample.
+            low = 0
+            high = sym_count
+            while low < high {
+                mid = (low + high) / 2
+                if addrs[mid] <= rva { low = mid + 1 } else { high = mid }
+            }
+            if low > 0 && rva - addrs[low - 1] < (1048576 as long) {
+                counts[low - 1] = counts[low - 1] + 1
+            } else {
+                unknown = unknown + 1
+            }
+            total = total + 1
+        }
+        i = i + 1
+    }
+
+    println("samples: ${total} (${unknown} outside the executable)")
+    shown = 0
+    while shown < top {
+        best = -1
+        j = 0
+        while j < sym_count {
+            if counts[j] > 0 && (best < 0 || counts[j] > counts[best]) { best = j }
+            j = j + 1
+        }
+        if best < 0 { break }
+        percent = 100.0 * (counts[best] as float) / (total as float)
+        println("${percent}% ${counts[best]} ${names[best]}")
+        counts[best] = 0
+        shown = shown + 1
+    }
+    free(addrs_block)
+    free(names_block)
+    free(counts_block)
+    string.array_free(sym_lines)
+    string.array_free(sample_lines)
+}

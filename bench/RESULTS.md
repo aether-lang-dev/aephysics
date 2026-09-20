@@ -474,16 +474,17 @@ colour).
 
 | scene, 120 steps | aephysics | Box3D |
 |---|---|---|
-| 5,000 cubes falling onto a slab | 308 ms | **163** |
-| 100 stacks of 10 cubes | 61 | **30** |
+| 5,000 cubes falling onto a slab | 245 ms | **157** |
+| 100 stacks of 10 cubes | 50 | **28** |
 
 The same height sums (2,499.65 and 4,983.87), every body asleep at the
-end, the same contact counts (5,000 and 1,000). We are 1.9-2.0x: the
-reference solves its convex contacts four at a time in SIMD lanes and
-computes in single precision, and this engine solves them one at a
-time in doubles (Aether's float). The wide contact path, laid over the
-same constraint data, is the next performance layer (issue #22); the
-narrow phase's 1.7x (issue #17) is the rest.
+end, the same contact counts (5,000 and 1,000). We are 1.6-1.8x (1.9-2.0x
+before the [build flags](#build-flags-inlining)): the reference solves
+its convex contacts four at a time in SIMD lanes and computes in single
+precision, and this engine solves them one at a time in doubles
+(Aether's float). The wide contact path, laid over the same constraint
+data, is the next performance layer (issue #22); the narrow phase's
+1.7x (issue #17) is the rest.
 
 ## physics_world
 
@@ -494,16 +495,45 @@ sleeping off as the reference runs them.
 
 | scene | aephysics per step | Box3D per step |
 |---|---|---|
-| large pyramid: 5,050 cubes on a base of 100, 200 steps | 24.5 ms | **10.9** |
-| many pyramids: 196 pyramids of base 10, 10,780 cubes, 100 steps | 53.0 | **22.0** |
-| joint grid: 10,000 spheres on 19,800 spherical joints, 100 steps | 20.0 | **11.1** |
+| large pyramid: 5,050 cubes on a base of 100, 200 steps | 21.2 ms | **9.1** |
+| many pyramids: 196 pyramids of base 10, 10,780 cubes, 100 steps | 45.5 | **20.3** |
+| joint grid: 10,000 spheres on 19,800 spherical joints, 100 steps | 12.9 | **11.0** |
 
 The same height sums (167,556, 37,695 and -496,893), contact counts
-(14,950 and 28,420) and joint count. The pyramids are 2.2-2.4x: the
-reference's SIMD wide contacts (issue #22) and single precision. The
-joint grid has no contacts and is still 1.8x, so half the gap is not
-the wide path: joints are scalar in both, and the difference is single
-against double precision plus whatever the generated C loses on the
-struct-heavy code; a profile of the joint grid is the place to look
-next (issue #22 notes it).
+(14,950 and 28,420) and joint count. The joint grid, no contacts, is
+within 1.2x (1.8x before the [build flags](#build-flags-inlining)):
+joints are scalar in both, so this is what single against double
+precision and the remaining codegen differences cost. The pyramids
+are 2.2-2.3x, and `scripts/profile.sh bench/physics_world.ae` says
+where: 75% of the pyramids' step is the contact solver (solve 44%,
+prepare 12%, warm start 10%, store 3%), which the reference runs four
+contacts at a time in SIMD lanes (issue #22); contact recycling is 7%,
+the narrow phase 3%, everything else under 4% each.
 
+## Build flags (inlining)
+
+The generated C of every Aether function is a plain `static` function,
+never `static inline`, and gcc's -O2 keeps the small maths (a 3x3
+product, a rotation, a quaternion product) out of line: a sampling
+profile of the joint grid at -O2 had `math_mul_mm` at 15%,
+`math_rotate_vector` at 8%, `math_solve3`, `math_mul_quat` and
+`math_inv_mul_quat` at 4-6% each, all as calls, where the reference's
+`static inline` headers vanish into the joint solve. Marking the math
+module's functions `static inline` by hand in the emitted C took the
+joint grid from 18.9 to 11.9 ms per step; the same effect from the
+outside is gcc's inlining budget, so `aether.toml` builds this repo
+with
+
+    -O3 --param max-inline-insns-auto=400 --param inline-unit-growth=400
+
+(`ae build` reads it for the tests and the benchmarks; a program that
+uses aephysics as a library sets its own). Measured on the joint grid,
+one run each, ms per step: -O2 18.9; -O3 16.9; -O3 -march=native 16.2;
+-O2 with the inline parameters at 200: 12.5; -O3 with them at 400:
+11.2; the hand-inlined C at -O2: 11.9. The pyramids gain 10% from the
+same flags (their time is the contact solver's loops, already inlined).
+The compile is a third slower and the executable 1.7x larger. Turning
+every double into a float in the emitted C (an experiment, not a
+change) made the grid slower, 26 ms, so precision is not where the time
+goes at present. An emitter-side `static inline` for small leaf
+functions is asked of Aether in aether-lang-dev/aether#2123.
