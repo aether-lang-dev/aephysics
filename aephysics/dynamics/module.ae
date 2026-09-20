@@ -82,7 +82,18 @@ exports (
     shape_set_user_data, shape_get_user_data, shape_get_flags,
     create_island, destroy_island, validate_island, create_solver_set, destroy_solver_set, wake_solver_set,
     validate_solver_sets, get_solver_set, get_island, world_island_count, world_solver_set_count,
-    body_sim_at, body_state_at, world_shape_at, island_at, solver_set_at, body_at
+    body_sim_at, body_state_at, world_shape_at, island_at, solver_set_at, body_at,
+    Manifold, ManifoldPoint, ContactSpec, ContactId, ContactBeginTouchEvent, ContactEndTouchEvent, JointSim, GraphColor, ConstraintGraph,
+    GRAPH_COLOR_COUNT, OVERFLOW_INDEX, DYNAMIC_COLOR_COUNT, MAX_MANIFOLD_POINTS,
+    CONTACT_TOUCHING, CONTACT_ENABLE_CONTACT_EVENTS, CONTACT_STATIC, CONTACT_RECYCLE, SIM_TOUCHING, SIM_MESH_CONTACT,
+    SIM_ENABLE_HIT_EVENT, RELATIVE_TRANSFORM_VALID, ENABLE_SPECULATIVE_POINTS,
+    contact_at, joint_at, manifold_at, manifold_point_at, graph_color, contact_spec_at, joint_sim_at, contact_link_at, joint_link_at,
+    world_contact_count, get_contact, contact_is_valid, make_contact_id, make_shape_id,
+    world_contact_begin_event_count, world_contact_begin_event, world_contact_end_event_count, world_contact_end_event, swap_end_events,
+    create_graph, destroy_graph, add_contact_to_graph, remove_contact_from_graph, add_joint_to_graph, remove_joint_from_graph,
+    create_contact, destroy_contact, update_contact, contact_edge_next, invalidate_body_contacts,
+    merge_islands, link_contact, unlink_contact, link_joint, unlink_joint, split_island, try_sleep_island,
+    update_pairs, collide, validate_contacts
 )
 
 extern memset(block: ptr, value: int, size: int) -> ptr
@@ -101,7 +112,27 @@ const BODY_DYNAMIC = 2
 const SPECULATIVE_DISTANCE = 0.02
 const MAX_AABB_MARGIN = 0.05
 const AABB_MARGIN_FRACTION = 0.125
-const CONTACT_RECYCLE_DISTANCE = 0.01
+const CONTACT_RECYCLE_DISTANCE = 0.05
+const CONTACT_RECYCLE_ANGULAR_DISTANCE = 0.99240388
+const GRAPH_COLOR_COUNT = 24
+const OVERFLOW_INDEX = 23
+const DYNAMIC_COLOR_COUNT = 20
+const MAX_MANIFOLD_POINTS = 4
+// Contact flags (b3ContactFlags).
+const CONTACT_TOUCHING = 0x00000001
+const CONTACT_HIT_EVENT = 0x00000002
+const CONTACT_ENABLE_CONTACT_EVENTS = 0x00000004
+const CONTACT_STATIC = 0x00000008
+const CONTACT_RECYCLE = 0x00000010
+const SIM_TOUCHING = 0x00010000
+const SIM_DISJOINT = 0x00020000
+const SIM_STARTED_TOUCHING = 0x00040000
+const SIM_STOPPED_TOUCHING = 0x00080000
+const SIM_ENABLE_HIT_EVENT = 0x00100000
+const SIM_ENABLE_PRE_SOLVE_EVENTS = 0x00200000
+const SIM_MESH_CONTACT = 0x00400000
+const RELATIVE_TRANSFORM_VALID = 0x00800000
+const ENABLE_SPECULATIVE_POINTS = 0x01000000
 // The shape kinds (the shape module's, restated).
 const KIND_SPHERE = 0
 const KIND_CAPSULE = 1
@@ -362,15 +393,71 @@ struct Contact {
     body_sim_index_a: int
     body_sim_index_b: int
     flags: int
-    manifolds: ptr
+    manifolds: ptr                 // Manifold[manifold_count], a heap block of the contact's
     manifold_count: int
+    cached_rotation_a: Quat        // for the recycling
+    cached_rotation_b: Quat
+    cached_relative_pose: Transform
     friction: float
     restitution: float
     rolling_resistance: float
     tangent_velocity: Vec3
-    mesh_cache: MeshContactCache
-    convex_cache: TriangleCache
+    mesh_cache: MeshContactCache   // a mesh contact's triangles
+    convex_cache: TriangleCache    // a convex contact's simplex or axis
     generation: int
+}
+
+// A contact point the solver works on: anchors relative to the bodies'
+// centres of mass in world space, the separation, the impulses.
+struct ManifoldPoint {
+    anchor_a: Vec3
+    anchor_b: Vec3
+    separation: float
+    base_separation: float
+    normal_impulse: float
+    total_normal_impulse: float
+    normal_velocity: float
+    feature_id: int
+    triangle_index: int
+    persisted: bool
+}
+
+// Up to four points on a normal, with the accumulated friction and rolling.
+struct Manifold {
+    point0: ManifoldPoint
+    point1: ManifoldPoint
+    point2: ManifoldPoint
+    point3: ManifoldPoint
+    normal: Vec3
+    twist_impulse: float
+    friction_impulse: Vec3
+    rolling_impulse: Vec3
+    point_count: int
+}
+
+// A touching contact in a graph colour: its manifolds' place in the solver's array.
+struct ContactSpec {
+    contact_id: int
+    manifold_start: int
+    manifold_count: int
+}
+
+struct ContactId {
+    index1: int
+    world0: int
+    generation: int
+}
+
+struct ContactBeginTouchEvent {
+    shape_id_a: ShapeId
+    shape_id_b: ShapeId
+    contact_id: ContactId
+}
+
+struct ContactEndTouchEvent {
+    shape_id_a: ShapeId
+    shape_id_b: ShapeId
+    contact_id: ContactId
 }
 
 struct JointEdge {
@@ -392,6 +479,29 @@ struct Joint {
     island_index: int
     kind: int
     generation: int
+}
+
+// A joint's simulation data (its kinds fill this in with the joint layer).
+struct JointSim {
+    joint_id: int
+    kind: int
+    body_id_a: int
+    body_id_b: int
+    local_frame_a: Transform
+    local_frame_b: Transform
+}
+
+// One colour of the constraint graph: no two constraints in it share a
+// dynamic body, so the solver can run them side by side.
+struct GraphColor {
+    body_set: BitSet               // by body id; unused on the overflow colour
+    joint_sims: Buffer             // JointSim
+    convex_contacts: IntArray      // contact ids (the wide solver's)
+    contacts: Buffer               // ContactSpec (mesh contacts and the overflow's)
+}
+
+struct ConstraintGraph {
+    colors: ptr                    // GraphColor[GRAPH_COLOR_COUNT], the overflow last
 }
 
 struct ContactLink {
@@ -434,6 +544,16 @@ struct SolverSet {
 struct World {
     stack: Stack
     broad_phase: BroadPhase
+    constraint_graph: ConstraintGraph
+    arena: Arena                   // the collide pass's scratch (one worker)
+    contact_state: BitSet          // the contacts whose touching changed this pass
+    contact_begin_events: Buffer   // ContactBeginTouchEvent
+    contact_end_events0: Buffer    // ContactEndTouchEvent, double buffered
+    contact_end_events1: Buffer
+    end_event_index: int
+    sat_call_count: int
+    sat_cache_hit_count: int
+    recycled_contact_count: int
     body_id_pool: IdPool
     bodies: Buffer                 // Body, sparse by id
     solver_set_id_pool: IdPool
@@ -567,6 +687,13 @@ create_world(def: *WorldDef) -> WorldId {
     w.generation = generation
     w.in_use = true
     w.stack = core.stack_create(2048)
+    w.arena = core.arena_create(1 << 20)
+    w.contact_state = core.bitset_create(64)
+    w.contact_begin_events = core.buffer_create(sizeof(ContactBeginTouchEvent), 4)
+    w.contact_end_events0 = core.buffer_create(sizeof(ContactEndTouchEvent), 4)
+    w.contact_end_events1 = core.buffer_create(sizeof(ContactEndTouchEvent), 4)
+    w.end_event_index = 0
+    create_graph(&w.constraint_graph, 16)
     broad_phase.create_broad_phase(&w.broad_phase, Capacity { static_shape_count: def.static_shape_count, dynamic_shape_count: def.dynamic_shape_count, contact_count: def.contact_count })
     w.body_id_pool = core.idpool_create()
     w.bodies = core.buffer_create(sizeof(Body), math.max_int(16, def.static_body_count + def.dynamic_body_count))
@@ -622,6 +749,15 @@ destroy_world(id: WorldId) {
         i = i + 1
     }
     i = 0
+    while i < w.contacts.count {
+        c = contact_at(w, i)
+        if c.contact_id != NULL_INDEX {
+            free_manifolds(c)
+            if (c.flags & SIM_MESH_CONTACT) != 0 { mesh_contact.mesh_contact_cache_destroy(&c.mesh_cache) }
+        }
+        i = i + 1
+    }
+    i = 0
     while i < w.islands.count {
         island = island_at(w, i)
         if island.island_id != NULL_INDEX {
@@ -650,6 +786,12 @@ destroy_world(id: WorldId) {
     core.buffer_destroy(&w.islands)
     core.idpool_destroy(&w.island_id_pool)
     broad_phase.destroy_broad_phase(&w.broad_phase)
+    destroy_graph(&w.constraint_graph)
+    core.arena_destroy(&w.arena)
+    core.bitset_destroy(&w.contact_state)
+    core.buffer_destroy(&w.contact_begin_events)
+    core.buffer_destroy(&w.contact_end_events0)
+    core.buffer_destroy(&w.contact_end_events1)
     core.stack_destroy(&w.stack)
     generation = w.generation
     memset(w as ptr, 0, sizeof(World))
@@ -885,42 +1027,6 @@ wake_body(w: *World, body: *Body) -> bool {
     return false
 }
 
-// A sleeping set's bodies and islands move into the awake set, states
-// made for them, and the set is destroyed.
-wake_solver_set(w: *World, set_index: int) {
-    set = solver_set_at(w, set_index)
-    awake = solver_set_at(w, AWAKE_SET)
-    i = 0
-    while i < set.body_sims.count {
-        sim = body_sim_at(set, i)
-        body = body_at(w, sim.body_id)
-        target = core.buffer_push(&awake.body_sims)
-        memcpy(awake.body_sims.data + target * sizeof(BodySim), sim as ptr, sizeof(BodySim))
-        state_index = core.buffer_push(&awake.body_states)
-        state = body_state_at(awake, state_index)
-        state.linear_velocity = math.vec3_zero()
-        state.angular_velocity = math.vec3_zero()
-        state.delta_position = math.vec3_zero()
-        state.delta_rotation = math.quat_identity()
-        state.flags = sim.flags
-        body.set_index = AWAKE_SET
-        body.local_index = target
-        body.sleep_time = 0.0
-        i = i + 1
-    }
-    i = 0
-    while i < set.island_sims.count {
-        island_id = island_sim_at(set, i).island_id
-        island = island_at(w, island_id)
-        island.set_index = AWAKE_SET
-        island.local_index = awake.island_sims.count
-        target = core.buffer_push(&awake.island_sims)
-        island_sim_at(awake, target).island_id = island_id
-        i = i + 1
-    }
-    destroy_solver_set(w, set_index)
-}
-
 // The body's joints and contacts (with their layers), its shapes and their
 // proxies, its island, its sim and state, then its id (the generation stays).
 destroy_body(id: BodyId) {
@@ -929,6 +1035,8 @@ destroy_body(id: BodyId) {
     if w.locked { return }
     w.locked = true
     body = body_at(w, id.index1 - 1)
+    // Bodies attached through contacts wake, even when this one is static.
+    destroy_body_contacts(w, body, true)
     shape_id = body.head_shape_id
     while shape_id != NULL_INDEX {
         s = world_shape_at(w, shape_id)
@@ -1125,6 +1233,7 @@ destroy_shape(id: ShapeId, update_body_mass: bool) {
     w.locked = true
     s = world_shape_at(w, id.index1 - 1)
     body = body_at(w, s.body_id)
+    destroy_shape_contacts(w, s, true)
     if s.prev_shape_id != NULL_INDEX { world_shape_at(w, s.prev_shape_id).next_shape_id = s.next_shape_id }
     if s.next_shape_id != NULL_INDEX { world_shape_at(w, s.next_shape_id).prev_shape_id = s.prev_shape_id }
     if body.head_shape_id == s.id { body.head_shape_id = s.next_shape_id }
@@ -1275,7 +1384,8 @@ update_body_mass_data(w: *World, body: *Body) {
         sim.max_extent = math.max_vec3(sim.max_extent, extent.max_extent)
         shape_id = s.next_shape_id
     }
-    // (The contacts' cached relative transforms are invalidated with the contact layer.)
+    // A moved centre of mass invalidates every cached manifold.
+    invalidate_body_contacts(w, body)
     if (sim.flags & FIXED_ROTATION) == FIXED_ROTATION {
         body.inertia = math.mat3_zero()
         sim.inv_inertia_local = math.mat3_zero()
@@ -1318,6 +1428,7 @@ body_set_transform(id: BodyId, position: Vec3, rotation: Quat) {
         }
         shape_id = s.next_shape_id
     }
+    invalidate_body_contacts(w, body)
 }
 
 body_get_linear_velocity(id: BodyId) -> Vec3 {
@@ -1441,6 +1552,7 @@ body_set_mass_data(id: BodyId, mass_data: MassData) {
         sim.max_extent = math.max_vec3(sim.max_extent, extent.max_extent)
         shape_id = s.next_shape_id
     }
+    invalidate_body_contacts(w, body)
 }
 
 body_get_mass_data(id: BodyId) -> MassData {
@@ -1607,5 +1719,1631 @@ validate_solver_sets(w: *World) -> bool {
         i = i + 1
     }
     if sim_count != body_count { return false }
+    return true
+}
+
+// --- element access, continued ----------------------------------------------------------------------
+
+contact_at(w: *World, id: int) -> *Contact { return (w.contacts.data + id * sizeof(Contact)) as *Contact }
+joint_at(w: *World, id: int) -> *Joint { return (w.joints.data + id * sizeof(Joint)) as *Joint }
+manifold_at(c: *Contact, index: int) -> *Manifold { return (c.manifolds + index * sizeof(Manifold)) as *Manifold }
+graph_color(w: *World, index: int) -> *GraphColor { return (w.constraint_graph.colors + index * sizeof(GraphColor)) as *GraphColor }
+contact_spec_at(color: *GraphColor, index: int) -> *ContactSpec { return (color.contacts.data + index * sizeof(ContactSpec)) as *ContactSpec }
+joint_sim_at(b: *Buffer, index: int) -> *JointSim { return (b.data + index * sizeof(JointSim)) as *JointSim }
+contact_link_at(island: *Island, index: int) -> *ContactLink { return (island.contacts.data + index * sizeof(ContactLink)) as *ContactLink }
+joint_link_at(island: *Island, index: int) -> *JointLink { return (island.joints.data + index * sizeof(JointLink)) as *JointLink }
+
+// A manifold's point, by index (the points are four named fields).
+manifold_point_at(m: *Manifold, index: int) -> *ManifoldPoint { return ((m as ptr) + index * sizeof(ManifoldPoint)) as *ManifoldPoint }
+
+world_contact_count(w: *World) -> int { return core.idpool_count(&w.contact_id_pool) }
+get_contact(w: *World, contact_id: int) -> *Contact { return contact_at(w, contact_id) }
+
+contact_is_valid(id: ContactId) -> bool {
+    if id.world0 < 0 || id.world0 >= MAX_WORLDS { return false }
+    worlds_ready()
+    w = world_at(id.world0)
+    if w.in_use == false { return false }
+    if id.index1 < 1 || id.index1 > w.contacts.count { return false }
+    c = contact_at(w, id.index1 - 1)
+    return c.contact_id == id.index1 - 1 && c.generation == id.generation
+}
+
+make_contact_id(w: *World, c: *Contact) -> ContactId { return ContactId { index1: c.contact_id + 1, world0: w.world_id, generation: c.generation } }
+make_shape_id(w: *World, s: *WorldShape) -> ShapeId { return ShapeId { index1: s.id + 1, world0: w.world_id, generation: s.generation } }
+
+// The events of the last collide pass.
+world_contact_begin_event_count(w: *World) -> int { return w.contact_begin_events.count }
+world_contact_begin_event(w: *World, index: int) -> ContactBeginTouchEvent {
+    events = w.contact_begin_events.data as ContactBeginTouchEvent[]
+    return events[index]
+}
+end_events(w: *World) -> *Buffer {
+    if w.end_event_index == 0 { return &w.contact_end_events0 }
+    return &w.contact_end_events1
+}
+world_contact_end_event_count(w: *World) -> int { return end_events(w).count }
+world_contact_end_event(w: *World, index: int) -> ContactEndTouchEvent {
+    events = end_events(w).data as ContactEndTouchEvent[]
+    return events[index]
+}
+
+// --- the constraint graph ------------------------------------------------------------------------------
+
+create_graph(g: *ConstraintGraph, body_capacity: int) {
+    g.colors = core.alloc(GRAPH_COLOR_COUNT * sizeof(GraphColor))
+    capacity = math.max_int(body_capacity, 8)
+    i = 0
+    while i < GRAPH_COLOR_COUNT {
+        color = (g.colors + i * sizeof(GraphColor)) as *GraphColor
+        if i < OVERFLOW_INDEX {
+            color.body_set = core.bitset_create(capacity)
+            core.bitset_set_count_and_clear(&color.body_set, capacity)
+        }
+        color.joint_sims = core.buffer_create(sizeof(JointSim), 0)
+        color.convex_contacts = core.ints_create(0)
+        color.contacts = core.buffer_create(sizeof(ContactSpec), 0)
+        i = i + 1
+    }
+}
+
+destroy_graph(g: *ConstraintGraph) {
+    i = 0
+    while i < GRAPH_COLOR_COUNT {
+        color = (g.colors + i * sizeof(GraphColor)) as *GraphColor
+        if i < OVERFLOW_INDEX { core.bitset_destroy(&color.body_set) }
+        core.buffer_destroy(&color.joint_sims)
+        core.ints_destroy(&color.convex_contacts)
+        core.buffer_destroy(&color.contacts)
+        i = i + 1
+    }
+    core.free_bytes(g.colors, GRAPH_COLOR_COUNT * sizeof(GraphColor))
+    g.colors = null
+}
+
+// The first colour where neither dynamic body is taken: dynamic pairs
+// from the front, pairs with a static or kinematic body from the back
+// (they get priority), the overflow when none is free.
+assign_color(g: *ConstraintGraph, body_id_a: int, body_id_b: int, kind_a: int, kind_b: int) -> int {
+    if kind_a == BODY_DYNAMIC && kind_b == BODY_DYNAMIC {
+        i = 0
+        while i < DYNAMIC_COLOR_COUNT {
+            color = (g.colors + i * sizeof(GraphColor)) as *GraphColor
+            if core.bitset_get(&color.body_set, body_id_a) == false && core.bitset_get(&color.body_set, body_id_b) == false {
+                core.bitset_set_grow(&color.body_set, body_id_a)
+                core.bitset_set_grow(&color.body_set, body_id_b)
+                return i
+            }
+            i = i + 1
+        }
+    } else if kind_a == BODY_DYNAMIC {
+        i = OVERFLOW_INDEX - 1
+        while i >= 1 {
+            color = (g.colors + i * sizeof(GraphColor)) as *GraphColor
+            if core.bitset_get(&color.body_set, body_id_a) == false {
+                core.bitset_set_grow(&color.body_set, body_id_a)
+                return i
+            }
+            i = i - 1
+        }
+    } else if kind_b == BODY_DYNAMIC {
+        i = OVERFLOW_INDEX - 1
+        while i >= 1 {
+            color = (g.colors + i * sizeof(GraphColor)) as *GraphColor
+            if core.bitset_get(&color.body_set, body_id_b) == false {
+                core.bitset_set_grow(&color.body_set, body_id_b)
+                return i
+            }
+            i = i - 1
+        }
+    }
+    return OVERFLOW_INDEX
+}
+
+// A touching contact into a colour: convex contacts into the wide array,
+// mesh contacts and the overflow's into the scalar one.
+add_contact_to_graph(w: *World, c: *Contact) {
+    body_a = body_at(w, c.edge_a.body_id)
+    body_b = body_at(w, c.edge_b.body_id)
+    color_index = assign_color(&w.constraint_graph, body_a.id, body_b.id, body_a.kind, body_b.kind)
+    is_scalar = (c.flags & SIM_MESH_CONTACT) != 0 || color_index == OVERFLOW_INDEX
+    color = graph_color(w, color_index)
+    c.color_index = color_index
+    c.body_sim_index_a = body_a.local_index
+    if body_a.kind == BODY_STATIC { c.body_sim_index_a = NULL_INDEX }
+    c.body_sim_index_b = body_b.local_index
+    if body_b.kind == BODY_STATIC { c.body_sim_index_b = NULL_INDEX }
+    if is_scalar {
+        c.local_index = color.contacts.count
+        index = core.buffer_push(&color.contacts)
+        spec = contact_spec_at(color, index)
+        spec.contact_id = c.contact_id
+        spec.manifold_start = 0
+        spec.manifold_count = c.manifold_count
+    } else {
+        c.local_index = color.convex_contacts.count
+        core.ints_push(&color.convex_contacts, c.contact_id)
+    }
+}
+
+remove_contact_from_graph(w: *World, body_id_a: int, body_id_b: int, color_index: int, local_index: int, mesh_contact: bool) {
+    color = graph_color(w, color_index)
+    if color_index != OVERFLOW_INDEX {
+        core.bitset_clear(&color.body_set, body_id_a)
+        core.bitset_clear(&color.body_set, body_id_b)
+    }
+    if mesh_contact || color_index == OVERFLOW_INDEX {
+        moved = core.buffer_remove_swap(&color.contacts, local_index)
+        if moved != NULL_INDEX && moved != local_index {
+            contact_at(w, contact_spec_at(color, local_index).contact_id).local_index = local_index
+        }
+    } else {
+        moved = core.ints_remove_swap(&color.convex_contacts, local_index)
+        if moved != NULL_INDEX && moved != local_index {
+            contact_at(w, core.ints_get(&color.convex_contacts, local_index)).local_index = local_index
+        }
+    }
+}
+
+// --- contacts ------------------------------------------------------------------------------------------------
+
+// The pairs of kinds that collide, with the mesh-like or larger kind first.
+contact_pair_supported(kind_a: int, kind_b: int) -> bool {
+    convex_b = kind_b == KIND_SPHERE || kind_b == KIND_CAPSULE || kind_b == KIND_HULL
+    if convex_b == false { return false }
+    return kind_a == KIND_SPHERE && kind_b == KIND_SPHERE ||
+           kind_a == KIND_CAPSULE && (kind_b == KIND_SPHERE || kind_b == KIND_CAPSULE) ||
+           kind_a == KIND_HULL || kind_a == KIND_MESH || kind_a == KIND_HEIGHT_FIELD || kind_a == KIND_COMPOUND
+}
+
+// Whether the pair as given is the primary order, or must be flipped.
+contact_pair_primary(kind_a: int, kind_b: int) -> bool {
+    if kind_a == kind_b { return true }
+    return contact_pair_supported(kind_a, kind_b)
+}
+
+// A contact between two shapes (a compound's child named), non-touching,
+// in the awake set if either body is awake and the disabled set
+// otherwise, linked into both bodies' lists and the broad phase's pair set.
+create_contact(w: *World, shape_a: *WorldShape, shape_b: *WorldShape, child_index: int) {
+    kind_a = shape_a.geometry.kind
+    kind_b = shape_b.geometry.kind
+    if contact_pair_supported(kind_a, kind_b) == false && contact_pair_supported(kind_b, kind_a) == false { return }
+    if contact_pair_primary(kind_a, kind_b) == false {
+        create_contact(w, shape_b, shape_a, child_index)
+        return
+    }
+    body_a = body_at(w, shape_a.body_id)
+    body_b = body_at(w, shape_b.body_id)
+    set_index = DISABLED_SET
+    if body_a.set_index == AWAKE_SET || body_b.set_index == AWAKE_SET { set_index = AWAKE_SET }
+    set = solver_set_at(w, set_index)
+    contact_id = core.idpool_alloc(&w.contact_id_pool)
+    if contact_id == w.contacts.count {
+        index = core.buffer_push(&w.contacts)
+        contact_at(w, index).generation = 0
+    }
+    c = contact_at(w, contact_id)
+    generation = c.generation
+    memset(c as ptr, 0, sizeof(Contact))
+    c.contact_id = contact_id
+    c.generation = generation + 1
+    c.set_index = set_index
+    c.color_index = NULL_INDEX
+    c.local_index = set.contact_indices.count
+    c.island_id = NULL_INDEX
+    c.island_index = NULL_INDEX
+    c.body_sim_index_a = NULL_INDEX
+    c.body_sim_index_b = NULL_INDEX
+    c.shape_id_a = shape_a.id
+    c.shape_id_b = shape_b.id
+    c.child_index = child_index
+    c.manifolds = null
+    c.manifold_count = 0
+    c.mesh_cache = mesh_contact.mesh_contact_cache_create()
+    c.convex_cache = TriangleCache { triangle_index: NULL_INDEX, simplex_cache: distance.empty_cache(), sat_cache: manifold.empty_sat_cache() }
+    flags = 0
+    if (body_a.flags & ENABLE_CONTACT_RECYCLING) != 0 && (body_b.flags & ENABLE_CONTACT_RECYCLING) != 0 { flags = flags | CONTACT_RECYCLE }
+    if kind_a == KIND_MESH || kind_a == KIND_HEIGHT_FIELD { flags = flags | SIM_MESH_CONTACT }
+    if kind_a == KIND_COMPOUND {
+        child = compound.get_compound_child(shape_a.geometry.compound, child_index)
+        if child.kind == KIND_MESH { flags = flags | SIM_MESH_CONTACT }
+    }
+    if body_a.kind == BODY_STATIC || body_b.kind == BODY_STATIC { flags = flags | CONTACT_STATIC }
+    if (shape_a.flags & SHAPE_ENABLE_CONTACT_EVENTS) != 0 || (shape_b.flags & SHAPE_ENABLE_CONTACT_EVENTS) != 0 { flags = flags | CONTACT_ENABLE_CONTACT_EVENTS }
+    if (shape_a.flags & SHAPE_ENABLE_SPECULATIVE) != 0 && (shape_b.flags & SHAPE_ENABLE_SPECULATIVE) != 0 { flags = flags | ENABLE_SPECULATIVE_POINTS }
+    if (shape_a.flags & SHAPE_ENABLE_PRE_SOLVE_EVENTS) != 0 || (shape_b.flags & SHAPE_ENABLE_PRE_SOLVE_EVENTS) != 0 { flags = flags | SIM_ENABLE_PRE_SOLVE_EVENTS }
+    c.flags = flags
+    // Into body A's list.
+    c.edge_a = ContactEdge { body_id: shape_a.body_id, prev_key: NULL_INDEX, next_key: body_a.head_contact_key }
+    key_a = (contact_id << 1) | 0
+    if body_a.head_contact_key != NULL_INDEX { set_contact_edge_prev(w, body_a.head_contact_key, key_a) }
+    body_a.head_contact_key = key_a
+    body_a.contact_count = body_a.contact_count + 1
+    // Into body B's list.
+    c.edge_b = ContactEdge { body_id: shape_b.body_id, prev_key: NULL_INDEX, next_key: body_b.head_contact_key }
+    key_b = (contact_id << 1) | 1
+    if body_b.head_contact_key != NULL_INDEX { set_contact_edge_prev(w, body_b.head_contact_key, key_b) }
+    body_b.head_contact_key = key_b
+    body_b.contact_count = body_b.contact_count + 1
+    broad_phase.add_pair(&w.broad_phase, core.shape_pair_key(shape_a.id, shape_b.id, child_index))
+    core.ints_push(&set.contact_indices, contact_id)
+    // The rolling resistance, assumed not to change.
+    radius_a = 0.0
+    if kind_a == KIND_SPHERE { radius_a = shape_a.geometry.sphere.radius }
+    if kind_a == KIND_CAPSULE { radius_a = shape_a.geometry.capsule.radius }
+    radius_b = 0.0
+    if kind_b == KIND_SPHERE { radius_b = shape_b.geometry.sphere.radius }
+    if kind_b == KIND_CAPSULE { radius_b = shape_b.geometry.capsule.radius }
+    c.rolling_resistance = math.max_float(shape_a.material.rolling_resistance, shape_b.material.rolling_resistance) * math.max_float(radius_a, radius_b)
+}
+
+// The edge a key names (the contact's A or B side).
+contact_edge_next(w: *World, key: int) -> int {
+    c = contact_at(w, key >> 1)
+    if (key & 1) == 0 { return c.edge_a.next_key }
+    return c.edge_b.next_key
+}
+
+set_contact_edge_prev(w: *World, key: int, prev: int) {
+    c = contact_at(w, key >> 1)
+    if (key & 1) == 0 { c.edge_a.prev_key = prev } else { c.edge_b.prev_key = prev }
+}
+
+set_contact_edge_next(w: *World, key: int, next: int) {
+    c = contact_at(w, key >> 1)
+    if (key & 1) == 0 { c.edge_a.next_key = next } else { c.edge_b.next_key = next }
+}
+
+free_manifolds(c: *Contact) {
+    if c.manifold_count > 0 { core.free_bytes(c.manifolds, c.manifold_count * sizeof(Manifold)) }
+    c.manifolds = null
+    c.manifold_count = 0
+}
+
+allocate_manifolds(c: *Contact, count: int) {
+    free_manifolds(c)
+    if count > 0 {
+        c.manifolds = core.alloc(count * sizeof(Manifold))
+        c.manifold_count = count
+    }
+}
+
+// The contact out of the pair set, both bodies' lists, its island, its
+// colour or its set's indices; its bodies woken when asked and it was touching.
+destroy_contact(w: *World, c: *Contact, wake_bodies: bool) {
+    broad_phase.remove_pair(&w.broad_phase, core.shape_pair_key(c.shape_id_a, c.shape_id_b, c.child_index))
+    free_manifolds(c)
+    body_id_a = c.edge_a.body_id
+    body_id_b = c.edge_b.body_id
+    body_a = body_at(w, body_id_a)
+    body_b = body_at(w, body_id_b)
+    flags = c.flags
+    touching = (flags & CONTACT_TOUCHING) != 0
+    if touching && (flags & CONTACT_ENABLE_CONTACT_EVENTS) != 0 {
+        push_end_event(w, c)
+    }
+    contact_id = c.contact_id
+    // Out of body A's list.
+    if c.edge_a.prev_key != NULL_INDEX { set_contact_edge_next(w, c.edge_a.prev_key, c.edge_a.next_key) }
+    if c.edge_a.next_key != NULL_INDEX { set_contact_edge_prev(w, c.edge_a.next_key, c.edge_a.prev_key) }
+    if body_a.head_contact_key == ((contact_id << 1) | 0) { body_a.head_contact_key = c.edge_a.next_key }
+    body_a.contact_count = body_a.contact_count - 1
+    // Out of body B's list.
+    if c.edge_b.prev_key != NULL_INDEX { set_contact_edge_next(w, c.edge_b.prev_key, c.edge_b.next_key) }
+    if c.edge_b.next_key != NULL_INDEX { set_contact_edge_prev(w, c.edge_b.next_key, c.edge_b.prev_key) }
+    if body_b.head_contact_key == ((contact_id << 1) | 1) { body_b.head_contact_key = c.edge_b.next_key }
+    body_b.contact_count = body_b.contact_count - 1
+    if (flags & SIM_MESH_CONTACT) != 0 { mesh_contact.mesh_contact_cache_destroy(&c.mesh_cache) }
+    if c.island_id != NULL_INDEX { unlink_contact(w, c) }
+    if c.color_index != NULL_INDEX {
+        remove_contact_from_graph(w, body_id_a, body_id_b, c.color_index, c.local_index, (flags & SIM_MESH_CONTACT) != 0)
+    } else {
+        set = solver_set_at(w, c.set_index)
+        local_index = c.local_index
+        moved = core.ints_remove_swap(&set.contact_indices, local_index)
+        if moved != NULL_INDEX && moved != local_index {
+            contact_at(w, core.ints_get(&set.contact_indices, local_index)).local_index = local_index
+        }
+    }
+    c.contact_id = NULL_INDEX
+    c.set_index = NULL_INDEX
+    c.color_index = NULL_INDEX
+    c.local_index = NULL_INDEX
+    core.idpool_free(&w.contact_id_pool, contact_id)
+    if wake_bodies && touching {
+        wake_body(w, body_a)
+        wake_body(w, body_b)
+    }
+}
+
+push_end_event(w: *World, c: *Contact) {
+    shape_a = world_shape_at(w, c.shape_id_a)
+    shape_b = world_shape_at(w, c.shape_id_b)
+    events = end_events(w)
+    index = core.buffer_push(events)
+    target = (events.data + index * sizeof(ContactEndTouchEvent)) as *ContactEndTouchEvent
+    target.shape_id_a = make_shape_id(w, shape_a)
+    target.shape_id_b = make_shape_id(w, shape_b)
+    target.contact_id = make_contact_id(w, c)
+}
+
+push_begin_event(w: *World, c: *Contact) {
+    shape_a = world_shape_at(w, c.shape_id_a)
+    shape_b = world_shape_at(w, c.shape_id_b)
+    index = core.buffer_push(&w.contact_begin_events)
+    target = (w.contact_begin_events.data + index * sizeof(ContactBeginTouchEvent)) as *ContactBeginTouchEvent
+    target.shape_id_a = make_shape_id(w, shape_a)
+    target.shape_id_b = make_shape_id(w, shape_b)
+    target.contact_id = make_contact_id(w, c)
+}
+
+// Every contact on a body destroyed (its joints with the joint layer).
+destroy_body_contacts(w: *World, body: *Body, wake_bodies: bool) {
+    key = body.head_contact_key
+    while key != NULL_INDEX {
+        c = contact_at(w, key >> 1)
+        key = contact_edge_next(w, key)
+        destroy_contact(w, c, wake_bodies)
+    }
+}
+
+// Every contact on a shape destroyed.
+destroy_shape_contacts(w: *World, s: *WorldShape, wake_bodies: bool) {
+    body = body_at(w, s.body_id)
+    key = body.head_contact_key
+    while key != NULL_INDEX {
+        c = contact_at(w, key >> 1)
+        key = contact_edge_next(w, key)
+        if c.shape_id_a == s.id || c.shape_id_b == s.id { destroy_contact(w, c, wake_bodies) }
+    }
+}
+
+// The contacts' cached relative transforms invalidated (a centre of mass moved).
+invalidate_body_contacts(w: *World, body: *Body) {
+    key = body.head_contact_key
+    while key != NULL_INDEX {
+        c = contact_at(w, key >> 1)
+        c.flags = c.flags & (0 - 1 - RELATIVE_TRANSFORM_VALID)
+        key = contact_edge_next(w, key)
+    }
+}
+
+var g_local_points: ptr = null   // LocalManifoldPoint[MAX_MANIFOLD_POINTS]
+var g_old_points: ptr = null     // ManifoldPoint[MAX_MANIFOLD_POINTS]
+
+contact_scratch_ready() {
+    if g_local_points == null {
+        g_local_points = core.alloc(MAX_MANIFOLD_POINTS * sizeof(LocalManifoldPoint))
+        g_old_points = core.alloc(MAX_MANIFOLD_POINTS * sizeof(ManifoldPoint))
+    }
+}
+
+// The manifold of two convex shapes (A's kind first: sphere < capsule <
+// hull), computed in A's frame, its points as world-space anchors
+// relative to each shape's origin, the old points' impulses kept by feature.
+compute_convex_manifold(w: *World, c: *Contact, geometry_a: *Shape, xf_a: Transform, geometry_b: *Shape, xf_b: Transform) -> bool {
+    contact_scratch_ready()
+    kind_a = geometry_a.kind
+    kind_b = geometry_b.kind
+    m = manifold.local_manifold(g_local_points)
+    transform_b_to_a = math.inv_mul_transforms(xf_a, xf_b)
+    if kind_a == KIND_SPHERE {
+        manifold.collide_spheres(&m, MAX_MANIFOLD_POINTS, geometry_a.sphere, geometry_b.sphere, transform_b_to_a)
+    } else if kind_a == KIND_CAPSULE {
+        if kind_b == KIND_SPHERE { manifold.collide_capsule_and_sphere(&m, MAX_MANIFOLD_POINTS, geometry_a.capsule, geometry_b.sphere, transform_b_to_a) }
+        else { manifold.collide_capsules(&m, MAX_MANIFOLD_POINTS, geometry_a.capsule, geometry_b.capsule, transform_b_to_a) }
+    } else {
+        if kind_b == KIND_SPHERE { manifold.collide_hull_and_sphere(&m, MAX_MANIFOLD_POINTS, geometry_a.hull, geometry_b.sphere, transform_b_to_a, &c.convex_cache.simplex_cache) }
+        else if kind_b == KIND_CAPSULE { manifold.collide_hull_and_capsule(&m, MAX_MANIFOLD_POINTS, geometry_a.hull, geometry_b.capsule, transform_b_to_a, &c.convex_cache.simplex_cache) }
+        else {
+            manifold.collide_hulls(&m, MAX_MANIFOLD_POINTS, geometry_a.hull, geometry_b.hull, transform_b_to_a, &c.convex_cache.sat_cache)
+            w.sat_call_count = w.sat_call_count + 1
+            w.sat_cache_hit_count = w.sat_cache_hit_count + c.convex_cache.sat_cache.hit
+        }
+    }
+    if m.point_count == 0 {
+        free_manifolds(c)
+        return false
+    }
+    old = g_old_points as ManifoldPoint[]
+    old_count = 0
+    if c.manifold_count == 0 {
+        allocate_manifolds(c, 1)
+    } else {
+        first = manifold_at(c, 0)
+        old_count = first.point_count
+        i = 0
+        while i < old_count {
+            old[i] = point_copy(manifold_point_at(first, i))
+            i = i + 1
+        }
+    }
+    target = manifold_at(c, 0)
+    target.point_count = m.point_count
+    matrix_a = math.make_matrix_from_quat(xf_a.q)
+    target.normal = math.mul_mv(matrix_a, m.normal)
+    offset = math.sub(xf_a.p, xf_b.p)
+    i = 0
+    while i < m.point_count {
+        source = manifold.manifold_point(&m, i)
+        p = manifold_point_at(target, i)
+        p.anchor_a = math.mul_mv(matrix_a, source.point)
+        p.anchor_b = math.add(p.anchor_a, offset)
+        p.separation = source.separation
+        p.feature_id = manifold.make_feature_id(source.pair)
+        p.triangle_index = NULL_INDEX
+        p.normal_velocity = 0.0
+        p.total_normal_impulse = 0.0
+        p.persisted = false
+        p.normal_impulse = 0.0
+        j = 0
+        while j < old_count {
+            if old[j].feature_id == p.feature_id && p.persisted == false {
+                p.normal_impulse = old[j].normal_impulse
+                p.persisted = true
+                old[j].feature_id = 0 - 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return true
+}
+
+point_copy(p: *ManifoldPoint) -> ManifoldPoint {
+    return ManifoldPoint { anchor_a: p.anchor_a, anchor_b: p.anchor_b, separation: p.separation, base_separation: p.base_separation,
+                           normal_impulse: p.normal_impulse, total_normal_impulse: p.total_normal_impulse, normal_velocity: p.normal_velocity,
+                           feature_id: p.feature_id, triangle_index: p.triangle_index, persisted: p.persisted }
+}
+
+// The friction and restitution through the world's callbacks.
+mix_materials(w: *World, c: *Contact, material_a: SurfaceMaterial, material_b: SurfaceMaterial) {
+    friction_fn = w.friction_callback
+    restitution_fn = w.restitution_callback
+    c.friction = friction_fn(material_a.friction, material_a.user_material_id, material_b.friction, material_b.user_material_id)
+    c.restitution = restitution_fn(material_a.restitution, material_a.user_material_id, material_b.restitution, material_b.user_material_id)
+}
+
+// The convex manifold, flipped when the pair was flipped, with the
+// materials mixed, the rolling resistance and the tangent velocity.
+update_convex_contact(w: *World, c: *Contact, geometry_a: *Shape, material_a: SurfaceMaterial, flags_a: int, xf_a: Transform,
+                      geometry_b: *Shape, material_b: SurfaceMaterial, flags_b: int, xf_b: Transform, flip: bool) -> bool {
+    touching = compute_convex_manifold(w, c, geometry_a, xf_a, geometry_b, xf_b)
+    if touching == false { return false }
+    if flip {
+        // The feature ids need only match, and flipping is consistent.
+        m = manifold_at(c, 0)
+        m.normal = math.neg(m.normal)
+        i = 0
+        while i < m.point_count {
+            p = manifold_point_at(m, i)
+            swap = p.anchor_a
+            p.anchor_a = p.anchor_b
+            p.anchor_b = swap
+            i = i + 1
+        }
+    }
+    mix_materials(w, c, material_a, material_b)
+    if material_a.rolling_resistance > 0.0 || material_b.rolling_resistance > 0.0 {
+        radius_a = 0.0
+        if geometry_a.kind == KIND_SPHERE { radius_a = geometry_a.sphere.radius }
+        else if geometry_a.kind == KIND_CAPSULE { radius_a = geometry_a.capsule.radius }
+        else if geometry_a.kind == KIND_HULL { radius_a = 0.25 * geometry_a.hull.inner_radius }
+        radius_b = 0.0
+        if geometry_b.kind == KIND_SPHERE { radius_b = geometry_b.sphere.radius }
+        else if geometry_b.kind == KIND_CAPSULE { radius_b = geometry_b.capsule.radius }
+        else if geometry_b.kind == KIND_HULL { radius_b = 0.25 * geometry_b.hull.inner_radius }
+        c.rolling_resistance = math.max_float(material_a.rolling_resistance, material_b.rolling_resistance) * math.max_float(radius_a, radius_b)
+    } else {
+        c.rolling_resistance = 0.0
+    }
+    c.tangent_velocity = math.sub(math.rotate_vector(xf_a.q, material_a.tangent_velocity), math.rotate_vector(xf_b.q, material_b.tangent_velocity))
+    if (flags_a & SHAPE_ENABLE_HIT_EVENTS) != 0 || (flags_b & SHAPE_ENABLE_HIT_EVENTS) != 0 {
+        c.flags = c.flags | SIM_ENABLE_HIT_EVENT
+    } else {
+        c.flags = c.flags & (0 - 1 - SIM_ENABLE_HIT_EVENT)
+    }
+    return true
+}
+
+// A mesh or height field shape (or a compound's mesh child) against the
+// convex shape B: the clusters from the mesh contact become manifolds
+// matched to the old ones by normal (their friction, rolling and twist
+// impulses kept) and by feature and triangle per point (the normal
+// impulse kept); the materials per triangle averaged.
+update_mesh_contact(w: *World, c: *Contact, mesh_geometry: *Shape, mesh_shape: *WorldShape, material_map: ptr, xf_a: Transform,
+                    shape_b: *WorldShape, xf_b: Transform, is_fast: bool) -> bool {
+    contact_scratch_ready()
+    bounds_b = shape_b.aabb
+    enable_speculative = (c.flags & ENABLE_SPECULATIVE_POINTS) != 0
+    mark = w.arena.index
+    r = mesh_contact.compute_mesh_manifolds(&c.mesh_cache, mesh_geometry, xf_a, &shape_b.geometry, xf_b, bounds_b, is_fast, enable_speculative, &w.arena)
+    w.sat_call_count = w.sat_call_count + r.sat_calls
+    w.sat_cache_hit_count = w.sat_cache_hit_count + r.sat_cache_hits
+    cluster_count = r.cluster_count
+    if cluster_count == 0 {
+        free_manifolds(c)
+        w.arena.index = mark
+        return false
+    }
+    // The old manifolds, kept aside for the matching.
+    old_count = c.manifold_count
+    old_block = null
+    if old_count > 0 {
+        old_block = core.arena_bump(&w.arena, old_count * sizeof(Manifold))
+        memcpy(old_block, c.manifolds, old_count * sizeof(Manifold))
+    }
+    if old_count != cluster_count {
+        allocate_manifolds(c, cluster_count)
+    } else {
+        memset(c.manifolds, 0, cluster_count * sizeof(Manifold))
+    }
+    consumed_block = null
+    consumed = null as int[]
+    if old_count > 0 {
+        consumed_block = core.arena_bump(&w.arena, old_count * 4)
+        memset(consumed_block, 0, old_count * 4)
+        consumed = consumed_block as int[]
+    }
+    matrix_b = math.make_matrix_from_quat(xf_b.q)
+    offset_a = math.sub(xf_b.p, xf_a.p)
+    normal_match_tolerance = 0.995
+    clusters = r.clusters as Cluster[]
+    i = 0
+    while i < cluster_count {
+        cluster = clusters[i]
+        m = manifold_at(c, i)
+        m.point_count = cluster.point_count
+        m.normal = math.mul_mv(matrix_b, cluster.manifold_normal)
+        best_dot = normal_match_tolerance
+        best_index = NULL_INDEX
+        j = 0
+        while j < old_count {
+            if consumed[j] == 0 {
+                old_m = (old_block + j * sizeof(Manifold)) as *Manifold
+                d = math.dot(old_m.normal, m.normal)
+                if d > best_dot {
+                    best_index = j
+                    best_dot = d
+                }
+            }
+            j = j + 1
+        }
+        matched = null as *Manifold
+        if best_index != NULL_INDEX {
+            matched = (old_block + best_index * sizeof(Manifold)) as *Manifold
+            m.friction_impulse = matched.friction_impulse
+            m.rolling_impulse = matched.rolling_impulse
+            m.twist_impulse = matched.twist_impulse
+            consumed[best_index] = 1
+        }
+        points = cluster.points as LocalManifoldPoint[]
+        j = 0
+        while j < cluster.point_count {
+            source = points[j]
+            p = manifold_point_at(m, j)
+            // The points were computed in B's frame.
+            p.anchor_b = math.mul_mv(matrix_b, source.point)
+            p.anchor_a = math.add(p.anchor_b, offset_a)
+            p.separation = source.separation - mesh_contact.MESH_REST_OFFSET
+            p.feature_id = manifold.make_feature_id(source.pair)
+            p.triangle_index = source.triangle_index
+            p.normal_impulse = 0.0
+            p.total_normal_impulse = 0.0
+            p.normal_velocity = 0.0
+            p.persisted = false
+            if matched != null {
+                k = 0
+                while k < matched.point_count {
+                    old_p = manifold_point_at(matched, k)
+                    if p.persisted == false && p.feature_id == old_p.feature_id && p.triangle_index == old_p.triangle_index {
+                        p.normal_impulse = old_p.normal_impulse
+                        p.persisted = true
+                        old_p.triangle_index = NULL_INDEX
+                    }
+                    k = k + 1
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    // The materials: per triangle when the mesh carries several.
+    material_b = shape_b.material
+    tangent_velocity_a = math.vec3_zero()
+    friction_fn = w.friction_callback
+    restitution_fn = w.restitution_callback
+    if mesh_shape.material_count > 1 {
+        friction = 0.0
+        restitution = 0.0
+        sample_count = 0.0
+        materials_a = mesh_shape.materials as SurfaceMaterial[]
+        i = 0
+        while i < cluster_count {
+            m = manifold_at(c, i)
+            j = 0
+            while j < m.point_count {
+                triangle_index = manifold_point_at(m, j).triangle_index
+                material_index = 0
+                if mesh_geometry.kind == KIND_MESH {
+                    indices = mesh.mesh_material_indices(mesh_geometry.mesh.data)
+                    material_index = indices[triangle_index]
+                    if material_map != null {
+                        map = material_map as int[]
+                        material_index = map[math.min_int(material_index, 3)]
+                    }
+                } else {
+                    indices = height_field.height_field_material_indices(mesh_geometry.height_field)
+                    material_index = indices[triangle_index >> 1]
+                }
+                material_index = math.clamp_int(material_index, 0, mesh_shape.material_count - 1)
+                material_a = materials_a[material_index]
+                friction = friction + friction_fn(material_a.friction, material_a.user_material_id, material_b.friction, material_b.user_material_id)
+                restitution = restitution + restitution_fn(material_a.restitution, material_a.user_material_id, material_b.restitution, material_b.user_material_id)
+                tangent_velocity_a = math.add(tangent_velocity_a, material_a.tangent_velocity)
+                sample_count = sample_count + 1.0
+                j = j + 1
+            }
+            i = i + 1
+        }
+        if sample_count > 0.0 {
+            inv = 1.0 / sample_count
+            c.friction = inv * friction
+            c.restitution = inv * restitution
+            tangent_velocity_a = math.mul_sv(inv, tangent_velocity_a)
+        }
+    } else {
+        mix_materials(w, c, mesh_shape.material, material_b)
+        tangent_velocity_a = mesh_shape.material.tangent_velocity
+    }
+    tangent_velocity_a = math.rotate_vector(xf_a.q, tangent_velocity_a)
+    radius_b = 0.0
+    if shape_b.geometry.kind == KIND_SPHERE { radius_b = shape_b.geometry.sphere.radius }
+    else if shape_b.geometry.kind == KIND_CAPSULE { radius_b = shape_b.geometry.capsule.radius }
+    else if shape_b.geometry.kind == KIND_HULL { radius_b = shape_b.geometry.hull.inner_radius }
+    c.rolling_resistance = material_b.rolling_resistance * radius_b
+    c.tangent_velocity = math.sub(tangent_velocity_a, math.rotate_vector(xf_b.q, material_b.tangent_velocity))
+    w.arena.index = mark
+    return true
+}
+
+var g_child_geometry: ptr = null   // Shape: a compound's child as a shape
+var g_material_map: ptr = null     // int[4]
+
+// The contact's manifolds and whether it touches, for any pair: a
+// compound's child stands in for the compound (its transform composed),
+// a mesh or height field goes through the mesh contact, the rest
+// through the convex manifolds; the anchors end relative to the centres
+// of mass.
+update_contact(w: *World, c: *Contact, shape_a: *WorldShape, local_center_a: Vec3, xf_a: Transform, shape_b: *WorldShape,
+               local_center_b: Vec3, xf_b: Transform, is_fast: bool) -> bool {
+    if g_child_geometry == null {
+        g_child_geometry = core.alloc(sizeof(Shape))
+        g_material_map = core.alloc(4 * 4)
+    }
+    touching = false
+    kind_a = shape_a.geometry.kind
+    if kind_a == KIND_COMPOUND {
+        child = compound.get_compound_child(shape_a.geometry.compound, c.child_index)
+        child_geometry = g_child_geometry as *Shape
+        materials_a = shape_a.materials as SurfaceMaterial[]
+        child_material = materials_a[math.clamp_int(child.material_index0, 0, shape_a.material_count - 1)]
+        if child.kind == KIND_CAPSULE {
+            cg = shape.capsule_shape(child.capsule, 0.0)
+            copy_geometry(child_geometry, cg)
+            if shape_b.geometry.kind == KIND_HULL {
+                touching = update_convex_contact(w, c, &shape_b.geometry, shape_b.material, shape_b.flags, xf_b, child_geometry, child_material, shape_a.flags, xf_a, true)
+            } else {
+                touching = update_convex_contact(w, c, child_geometry, child_material, shape_a.flags, xf_a, &shape_b.geometry, shape_b.material, shape_b.flags, xf_b, false)
+            }
+        } else if child.kind == KIND_HULL {
+            cg = shape.hull_shape(child.hull, 0.0)
+            copy_geometry(child_geometry, cg)
+            xf_child = math.mul_transforms(xf_a, child.transform)
+            touching = update_convex_contact(w, c, child_geometry, child_material, shape_a.flags, xf_child, &shape_b.geometry, shape_b.material, shape_b.flags, xf_b, false)
+        } else if child.kind == KIND_MESH {
+            cg = shape.mesh_shape(child.mesh, shape_a.material_count)
+            copy_geometry(child_geometry, cg)
+            xf_child = math.mul_transforms(xf_a, child.transform)
+            map = g_material_map as int[]
+            map[0] = child.material_index0
+            map[1] = child.material_index1
+            map[2] = child.material_index2
+            map[3] = child.material_index3
+            touching = update_mesh_contact(w, c, child_geometry, shape_a, g_material_map, xf_child, shape_b, xf_b, is_fast)
+            set_hit_event_flag(c, touching, shape_a.flags, shape_b.flags)
+        } else {
+            cg = shape.sphere_shape(child.sphere, 0.0)
+            copy_geometry(child_geometry, cg)
+            if shape_b.geometry.kind == KIND_CAPSULE || shape_b.geometry.kind == KIND_HULL {
+                touching = update_convex_contact(w, c, &shape_b.geometry, shape_b.material, shape_b.flags, xf_b, child_geometry, child_material, shape_a.flags, xf_a, true)
+            } else {
+                touching = update_convex_contact(w, c, child_geometry, child_material, shape_a.flags, xf_a, &shape_b.geometry, shape_b.material, shape_b.flags, xf_b, false)
+            }
+        }
+        // The anchors are relative to the child's origin: offset to the compound's.
+        offset = math.rotate_vector(xf_a.q, child.transform.p)
+        i = 0
+        while i < c.manifold_count {
+            m = manifold_at(c, i)
+            j = 0
+            while j < m.point_count {
+                p = manifold_point_at(m, j)
+                p.anchor_a = math.add(p.anchor_a, offset)
+                j = j + 1
+            }
+            i = i + 1
+        }
+    } else if kind_a == KIND_MESH || kind_a == KIND_HEIGHT_FIELD {
+        touching = update_mesh_contact(w, c, &shape_a.geometry, shape_a, null, xf_a, shape_b, xf_b, is_fast)
+        set_hit_event_flag(c, touching, shape_a.flags, shape_b.flags)
+    } else {
+        touching = update_convex_contact(w, c, &shape_a.geometry, shape_a.material, shape_a.flags, xf_a, &shape_b.geometry, shape_b.material, shape_b.flags, xf_b, false)
+    }
+    if touching {
+        center_a = math.rotate_vector(xf_a.q, local_center_a)
+        center_b = math.rotate_vector(xf_b.q, local_center_b)
+        i = 0
+        while i < c.manifold_count {
+            m = manifold_at(c, i)
+            j = 0
+            while j < m.point_count {
+                p = manifold_point_at(m, j)
+                p.anchor_a = math.sub(p.anchor_a, center_a)
+                p.anchor_b = math.sub(p.anchor_b, center_b)
+                j = j + 1
+            }
+            i = i + 1
+        }
+        c.flags = c.flags | SIM_TOUCHING
+    } else {
+        c.flags = c.flags & (0 - 1 - SIM_TOUCHING)
+    }
+    return touching
+}
+
+copy_geometry(dst: *Shape, src: Shape) {
+    dst.kind = src.kind
+    dst.density = src.density
+    dst.material_count = src.material_count
+    dst.sphere = src.sphere
+    dst.capsule = src.capsule
+    dst.hull = src.hull
+    dst.mesh = src.mesh
+    dst.height_field = src.height_field
+    dst.compound = src.compound
+}
+
+set_hit_event_flag(c: *Contact, touching: bool, flags_a: int, flags_b: int) {
+    if touching && ((flags_a & SHAPE_ENABLE_HIT_EVENTS) != 0 || (flags_b & SHAPE_ENABLE_HIT_EVENTS) != 0) {
+        c.flags = c.flags | SIM_ENABLE_HIT_EVENT
+    } else {
+        c.flags = c.flags & (0 - 1 - SIM_ENABLE_HIT_EVENT)
+    }
+}
+
+// --- islands: linking, merging, splitting ------------------------------------------------------------------
+
+// The smaller island's bodies, contacts and joints move into the larger; the survivor's id.
+merge_islands(w: *World, island_id_a: int, island_id_b: int) -> int {
+    if island_id_a == island_id_b { return island_id_a }
+    if island_id_a == NULL_INDEX { return island_id_b }
+    if island_id_b == NULL_INDEX { return island_id_a }
+    island_a = island_at(w, island_id_a)
+    island_b = island_at(w, island_id_b)
+    big = island_a
+    small = island_b
+    if island_a.bodies.count < island_b.bodies.count {
+        big = island_b
+        small = island_a
+    }
+    big_id = big.island_id
+    i = 0
+    while i < small.bodies.count {
+        body_id = core.ints_get(&small.bodies, i)
+        body = body_at(w, body_id)
+        body.island_id = big_id
+        body.island_index = big.bodies.count
+        core.ints_push(&big.bodies, body_id)
+        i = i + 1
+    }
+    i = 0
+    while i < small.contacts.count {
+        link = contact_link_at(small, i)
+        c = contact_at(w, link.contact_id)
+        c.island_id = big_id
+        c.island_index = big.contacts.count
+        index = core.buffer_push(&big.contacts)
+        target = contact_link_at(big, index)
+        target.contact_id = link.contact_id
+        target.body_id_a = link.body_id_a
+        target.body_id_b = link.body_id_b
+        i = i + 1
+    }
+    i = 0
+    while i < small.joints.count {
+        jlink = joint_link_at(small, i)
+        j = joint_at(w, jlink.joint_id)
+        j.island_id = big_id
+        j.island_index = big.joints.count
+        index = core.buffer_push(&big.joints)
+        jtarget = joint_link_at(big, index)
+        jtarget.joint_id = jlink.joint_id
+        jtarget.body_id_a = jlink.body_id_a
+        jtarget.body_id_b = jlink.body_id_b
+        i = i + 1
+    }
+    big.constraint_remove_count = big.constraint_remove_count + small.constraint_remove_count
+    destroy_island(w, small.island_id)
+    return big_id
+}
+
+add_contact_to_island(w: *World, island_id: int, c: *Contact) {
+    island = island_at(w, island_id)
+    c.island_id = island_id
+    c.island_index = island.contacts.count
+    index = core.buffer_push(&island.contacts)
+    link = contact_link_at(island, index)
+    link.contact_id = c.contact_id
+    link.body_id_a = c.edge_a.body_id
+    link.body_id_b = c.edge_b.body_id
+}
+
+// A touching contact joins its bodies' islands (waking a sleeping one
+// when the other is awake) and merges them.
+link_contact(w: *World, c: *Contact) {
+    body_a = body_at(w, c.edge_a.body_id)
+    body_b = body_at(w, c.edge_b.body_id)
+    if body_a.set_index == AWAKE_SET && body_b.set_index >= FIRST_SLEEPING_SET { wake_solver_set(w, body_b.set_index) }
+    if body_b.set_index == AWAKE_SET && body_a.set_index >= FIRST_SLEEPING_SET { wake_solver_set(w, body_a.set_index) }
+    final_island = merge_islands(w, body_a.island_id, body_b.island_id)
+    add_contact_to_island(w, final_island, c)
+}
+
+// A contact leaves its island, which notes a removed constraint (a split candidate).
+unlink_contact(w: *World, c: *Contact) {
+    island_id = c.island_id
+    island = island_at(w, island_id)
+    remove_index = c.island_index
+    moved = core.buffer_remove_swap(&island.contacts, remove_index)
+    if moved != NULL_INDEX && moved != remove_index {
+        contact_at(w, contact_link_at(island, remove_index).contact_id).island_index = remove_index
+    }
+    c.island_id = NULL_INDEX
+    c.island_index = NULL_INDEX
+    island.constraint_remove_count = island.constraint_remove_count + 1
+}
+
+add_joint_to_island(w: *World, island_id: int, j: *Joint) {
+    island = island_at(w, island_id)
+    j.island_id = island_id
+    j.island_index = island.joints.count
+    index = core.buffer_push(&island.joints)
+    link = joint_link_at(island, index)
+    link.joint_id = j.joint_id
+    link.body_id_a = j.edge_a.body_id
+    link.body_id_b = j.edge_b.body_id
+}
+
+link_joint(w: *World, j: *Joint) {
+    body_a = body_at(w, j.edge_a.body_id)
+    body_b = body_at(w, j.edge_b.body_id)
+    if body_a.set_index == AWAKE_SET && body_b.set_index >= FIRST_SLEEPING_SET { wake_solver_set(w, body_b.set_index) }
+    else if body_b.set_index == AWAKE_SET && body_a.set_index >= FIRST_SLEEPING_SET { wake_solver_set(w, body_a.set_index) }
+    final_island = merge_islands(w, body_a.island_id, body_b.island_id)
+    add_joint_to_island(w, final_island, j)
+}
+
+unlink_joint(w: *World, j: *Joint) {
+    if j.island_id == NULL_INDEX { return }
+    island_id = j.island_id
+    island = island_at(w, island_id)
+    remove_index = j.island_index
+    moved = core.buffer_remove_swap(&island.joints, remove_index)
+    if moved != NULL_INDEX && moved != remove_index {
+        joint_at(w, joint_link_at(island, remove_index).joint_id).island_index = remove_index
+    }
+    j.island_id = NULL_INDEX
+    j.island_index = NULL_INDEX
+    island.constraint_remove_count = island.constraint_remove_count + 1
+}
+
+// Union-find with path halving.
+find_parent(parents: int[], node: int) -> int {
+    n = node
+    while parents[n] != n {
+        grand = parents[parents[n]]
+        parents[n] = grand
+        n = grand
+    }
+    return n
+}
+
+island_union(parents: int[], ranks: int[], node1: int, node2: int) {
+    root1 = find_parent(parents, node1)
+    root2 = find_parent(parents, node2)
+    if root1 == root2 { return }
+    if ranks[root1] < ranks[root2] {
+        parents[root1] = root2
+    } else if ranks[root1] > ranks[root2] {
+        parents[root2] = root1
+    } else {
+        parents[root2] = root1
+        ranks[root1] = ranks[root1] + 1
+    }
+}
+
+// An awake island whose constraints were removed, split into its
+// connected components by union-find over its contacts and joints
+// (constraints to static bodies connect nothing); returns how many
+// islands it became (one when still connected).
+split_island(w: *World, base_id: int) -> int {
+    base = island_at(w, base_id)
+    body_count = base.bodies.count
+    if body_count == 0 { return 1 }
+    parents_block = core.stack_alloc(&w.stack, body_count * 4)
+    ranks_block = core.stack_alloc(&w.stack, body_count * 4)
+    parents = parents_block as int[]
+    ranks = ranks_block as int[]
+    i = 0
+    while i < body_count {
+        parents[i] = i
+        ranks[i] = 0
+        i = i + 1
+    }
+    i = 0
+    while i < base.contacts.count {
+        link = contact_link_at(base, i)
+        index_a = body_at(w, link.body_id_a).island_index
+        index_b = body_at(w, link.body_id_b).island_index
+        if index_a != NULL_INDEX && index_b != NULL_INDEX { island_union(parents, ranks, index_a, index_b) }
+        i = i + 1
+    }
+    i = 0
+    while i < base.joints.count {
+        jlink = joint_link_at(base, i)
+        index_a = body_at(w, jlink.body_id_a).island_index
+        index_b = body_at(w, jlink.body_id_b).island_index
+        if index_a != NULL_INDEX && index_b != NULL_INDEX { island_union(parents, ranks, index_a, index_b) }
+        i = i + 1
+    }
+    core.stack_free(&w.stack, ranks_block)
+    component_count = 0
+    i = 0
+    while i < body_count {
+        parents[i] = find_parent(parents, i)
+        if parents[i] == i { component_count = component_count + 1 }
+        i = i + 1
+    }
+    if component_count == 1 {
+        base.constraint_remove_count = 0
+        core.stack_free(&w.stack, parents_block)
+        return 1
+    }
+    // The base island's arrays are detached and freed at the end; the
+    // island slot is destroyed after the new ones are filled.
+    base_bodies = base.bodies
+    base_contacts = base.contacts
+    base_joints = base.joints
+    base.bodies = core.ints_create(0)
+    base.contacts = core.buffer_create(sizeof(ContactLink), 0)
+    base.joints = core.buffer_create(sizeof(JointLink), 0)
+    root_map_block = core.stack_alloc(&w.stack, body_count * 4)
+    root_map = root_map_block as int[]
+    i = 0
+    while i < body_count {
+        root_map[i] = NULL_INDEX
+        i = i + 1
+    }
+    island_ids_block = core.stack_alloc(&w.stack, component_count * 4)
+    island_ids = island_ids_block as int[]
+    island_count = 0
+    i = 0
+    while i < body_count {
+        root = parents[i]
+        if root_map[root] == NULL_INDEX {
+            root_map[root] = island_count
+            fresh = create_island(w, AWAKE_SET)
+            island_ids[island_count] = fresh.island_id
+            island_count = island_count + 1
+        }
+        i = i + 1
+    }
+    base_body_ids = base_bodies.data as int[]
+    i = 0
+    while i < body_count {
+        body_id = base_body_ids[i]
+        new_island_id = island_ids[root_map[parents[i]]]
+        body = body_at(w, body_id)
+        fresh = island_at(w, new_island_id)
+        body.island_id = new_island_id
+        body.island_index = fresh.bodies.count
+        core.ints_push(&fresh.bodies, body_id)
+        i = i + 1
+    }
+    i = 0
+    while i < base_contacts.count {
+        link = (base_contacts.data + i * sizeof(ContactLink)) as *ContactLink
+        c = contact_at(w, link.contact_id)
+        target_id = body_at(w, link.body_id_a).island_id
+        if target_id == NULL_INDEX { target_id = body_at(w, link.body_id_b).island_id }
+        target = island_at(w, target_id)
+        c.island_id = target_id
+        c.island_index = target.contacts.count
+        index = core.buffer_push(&target.contacts)
+        moved = contact_link_at(target, index)
+        moved.contact_id = link.contact_id
+        moved.body_id_a = link.body_id_a
+        moved.body_id_b = link.body_id_b
+        i = i + 1
+    }
+    i = 0
+    while i < base_joints.count {
+        jlink = (base_joints.data + i * sizeof(JointLink)) as *JointLink
+        j = joint_at(w, jlink.joint_id)
+        target_id = body_at(w, jlink.body_id_a).island_id
+        if target_id == NULL_INDEX { target_id = body_at(w, jlink.body_id_b).island_id }
+        target = island_at(w, target_id)
+        j.island_id = target_id
+        j.island_index = target.joints.count
+        index = core.buffer_push(&target.joints)
+        jmoved = joint_link_at(target, index)
+        jmoved.joint_id = jlink.joint_id
+        jmoved.body_id_a = jlink.body_id_a
+        jmoved.body_id_b = jlink.body_id_b
+        i = i + 1
+    }
+    destroy_island(w, base_id)
+    core.ints_destroy(&base_bodies)
+    core.buffer_destroy(&base_contacts)
+    core.buffer_destroy(&base_joints)
+    core.stack_free(&w.stack, island_ids_block)
+    core.stack_free(&w.stack, root_map_block)
+    core.stack_free(&w.stack, parents_block)
+    return island_count
+}
+
+// --- sleeping and waking -------------------------------------------------------------------------------------
+
+// A sleeping set's bodies and islands move into the awake set, its
+// non-touching contacts from the disabled set into the awake set's, its
+// touching contacts into the constraint graph, its joints too; then the
+// set is destroyed.
+wake_solver_set(w: *World, set_index: int) {
+    set = solver_set_at(w, set_index)
+    awake = solver_set_at(w, AWAKE_SET)
+    disabled = solver_set_at(w, DISABLED_SET)
+    i = 0
+    while i < set.body_sims.count {
+        sim = body_sim_at(set, i)
+        body = body_at(w, sim.body_id)
+        target = core.buffer_push(&awake.body_sims)
+        memcpy(awake.body_sims.data + target * sizeof(BodySim), sim as ptr, sizeof(BodySim))
+        state_index = core.buffer_push(&awake.body_states)
+        state = body_state_at(awake, state_index)
+        state.linear_velocity = math.vec3_zero()
+        state.angular_velocity = math.vec3_zero()
+        state.delta_position = math.vec3_zero()
+        state.delta_rotation = math.quat_identity()
+        state.flags = body.flags
+        body.set_index = AWAKE_SET
+        body.local_index = target
+        body.sleep_time = 0.0
+        // The body's non-touching contacts, from the disabled set to the awake one.
+        key = body.head_contact_key
+        while key != NULL_INDEX {
+            c = contact_at(w, key >> 1)
+            key = contact_edge_next(w, key)
+            if c.set_index == DISABLED_SET {
+                local_index = c.local_index
+                c.set_index = AWAKE_SET
+                c.local_index = awake.contact_indices.count
+                core.ints_push(&awake.contact_indices, c.contact_id)
+                moved = core.ints_remove_swap(&disabled.contact_indices, local_index)
+                if moved != NULL_INDEX && moved != local_index {
+                    contact_at(w, core.ints_get(&disabled.contact_indices, local_index)).local_index = local_index
+                }
+            }
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < set.contact_indices.count {
+        c = contact_at(w, core.ints_get(&set.contact_indices, i))
+        add_contact_to_graph(w, c)
+        c.set_index = AWAKE_SET
+        i = i + 1
+    }
+    i = 0
+    while i < set.joint_sims.count {
+        jsim = joint_sim_at(&set.joint_sims, i)
+        j = joint_at(w, jsim.joint_id)
+        add_joint_to_graph(w, jsim, j)
+        j.set_index = AWAKE_SET
+        i = i + 1
+    }
+    i = 0
+    while i < set.island_sims.count {
+        island_id = island_sim_at(set, i).island_id
+        island = island_at(w, island_id)
+        island.set_index = AWAKE_SET
+        island.local_index = awake.island_sims.count
+        target = core.buffer_push(&awake.island_sims)
+        island_sim_at(awake, target).island_id = island_id
+        i = i + 1
+    }
+    destroy_solver_set(w, set_index)
+}
+
+// A joint sim into a colour of the graph (the joint layer fills the sims).
+add_joint_to_graph(w: *World, sim: *JointSim, j: *Joint) {
+    body_a = body_at(w, j.edge_a.body_id)
+    body_b = body_at(w, j.edge_b.body_id)
+    color_index = assign_color(&w.constraint_graph, body_a.id, body_b.id, body_a.kind, body_b.kind)
+    color = graph_color(w, color_index)
+    index = core.buffer_push(&color.joint_sims)
+    memcpy(color.joint_sims.data + index * sizeof(JointSim), sim as ptr, sizeof(JointSim))
+    j.color_index = color_index
+    j.local_index = index
+}
+
+remove_joint_from_graph(w: *World, body_id_a: int, body_id_b: int, color_index: int, local_index: int) {
+    color = graph_color(w, color_index)
+    if color_index != OVERFLOW_INDEX {
+        core.bitset_clear(&color.body_set, body_id_a)
+        core.bitset_clear(&color.body_set, body_id_b)
+    }
+    moved = core.buffer_remove_swap(&color.joint_sims, local_index)
+    if moved != NULL_INDEX && moved != local_index {
+        joint_at(w, joint_sim_at(&color.joint_sims, local_index).joint_id).local_index = local_index
+    }
+}
+
+// An awake island put to sleep in a set of its own: its bodies' sims
+// move there (their states dropped), their non-touching contacts with
+// other sleeping bodies to the disabled set, the island's touching
+// contacts and joints out of the graph and into the set. Refused while
+// the island has a pending split.
+try_sleep_island(w: *World, island_id: int) -> bool {
+    island = island_at(w, island_id)
+    if island.set_index != AWAKE_SET { return false }
+    if island.constraint_remove_count > 0 && island.bodies.count > 1 { return false }
+    sleep_set_id = create_solver_set(w)
+    sleep_set = solver_set_at(w, sleep_set_id)
+    awake = solver_set_at(w, AWAKE_SET)
+    disabled = solver_set_at(w, DISABLED_SET)
+    core.buffer_reserve(&sleep_set.body_sims, island.bodies.count)
+    i = 0
+    while i < island.bodies.count {
+        body_id = core.ints_get(&island.bodies, i)
+        body = body_at(w, body_id)
+        awake_index = body.local_index
+        sleep_index = core.buffer_push(&sleep_set.body_sims)
+        memcpy(sleep_set.body_sims.data + sleep_index * sizeof(BodySim), body_sim_at(awake, awake_index) as ptr, sizeof(BodySim))
+        moved = core.buffer_remove_swap(&awake.body_sims, awake_index)
+        if moved != NULL_INDEX && moved != awake_index {
+            body_at(w, body_sim_at(awake, awake_index).body_id).local_index = awake_index
+        }
+        core.buffer_remove_swap(&awake.body_states, awake_index)
+        body.set_index = sleep_set_id
+        body.local_index = sleep_index
+        body.body_move_index = NULL_INDEX
+        // Its non-touching contacts whose other body is not awake go to the disabled set.
+        key = body.head_contact_key
+        while key != NULL_INDEX {
+            c = contact_at(w, key >> 1)
+            edge_index = key & 1
+            key = contact_edge_next(w, key)
+            if c.set_index == DISABLED_SET { continue }
+            if c.color_index != NULL_INDEX { continue }
+            other_id = c.edge_b.body_id
+            if edge_index == 1 { other_id = c.edge_a.body_id }
+            if body_at(w, other_id).set_index == AWAKE_SET { continue }
+            local_index = c.local_index
+            c.set_index = DISABLED_SET
+            c.local_index = disabled.contact_indices.count
+            core.ints_push(&disabled.contact_indices, c.contact_id)
+            moved_contact = core.ints_remove_swap(&awake.contact_indices, local_index)
+            if moved_contact != NULL_INDEX && moved_contact != local_index {
+                contact_at(w, core.ints_get(&awake.contact_indices, local_index)).local_index = local_index
+            }
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < island.contacts.count {
+        c = contact_at(w, contact_link_at(island, i).contact_id)
+        color_index = c.color_index
+        color = graph_color(w, color_index)
+        if color_index != OVERFLOW_INDEX {
+            core.bitset_clear(&color.body_set, c.edge_a.body_id)
+            core.bitset_clear(&color.body_set, c.edge_b.body_id)
+        }
+        sleep_contact_index = sleep_set.contact_indices.count
+        core.ints_push(&sleep_set.contact_indices, c.contact_id)
+        local_index = c.local_index
+        if (c.flags & SIM_MESH_CONTACT) != 0 || color_index == OVERFLOW_INDEX {
+            moved = core.buffer_remove_swap(&color.contacts, local_index)
+            if moved != NULL_INDEX && moved != local_index {
+                contact_at(w, contact_spec_at(color, local_index).contact_id).local_index = local_index
+            }
+        } else {
+            moved = core.ints_remove_swap(&color.convex_contacts, local_index)
+            if moved != NULL_INDEX && moved != local_index {
+                contact_at(w, core.ints_get(&color.convex_contacts, local_index)).local_index = local_index
+            }
+        }
+        c.set_index = sleep_set_id
+        c.color_index = NULL_INDEX
+        c.local_index = sleep_contact_index
+        i = i + 1
+    }
+    i = 0
+    while i < island.joints.count {
+        j = joint_at(w, joint_link_at(island, i).joint_id)
+        color_index = j.color_index
+        local_index = j.local_index
+        color = graph_color(w, color_index)
+        if color_index != OVERFLOW_INDEX {
+            core.bitset_clear(&color.body_set, j.edge_a.body_id)
+            core.bitset_clear(&color.body_set, j.edge_b.body_id)
+        }
+        sleep_joint_index = core.buffer_push(&sleep_set.joint_sims)
+        memcpy(sleep_set.joint_sims.data + sleep_joint_index * sizeof(JointSim), joint_sim_at(&color.joint_sims, local_index) as ptr, sizeof(JointSim))
+        moved = core.buffer_remove_swap(&color.joint_sims, local_index)
+        if moved != NULL_INDEX && moved != local_index {
+            joint_at(w, joint_sim_at(&color.joint_sims, local_index).joint_id).local_index = local_index
+        }
+        j.set_index = sleep_set_id
+        j.color_index = NULL_INDEX
+        j.local_index = sleep_joint_index
+        i = i + 1
+    }
+    island_index = island.local_index
+    sleep_island = core.buffer_push(&sleep_set.island_sims)
+    island_sim_at(sleep_set, sleep_island).island_id = island_id
+    moved_island = core.buffer_remove_swap(&awake.island_sims, island_index)
+    if moved_island != NULL_INDEX && moved_island != island_index {
+        island_at(w, island_sim_at(awake, island_index).island_id).local_index = island_index
+    }
+    island.set_index = sleep_set_id
+    island.local_index = 0
+    if w.split_island_id == island_id { w.split_island_id = NULL_INDEX }
+    return true
+}
+
+// --- the pair filter and the collide pass ----------------------------------------------------------------------
+
+// Whether two shapes may collide: not on one body, no sensors, the
+// filters (a joint's collide-connected flag comes with the joint layer).
+should_pair(shape_id_a: int, shape_id_b: int, context: ptr) -> bool {
+    w = context as *World
+    shape_a = world_shape_at(w, shape_id_a)
+    shape_b = world_shape_at(w, shape_id_b)
+    if shape_a.body_id == shape_b.body_id { return false }
+    if shape_a.sensor_index != NULL_INDEX || shape_b.sensor_index != NULL_INDEX { return false }
+    if shape.should_shapes_collide(shape_a.filter, shape_b.filter) == false { return false }
+    return true
+}
+
+compound_tree_of(shape_id: int, context: ptr) -> ptr {
+    w = context as *World
+    s = world_shape_at(w, shape_id)
+    if s.geometry.kind != KIND_COMPOUND { return null }
+    return (&s.geometry.compound.tree) as ptr
+}
+
+compound_transform_of(shape_id: int, context: ptr) -> Transform {
+    w = context as *World
+    s = world_shape_at(w, shape_id)
+    return get_body_transform(w, s.body_id)
+}
+
+// The broad phase's new pairs become contacts.
+update_pairs(w: *World) -> int {
+    visitors = PairVisitors { should_pair: should_pair, compound_tree_of: compound_tree_of, compound_transform: compound_transform_of, context: w as ptr }
+    count = broad_phase.update_broad_phase_pairs(&w.broad_phase, visitors, w.compound_shape_count > 0)
+    i = 0
+    while i < count {
+        key = broad_phase.pair_key(&w.broad_phase, i)
+        shape_a = world_shape_at(w, broad_phase.pair_key_shape_a(key))
+        shape_b = world_shape_at(w, broad_phase.pair_key_shape_b(key))
+        create_contact(w, shape_a, shape_b, broad_phase.pair_key_child(key))
+        i = i + 1
+    }
+    return count
+}
+
+// The recycling: when the bodies barely moved relative to each other
+// since the manifolds were computed, the anchors are kept and only the
+// separations updated (the reference's persistent-manifold shortcut).
+try_recycle_contact(w: *World, c: *Contact, sim_a: *BodySim, sim_b: *BodySim, static_a: bool, static_b: bool, tolerance: float) -> bool {
+    xf_a = sim_a.transform
+    xf_b = sim_b.transform
+    angle_a = math.dot_quat(xf_a.q, c.cached_rotation_a)
+    angle_b = math.dot_quat(xf_b.q, c.cached_rotation_b)
+    angular_distance = math.min_float(angle_a * angle_a, angle_b * angle_b)
+    xf = math.inv_mul_transforms(xf_a, xf_b)
+    xfc = c.cached_relative_pose
+    max_extent_a = sim_a.max_extent
+    if static_a { max_extent_a = math.vec3_zero() }
+    max_extent_b = sim_b.max_extent
+    if static_b { max_extent_b = math.vec3_zero() }
+    max_extent = math.max_vec3(max_extent_a, max_extent_b)
+    dist_squared = math.distance_squared(xf.p, xfc.p)
+    if angular_distance <= CONTACT_RECYCLE_ANGULAR_DISTANCE || dist_squared >= tolerance * tolerance { return false }
+    slack = tolerance - sqrt(dist_squared)
+    qr = math.inv_mul_quat(xfc.q, xf.q)
+    a = math.abs_vec3(qr.v)
+    arc = math.vec3(a.y * max_extent.z + a.z * max_extent.y, a.z * max_extent.x + a.x * max_extent.z, a.x * max_extent.y + a.y * max_extent.x)
+    if 4.0 * math.length_squared(arc) >= slack * slack { return false }
+    dq_a = math.mul_quat(xf_a.q, math.conjugate(c.cached_rotation_a))
+    dq_b = math.mul_quat(xf_b.q, math.conjugate(c.cached_rotation_b))
+    matrix_a = math.make_matrix_from_quat(dq_a)
+    matrix_b = math.make_matrix_from_quat(dq_b)
+    dc = math.sub(sim_b.center, sim_a.center)
+    i = 0
+    while i < c.manifold_count {
+        m = manifold_at(c, i)
+        j = 0
+        while j < m.point_count {
+            p = manifold_point_at(m, j)
+            r_a = math.mul_mv(matrix_a, p.anchor_a)
+            r_b = math.mul_mv(matrix_b, p.anchor_b)
+            dp = math.add(dc, math.sub(r_b, r_a))
+            p.separation = p.base_separation + math.dot(dp, m.normal)
+            p.persisted = true
+            j = j + 1
+        }
+        i = i + 1
+    }
+    w.recycled_contact_count = w.recycled_contact_count + 1
+    return true
+}
+
+// One awake contact's pass: destroyed when its proxies no longer
+// overlap, recycled when its bodies barely moved, else its manifolds
+// recomputed; a change of touching is noted for the state pass.
+collide_contact(w: *World, contact_id: int) {
+    c = contact_at(w, contact_id)
+    shape_a = world_shape_at(w, c.shape_id_a)
+    shape_b = world_shape_at(w, c.shape_id_b)
+    if math.aabb_overlaps(shape_a.fat_aabb, shape_b.fat_aabb) == false {
+        c.flags = (c.flags | SIM_DISJOINT) & (0 - 1 - SIM_TOUCHING)
+        core.bitset_set(&w.contact_state, contact_id)
+        return
+    }
+    body_a = body_at(w, shape_a.body_id)
+    body_b = body_at(w, shape_b.body_id)
+    static_a = body_a.kind == BODY_STATIC
+    static_b = body_b.kind == BODY_STATIC
+    was_touching = (c.flags & SIM_TOUCHING) != 0
+    sim_a = get_body_sim(w, body_a)
+    sim_b = get_body_sim(w, body_b)
+    is_fast = (sim_a.flags & IS_FAST) != 0 || (sim_b.flags & IS_FAST) != 0
+    c.body_sim_index_a = body_a.local_index
+    if static_a { c.body_sim_index_a = NULL_INDEX }
+    c.body_sim_index_b = body_b.local_index
+    if static_b { c.body_sim_index_b = NULL_INDEX }
+    recycle_distance = w.contact_recycle_distance
+    tolerance = recycle_distance
+    if was_touching == false { tolerance = math.min_float(recycle_distance, SPECULATIVE_DISTANCE) }
+    if is_fast == false && recycle_distance > 0.0 && (c.flags & RELATIVE_TRANSFORM_VALID) != 0 && (c.flags & CONTACT_RECYCLE) != 0 {
+        if try_recycle_contact(w, c, sim_a, sim_b, static_a, static_b, tolerance) { return }
+    }
+    c.cached_rotation_a = sim_a.transform.q
+    c.cached_rotation_b = sim_b.transform.q
+    c.cached_relative_pose = math.inv_mul_transforms(sim_a.transform, sim_b.transform)
+    c.flags = c.flags | RELATIVE_TRANSFORM_VALID
+    touching = update_contact(w, c, shape_a, sim_a.local_center, sim_a.transform, shape_b, sim_b.local_center, sim_b.transform, is_fast)
+    if touching && was_touching && (c.flags & SIM_MESH_CONTACT) != 0 {
+        contact_spec_at(graph_color(w, c.color_index), c.local_index).manifold_count = c.manifold_count
+    }
+    if touching && was_touching == false {
+        c.flags = c.flags | SIM_STARTED_TOUCHING
+        core.bitset_set(&w.contact_state, contact_id)
+    } else if touching == false && was_touching {
+        c.flags = c.flags | SIM_STOPPED_TOUCHING
+        core.bitset_set(&w.contact_state, contact_id)
+    }
+    i = 0
+    while i < c.manifold_count {
+        m = manifold_at(c, i)
+        j = 0
+        while j < m.point_count {
+            p = manifold_point_at(m, j)
+            p.base_separation = p.separation
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+add_non_touching_contact(w: *World, c: *Contact) {
+    set = solver_set_at(w, AWAKE_SET)
+    c.color_index = NULL_INDEX
+    c.local_index = set.contact_indices.count
+    c.body_sim_index_a = NULL_INDEX
+    c.body_sim_index_b = NULL_INDEX
+    core.ints_push(&set.contact_indices, c.contact_id)
+}
+
+remove_non_touching_contact(w: *World, set_index: int, local_index: int) {
+    set = solver_set_at(w, set_index)
+    moved = core.ints_remove_swap(&set.contact_indices, local_index)
+    if moved != NULL_INDEX && moved != local_index {
+        contact_at(w, core.ints_get(&set.contact_indices, local_index)).local_index = local_index
+    }
+}
+
+// The narrow phase for every awake contact (the graph's touching ones
+// and the awake set's non-touching ones), then the state changes in
+// contact id order: disjoint contacts destroyed, contacts that began
+// touching linked into islands and the graph (with a begin event),
+// contacts that stopped unlinked and back among the non-touching (with
+// an end event). Returns how many contacts changed state.
+collide(w: *World) -> int {
+    core.buffer_clear(&w.contact_begin_events)
+    touching_count = 0
+    i = 0
+    while i < GRAPH_COLOR_COUNT {
+        color = graph_color(w, i)
+        touching_count = touching_count + color.convex_contacts.count + color.contacts.count
+        i = i + 1
+    }
+    awake = solver_set_at(w, AWAKE_SET)
+    contact_count = touching_count + awake.contact_indices.count
+    if contact_count == 0 { return 0 }
+    indices_block = core.stack_alloc(&w.stack, contact_count * 4)
+    indices = indices_block as int[]
+    n = 0
+    i = 0
+    while i < GRAPH_COLOR_COUNT {
+        color = graph_color(w, i)
+        j = 0
+        while j < color.convex_contacts.count {
+            indices[n] = core.ints_get(&color.convex_contacts, j)
+            n = n + 1
+            j = j + 1
+        }
+        j = 0
+        while j < color.contacts.count {
+            indices[n] = contact_spec_at(color, j).contact_id
+            n = n + 1
+            j = j + 1
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < awake.contact_indices.count {
+        indices[n] = core.ints_get(&awake.contact_indices, i)
+        n = n + 1
+        i = i + 1
+    }
+    core.bitset_set_count_and_clear(&w.contact_state, core.idpool_capacity(&w.contact_id_pool))
+    w.sat_call_count = 0
+    w.sat_cache_hit_count = 0
+    w.recycled_contact_count = 0
+    i = 0
+    while i < contact_count {
+        collide_contact(w, indices[i])
+        i = i + 1
+    }
+    core.stack_free(&w.stack, indices_block)
+    core.arena_sync(&w.arena)
+    // The state changes, in id order.
+    changed = 0
+    bits = w.contact_state.bits as long[]
+    k = 0
+    while k < w.contact_state.block_count {
+        block = bits[k]
+        while block != (0 as long) {
+            bit = core.ctz64(block)
+            contact_id = 64 * k + bit
+            c = contact_at(w, contact_id)
+            flags = c.flags
+            if (flags & SIM_DISJOINT) != 0 {
+                destroy_contact(w, c, false)
+            } else if (flags & SIM_STARTED_TOUCHING) != 0 {
+                if (flags & CONTACT_ENABLE_CONTACT_EVENTS) != 0 { push_begin_event(w, c) }
+                c.flags = (c.flags & (0 - 1 - SIM_STARTED_TOUCHING)) | CONTACT_TOUCHING
+                // Linked first: this wakes the other body and settles the sims.
+                link_contact(w, c)
+                old_local_index = c.local_index
+                add_contact_to_graph(w, c)
+                remove_non_touching_contact(w, AWAKE_SET, old_local_index)
+            } else if (flags & SIM_STOPPED_TOUCHING) != 0 {
+                c.flags = c.flags & (0 - 1 - SIM_STOPPED_TOUCHING) & (0 - 1 - CONTACT_TOUCHING)
+                if (c.flags & CONTACT_ENABLE_CONTACT_EVENTS) != 0 { push_end_event(w, c) }
+                color_index = c.color_index
+                local_index = c.local_index
+                unlink_contact(w, c)
+                body_id_a = c.edge_a.body_id
+                body_id_b = c.edge_b.body_id
+                add_non_touching_contact(w, c)
+                remove_contact_from_graph(w, body_id_a, body_id_b, color_index, local_index, (c.flags & SIM_MESH_CONTACT) != 0)
+            }
+            changed = changed + 1
+            block = block & (block - (1 as long))
+        }
+        k = k + 1
+    }
+    return changed
+}
+
+// The end events are double buffered so the user reads last pass's after
+// the next has begun; the step swaps them.
+swap_end_events(w: *World) {
+    w.end_event_index = 1 - w.end_event_index
+    core.buffer_clear(end_events(w))
+}
+
+// --- contact validation --------------------------------------------------------------------------------------
+
+// Every live contact is where its indices say (a colour's array or a
+// set's indices), touching iff coloured or in a sleeping set, in its
+// island iff touching; the pair set holds every contact's key; both
+// bodies' lists close on their counts.
+validate_contacts(w: *World) -> bool {
+    live = 0
+    i = 0
+    while i < w.contacts.count {
+        c = contact_at(w, i)
+        if c.contact_id != NULL_INDEX {
+            live = live + 1
+            if c.contact_id != i { return false }
+            if broad_phase.has_pair(&w.broad_phase, core.shape_pair_key(c.shape_id_a, c.shape_id_b, c.child_index)) == false { return false }
+            touching = (c.flags & CONTACT_TOUCHING) != 0
+            if c.color_index != NULL_INDEX {
+                if c.set_index != AWAKE_SET || touching == false { return false }
+                color = graph_color(w, c.color_index)
+                if (c.flags & SIM_MESH_CONTACT) != 0 || c.color_index == OVERFLOW_INDEX {
+                    if c.local_index >= color.contacts.count || contact_spec_at(color, c.local_index).contact_id != i { return false }
+                } else {
+                    if c.local_index >= color.convex_contacts.count || core.ints_get(&color.convex_contacts, c.local_index) != i { return false }
+                }
+                if c.island_id == NULL_INDEX { return false }
+            } else {
+                set = solver_set_at(w, c.set_index)
+                if c.local_index >= set.contact_indices.count || core.ints_get(&set.contact_indices, c.local_index) != i { return false }
+                if c.set_index == AWAKE_SET && touching { return false }
+                if c.set_index >= FIRST_SLEEPING_SET && touching == false { return false }
+                if c.set_index == DISABLED_SET && (touching || c.island_id != NULL_INDEX) { return false }
+            }
+            if c.island_id != NULL_INDEX {
+                island = island_at(w, c.island_id)
+                if c.island_index >= island.contacts.count || contact_link_at(island, c.island_index).contact_id != i { return false }
+            }
+        }
+        i = i + 1
+    }
+    if live != core.idpool_count(&w.contact_id_pool) { return false }
+    if broad_phase.pair_count(&w.broad_phase) != live { return false }
+    // The bodies' lists.
+    i = 0
+    while i < w.bodies.count {
+        body = body_at(w, i)
+        if body.set_index != NULL_INDEX {
+            count = 0
+            key = body.head_contact_key
+            prev = NULL_INDEX
+            while key != NULL_INDEX {
+                c = contact_at(w, key >> 1)
+                edge_body = c.edge_b.body_id
+                edge_prev = c.edge_b.prev_key
+                if (key & 1) == 0 {
+                    edge_body = c.edge_a.body_id
+                    edge_prev = c.edge_a.prev_key
+                }
+                if edge_body != i || edge_prev != prev { return false }
+                count = count + 1
+                prev = key
+                key = contact_edge_next(w, key)
+            }
+            if count != body.contact_count { return false }
+        }
+        i = i + 1
+    }
     return true
 }

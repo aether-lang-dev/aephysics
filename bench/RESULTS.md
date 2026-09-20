@@ -375,23 +375,34 @@ kept as speculative ones, as the reference keeps them. The test checks
 the seams (a sphere on an interior edge or vertex gives one point), the
 cache's persistence and the cull.
 
-## dynamics (bookkeeping)
+## dynamics (bookkeeping and contacts)
 
 `bench/dynamics.ae` and `bench/dynamics_box3d.c`: ten rounds of a world
 with 5,000 dynamic bodies (a box hull and an offset sphere each, the
 mass computed from both) and 500 static ones, the mass summed, every
 dynamic body's transform set once (its shapes' bounds and proxies
-updated), then the world destroyed. No step.
+updated), then the world destroyed; then 5,000 cubes resting on a slab
+through eleven collide passes with no solve (the reference's step with
+a zero time step does exactly that: the pairs, the narrow phase, the
+state changes): the first begins every contact, the rest recycle them.
 
-| phase, 10 rounds | aephysics | Box3D |
+| phase | aephysics | Box3D |
 |---|---|---|
-| 5,500 bodies and 10,500 shapes created | **113 ms** | 122 |
-| 5,000 transforms set | **38** | 55 |
-| the world destroyed | 5.0 | **5.1** |
+| 5,500 bodies and 10,500 shapes created, 10 rounds | **116 ms** | 118 |
+| 5,000 transforms set, 10 rounds | **40** | 54 |
+| the world destroyed, 10 rounds | 6.1 | **4.4** |
+| first collide: 5,000 contacts begun, islands linked | 7.7 | **4.6** |
+| 10 recycling collides | 3.9 | **2.2** |
 
-The same mass sum (53,272.5). Creation is 0.93x: the reference's hull
-database hashes every hull shape's bytes and refcounts them, which this
-layer does not do (a hull shape keeps the pointer it was given). The
-transforms are 0.7x: the reference's b3Body_SetTransform also invalidates
-the body's contacts and validates, which arrive with the contact layer;
-the comparison will be redone then.
+The same mass sum (53,272.5), the same 5,000 contacts and 5,000 islands.
+Creation is at parity: the reference's hull database hashes every hull
+shape's bytes and refcounts them, which this layer does not do (a hull
+shape keeps the pointer it was given). The transforms are 0.7x: the
+reference's b3Body_SetTransform also walks the body's joints, which
+arrive with the joint layer. The collide passes are 1.7-1.8x: each
+contact is reached through its id into a 300-byte struct here where the
+reference's narrow phase prefetches the next contact and packs its
+state; the first pass also computes 5,000 hull-hull manifolds (the
+distance layer's 1.3-1.5x) and links 5,000 islands. The wide contact
+solver will read these arrays, so this is the place to come back to
+with the solver's profile.

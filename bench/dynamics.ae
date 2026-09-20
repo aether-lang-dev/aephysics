@@ -1,8 +1,11 @@
-// The world's bookkeeping on the same scene as bench/dynamics_box3d.c:
+// The world's bookkeeping on the same scenes as bench/dynamics_box3d.c:
 // ten rounds of a world with 5,000 dynamic bodies (a box hull and an
 // offset sphere each) and 500 static ones, the mass summed, every body's
-// transform set once, then the world destroyed. No step. Single thread,
-// wall time per phase, with the mass sum as the checksum.
+// transform set once, then the world destroyed; then 5,000 cubes resting
+// on a slab through eleven collide passes (the pairs, the narrow phase
+// and the state changes, no solve): the first begins the contacts, the
+// rest recycle them. Single thread, wall time per phase, with the mass
+// sum and the contact count as the checksum.
 import std.string
 import std.os
 import aephysics.math
@@ -84,5 +87,39 @@ main() {
     }
     println("aephysics dynamics: ${ROUNDS} rounds: create ${DYNAMIC + STATIC} bodies and ${2 * DYNAMIC + STATIC} shapes ${ms(create_ns)} ms, move ${DYNAMIC} bodies ${ms(move_ns)} ms, destroy ${ms(destroy_ns)} ms (mass sum ${mass_sum})")
     free(ids_block)
+
+    // Contacts: cubes resting on a slab, collided without solving.
+    world_def = dynamics.default_world_def()
+    world_id = dynamics.create_world(&world_def)
+    w = dynamics.get_world(world_id.index1 - 1)
+    shape_def = dynamics.default_shape_def()
+    ground_def = dynamics.default_body_def()
+    ground_def.position = math.vec3(100.0, 0.0 - 0.5, 50.0)
+    ground = dynamics.create_body(world_id, &ground_def)
+    slab = hull.make_box_hull(110.0, 0.5, 60.0)
+    dynamics.create_hull_shape(ground, &shape_def, slab)
+    i = 0
+    while i < DYNAMIC {
+        body_def = dynamics.default_body_def()
+        body_def.kind = dynamics.BODY_DYNAMIC
+        body_def.position = math.vec3((2 * (i % 100)) as float, 0.49, (2 * (i / 100)) as float)
+        id = dynamics.create_body(world_id, &body_def)
+        dynamics.create_hull_shape(id, &shape_def, box)
+        i = i + 1
+    }
+    t0 = clock()
+    dynamics.update_pairs(w)
+    dynamics.collide(w)
+    t1 = clock()
+    k = 0
+    while k < 10 {
+        dynamics.update_pairs(w)
+        dynamics.collide(w)
+        k = k + 1
+    }
+    t2 = clock()
+    println("aephysics dynamics: first collide of ${DYNAMIC} cubes on a slab ${ms(t1 - t0)} ms (${dynamics.world_contact_count(w)} contacts, ${dynamics.world_island_count(w)} islands), 10 recycling collides ${ms(t2 - t1)} ms")
+    dynamics.destroy_world(world_id)
+    hull.destroy_hull(slab)
     hull.destroy_hull(box)
 }
