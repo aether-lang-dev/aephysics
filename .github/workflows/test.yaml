@@ -45,4 +45,7 @@ jobs:
       # The determinism scenes' per-step checksums, for a diff against a
       # run on another platform (issue #27): the log is the record.
       - name: Trace the determinism scenes
-        run: AEPHYSICS_TRACE=1 target/test_determinism > target/trace_linux.txt && wc -l target/trace_linux.txt && cat target/trace_linux.txt
+        run: |
+          AEPHYSICS_TRACE=1 target/test_determinism > target/trace_linux.txt
+          wc -l target/trace_linux.txt
+          cat target/trace_linux.txt
