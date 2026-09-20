@@ -567,7 +567,7 @@ collide_hull_face(m: *LocalManifold, point_capacity: int, t: *TriangleData, h: *
         }
         swap = input
         input = output
-        output = swap
+        output = swap as ClipVertex[]
         edge_index = next_index
         if edge_index == start { break }
     }
@@ -636,7 +636,7 @@ collide_triangle_face(m: *LocalManifold, point_capacity: int, t: *TriangleData, 
         point_count = manifold.clip_polygon(output, input, point_count, clip_plane, i, ref_plane)
         swap = input
         input = output
-        output = swap
+        output = swap as ClipVertex[]
         i = i + 1
     }
     if point_count == 0 {

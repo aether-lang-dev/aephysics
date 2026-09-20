@@ -337,7 +337,10 @@ started until its tests pass.
 
 - Every ported test passes with the original's tolerances.
 - Determinism: `test_determinism` (the same scene twice, bit-identical),
-  and the port against the C original on a scene's first frames.
+  and the port against the C original on a scene's first frames; across
+  platforms too: the per-step trace CI records on Linux matches the
+  Windows run bit for bit (PR #28), which the reference pins with golden
+  hashes and this port pins by diffing the traces.
 - Speed: each benchmark scene, port against C, single thread first. The
   honest expectation for a scalar double port against a wide-SIMD float
   original is a gap; the work after the port is closing it -- and where
