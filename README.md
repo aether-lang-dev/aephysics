@@ -48,6 +48,7 @@ so a test written against the reference reads the same here.
 | `aephysics.joint_solver` | the seven joints solved: each kind's prepare (frames relative to the centres of mass, effective masses, spring softness), warm start and solve (rigid or soft constraints, speculative limits, springs, motors), the kinds' accessors (limits, springs, motors, current angles and translations, forces and torques), joint.c's dispatch with the constraint hertz clamp | `test_joint_solver.ae` (149 checks: test_joint.c's accessors on every kind, each kind solved by hand) | [ours alone](bench/RESULTS.md#joint_solver) |
 | `aephysics.solver` | the Soft Step: the constraints prepared, per sub-step the velocities integrated (gravity, damping, the gyroscopic torque), warm start, solve, positions, relax, colour by colour with the overflow first; restitution, the impulses stored; the bodies finalised (sleep velocities, move events, fast bodies swept for the time of impact, bounds and proxies), the joint and hit events, the trees refit, bullets, the sensors' hits, islands put to sleep | `test_solver.ae` (42 checks: free fall against the closed form, resting and sleeping, a stack, a bounce and its hit event, a joint event, a pendulum, a fast sphere stopped by a thin wall, a bullet, a sensor swept, two worlds bit for bit alike) | [1.2-1.4x the reference's step with the native lanes](bench/RESULTS.md#solver) |
 | `aephysics.physics_world` | the world's face: the step (pairs, narrow phase, solve, sensors, events), the events read back, the settings and counters, queries over every shape (overlap of a box or a proxy, the mover's planes, ray, shape and mover casts, the closest ray hit) and against one body at a transform of the caller's, explosions | `test_physics_world.ae` (94 checks: test_world.c's HelloWorld, contact, hit, move and sensor events, the explosion near and far; test_body_query.c's casts, overlaps, mover planes and time of impact; the world queries; a wave pile stepping alike twice) | [the reference's own benchmark scenes with the same checksums at 1.2-1.6x](bench/RESULTS.md#physics_world) |
+| `aephysics.human` | the ragdoll: twelve capsule bones on spherical joints with cone and twist limits and revolute joints with angle limits, a spring on every joint toward the reference pose, a motor whose torque limit is joint friction, filter joints for the limbs that clash; the align spring, kinematic anchors through motor or parallel joints (the pose drive of an active ragdoll), velocity, kicks, bullets | `test_human.ae` (44 checks: the figure's shape, a fall to rest in one piece, the setters, a kick, standing under the align spring, the pose held on anchors, the same drop twice bit for bit) | [the reference's rain benchmark, 300 ragdolls over 400 steps, at 1.05x](bench/RESULTS.md#human) |
 | `aephysics` | the public API | |
 
 Deliberate choices:
@@ -87,10 +88,10 @@ Beyond the modules' own tests, the reference's scene tests run on the
 world as a whole: `test_mover_world.ae` (the mover through a world:
 which material a plane came from, for meshes, compounds and convex
 shapes; 38 checks), `test_determinism.ae` (the reference's wave pile,
-query spawn and mesh drop with its own random numbers, each run to
-sleep twice and compared bit for bit; the query spawn sleeps a step
-after the reference's with its 59 query hits, the mesh drop two; 9
-checks) and `test_large_world.ae` (a stack, a bullet and the
+query spawn and mesh drop with its own random numbers, and the
+falling ragdolls, each run to sleep twice and compared bit for bit; the
+query spawn sleeps a step after the reference's with its 59 query hits,
+the mesh drop two; 11 checks) and `test_large_world.ae` (a stack, a bullet and the
 origin-relative queries at x = 0 and at x = 1e7 agree, the whole
 engine being in doubles; 43 checks).
 
@@ -98,7 +99,7 @@ The step is deterministic across platforms, not only across runs:
 `AEPHYSICS_TRACE=1 target/test_determinism` prints every body's
 checksum after every step with its bits, CI records the Linux trace in
 its log, and the Windows trace (MinGW, a different gcc) matches it bit
-for bit on all 776 steps of the three scenes. The engine's own maths
+for bit on every step of the four scenes. The engine's own maths
 (the reference's cos, sin and atan2 approximations, `sqrt`, `floor`
 and `remainder` as the only libm calls, no fused multiply-adds in the
 lanes) is what makes that hold; the one divergence seen so far was an

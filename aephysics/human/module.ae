@@ -1,0 +1,468 @@
+// aephysics.human -- a ragdoll: twelve bones (pelvis, two spine
+// segments, the neck with the head, thighs, calves with their feet,
+// upper and lower arms) as capsules on dynamic bodies, joined by
+// spherical joints with cone and twist limits (the spine, neck,
+// shoulders, hips) and revolute joints with angle limits (the elbows,
+// the knees), each with a spring toward its reference pose and a motor
+// whose torque limit acts as joint friction; filter joints keep the
+// thighs from each other and the head from the shoulders. The bones'
+// reference frames and joint frames are the reference's, measured from
+// its rigged figure.
+//
+// This is Box3D's shared/human.c (Erin Catto, MIT): CreateHuman is
+// create_human, Human_SetJointFrictionTorque is
+// set_joint_friction_torque. Beyond the reference's sample it is the
+// ground for an active ragdoll: the springs and motors are the pose
+// drive, the anchors (a kinematic body per bone through a motor or
+// parallel joint) are the pose target, and the torque limits are the
+// muscle budget; design.md's research note says what comes next.
+import std.string
+import aephysics.math
+import aephysics.core
+import aephysics.manifold
+import aephysics.material
+import aephysics.shape
+import aephysics.dynamics
+import aephysics.joint_solver
+
+exports (
+    BONE_PELVIS, BONE_SPINE_01, BONE_SPINE_03, BONE_NECK, BONE_THIGH_L, BONE_CALF_L, BONE_THIGH_R, BONE_CALF_R,
+    BONE_UPPER_ARM_L, BONE_LOWER_ARM_L, BONE_UPPER_ARM_R, BONE_LOWER_ARM_R, BONE_COUNT, FILTER_JOINT_COUNT,
+    Bone, Human, bone_at, filter_joint_at,
+    create_human, destroy_human, human_set_velocity, human_apply_angular_impulse, human_set_joint_friction_torque,
+    human_set_joint_spring_hertz, human_set_joint_damping_ratio, human_align_spring, human_create_motor_anchors,
+    human_create_parallel_anchors, human_set_bullet
+)
+
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+
+const BONE_PELVIS = 0
+const BONE_SPINE_01 = 1
+const BONE_SPINE_03 = 2
+const BONE_NECK = 3
+const BONE_THIGH_L = 4
+const BONE_CALF_L = 5
+const BONE_THIGH_R = 6
+const BONE_CALF_R = 7
+const BONE_UPPER_ARM_L = 8
+const BONE_LOWER_ARM_L = 9
+const BONE_UPPER_ARM_R = 10
+const BONE_LOWER_ARM_R = 11
+const BONE_COUNT = 12
+const FILTER_JOINT_COUNT = 3
+
+// One bone: its body, the joint to its parent, the anchor a pose drive
+// hangs it from, the joint's frames on parent and bone, the bone's
+// frame in the reference pose, and the joint's limits and friction.
+struct Bone {
+    body_id: BodyId
+    joint_id: JointId
+    anchor_id: BodyId
+    anchor_joint_id: JointId
+    local_frame_a: Transform
+    local_frame_b: Transform
+    reference_frame: Transform
+    joint_kind: int                // dynamics.JOINT_SPHERICAL or JOINT_REVOLUTE; PARALLEL for none
+    swing_limit: float             // the spherical cone
+    twist_limit: Vec2              // the twist's or the hinge's angles
+    joint_friction: float          // this joint's share of the friction torque
+    parent_index: int
+}
+
+// The ragdoll: a heap block of bones and filter joints (create allocates, destroy frees).
+struct Human {
+    bones: ptr                     // Bone[BONE_COUNT]
+    filter_joints: ptr             // JointId[FILTER_JOINT_COUNT]
+    filter_joint_count: int
+    friction_torque: float
+    is_spawned: bool
+}
+
+bone_at(h: *Human, index: int) -> *Bone { return (h.bones + index * sizeof(Bone)) as *Bone }
+filter_joint_at(h: *Human, index: int) -> JointId { return (h.filter_joints as JointId[])[index] }
+
+transform_of(px: float, py: float, pz: float, qx: float, qy: float, qz: float, qs: float) -> Transform {
+    return Transform { p: math.vec3(px, py, pz), q: Quat { v: math.vec3(qx, qy, qz), s: qs } }
+}
+
+// A bone's body and shape: the body at the reference frame offset by the
+// human's position, the capsule with its material; the joint data on the bone.
+struct BoneSpec {
+    parent: int
+    reference: Transform
+    group: int                     // the filter group: 0, or -group_index to keep limbs from their neighbours
+    friction: float
+    capsule: Capsule
+    joint_kind: int
+    frame_a: Transform
+    frame_b: Transform
+    swing_degrees: float
+    twist_degrees: float
+    joint_friction: float
+}
+
+place_bone(h: *Human, world_id: WorldId, index: int, position: Vec3, spec: BoneSpec, user_data: ptr, group_index: int, density_scale: float) -> *Bone {
+    bone = bone_at(h, index)
+    bone.parent_index = spec.parent
+    bone.reference_frame = spec.reference
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.user_data = user_data
+    bdef.rotation = spec.reference.q
+    bdef.position = math.add(position, spec.reference.p)
+    bone.body_id = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    sdef.density = sdef.density * density_scale
+    sdef.filter.group_index = spec.group * group_index
+    sdef.base_material.friction = spec.friction
+    sdef.base_material.rolling_resistance = 0.1
+    dynamics.create_capsule_shape(bone.body_id, &sdef, spec.capsule)
+    bone.joint_kind = spec.joint_kind
+    bone.local_frame_a = spec.frame_a
+    bone.local_frame_b = spec.frame_b
+    bone.swing_limit = spec.swing_degrees * math.DEG_TO_RAD
+    bone.twist_limit = Vec2 { x: 0.0 - spec.twist_degrees * math.DEG_TO_RAD, y: spec.twist_degrees * math.DEG_TO_RAD }
+    bone.joint_friction = spec.joint_friction
+    return bone
+}
+
+// The reference's figure, bone by bone (its frames measured from the rig).
+create_human(h: *Human, world_id: WorldId, position: Vec3, friction_torque: float, hertz: float, damping_ratio: float, group_index: int, user_data: ptr) {
+    h.bones = calloc(BONE_COUNT, sizeof(Bone))
+    h.filter_joints = calloc(FILTER_JOINT_COUNT, sizeof(JointId))
+    i = 0
+    while i < BONE_COUNT {
+        bone = bone_at(h, i)
+        bone.body_id = dynamics.null_body_id()
+        bone.anchor_id = dynamics.null_body_id()
+        bone.joint_id = dynamics.null_joint_id()
+        bone.anchor_joint_id = dynamics.null_joint_id()
+        bone.joint_friction = 1.0
+        bone.parent_index = 0 - 1
+        i = i + 1
+    }
+    filters = h.filter_joints as JointId[]
+    i = 0
+    while i < FILTER_JOINT_COUNT {
+        filters[i] = dynamics.null_joint_id()
+        i = i + 1
+    }
+    h.friction_torque = friction_torque
+    no_joint = math.transform_identity()
+
+    place_bone(h, world_id, BONE_PELVIS, position, BoneSpec {
+        parent: 0 - 1, reference: transform_of(0.0, 0.996219, 0.0 - 0.023868, 1.0, 0.0, 0.0, 0.0), group: 0, friction: 0.6,
+        capsule: manifold.capsule(math.vec3(0.04, 0.000001, 0.0), math.vec3(0.0 - 0.04, 0.0 - 0.000001, 0.0), 0.15),
+        joint_kind: dynamics.JOINT_PARALLEL, frame_a: no_joint, frame_b: no_joint, swing_degrees: 0.0, twist_degrees: 0.0, joint_friction: 1.0 },
+        user_data, group_index, 1.0)
+    place_bone(h, world_id, BONE_SPINE_01, position, BoneSpec {
+        parent: BONE_PELVIS, reference: transform_of(0.0, 1.017288, 0.0 - 0.024882, 1.0, 0.0, 0.0, 0.0), group: 0 - 1, friction: 0.5,
+        capsule: manifold.capsule(math.vec3(0.029876, 0.0 - 0.146581, 0.00626), math.vec3(0.0 - 0.029876, 0.0 - 0.146574, 0.00626), 0.145663),
+        joint_kind: dynamics.JOINT_SPHERICAL,
+        frame_a: transform_of(0.0, 0.0 - 0.021069, 0.001014, 0.0 - 0.642737, 0.0, 0.0, 0.0 - 0.766087),
+        frame_b: transform_of(0.0, 0.0, 0.0, 0.0 - 0.707107, 0.0, 0.0, 0.0 - 0.707107),
+        swing_degrees: 35.0, twist_degrees: 17.5, joint_friction: 1.0 }, user_data, group_index, 1.0)
+    place_bone(h, world_id, BONE_SPINE_03, position, BoneSpec {
+        parent: BONE_SPINE_01, reference: transform_of(0.0, 1.267766, 0.0 - 0.02232, 1.0, 0.0, 0.0, 0.0), group: 0, friction: 0.5,
+        capsule: manifold.capsule(math.vec3(0.063996, 0.0 - 0.117434, 0.0 - 0.040199), math.vec3(0.0 - 0.063996, 0.0 - 0.117432, 0.0 - 0.040199), 0.165004),
+        joint_kind: dynamics.JOINT_SPHERICAL,
+        frame_a: transform_of(0.0, 0.0 - 0.250478, 0.0 - 0.002562, 0.0 - 0.642766, 0.0, 0.0, 0.0 - 0.766063),
+        frame_b: transform_of(0.0, 0.0, 0.0, 0.0 - 0.707107, 0.0, 0.0, 0.0 - 0.707107),
+        swing_degrees: 35.0, twist_degrees: 17.5, joint_friction: 1.0 }, user_data, group_index, 1.0)
+    place_bone(h, world_id, BONE_NECK, position, BoneSpec {
+        parent: BONE_SPINE_03, reference: transform_of(0.0, 1.498783, 0.024462, 0.987879, 0.0, 0.0, 0.155228), group: 0, friction: 0.2,
+        capsule: manifold.capsule(math.vec3(0.0, 0.0 - 0.21234, 0.0), math.vec3(0.0, 0.0 - 0.08734, 0.0), 0.11),
+        joint_kind: dynamics.JOINT_SPHERICAL,
+        frame_a: transform_of(0.0, 0.0 - 0.231017, 0.0 - 0.046781, 0.0 - 0.516157, 0.0 - 0.000002, 0.000003, 0.0 - 0.856494),
+        frame_b: transform_of(0.0, 0.0, 0.0, 0.0 - 0.707108, 0.0 - 0.000002, 0.000002, 0.0 - 0.707106),
+        swing_degrees: 30.0, twist_degrees: 17.5, joint_friction: 1.0 }, user_data, group_index, 1.0)
+    place_bone(h, world_id, BONE_THIGH_L, position, BoneSpec {
+        parent: BONE_PELVIS, reference: transform_of(0.092175, 0.971562, 0.0 - 0.011177, 0.471412, 0.52951, 0.0 - 0.499888, 0.0 - 0.497495), group: 0 - 1, friction: 0.6,
+        capsule: manifold.capsule(math.vec3(0.0 - 0.047269, 0.000001, 0.0), math.vec3(0.0 - 0.379769, 0.000005, 0.0), 0.091539),
+        joint_kind: dynamics.JOINT_SPHERICAL,
+        frame_a: transform_of(0.092175, 0.024656, 0.0 - 0.012691, 0.0 - 0.460186, 0.0 - 0.365368, 0.0 - 0.637662, 0.498118),
+        frame_b: transform_of(0.0, 0.0, 0.0, 0.0 - 0.499997, 0.0 - 0.500003, 0.500002, 0.499998),
+        swing_degrees: 30.0, twist_degrees: 10.0, joint_friction: 1.0 }, user_data, group_index, 1.0)
+    // The calves carry the shins at half density and the feet at full.
+    calf_l = place_bone(h, world_id, BONE_CALF_L, position, BoneSpec {
+        parent: BONE_THIGH_L, reference: transform_of(0.11872, 0.534541, 0.0 - 0.035362, 0.521188, 0.480597, 0.0 - 0.54638, 0.0 - 0.445935), group: 0, friction: 0.1,
+        capsule: manifold.capsule(math.vec3(0.0 - 0.445, 0.000001, 0.0), math.vec3(0.005, 0.0 - 0.000001, 0.0), 0.08),
+        joint_kind: dynamics.JOINT_REVOLUTE,
+        frame_a: transform_of(0.0 - 0.438494, 0.0 - 0.000175, 0.0, 0.344866, 0.0 - 0.938652, 0.000002, 0.0 - 0.000008),
+        frame_b: transform_of(0.0, 0.0, 0.0, 0.0 - 0.008182, 0.0 - 0.999967, 0.000001, 0.0 - 0.000007),
+        swing_degrees: 0.0, twist_degrees: 30.0, joint_friction: 1.0 }, user_data, group_index, 0.5)
+    add_foot(calf_l, manifold.capsule(math.vec3(0.0 - 0.456371, 0.129321, 0.000013), math.vec3(0.0 - 0.359977, 0.014394, 0.000013), 0.07))
+    place_bone(h, world_id, BONE_THIGH_R, position, BoneSpec {
+        parent: BONE_PELVIS, reference: transform_of(0.0 - 0.092175, 0.971562, 0.0 - 0.011177, 0.0 - 0.497495, 0.499888, 0.52951, 0.0 - 0.471412), group: 0 - 1, friction: 0.6,
+        capsule: manifold.capsule(math.vec3(0.047269, 0.0 - 0.000001, 0.0), math.vec3(0.379769, 0.0 - 0.000005, 0.0), 0.092587),
+        joint_kind: dynamics.JOINT_SPHERICAL,
+        frame_a: transform_of(0.0 - 0.092175, 0.024656, 0.0 - 0.012691, 0.380666, 0.491846, 0.488644, 0.0 - 0.611889),
+        frame_b: transform_of(0.0, 0.0, 0.0, 0.0 - 0.500002, 0.499998, 0.0 - 0.499998, 0.500002),
+        swing_degrees: 30.0, twist_degrees: 10.0, joint_friction: 1.0 }, user_data, group_index, 1.0)
+    calf_r = place_bone(h, world_id, BONE_CALF_R, position, BoneSpec {
+        parent: BONE_THIGH_R, reference: transform_of(0.0 - 0.11872, 0.534541, 0.0 - 0.035362, 0.0 - 0.445935, 0.54638, 0.480597, 0.0 - 0.521188), group: 0, friction: 0.1,
+        capsule: manifold.capsule(math.vec3(0.445, 0.0 - 0.000002, 0.000003), math.vec3(0.0 - 0.005, 0.0, 0.000003), 0.08),
+        joint_kind: dynamics.JOINT_REVOLUTE,
+        frame_a: transform_of(0.438494, 0.000175, 0.0, 0.000007, 0.000005, 0.0 - 0.34486, 0.0 - 0.938654),
+        frame_b: transform_of(0.0, 0.0, 0.0, 0.000006, 0.000005, 0.008188, 0.0 - 0.999966),
+        swing_degrees: 0.0, twist_degrees: 30.0, joint_friction: 1.0 }, user_data, group_index, 0.5)
+    add_foot(calf_r, manifold.capsule(math.vec3(0.369113, 0.0 - 0.00683, 0.000017), math.vec3(0.465507, 0.0 - 0.121757, 0.000017), 0.07))
+    place_bone(h, world_id, BONE_UPPER_ARM_L, position, BoneSpec {
+        parent: BONE_SPINE_03, reference: transform_of(0.185817, 1.44363, 0.031306, 0.56022, 0.0 - 0.307179, 0.366233, 0.0 - 0.676512), group: 0, friction: 0.6,
+        capsule: manifold.capsule(math.vec3(0.296038, 0.004386, 0.0 - 0.000794), math.vec3(0.0 - 0.016086, 0.004384, 0.0 - 0.016127), 0.065),
+        joint_kind: dynamics.JOINT_SPHERICAL,
+        frame_a: transform_of(0.185817, 0.0 - 0.175865, 0.0 - 0.053625, 0.0 - 0.559466, 0.0 - 0.213784, 0.0 - 0.670199, 0.438323),
+        frame_b: transform_of(0.0, 0.0, 0.0, 0.0 - 0.500953, 0.0 - 0.502617, 0.0 - 0.509318, 0.0 - 0.486844),
+        swing_degrees: 45.0, twist_degrees: 20.0, joint_friction: 0.8 }, user_data, group_index, 1.0)
+    place_bone(h, world_id, BONE_LOWER_ARM_L, position, BoneSpec {
+        parent: BONE_UPPER_ARM_L, reference: transform_of(0.347683, 1.193455, 0.029378, 0.406736, 0.0 - 0.493012, 0.089135, 0.0 - 0.763911), group: 0, friction: 0.3,
+        capsule: manifold.capsule(math.vec3(0.312329, 0.0 - 0.008256, 0.0 - 0.016454), math.vec3(0.033153, 0.008259, 0.0 - 0.002741), 0.06),
+        joint_kind: dynamics.JOINT_REVOLUTE,
+        frame_a: transform_of(0.297979, 0.000361, 0.0, 0.916726, 0.399352, 0.000839, 0.0 - 0.011456),
+        frame_b: transform_of(0.0, 0.0, 0.0, 0.999922, 0.0 - 0.003857, 0.004659, 0.0 - 0.010908),
+        swing_degrees: 0.0, twist_degrees: 35.0, joint_friction: 0.06 }, user_data, group_index, 1.0)
+    place_bone(h, world_id, BONE_UPPER_ARM_R, position, BoneSpec {
+        parent: BONE_SPINE_03, reference: transform_of(0.0 - 0.185817, 1.44363, 0.031306, 0.676512, 0.366233, 0.307179, 0.56022), group: 0, friction: 0.6,
+        capsule: manifold.capsule(math.vec3(0.0 - 0.300237, 0.0 - 0.000001, 0.0 - 0.000319), math.vec3(0.011887, 0.000001, 0.015013), 0.065),
+        joint_kind: dynamics.JOINT_SPHERICAL,
+        frame_a: transform_of(0.0 - 0.185817, 0.0 - 0.175865, 0.0 - 0.053625, 0.213793, 0.559449, 0.438334, 0.0 - 0.670204),
+        frame_b: transform_of(0.0, 0.0, 0.0, 0.0 - 0.509319, 0.486843, 0.500954, 0.0 - 0.502617),
+        swing_degrees: 45.0, twist_degrees: 20.0, joint_friction: 0.8 }, user_data, group_index, 1.0)
+    place_bone(h, world_id, BONE_LOWER_ARM_R, position, BoneSpec {
+        parent: BONE_UPPER_ARM_R, reference: transform_of(0.0 - 0.347683, 1.193455, 0.029378, 0.763911, 0.089135, 0.493012, 0.406736), group: 0, friction: 0.3,
+        capsule: manifold.capsule(math.vec3(0.0 - 0.312649, 0.0 - 0.000003, 0.016471), math.vec3(0.0 - 0.032986, 0.0, 0.002732), 0.06),
+        joint_kind: dynamics.JOINT_REVOLUTE,
+        frame_a: transform_of(0.0 - 0.297979, 0.0 - 0.000361, 0.0, 0.0 - 0.405444, 0.914059, 0.010541, 0.000852),
+        frame_b: transform_of(0.0, 0.0, 0.0, 0.0 - 0.002794, 0.999936, 0.010042, 0.004364),
+        swing_degrees: 0.0, twist_degrees: 35.0, joint_friction: 0.06 }, user_data, group_index, 1.0)
+
+    // The joints: a spring toward the reference pose when asked, the
+    // motor's torque limit as friction, the limits as the rig allows.
+    i = 1
+    while i < BONE_COUNT {
+        bone = bone_at(h, i)
+        parent = bone_at(h, bone.parent_index)
+        bone.local_frame_a.q = math.normalize_quat(bone.local_frame_a.q)
+        bone.local_frame_b.q = math.normalize_quat(bone.local_frame_b.q)
+        if bone.joint_kind == dynamics.JOINT_REVOLUTE {
+            rdef = dynamics.default_revolute_joint_def()
+            rdef.base.body_id_a = parent.body_id
+            rdef.base.body_id_b = bone.body_id
+            rdef.base.local_frame_a = bone.local_frame_a
+            rdef.base.local_frame_b = bone.local_frame_b
+            rdef.enable_limit = true
+            rdef.lower_angle = bone.twist_limit.x
+            rdef.upper_angle = bone.twist_limit.y
+            rdef.enable_spring = hertz > 0.0
+            rdef.hertz = hertz
+            rdef.damping_ratio = damping_ratio
+            rdef.enable_motor = true
+            rdef.max_motor_torque = bone.joint_friction * friction_torque
+            bone.joint_id = dynamics.create_revolute_joint(world_id, &rdef)
+        } else {
+            sdef = dynamics.default_spherical_joint_def()
+            sdef.base.body_id_a = parent.body_id
+            sdef.base.body_id_b = bone.body_id
+            sdef.base.local_frame_a = bone.local_frame_a
+            sdef.base.local_frame_b = bone.local_frame_b
+            sdef.enable_cone_limit = true
+            sdef.cone_angle = bone.swing_limit
+            sdef.enable_twist_limit = true
+            sdef.lower_twist_angle = bone.twist_limit.x
+            sdef.upper_twist_angle = bone.twist_limit.y
+            sdef.enable_spring = hertz > 0.0
+            sdef.hertz = hertz
+            sdef.damping_ratio = damping_ratio
+            sdef.enable_motor = true
+            sdef.max_motor_torque = bone.joint_friction * friction_torque
+            bone.joint_id = dynamics.create_spherical_joint(world_id, &sdef)
+        }
+        i = i + 1
+    }
+    // The thighs pass each other and the head the shoulders.
+    h.filter_joint_count = 0
+    add_filter(h, world_id, BONE_THIGH_L, BONE_THIGH_R)
+    add_filter(h, world_id, BONE_NECK, BONE_UPPER_ARM_L)
+    add_filter(h, world_id, BONE_NECK, BONE_UPPER_ARM_R)
+    h.is_spawned = true
+}
+
+add_foot(calf: *Bone, foot: Capsule) {
+    sdef = dynamics.default_shape_def()
+    sdef.base_material.friction = 0.1
+    sdef.base_material.rolling_resistance = 0.1
+    dynamics.create_capsule_shape(calf.body_id, &sdef, foot)
+}
+
+add_filter(h: *Human, world_id: WorldId, a: int, b: int) {
+    fdef = dynamics.default_filter_joint_def()
+    fdef.base.body_id_a = bone_at(h, a).body_id
+    fdef.base.body_id_b = bone_at(h, b).body_id
+    filters = h.filter_joints as JointId[]
+    filters[h.filter_joint_count] = dynamics.create_filter_joint(world_id, &fdef)
+    h.filter_joint_count = h.filter_joint_count + 1
+}
+
+// The joints, then the bodies (and their anchors), then the blocks.
+destroy_human(h: *Human) {
+    filters = h.filter_joints as JointId[]
+    i = 0
+    while i < h.filter_joint_count {
+        dynamics.destroy_joint(filters[i], false)
+        i = i + 1
+    }
+    i = 0
+    while i < BONE_COUNT {
+        bone = bone_at(h, i)
+        if dynamics.joint_is_valid(bone.joint_id) { dynamics.destroy_joint(bone.joint_id, false) }
+        if dynamics.joint_is_valid(bone.anchor_joint_id) { dynamics.destroy_joint(bone.anchor_joint_id, false) }
+        i = i + 1
+    }
+    i = 0
+    while i < BONE_COUNT {
+        bone = bone_at(h, i)
+        if dynamics.body_is_valid(bone.body_id) { dynamics.destroy_body(bone.body_id) }
+        if dynamics.body_is_valid(bone.anchor_id) { dynamics.destroy_body(bone.anchor_id) }
+        i = i + 1
+    }
+    free(h.bones)
+    free(h.filter_joints)
+    h.bones = null
+    h.filter_joints = null
+    h.filter_joint_count = 0
+    h.is_spawned = false
+}
+
+human_set_velocity(h: *Human, velocity: Vec3) {
+    i = 0
+    while i < BONE_COUNT {
+        bone = bone_at(h, i)
+        if dynamics.body_is_valid(bone.body_id) { dynamics.body_set_linear_velocity(bone.body_id, velocity) }
+        i = i + 1
+    }
+}
+
+// A kick at the lower spine (the reference draws a random one; the caller picks it here).
+human_apply_angular_impulse(h: *Human, impulse: Vec3) {
+    dynamics.body_apply_angular_impulse(bone_at(h, BONE_SPINE_01).body_id, impulse, true)
+}
+
+human_set_joint_friction_torque(h: *Human, torque: float) {
+    h.friction_torque = torque
+    i = 1
+    while i < BONE_COUNT {
+        bone = bone_at(h, i)
+        if bone.joint_kind == dynamics.JOINT_REVOLUTE {
+            joint_solver.revolute_joint_set_max_motor_torque(bone.joint_id, bone.joint_friction * torque)
+        } else {
+            joint_solver.spherical_joint_set_max_motor_torque(bone.joint_id, bone.joint_friction * torque)
+        }
+        i = i + 1
+    }
+}
+
+human_set_joint_spring_hertz(h: *Human, hertz: float) {
+    i = 1
+    while i < BONE_COUNT {
+        bone = bone_at(h, i)
+        if bone.joint_kind == dynamics.JOINT_REVOLUTE {
+            joint_solver.revolute_joint_set_spring_hertz(bone.joint_id, hertz)
+        } else {
+            joint_solver.spherical_joint_set_spring_hertz(bone.joint_id, hertz)
+        }
+        i = i + 1
+    }
+}
+
+human_set_joint_damping_ratio(h: *Human, damping_ratio: float) {
+    i = 1
+    while i < BONE_COUNT {
+        bone = bone_at(h, i)
+        if bone.joint_kind == dynamics.JOINT_REVOLUTE {
+            joint_solver.revolute_joint_set_spring_damping_ratio(bone.joint_id, damping_ratio)
+        } else {
+            joint_solver.spherical_joint_set_spring_damping_ratio(bone.joint_id, damping_ratio)
+        }
+        i = i + 1
+    }
+}
+
+// A parallel joint from the ground to the pelvis that springs the figure
+// upright: the frames align the ground's y with the pelvis's z.
+human_align_spring(h: *Human, world_id: WorldId, ground_id: BodyId, hertz: float, damping_ratio: float) {
+    bone = bone_at(h, BONE_PELVIS)
+    q = math.compute_quat_between_unit_vectors(math.vec3_axis_z(), math.vec3_axis_y())
+    qb = dynamics.body_get_rotation(bone.body_id)
+    pdef = dynamics.default_parallel_joint_def()
+    pdef.base.body_id_a = ground_id
+    pdef.base.body_id_b = bone.body_id
+    pdef.base.local_frame_a.q = q
+    pdef.base.local_frame_b.q = math.inv_mul_quat(qb, q)
+    pdef.base.draw_scale = 2.0
+    pdef.base.collide_connected = true
+    pdef.hertz = hertz
+    pdef.damping_ratio = damping_ratio
+    bone.joint_id = dynamics.create_parallel_joint(world_id, &pdef)
+}
+
+// A kinematic anchor per bone at its pose, holding the bone through a
+// motor joint's position and rotation springs: move the anchors and the
+// figure follows (the pose drive of an active ragdoll).
+human_create_motor_anchors(h: *Human, world_id: WorldId) {
+    adef = dynamics.default_body_def()
+    adef.kind = dynamics.BODY_KINEMATIC
+    mdef = dynamics.default_motor_joint_def()
+    mdef.angular_hertz = 5.0
+    mdef.angular_damping_ratio = 1.0
+    mdef.linear_hertz = 5.0
+    mdef.linear_damping_ratio = 1.0
+    mdef.max_spring_force = math.MAX_FLOAT
+    mdef.max_spring_torque = math.MAX_FLOAT
+    i = 0
+    while i < BONE_COUNT {
+        bone = bone_at(h, i)
+        xf = dynamics.body_get_transform(bone.body_id)
+        adef.position = xf.p
+        adef.rotation = xf.q
+        bone.anchor_id = dynamics.create_body(world_id, &adef)
+        mdef.base.body_id_a = bone.anchor_id
+        mdef.base.body_id_b = bone.body_id
+        bone.anchor_joint_id = dynamics.create_motor_joint(world_id, &mdef)
+        i = i + 1
+    }
+}
+
+// The same anchors through parallel joints: rotation only, with a torque limit.
+human_create_parallel_anchors(h: *Human, world_id: WorldId) {
+    adef = dynamics.default_body_def()
+    adef.kind = dynamics.BODY_KINEMATIC
+    q_frame_world = math.compute_quat_between_unit_vectors(math.vec3_axis_z(), math.vec3_axis_y())
+    pdef = dynamics.default_parallel_joint_def()
+    pdef.hertz = 8.0
+    pdef.damping_ratio = 1.0
+    pdef.max_torque = 800.0
+    i = 0
+    while i < BONE_COUNT {
+        bone = bone_at(h, i)
+        xf = dynamics.body_get_transform(bone.body_id)
+        adef.position = xf.p
+        adef.rotation = xf.q
+        bone.anchor_id = dynamics.create_body(world_id, &adef)
+        pdef.base.body_id_a = bone.anchor_id
+        pdef.base.body_id_b = bone.body_id
+        frame_q = math.inv_mul_quat(xf.q, q_frame_world)
+        pdef.base.local_frame_a.q = frame_q
+        pdef.base.local_frame_b.q = frame_q
+        bone.anchor_joint_id = dynamics.create_parallel_joint(world_id, &pdef)
+        i = i + 1
+    }
+}
+
+human_set_bullet(h: *Human, flag: bool) {
+    i = 0
+    while i < BONE_COUNT {
+        dynamics.body_set_bullet(bone_at(h, i).body_id, flag)
+        i = i + 1
+    }
+}

@@ -12,7 +12,7 @@ layers="${1:-tree}"
 for layer in $layers; do
     # A layer the reference only has inside its world (the broad phase) runs ours alone.
     if [ -f "bench/${layer}_box3d.c" ]; then
-        gcc -O3 -Ireference/box3d/include "bench/${layer}_box3d.c" -o "target/${layer}_box3d" -Lreference/box3d/out/src -lbox3d -lm || exit 1
+        gcc -O3 -Ireference/box3d/include -Ireference/box3d/shared "bench/${layer}_box3d.c" -o "target/${layer}_box3d" -Lreference/box3d/out/shared -Lreference/box3d/out/src -lshared -lbox3d -lm || exit 1
         ref="target/${layer}_box3d"; [ -x "$ref" ] || ref="$ref.exe"
         "$ref"
     fi

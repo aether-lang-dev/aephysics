@@ -1,0 +1,134 @@
+// The reference's "rain" benchmark (shared/benchmarks.c) on our world,
+// against bench/human_box3d.c: a ten by ten grid of cells, each a grid
+// mesh with a torus on it, and every 48 steps a column of cells gets
+// three ragdolls dropped from twenty metres; once every column has its
+// group the columns are recycled in turn. 400 steps of 1/60 with four
+// sub-steps, one thread. The checksums: the body, joint and contact
+// counts, the awake bodies, and the heights of the bodies that moved in
+// the last step.
+import std.string
+import std.os
+import aephysics.math
+import aephysics.core
+import aephysics.mesh
+import aephysics.shape
+import aephysics.dynamics
+import aephysics.human
+import aephysics.physics_world
+
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+
+clock() -> long { return os.now_monotonic_ns() }
+ms(ns: long) -> float { return (ns as float) / 1000000.0 }
+
+const GRID_SIZE = 15.0
+const GRID_COUNT = 10
+const GROUP_SIZE = 3
+const STEPS = 400
+
+var g_humans: ptr = null        // Human[GRID_COUNT * GRID_COUNT * GROUP_SIZE]
+var g_column_count = 0
+var g_column_index = 0
+
+human_at(group: int, i: int) -> *Human { return (g_humans + (group * GROUP_SIZE + i) * sizeof(Human)) as *Human }
+
+create_group(world_id: WorldId, row: int, column: int) {
+    group = row * GRID_COUNT + column
+    span = (GRID_COUNT as float) * GRID_SIZE
+    group_distance = span / (GRID_COUNT as float)
+    position = math.vec3(0.0 - 0.5 * span + group_distance * ((column as float) + 0.5), 20.0, 0.0 - 0.5 * span + group_distance * ((row as float) + 0.5))
+    i = 0
+    while i < GROUP_SIZE {
+        human.create_human(human_at(group, i), world_id, position, 5.0, 1.0, 0.7, group, null)
+        position.x = position.x + 0.75
+        i = i + 1
+    }
+}
+
+destroy_group(row: int, column: int) {
+    group = row * GRID_COUNT + column
+    i = 0
+    while i < GROUP_SIZE {
+        human.destroy_human(human_at(group, i))
+        i = i + 1
+    }
+}
+
+// The reference's StepRain: a column every 48 steps, then recycled in turn.
+step_rain(world_id: WorldId, step: int) {
+    if (step & 0x2F) != 0 { return }
+    if g_column_count < GRID_COUNT {
+        i = 0
+        while i < GRID_COUNT {
+            create_group(world_id, i, g_column_count)
+            i = i + 1
+        }
+        g_column_count = g_column_count + 1
+    } else {
+        i = 0
+        while i < GRID_COUNT {
+            destroy_group(i, g_column_index)
+            create_group(world_id, i, g_column_index)
+            i = i + 1
+        }
+        g_column_index = g_column_index + 1
+        if g_column_index >= GRID_COUNT { g_column_index = 0 }
+    }
+}
+
+main() {
+    wdef = dynamics.default_world_def()
+    world_id = dynamics.create_world(&wdef)
+    g_humans = calloc(GRID_COUNT * GRID_COUNT * GROUP_SIZE, sizeof(Human))
+    half_rows = 4
+    grid = mesh.create_grid_mesh(2 * half_rows, 2 * half_rows, GRID_SIZE / (2.0 * (half_rows as float)), 1, true)
+    torus = mesh.create_torus_mesh(16, 16, 0.25 * GRID_SIZE, 1.0)
+    span = GRID_SIZE * (GRID_COUNT as float)
+    bdef = dynamics.default_body_def()
+    sdef = dynamics.default_shape_def()
+    i = 0
+    while i < GRID_COUNT {
+        j = 0
+        while j < GRID_COUNT {
+            bdef.position = math.vec3(0.0 - 0.5 * span + 0.5 * GRID_SIZE + (i as float) * GRID_SIZE, 0.0, 0.0 - 0.5 * span + 0.5 * GRID_SIZE + (j as float) * GRID_SIZE)
+            body = dynamics.create_body(world_id, &bdef)
+            dynamics.create_mesh_shape(body, &sdef, grid, math.vec3_one())
+            dynamics.create_mesh_shape(body, &sdef, torus, math.vec3_one())
+            j = j + 1
+        }
+        i = i + 1
+    }
+    t0 = clock()
+    s = 0
+    while s < STEPS {
+        step_rain(world_id, s)
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        s = s + 1
+    }
+    t1 = clock()
+    moved = physics_world.body_event_count(world_id)
+    heights = 0.0
+    i = 0
+    while i < moved {
+        heights = heights + physics_world.body_event(world_id, i).transform.p.y
+        i = i + 1
+    }
+    counters = physics_world.get_counters(world_id)
+    println("aephysics human: rain: ${STEPS} steps ${ms(t1 - t0)} ms, ${ms(t1 - t0) / (STEPS as float)} ms per step (${counters.body_count} bodies, ${counters.joint_count} joints, ${counters.contact_count} contacts, ${physics_world.get_awake_body_count(world_id)} awake, ${moved} moved, height sum ${heights})")
+    // The humans still standing are destroyed with the world; their blocks are ours.
+    group = 0
+    while group < GRID_COUNT * GRID_COUNT {
+        i = 0
+        while i < GROUP_SIZE {
+            h = human_at(group, i)
+            if h.is_spawned { human.destroy_human(h) }
+            i = i + 1
+        }
+        group = group + 1
+    }
+    free(g_humans)
+    dynamics.destroy_world(world_id)
+    mesh.destroy_mesh(grid)
+    mesh.destroy_mesh(torus)
+}

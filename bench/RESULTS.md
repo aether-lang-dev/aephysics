@@ -528,6 +528,30 @@ left is the prepare (Aether writing a lane at a time into a
 double-sized structure), the packing the doubles need, and a narrow
 phase in doubles (issue #17).
 
+## human
+
+`bench/human.ae` and `bench/human_box3d.c`: the reference's "rain"
+benchmark (shared/benchmarks.c, its shared library linked for the
+figure and the scene): a ten by ten grid of cells, each a grid mesh with
+a torus on it; every 48 steps a column of cells gets three ragdolls
+(twelve capsule bones, eleven joints with limits, springs and motors)
+dropped from twenty metres, the columns recycled once full. 400 steps
+of 1/60 with four sub-steps, one thread.
+
+| | aephysics | Box3D |
+|---|---|---|
+| 400 steps, 3,700 bodies and 4,200 joints at the end | 4.61 ms per step | **4.40** |
+
+1.05x, the closest pair yet: the step is joints and capsule contacts,
+which the flags of PR #24 and the lanes of PR #25 brought to parity,
+and the meshes' contacts, the bookkeeping of 300 figures created and
+destroyed in turn. Both build the same 3,700 bodies and 4,200 joints
+on the same steps; the resting state differs (7,208 contacts and 2,892
+awake against 6,831 and 3,144, the moved bodies' height sum 24,019
+against 24,187): eight figures tumbling for six seconds is chaotic,
+and single against double precision parts them, where the resting
+pyramids of physics_world agree to six digits.
+
 ## Build flags (inlining)
 
 The generated C of every Aether function is a plain `static` function,

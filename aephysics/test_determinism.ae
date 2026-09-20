@@ -10,8 +10,8 @@
 // not carry over, and the same scene twice is the check (its
 // cross-platform check runs on CI's Linux against this Windows run by
 // the printed values). The random numbers are the reference's
-// xorshift32 with its seeds. The falling ragdolls wait on the human
-// (shared/human.c).
+// xorshift32 with its seeds. The falling ragdolls are the reference's
+// cross-platform scene: eight humans dropped on grid meshes and tori.
 import std.string
 import std.os
 import aephysics.math
@@ -23,6 +23,7 @@ import aephysics.mesh
 import aephysics.height_field
 import aephysics.shape
 import aephysics.dynamics
+import aephysics.human
 import aephysics.physics_world
 
 extern calloc(count: int, size: int) -> ptr
@@ -165,6 +166,71 @@ settle(scene: string, world_id: WorldId, bodies: BodyId[], count: int, first_ste
 
 same_outcome(a: Outcome, b: Outcome) -> bool {
     return a.sleep_step == b.sleep_step && a.hash == b.hash && a.query_hits == b.query_hits && a.query_hash == b.query_hash
+}
+
+// --- the falling ragdolls (shared/determinism.c) ----------------------------------------------------------
+
+const RAGDOLL_GRID_COUNT = 2
+const RAGDOLL_GROUP_SIZE = 2
+const RAGDOLL_GRID_SIZE = 15.0
+
+falling_ragdolls() -> Outcome {
+    wdef = dynamics.default_world_def()
+    world_id = dynamics.create_world(&wdef)
+    half_rows = 4
+    grid = mesh.create_grid_mesh(2 * half_rows, 2 * half_rows, RAGDOLL_GRID_SIZE / (2.0 * (half_rows as float)), 0, true)
+    torus = mesh.create_torus_mesh(16, 16, 0.25 * RAGDOLL_GRID_SIZE, 1.0)
+    span = RAGDOLL_GRID_SIZE * (RAGDOLL_GRID_COUNT as float)
+    human_count = RAGDOLL_GRID_COUNT * RAGDOLL_GRID_COUNT * RAGDOLL_GROUP_SIZE
+    humans_block = calloc(human_count, sizeof(Human))
+    humans = humans_block as Human[]
+    bodies_block = calloc(human_count * human.BONE_COUNT, sizeof(BodyId))
+    bodies = bodies_block as BodyId[]
+    gdef = dynamics.default_body_def()
+    sdef = dynamics.default_shape_def()
+    n = 0
+    i = 0
+    while i < RAGDOLL_GRID_COUNT {
+        j = 0
+        while j < RAGDOLL_GRID_COUNT {
+            gdef.position = math.vec3(0.0 - 0.5 * span + 0.5 * RAGDOLL_GRID_SIZE + (i as float) * RAGDOLL_GRID_SIZE, 0.0,
+                                      0.0 - 0.5 * span + 0.5 * RAGDOLL_GRID_SIZE + (j as float) * RAGDOLL_GRID_SIZE)
+            ground = dynamics.create_body(world_id, &gdef)
+            dynamics.create_mesh_shape(ground, &sdef, grid, math.vec3_one())
+            dynamics.create_mesh_shape(ground, &sdef, torus, math.vec3_one())
+            // The group of this cell, dropped from fifteen metres.
+            group_index = i * RAGDOLL_GRID_COUNT + j
+            group_distance = span / (RAGDOLL_GRID_COUNT as float)
+            position = math.vec3(0.0 - 0.5 * span + group_distance * ((j as float) + 0.5), 15.0, 0.0 - 0.5 * span + group_distance * ((i as float) + 0.5))
+            k = 0
+            while k < RAGDOLL_GROUP_SIZE {
+                h = (humans_block + n * sizeof(Human)) as *Human
+                human.create_human(h, world_id, position, 5.0, 1.0, 0.7, group_index, null)
+                b = 0
+                while b < human.BONE_COUNT {
+                    bodies[n * human.BONE_COUNT + b] = human.bone_at(h, b).body_id
+                    b = b + 1
+                }
+                position.x = position.x + 0.75
+                n = n + 1
+                k = k + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    outcome = settle("ragdolls", world_id, bodies, human_count * human.BONE_COUNT, 0, 3000)
+    n = 0
+    while n < human_count {
+        human.destroy_human((humans_block + n * sizeof(Human)) as *Human)
+        n = n + 1
+    }
+    free(bodies_block)
+    free(humans_block)
+    dynamics.destroy_world(world_id)
+    mesh.destroy_mesh(grid)
+    mesh.destroy_mesh(torus)
+    return outcome
 }
 
 // --- the wave pile (shared/determinism.c) -----------------------------------------------------------------
@@ -406,6 +472,12 @@ mesh_drop() -> Outcome {
 main() {
     value = os.getenv("AEPHYSICS_TRACE")
     g_trace = value != null && string.length(value) > 0
+    first = falling_ragdolls()
+    second = falling_ragdolls()
+    println("determinism: falling ragdolls slept at step ${first.sleep_step}, checksum ${first.hash}")
+    ensure("falling ragdolls: they slept", first.sleep_step > 0)
+    ensure("falling ragdolls: the same scene twice, bit for bit", same_outcome(first, second))
+
     first = wave_pile()
     second = wave_pile()
     println("determinism: wave pile slept at step ${first.sleep_step}, checksum ${first.hash}")

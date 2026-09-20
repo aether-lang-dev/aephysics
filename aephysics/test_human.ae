@@ -1,0 +1,271 @@
+// aephysics.human's checks: the figure builds as the reference's (twelve
+// bodies, eleven joints of the right kinds, three filter joints), falls
+// onto a slab and sleeps in one piece (every joint intact, the bones
+// within reach of their parents), stands under the align spring, holds
+// its pose on motor anchors and on parallel anchors, takes a kick, and
+// its friction, spring and damping setters reach every joint; two
+// figures dropped alike land alike.
+import std.string
+import aephysics.math
+import aephysics.core
+import aephysics.hull
+import aephysics.manifold
+import aephysics.shape
+import aephysics.dynamics
+import aephysics.joint_solver
+import aephysics.human
+import aephysics.physics_world
+
+extern calloc(count: int, size: int) -> ptr
+extern exit(code: int)
+extern free(p: ptr)
+
+var failures = 0
+var checks = 0
+
+ensure(name: string, ok: bool) {
+    checks = checks + 1
+    if !ok {
+        println("human: FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+// A world with a slab for the figure to land on (the world keeps the
+// hull by reference: it lives until main ends).
+var g_slab: ptr = null
+
+world_with_ground() -> WorldId {
+    wdef = dynamics.default_world_def()
+    world_id = dynamics.create_world(&wdef)
+    gdef = dynamics.default_body_def()
+    gdef.position = math.vec3(0.0, 0.0 - 1.0, 0.0)
+    ground = dynamics.create_body(world_id, &gdef)
+    sdef = dynamics.default_shape_def()
+    dynamics.create_hull_shape(ground, &sdef, g_slab as *HullData)
+    return world_id
+}
+
+ground_of(world_id: WorldId) -> BodyId { return dynamics.make_body_id(dynamics.get_world(world_id.index1 - 1), 0) }
+
+// The farthest any bone's joint anchor sits from its parent's: a joint torn would show here.
+worst_joint_separation(h: *Human) -> float {
+    worst = 0.0
+    i = 1
+    while i < human.BONE_COUNT {
+        bone = human.bone_at(h, i)
+        separation = dynamics.joint_get_linear_separation(bone.joint_id)
+        if separation > worst { worst = separation }
+        i = i + 1
+    }
+    return worst
+}
+
+steps(world_id: WorldId, count: int) {
+    s = 0
+    while s < count {
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        s = s + 1
+    }
+}
+
+// The bones' positions, for comparing two figures.
+positions(h: *Human) -> ptr {
+    block = calloc(human.BONE_COUNT, sizeof(Vec3))
+    p = block as Vec3[]
+    i = 0
+    while i < human.BONE_COUNT {
+        p[i] = dynamics.body_get_position(human.bone_at(h, i).body_id)
+        i = i + 1
+    }
+    return block
+}
+
+test_build_and_fall() {
+    world_id = world_with_ground()
+    h = Human { bones: null, filter_joints: null, filter_joint_count: 0, friction_torque: 0.0, is_spawned: false }
+    human.create_human(&h, world_id, math.vec3(0.0, 1.0, 0.0), 5.0, 1.0, 0.7, 1, null)
+    ensure("built: spawned", h.is_spawned)
+    ensure("built: three filter joints", h.filter_joint_count == human.FILTER_JOINT_COUNT)
+    counters = physics_world.get_counters(world_id)
+    ensure("built: 13 bodies, 14 joints (${counters.body_count}, ${counters.joint_count})", counters.body_count == 13 && counters.joint_count == 14)
+    spherical = 0
+    revolute = 0
+    i = 1
+    while i < human.BONE_COUNT {
+        bone = human.bone_at(&h, i)
+        ensure("built: bone ${i} has a valid joint to bone ${bone.parent_index}", dynamics.joint_is_valid(bone.joint_id) && bone.parent_index >= 0 && bone.parent_index < i)
+        kind = dynamics.joint_get_type(bone.joint_id)
+        if kind == dynamics.JOINT_SPHERICAL { spherical = spherical + 1 }
+        if kind == dynamics.JOINT_REVOLUTE { revolute = revolute + 1 }
+        i = i + 1
+    }
+    ensure("built: seven spherical and four revolute joints (${spherical}, ${revolute})", spherical == 7 && revolute == 4)
+    ensure("built: the pelvis has no joint", dynamics.joint_is_valid(human.bone_at(&h, human.BONE_PELVIS).joint_id) == false)
+    ensure("built: the joints start closed", worst_joint_separation(&h) < 0.001)
+    head_before = dynamics.body_get_position(human.bone_at(&h, human.BONE_NECK).body_id)
+    ensure("built: the head is up (${head_before.y})", head_before.y > 2.3)
+
+    // The figure falls from a metre and comes to rest in one piece.
+    slept = 0
+    s = 0
+    while s < 900 && slept == 0 {
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        s = s + 1
+        if physics_world.get_awake_body_count(world_id) == 0 { slept = s }
+    }
+    ensure("fall: the figure slept (step ${slept})", slept > 0)
+    ensure("fall: the joints held (${worst_joint_separation(&h)})", worst_joint_separation(&h) < 0.01)
+    lowest = 100.0
+    highest = 0.0 - 100.0
+    i = 0
+    while i < human.BONE_COUNT {
+        y = dynamics.body_get_position(human.bone_at(&h, i).body_id).y
+        if y < lowest { lowest = y }
+        if y > highest { highest = y }
+        i = i + 1
+    }
+    ensure("fall: it lies on the slab (${lowest}, ${highest})", lowest > 0.0 && highest < 0.8)
+    // The contacts under it are readable per body: the calves' feet touch the slab.
+    contacts_block = calloc(8, sizeof(ContactData))
+    contacts = contacts_block as ContactData[]
+    touching = 0
+    i = 0
+    while i < human.BONE_COUNT {
+        touching = touching + dynamics.body_get_contact_data(human.bone_at(&h, i).body_id, contacts, 8)
+        i = i + 1
+    }
+    ensure("fall: bones touch the slab or each other (${touching} contacts)", touching >= 4)
+    count = dynamics.body_get_contact_data(human.bone_at(&h, human.BONE_PELVIS).body_id, contacts, 8)
+    if count > 0 {
+        ensure("fall: the pelvis's first contact has a manifold with points and a normal", contacts[0].manifold_count >= 1 && (contacts[0].manifolds as *Manifold).point_count >= 1 && math.is_normalized((contacts[0].manifolds as *Manifold).normal))
+    }
+    free(contacts_block)
+
+    // The setters reach every joint.
+    human.human_set_joint_friction_torque(&h, 2.0)
+    ensure("setters: the friction torque is kept", h.friction_torque == 2.0)
+    lower_arm = human.bone_at(&h, human.BONE_LOWER_ARM_L)
+    ensure("setters: the elbow's motor torque scaled by its friction (${joint_solver.revolute_joint_get_max_motor_torque(lower_arm.joint_id)})",
+           math.abs_float(joint_solver.revolute_joint_get_max_motor_torque(lower_arm.joint_id) - 0.12) < 0.0001)
+    human.human_set_joint_spring_hertz(&h, 3.0)
+    human.human_set_joint_damping_ratio(&h, 0.5)
+    spine = human.bone_at(&h, human.BONE_SPINE_01)
+    ensure("setters: the spine's spring", joint_solver.spherical_joint_get_spring_hertz(spine.joint_id) == 3.0 && joint_solver.spherical_joint_get_spring_damping_ratio(spine.joint_id) == 0.5)
+    ensure("setters: the elbow's spring", joint_solver.revolute_joint_get_spring_hertz(lower_arm.joint_id) == 3.0 && joint_solver.revolute_joint_get_spring_damping_ratio(lower_arm.joint_id) == 0.5)
+    human.human_set_bullet(&h, true)
+    ensure("setters: every bone a bullet", dynamics.body_is_bullet(human.bone_at(&h, human.BONE_CALF_R).body_id))
+    human.human_set_bullet(&h, false)
+    ensure("setters: and back", dynamics.body_is_bullet(human.bone_at(&h, human.BONE_CALF_R).body_id) == false)
+
+    // A kick wakes it and sets it turning.
+    human.human_set_velocity(&h, math.vec3(0.0, 2.0, 0.0))
+    human.human_apply_angular_impulse(&h, math.vec3(0.0, 0.0, 3.0))
+    ensure("kick: awake (${physics_world.get_awake_body_count(world_id)})", physics_world.get_awake_body_count(world_id) == 12)
+    ensure("kick: the spine spins", math.length(dynamics.body_get_angular_velocity(spine.body_id)) > 1.0)
+    ensure("kick: the head rises", dynamics.body_get_linear_velocity(human.bone_at(&h, human.BONE_NECK).body_id).y > 1.9)
+
+    human.destroy_human(&h)
+    ensure("destroyed: nothing left but the ground", physics_world.get_counters(world_id).body_count == 1 && physics_world.get_counters(world_id).joint_count == 0)
+    dynamics.destroy_world(world_id)
+}
+
+test_align_spring() {
+    world_id = world_with_ground()
+    h = Human { bones: null, filter_joints: null, filter_joint_count: 0, friction_torque: 0.0, is_spawned: false }
+    human.create_human(&h, world_id, math.vec3(0.0, 0.05, 0.0), 5.0, 1.0, 0.7, 1, null)
+    human.human_align_spring(&h, world_id, ground_of(world_id), 25.0, 1.0)
+    pelvis = human.bone_at(&h, human.BONE_PELVIS)
+    ensure("align: the pelvis got its joint", dynamics.joint_is_valid(pelvis.joint_id))
+    steps(world_id, 240)
+    // The joint's frame on the pelvis was built with its z up; the spring keeps it so.
+    frame_b = dynamics.joint_get_local_frame_b(pelvis.joint_id)
+    up = math.rotate_vector(dynamics.body_get_rotation(pelvis.body_id), math.rotate_vector(frame_b.q, math.vec3_axis_z()))
+    ensure("align: the pelvis stays upright after four seconds (${up.y})", up.y > 0.95)
+    pelvis_y = dynamics.body_get_position(pelvis.body_id).y
+    ensure("align: the pelvis stays off the ground (${pelvis_y})", pelvis_y > 0.3)
+    human.destroy_human(&h)
+    dynamics.destroy_world(world_id)
+}
+
+// Anchors hold the pose against gravity: after two seconds every bone is
+// within a hand of where it started.
+drift_on_anchors(parallel: bool) -> float {
+    world_id = world_with_ground()
+    h = Human { bones: null, filter_joints: null, filter_joint_count: 0, friction_torque: 0.0, is_spawned: false }
+    human.create_human(&h, world_id, math.vec3(0.0, 1.0, 0.0), 5.0, 0.0, 0.7, 1, null)
+    if parallel { human.human_create_parallel_anchors(&h, world_id) } else { human.human_create_motor_anchors(&h, world_id) }
+    before = positions(&h)
+    steps(world_id, 120)
+    after = positions(&h)
+    a = before as Vec3[]
+    b = after as Vec3[]
+    worst = 0.0
+    i = 0
+    while i < human.BONE_COUNT {
+        d = math.distance(a[i], b[i])
+        if d > worst { worst = d }
+        i = i + 1
+    }
+    free(before)
+    free(after)
+    ensure("anchors: an anchor and its joint per bone", dynamics.body_is_valid(human.bone_at(&h, human.BONE_NECK).anchor_id) && dynamics.joint_is_valid(human.bone_at(&h, human.BONE_NECK).anchor_joint_id))
+    human.destroy_human(&h)
+    ensure("anchors: destroyed with the figure", physics_world.get_counters(world_id).body_count == 1)
+    dynamics.destroy_world(world_id)
+    return worst
+}
+
+test_anchors() {
+    motor = drift_on_anchors(false)
+    ensure("motor anchors hold the pose in the air (${motor})", motor < 0.15)
+    // Parallel anchors hold rotation only: the figure falls but keeps its shape.
+    parallel = drift_on_anchors(true)
+    ensure("parallel anchors let it fall (${parallel})", parallel > 0.3)
+}
+
+// The same figure dropped in two worlds lands bit for bit alike.
+drop_alone() -> ptr {
+    world_id = world_with_ground()
+    h = Human { bones: null, filter_joints: null, filter_joint_count: 0, friction_torque: 0.0, is_spawned: false }
+    human.create_human(&h, world_id, math.vec3(0.0, 1.5, 0.0), 5.0, 1.0, 0.7, 1, null)
+    human.human_apply_angular_impulse(&h, math.vec3(1.0, 2.0, 3.0))
+    steps(world_id, 300)
+    p = positions(&h)
+    human.destroy_human(&h)
+    dynamics.destroy_world(world_id)
+    return p
+}
+
+test_alike() {
+    pa_block = drop_alone()
+    pb_block = drop_alone()
+    pa = pa_block as Vec3[]
+    pb = pb_block as Vec3[]
+    same = true
+    i = 0
+    while i < human.BONE_COUNT {
+        if pa[i].x != pb[i].x || pa[i].y != pb[i].y || pa[i].z != pb[i].z { same = false }
+        i = i + 1
+    }
+    ensure("alike: the same figure dropped twice lands bit for bit alike", same)
+    ensure("alike: it moved (${pa[human.BONE_NECK].y})", pa[human.BONE_NECK].y < 1.5)
+    free(pa_block)
+    free(pb_block)
+}
+
+main() {
+    g_slab = hull.make_box_hull(20.0, 1.0, 20.0) as ptr
+    test_build_and_fall()
+    test_align_spring()
+    test_anchors()
+    test_alike()
+    hull.destroy_hull(g_slab as *HullData)
+    println("human: ${checks} checks")
+    if failures == 0 {
+        println("human: all checks passed")
+    } else {
+        println("human: ${failures} failure(s)")
+        exit(1)
+    }
+}
