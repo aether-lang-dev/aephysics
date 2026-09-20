@@ -1,0 +1,1611 @@
+// aephysics.dynamics -- the world's state and its bookkeeping: the
+// world with its sparse arrays of bodies, shapes, contacts, joints and
+// islands (each keyed by a recycled id with a generation, so a stale id
+// is caught), the solver sets that keep the simulation data of static,
+// disabled, awake and sleeping bodies in contiguous arrays, the islands
+// that group bodies by their constraints, the shapes' place in the
+// broad phase, and the mass properties of a body from its shapes.
+// Nothing here steps time: the solver and the world's step are the
+// layers above.
+//
+// This is the organisational half of Box3D's body.c, shape.c,
+// solver_set.c, island.c and physics_world.c (Erin Catto, MIT), the
+// reference this engine is measured against: a body is an entry in a
+// sparse array pointing at its sim (and, when awake, its state) inside
+// a solver set; the static set holds static bodies, the disabled set
+// disabled ones, the awake set everything simulated, and each sleeping
+// island is a set of its own; a shape lives in a doubly linked list on
+// its body and in the broad phase's tree of its body's type. Names are
+// the reference's without its prefix, in snake case: b3CreateBody is
+// create_body, b3Body_SetMassData is body_set_mass_data.
+//
+// This layer so far: worlds, bodies (creation, destruction, transforms,
+// velocities, mass data, extents, damping, sleep and enable flags),
+// shapes (creation of every kind, destruction, proxies), islands of one
+// body, solver sets for sleeping bodies, and the validation. Contacts,
+// joints and sensors are declared and come next.
+//
+// Differences: no hull database (a hull shape keeps the pointer it was
+// given; the owner keeps the hull alive), no name cache, no recording
+// hooks; a world's callbacks are plain function values.
+import std.string
+import aephysics.math
+import aephysics.core
+import aephysics.dynamic_tree
+import aephysics.hull
+import aephysics.distance
+import aephysics.manifold
+import aephysics.triangle_manifold
+import aephysics.mesh
+import aephysics.height_field
+import aephysics.material
+import aephysics.sphere
+import aephysics.capsule
+import aephysics.compound
+import aephysics.shape
+import aephysics.broad_phase
+import aephysics.mesh_contact
+
+exports (
+    WorldDef, BodyDef, ShapeDef, MotionLocks, WorldId, BodyId, ShapeId,
+    World, Body, BodySim, BodyState, WorldShape, Contact, ContactEdge, Joint, JointEdge,
+    SolverSet, Island, IslandSim, ContactLink, JointLink,
+    NULL_INDEX, MAX_WORLDS, STATIC_SET, DISABLED_SET, AWAKE_SET, FIRST_SLEEPING_SET,
+    BODY_STATIC, BODY_KINEMATIC, BODY_DYNAMIC,
+    LOCK_LINEAR_X, LOCK_LINEAR_Y, LOCK_LINEAR_Z, LOCK_ANGULAR_X, LOCK_ANGULAR_Y, LOCK_ANGULAR_Z,
+    IS_FAST, IS_BULLET, IS_SPEED_CAPPED, HAD_TIME_OF_IMPACT, ALLOW_FAST_ROTATION, ENLARGE_BOUNDS,
+    DYNAMIC_FLAG, ENABLE_SLEEP, ENABLE_CONTACT_RECYCLING, DIRTY_MASS, ALL_LOCKS, FIXED_ROTATION, BODY_TRANSIENT_FLAGS,
+    SHAPE_ENABLE_SENSOR_EVENTS, SHAPE_ENABLE_CONTACT_EVENTS, SHAPE_ENABLE_CUSTOM_FILTERING, SHAPE_ENABLE_HIT_EVENTS,
+    SHAPE_ENABLE_PRE_SOLVE_EVENTS, SHAPE_ENABLE_SPECULATIVE,
+    default_world_def, default_body_def, default_shape_def, null_body_id, null_shape_id,
+    create_world, destroy_world, world_is_valid, get_world, world_body_count, world_shape_count, world_awake_body_count,
+    world_set_gravity, world_get_gravity,
+    create_body, destroy_body, body_is_valid, get_body_full_id, get_body, get_body_sim, get_body_state, get_body_transform,
+    make_body_id, sync_body_flags, update_body_mass_data, is_body_awake, wake_body,
+    body_get_position, body_get_rotation, body_get_transform, body_set_transform,
+    body_get_local_point, body_get_world_point, body_get_local_vector, body_get_world_vector,
+    body_get_linear_velocity, body_get_angular_velocity, body_set_linear_velocity, body_set_angular_velocity,
+    body_get_local_point_velocity, body_get_world_point_velocity,
+    body_get_type, body_get_mass, body_get_inverse_mass, body_get_local_rotational_inertia,
+    body_get_world_inverse_rotational_inertia, body_get_local_center, body_get_world_center,
+    body_set_mass_data, body_get_mass_data, body_apply_mass_from_shapes,
+    body_get_min_extent, body_get_max_extent, body_get_max_extent_origin,
+    body_set_linear_damping, body_get_linear_damping, body_set_angular_damping, body_get_angular_damping,
+    body_set_gravity_scale, body_get_gravity_scale, body_set_user_data, body_get_user_data,
+    body_is_awake, body_set_awake, body_is_enabled, body_is_sleep_enabled, body_enable_sleep,
+    body_set_sleep_threshold, body_get_sleep_threshold, body_get_shape_count, body_get_shapes, body_compute_aabb,
+    body_set_motion_locks, body_get_motion_locks, body_get_flags,
+    create_sphere_shape, create_capsule_shape, create_hull_shape, create_mesh_shape, create_height_field_shape,
+    create_compound_shape, destroy_shape, shape_is_valid, get_shape_full_id, get_shape, shape_get_body,
+    shape_get_aabb, shape_get_type, shape_get_density, shape_set_density, shape_get_filter, shape_set_filter,
+    shape_get_surface_material, shape_set_surface_material, shape_get_material_count, shape_is_sensor,
+    shape_set_user_data, shape_get_user_data, shape_get_flags,
+    create_island, destroy_island, validate_island, create_solver_set, destroy_solver_set, wake_solver_set,
+    validate_solver_sets, get_solver_set, get_island, world_island_count, world_solver_set_count,
+    body_sim_at, body_state_at, world_shape_at, island_at, solver_set_at, body_at
+)
+
+extern memset(block: ptr, value: int, size: int) -> ptr
+extern memcpy(dst: ptr, src: ptr, size: int) -> ptr
+extern sqrt(x: float) -> float
+
+const NULL_INDEX = 0 - 1
+const MAX_WORLDS = 128
+const STATIC_SET = 0
+const DISABLED_SET = 1
+const AWAKE_SET = 2
+const FIRST_SLEEPING_SET = 3
+const BODY_STATIC = 0
+const BODY_KINEMATIC = 1
+const BODY_DYNAMIC = 2
+const SPECULATIVE_DISTANCE = 0.02
+const MAX_AABB_MARGIN = 0.05
+const AABB_MARGIN_FRACTION = 0.125
+const CONTACT_RECYCLE_DISTANCE = 0.01
+// The shape kinds (the shape module's, restated).
+const KIND_SPHERE = 0
+const KIND_CAPSULE = 1
+const KIND_HULL = 2
+const KIND_MESH = 3
+const KIND_HEIGHT_FIELD = 4
+const KIND_COMPOUND = 5
+
+// Body flags (b3BodyFlags).
+const LOCK_LINEAR_X = 0x00000001
+const LOCK_LINEAR_Y = 0x00000002
+const LOCK_LINEAR_Z = 0x00000004
+const LOCK_ANGULAR_X = 0x00000008
+const LOCK_ANGULAR_Y = 0x00000010
+const LOCK_ANGULAR_Z = 0x00000020
+const IS_FAST = 0x00000040
+const IS_BULLET = 0x00000080
+const IS_SPEED_CAPPED = 0x00000100
+const HAD_TIME_OF_IMPACT = 0x00000200
+const ALLOW_FAST_ROTATION = 0x00000400
+const ENLARGE_BOUNDS = 0x00000800
+const DYNAMIC_FLAG = 0x00001000
+const ENABLE_SLEEP = 0x00002000
+const ENABLE_CONTACT_RECYCLING = 0x00004000
+const DIRTY_MASS = 0x00008000
+const ALL_LOCKS = 0x0000003F
+const FIXED_ROTATION = 0x00000038
+const BODY_TRANSIENT_FLAGS = 0x00000340
+
+// Shape flags (b3ShapeFlags).
+const SHAPE_ENABLE_SENSOR_EVENTS = 0x01
+const SHAPE_ENABLE_CONTACT_EVENTS = 0x02
+const SHAPE_ENABLE_CUSTOM_FILTERING = 0x04
+const SHAPE_ENABLE_HIT_EVENTS = 0x08
+const SHAPE_ENABLE_PRE_SOLVE_EVENTS = 0x10
+const SHAPE_ENABLE_SPECULATIVE = 0x40
+
+// --- definitions and ids -------------------------------------------------------------------------
+
+struct WorldDef {
+    gravity: Vec3
+    hit_event_threshold: float     // the approach speed that makes a hit event
+    restitution_threshold: float   // the approach speed under which there is no bounce
+    contact_speed: float           // the push-out speed
+    contact_hertz: float           // the contact spring
+    contact_damping_ratio: float
+    maximum_linear_speed: float
+    friction_callback: fn(float, long, float, long) -> float
+    restitution_callback: fn(float, long, float, long) -> float
+    enable_sleep: bool
+    enable_continuous: bool
+    static_body_count: int         // the capacities the world starts with
+    dynamic_body_count: int
+    static_shape_count: int
+    dynamic_shape_count: int
+    contact_count: int
+    user_data: ptr
+}
+
+struct MotionLocks {
+    linear_x: bool
+    linear_y: bool
+    linear_z: bool
+    angular_x: bool
+    angular_y: bool
+    angular_z: bool
+}
+
+struct BodyDef {
+    kind: int                      // BODY_STATIC, BODY_KINEMATIC or BODY_DYNAMIC
+    position: Vec3
+    rotation: Quat
+    linear_velocity: Vec3
+    angular_velocity: Vec3
+    linear_damping: float
+    angular_damping: float
+    gravity_scale: float
+    sleep_threshold: float
+    safety_factor: float
+    user_data: ptr
+    motion_locks: MotionLocks
+    enable_sleep: bool
+    is_awake: bool
+    is_bullet: bool
+    is_enabled: bool
+    allow_fast_rotation: bool
+    enable_contact_recycling: bool
+}
+
+struct ShapeDef {
+    user_data: ptr
+    materials: ptr                 // SurfaceMaterial[], per triangle material of a mesh, or null
+    material_count: int
+    base_material: SurfaceMaterial // the one material when materials is null
+    density: float
+    explosion_scale: float
+    filter: Filter
+    enable_custom_filtering: bool
+    is_sensor: bool
+    enable_sensor_events: bool
+    enable_contact_events: bool
+    enable_hit_events: bool
+    enable_pre_solve_events: bool
+    invoke_contact_creation: bool  // a static shape finds its pairs at once
+    update_body_mass: bool
+    enable_speculative_contact: bool
+}
+
+// Ids are an index plus one (so zero is null), the world, and the
+// generation of the slot, so an id from before a slot was recycled fails.
+struct WorldId {
+    index1: int
+    generation: int
+}
+
+struct BodyId {
+    index1: int
+    world0: int
+    generation: int
+}
+
+struct ShapeId {
+    index1: int
+    world0: int
+    generation: int
+}
+
+default_friction(friction_a: float, user_a: long, friction_b: float, user_b: long) -> float { return sqrt(friction_a * friction_b) }
+default_restitution(restitution_a: float, user_a: long, restitution_b: float, user_b: long) -> float { return math.max_float(restitution_a, restitution_b) }
+
+default_world_def() -> WorldDef {
+    return WorldDef { gravity: math.vec3(0.0, 0.0 - 10.0, 0.0), hit_event_threshold: 1.0, restitution_threshold: 1.0, contact_speed: 3.0,
+                      contact_hertz: 30.0, contact_damping_ratio: 10.0, maximum_linear_speed: 400.0,
+                      friction_callback: default_friction, restitution_callback: default_restitution,
+                      enable_sleep: true, enable_continuous: true, static_body_count: 0, dynamic_body_count: 0,
+                      static_shape_count: 0, dynamic_shape_count: 0, contact_count: 0, user_data: null }
+}
+
+default_body_def() -> BodyDef {
+    return BodyDef { kind: BODY_STATIC, position: math.vec3_zero(), rotation: math.quat_identity(), linear_velocity: math.vec3_zero(),
+                     angular_velocity: math.vec3_zero(), linear_damping: 0.0, angular_damping: 0.0, gravity_scale: 1.0,
+                     sleep_threshold: 0.05, safety_factor: 0.5, user_data: null,
+                     motion_locks: MotionLocks { linear_x: false, linear_y: false, linear_z: false, angular_x: false, angular_y: false, angular_z: false },
+                     enable_sleep: true, is_awake: true, is_bullet: false, is_enabled: true, allow_fast_rotation: false, enable_contact_recycling: true }
+}
+
+default_shape_def() -> ShapeDef {
+    return ShapeDef { user_data: null, materials: null, material_count: 0, base_material: material.default_surface_material(),
+                      density: 1000.0, explosion_scale: 1.0, filter: shape.default_filter(), enable_custom_filtering: false,
+                      is_sensor: false, enable_sensor_events: false, enable_contact_events: false, enable_hit_events: false,
+                      enable_pre_solve_events: false, invoke_contact_creation: true, update_body_mass: true, enable_speculative_contact: true }
+}
+
+null_body_id() -> BodyId { return BodyId { index1: 0, world0: 0, generation: 0 } }
+null_shape_id() -> ShapeId { return ShapeId { index1: 0, world0: 0, generation: 0 } }
+
+// --- the state --------------------------------------------------------------------------------------
+
+// A body's organisation: where its sim lives, its lists, its island.
+struct Body {
+    user_data: ptr
+    set_index: int                 // the solver set, or NULL_INDEX when the slot is free
+    local_index: int               // the sim (and state) within the set
+    head_contact_key: int          // [contact id : 31 | edge : 1]
+    contact_count: int
+    head_shape_id: int
+    shape_count: int
+    head_joint_key: int
+    joint_count: int
+    island_id: int                 // every enabled dynamic or kinematic body is in one
+    island_index: int              // within the island's bodies
+    sleep_threshold: float
+    sleep_time: float
+    sleep_velocity: float
+    safety_factor: float
+    mass: float
+    inertia: Matrix3               // about the centre of mass, in the body's frame
+    body_move_index: int
+    id: int
+    flags: int
+    kind: int
+    generation: int
+}
+
+// What the solver reads and writes for an awake body.
+struct BodyState {
+    linear_velocity: Vec3
+    angular_velocity: Vec3
+    delta_position: Vec3
+    delta_rotation: Quat
+    flags: int
+}
+
+// What integration and collision need of a body.
+struct BodySim {
+    transform: Transform           // of the body's origin
+    center: Vec3                   // of mass, in world space
+    rotation0: Quat                // for the time of impact
+    center0: Vec3
+    local_center: Vec3
+    force: Vec3
+    torque: Vec3
+    inv_mass: float
+    inv_inertia_local: Matrix3
+    inv_inertia_world: Matrix3
+    min_extent: float
+    max_extent: Vec3
+    linear_damping: float
+    angular_damping: float
+    gravity_scale: float
+    body_id: int
+    flags: int
+}
+
+// A shape in the world: its geometry (the shape module's Shape, with
+// its density) and its place among its body's shapes and in the broad phase.
+struct WorldShape {
+    id: int                        // NULL_INDEX when the slot is free
+    body_id: int
+    prev_shape_id: int
+    next_shape_id: int
+    sensor_index: int
+    proxy_key: int
+    geometry: Shape
+    explosion_scale: float
+    aabb_margin: float
+    aabb: AABB
+    fat_aabb: AABB
+    local_centroid: Vec3
+    material_count: int
+    material: SurfaceMaterial      // the one material when materials is null
+    materials: ptr                 // SurfaceMaterial[] when there are several
+    filter: Filter
+    user_data: ptr
+    generation: int
+    flags: int
+}
+
+struct ContactEdge {
+    body_id: int
+    prev_key: int
+    next_key: int
+}
+
+// The persistent interaction of two shapes (its update comes with the next layer).
+struct Contact {
+    set_index: int
+    color_index: int
+    local_index: int
+    edge_a: ContactEdge
+    edge_b: ContactEdge
+    shape_id_a: int
+    shape_id_b: int
+    child_index: int
+    island_id: int
+    island_index: int
+    contact_id: int
+    body_sim_index_a: int
+    body_sim_index_b: int
+    flags: int
+    manifolds: ptr
+    manifold_count: int
+    friction: float
+    restitution: float
+    rolling_resistance: float
+    tangent_velocity: Vec3
+    mesh_cache: MeshContactCache
+    convex_cache: TriangleCache
+    generation: int
+}
+
+struct JointEdge {
+    body_id: int
+    prev_key: int
+    next_key: int
+}
+
+// A joint's organisation (its kinds come with the joint layer).
+struct Joint {
+    user_data: ptr
+    set_index: int
+    color_index: int
+    local_index: int
+    edge_a: JointEdge
+    edge_b: JointEdge
+    joint_id: int
+    island_id: int
+    island_index: int
+    kind: int
+    generation: int
+}
+
+struct ContactLink {
+    contact_id: int
+    body_id_a: int
+    body_id_b: int
+}
+
+struct JointLink {
+    joint_id: int
+    body_id_a: int
+    body_id_b: int
+}
+
+// A group of bodies connected by constraints; it sleeps as one.
+struct Island {
+    set_index: int
+    local_index: int
+    island_id: int
+    constraint_remove_count: int
+    bodies: IntArray
+    contacts: Buffer               // ContactLink
+    joints: Buffer                 // JointLink
+}
+
+struct IslandSim {
+    island_id: int
+}
+
+// The simulation data of one set of bodies: static, disabled, awake, or one sleeping island.
+struct SolverSet {
+    body_sims: Buffer              // BodySim
+    body_states: Buffer            // BodyState, the awake set only
+    joint_sims: Buffer             // the joint layer's JointSim, sleeping and disabled sets
+    contact_indices: IntArray      // sleeping sets' contacts; the awake set's non-touching ones
+    island_sims: Buffer            // IslandSim
+    set_index: int                 // NULL_INDEX when unused
+}
+
+struct World {
+    stack: Stack
+    broad_phase: BroadPhase
+    body_id_pool: IdPool
+    bodies: Buffer                 // Body, sparse by id
+    solver_set_id_pool: IdPool
+    solver_sets: Buffer            // SolverSet
+    joint_id_pool: IdPool
+    joints: Buffer                 // Joint
+    contact_id_pool: IdPool
+    contacts: Buffer               // Contact
+    island_id_pool: IdPool
+    islands: Buffer                // Island
+    shape_id_pool: IdPool
+    shapes: Buffer                 // WorldShape
+    compound_shape_count: int
+    step_index: long
+    split_island_id: int
+    gravity: Vec3
+    hit_event_threshold: float
+    restitution_threshold: float
+    max_linear_speed: float
+    contact_speed: float
+    contact_hertz: float
+    contact_damping_ratio: float
+    contact_recycle_distance: float
+    friction_callback: fn(float, long, float, long) -> float
+    restitution_callback: fn(float, long, float, long) -> float
+    generation: int
+    inv_h: float
+    inv_dt: float
+    world_id: int
+    enable_sleep: bool
+    locked: bool
+    enable_warm_starting: bool
+    enable_continuous: bool
+    enable_speculative: bool
+    in_use: bool
+    user_data: ptr
+}
+
+var g_worlds: ptr = null           // World[MAX_WORLDS]
+
+worlds_ready() {
+    if g_worlds == null { g_worlds = core.alloc(MAX_WORLDS * sizeof(World)) }
+}
+
+world_at(index: int) -> *World { return (g_worlds + index * sizeof(World)) as *World }
+
+// --- element access ------------------------------------------------------------------------------
+
+body_at(w: *World, id: int) -> *Body { return (w.bodies.data + id * sizeof(Body)) as *Body }
+world_shape_at(w: *World, id: int) -> *WorldShape { return (w.shapes.data + id * sizeof(WorldShape)) as *WorldShape }
+island_at(w: *World, id: int) -> *Island { return (w.islands.data + id * sizeof(Island)) as *Island }
+solver_set_at(w: *World, index: int) -> *SolverSet { return (w.solver_sets.data + index * sizeof(SolverSet)) as *SolverSet }
+body_sim_at(set: *SolverSet, index: int) -> *BodySim { return (set.body_sims.data + index * sizeof(BodySim)) as *BodySim }
+body_state_at(set: *SolverSet, index: int) -> *BodyState { return (set.body_states.data + index * sizeof(BodyState)) as *BodyState }
+island_sim_at(set: *SolverSet, index: int) -> *IslandSim { return (set.island_sims.data + index * sizeof(IslandSim)) as *IslandSim }
+
+get_solver_set(w: *World, index: int) -> *SolverSet { return solver_set_at(w, index) }
+get_island(w: *World, id: int) -> *Island { return island_at(w, id) }
+world_island_count(w: *World) -> int { return core.idpool_count(&w.island_id_pool) }
+world_solver_set_count(w: *World) -> int { return core.idpool_count(&w.solver_set_id_pool) }
+
+// --- worlds --------------------------------------------------------------------------------------------
+
+get_world(index: int) -> *World {
+    worlds_ready()
+    return world_at(index)
+}
+
+world_is_valid(id: WorldId) -> bool {
+    if id.index1 < 1 || id.index1 > MAX_WORLDS { return false }
+    worlds_ready()
+    w = world_at(id.index1 - 1)
+    return w.in_use && w.generation == id.generation
+}
+
+get_world_from_id(id: WorldId) -> *World {
+    worlds_ready()
+    return world_at(id.index1 - 1)
+}
+
+empty_solver_set() -> SolverSet {
+    return SolverSet { body_sims: core.buffer_create(sizeof(BodySim), 0), body_states: core.buffer_create(sizeof(BodyState), 0),
+                       joint_sims: core.buffer_create(8, 0), contact_indices: core.ints_create(0),
+                       island_sims: core.buffer_create(sizeof(IslandSim), 0), set_index: NULL_INDEX }
+}
+
+// A new set at a free slot, reserved for the awake set's capacities.
+create_solver_set(w: *World) -> int {
+    set_id = core.idpool_alloc(&w.solver_set_id_pool)
+    if set_id == w.solver_sets.count {
+        index = core.buffer_push(&w.solver_sets)
+        s = solver_set_at(w, index)
+        made = empty_solver_set()
+        s.body_sims = made.body_sims
+        s.body_states = made.body_states
+        s.joint_sims = made.joint_sims
+        s.contact_indices = made.contact_indices
+        s.island_sims = made.island_sims
+    }
+    s = solver_set_at(w, set_id)
+    s.set_index = set_id
+    return set_id
+}
+
+destroy_solver_set(w: *World, set_index: int) {
+    s = solver_set_at(w, set_index)
+    core.buffer_destroy(&s.body_sims)
+    core.buffer_destroy(&s.body_states)
+    core.buffer_destroy(&s.joint_sims)
+    core.ints_destroy(&s.contact_indices)
+    core.buffer_destroy(&s.island_sims)
+    core.idpool_free(&w.solver_set_id_pool, set_index)
+    s.set_index = NULL_INDEX
+}
+
+// A world at the first free slot: its pools, its broad phase, and the
+// static, disabled and awake sets.
+create_world(def: *WorldDef) -> WorldId {
+    worlds_ready()
+    index = NULL_INDEX
+    i = 0
+    while i < MAX_WORLDS && index == NULL_INDEX {
+        if world_at(i).in_use == false { index = i }
+        i = i + 1
+    }
+    if index == NULL_INDEX { return WorldId { index1: 0, generation: 0 } }
+    w = world_at(index)
+    generation = w.generation
+    memset(w as ptr, 0, sizeof(World))
+    w.world_id = index
+    w.generation = generation
+    w.in_use = true
+    w.stack = core.stack_create(2048)
+    broad_phase.create_broad_phase(&w.broad_phase, Capacity { static_shape_count: def.static_shape_count, dynamic_shape_count: def.dynamic_shape_count, contact_count: def.contact_count })
+    w.body_id_pool = core.idpool_create()
+    w.bodies = core.buffer_create(sizeof(Body), math.max_int(16, def.static_body_count + def.dynamic_body_count))
+    w.solver_set_id_pool = core.idpool_create()
+    w.solver_sets = core.buffer_create(sizeof(SolverSet), 8)
+    static_set = create_solver_set(w)
+    create_solver_set(w)
+    awake_set = create_solver_set(w)
+    core.buffer_reserve(&solver_set_at(w, static_set).body_sims, math.max_int(16, def.static_body_count))
+    core.buffer_reserve(&solver_set_at(w, awake_set).body_sims, math.max_int(16, def.dynamic_body_count))
+    core.buffer_reserve(&solver_set_at(w, awake_set).body_states, math.max_int(16, def.dynamic_body_count))
+    w.shape_id_pool = core.idpool_create()
+    w.shapes = core.buffer_create(sizeof(WorldShape), math.max_int(16, def.static_shape_count + def.dynamic_shape_count))
+    w.contact_id_pool = core.idpool_create()
+    w.contacts = core.buffer_create(sizeof(Contact), math.max_int(16, def.contact_count))
+    w.joint_id_pool = core.idpool_create()
+    w.joints = core.buffer_create(sizeof(Joint), 16)
+    w.island_id_pool = core.idpool_create()
+    w.islands = core.buffer_create(sizeof(Island), math.max_int(16, def.dynamic_body_count))
+    w.step_index = 0 as long
+    w.split_island_id = NULL_INDEX
+    w.gravity = def.gravity
+    w.hit_event_threshold = def.hit_event_threshold
+    w.restitution_threshold = def.restitution_threshold
+    w.max_linear_speed = def.maximum_linear_speed
+    w.contact_speed = def.contact_speed
+    w.contact_hertz = def.contact_hertz
+    w.contact_damping_ratio = def.contact_damping_ratio
+    w.contact_recycle_distance = CONTACT_RECYCLE_DISTANCE
+    w.friction_callback = def.friction_callback
+    w.restitution_callback = def.restitution_callback
+    w.enable_sleep = def.enable_sleep
+    w.locked = false
+    w.enable_warm_starting = true
+    w.enable_continuous = def.enable_continuous
+    w.enable_speculative = true
+    w.user_data = def.user_data
+    return WorldId { index1: index + 1, generation: generation }
+}
+
+// Everything the world holds is freed; ids into it die with its generation.
+destroy_world(id: WorldId) {
+    if world_is_valid(id) == false { return }
+    w = get_world_from_id(id)
+    // The shapes' materials and the contacts' caches.
+    i = 0
+    while i < w.shapes.count {
+        s = world_shape_at(w, i)
+        if s.id != NULL_INDEX && s.materials != null {
+            core.free_bytes(s.materials, s.material_count * sizeof(SurfaceMaterial))
+            s.materials = null
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < w.islands.count {
+        island = island_at(w, i)
+        if island.island_id != NULL_INDEX {
+            core.ints_destroy(&island.bodies)
+            core.buffer_destroy(&island.contacts)
+            core.buffer_destroy(&island.joints)
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < w.solver_sets.count {
+        set = solver_set_at(w, i)
+        if set.set_index != NULL_INDEX { destroy_solver_set(w, i) }
+        i = i + 1
+    }
+    core.buffer_destroy(&w.solver_sets)
+    core.idpool_destroy(&w.solver_set_id_pool)
+    core.buffer_destroy(&w.bodies)
+    core.idpool_destroy(&w.body_id_pool)
+    core.buffer_destroy(&w.shapes)
+    core.idpool_destroy(&w.shape_id_pool)
+    core.buffer_destroy(&w.contacts)
+    core.idpool_destroy(&w.contact_id_pool)
+    core.buffer_destroy(&w.joints)
+    core.idpool_destroy(&w.joint_id_pool)
+    core.buffer_destroy(&w.islands)
+    core.idpool_destroy(&w.island_id_pool)
+    broad_phase.destroy_broad_phase(&w.broad_phase)
+    core.stack_destroy(&w.stack)
+    generation = w.generation
+    memset(w as ptr, 0, sizeof(World))
+    w.generation = generation + 1
+    w.in_use = false
+}
+
+world_body_count(w: *World) -> int { return core.idpool_count(&w.body_id_pool) }
+world_shape_count(w: *World) -> int { return core.idpool_count(&w.shape_id_pool) }
+world_awake_body_count(w: *World) -> int { return solver_set_at(w, AWAKE_SET).body_sims.count }
+world_set_gravity(w: *World, gravity: Vec3) { w.gravity = gravity }
+world_get_gravity(w: *World) -> Vec3 { return w.gravity }
+
+// --- islands --------------------------------------------------------------------------------------------
+
+// A new island in a set (the awake one or a sleeping one).
+create_island(w: *World, set_index: int) -> *Island {
+    island_id = core.idpool_alloc(&w.island_id_pool)
+    if island_id == w.islands.count {
+        index = core.buffer_push(&w.islands)
+        fresh = island_at(w, index)
+        fresh.island_id = NULL_INDEX
+        fresh.set_index = NULL_INDEX
+    }
+    set = solver_set_at(w, set_index)
+    island = island_at(w, island_id)
+    island.set_index = set_index
+    island.local_index = set.island_sims.count
+    island.island_id = island_id
+    island.bodies = core.ints_create(0)
+    island.contacts = core.buffer_create(sizeof(ContactLink), 0)
+    island.joints = core.buffer_create(sizeof(JointLink), 0)
+    island.constraint_remove_count = 0
+    sim_index = core.buffer_push(&set.island_sims)
+    island_sim_at(set, sim_index).island_id = island_id
+    return island
+}
+
+// An empty island leaves its set (the last island sim moved into its slot) and frees its id.
+destroy_island(w: *World, island_id: int) {
+    if w.split_island_id == island_id { w.split_island_id = NULL_INDEX }
+    island = island_at(w, island_id)
+    set = solver_set_at(w, island.set_index)
+    local_index = island.local_index
+    last_index = set.island_sims.count - 1
+    moved_island_id = island_sim_at(set, last_index).island_id
+    island_sim_at(set, local_index).island_id = moved_island_id
+    island_at(w, moved_island_id).local_index = local_index
+    set.island_sims.count = set.island_sims.count - 1
+    core.ints_destroy(&island.bodies)
+    core.buffer_destroy(&island.contacts)
+    core.buffer_destroy(&island.joints)
+    island.constraint_remove_count = 0
+    island.local_index = NULL_INDEX
+    island.island_id = NULL_INDEX
+    island.set_index = NULL_INDEX
+    core.idpool_free(&w.island_id_pool, island_id)
+}
+
+// The island's bodies point back at it, and its set holds it.
+validate_island(w: *World, island_id: int) -> bool {
+    island = island_at(w, island_id)
+    if island.island_id != island_id { return false }
+    set = solver_set_at(w, island.set_index)
+    if island.local_index < 0 || island.local_index >= set.island_sims.count { return false }
+    if island_sim_at(set, island.local_index).island_id != island_id { return false }
+    i = 0
+    while i < island.bodies.count {
+        body_id = core.ints_get(&island.bodies, i)
+        body = body_at(w, body_id)
+        if body.island_id != island_id || body.island_index != i { return false }
+        if body.set_index != island.set_index { return false }
+        i = i + 1
+    }
+    return true
+}
+
+create_island_for_body(w: *World, set_index: int, body: *Body) {
+    island = create_island(w, set_index)
+    core.ints_push(&island.bodies, body.id)
+    body.island_id = island.island_id
+    body.island_index = 0
+}
+
+remove_body_from_island(w: *World, body: *Body) {
+    if body.island_id == NULL_INDEX { return }
+    island_id = body.island_id
+    island = island_at(w, island_id)
+    local_index = body.island_index
+    moved_body_id = core.ints_get(&island.bodies, island.bodies.count - 1)
+    core.ints_set(&island.bodies, local_index, moved_body_id)
+    body_at(w, moved_body_id).island_index = local_index
+    island.bodies.count = island.bodies.count - 1
+    if island.bodies.count == 0 { destroy_island(w, island.island_id) }
+    body.island_id = NULL_INDEX
+    body.island_index = NULL_INDEX
+}
+
+// --- bodies -------------------------------------------------------------------------------------------------
+
+body_is_valid(id: BodyId) -> bool {
+    if id.world0 < 0 || id.world0 >= MAX_WORLDS { return false }
+    worlds_ready()
+    w = world_at(id.world0)
+    if w.in_use == false { return false }
+    if id.index1 < 1 || id.index1 > w.bodies.count { return false }
+    body = body_at(w, id.index1 - 1)
+    if body.set_index == NULL_INDEX { return false }
+    return body.generation == id.generation
+}
+
+get_body_full_id(w: *World, id: BodyId) -> *Body { return body_at(w, id.index1 - 1) }
+get_body(w: *World, body_id: int) -> *Body { return body_at(w, body_id) }
+get_body_sim(w: *World, body: *Body) -> *BodySim { return body_sim_at(solver_set_at(w, body.set_index), body.local_index) }
+
+// The state exists for the awake set only; null otherwise.
+get_body_state(w: *World, body: *Body) -> *BodyState {
+    if body.set_index == AWAKE_SET { return body_state_at(solver_set_at(w, AWAKE_SET), body.local_index) }
+    return null
+}
+
+get_body_transform(w: *World, body_id: int) -> Transform { return get_body_sim(w, body_at(w, body_id)).transform }
+make_body_id(w: *World, body_id: int) -> BodyId { return BodyId { index1: body_id + 1, world0: w.world_id, generation: body_at(w, body_id).generation } }
+
+// The body's flags onto its sim and state, never the transient ones.
+sync_body_flags(w: *World, body: *Body) {
+    flags = body.flags & (0 - 1 - BODY_TRANSIENT_FLAGS)
+    get_body_sim(w, body).flags = flags
+    state = get_body_state(w, body)
+    if state != null { state.flags = flags }
+}
+
+// A body in the set its definition puts it in: disabled, static, awake,
+// or asleep in a set of its own; dynamic and kinematic bodies get an island.
+create_body(world_id: WorldId, def: *BodyDef) -> BodyId {
+    if world_is_valid(world_id) == false { return null_body_id() }
+    w = get_world_from_id(world_id)
+    if w.locked { return null_body_id() }
+    w.locked = true
+    is_awake = (def.is_awake || def.enable_sleep == false) && def.is_enabled
+    set_id = 0
+    if def.is_enabled == false { set_id = DISABLED_SET }
+    else if def.kind == BODY_STATIC { set_id = STATIC_SET }
+    else if is_awake { set_id = AWAKE_SET }
+    else { set_id = create_solver_set(w) }
+
+    body_id = core.idpool_alloc(&w.body_id_pool)
+    lock_flags = 0
+    if def.motion_locks.linear_x { lock_flags = lock_flags | LOCK_LINEAR_X }
+    if def.motion_locks.linear_y { lock_flags = lock_flags | LOCK_LINEAR_Y }
+    if def.motion_locks.linear_z { lock_flags = lock_flags | LOCK_LINEAR_Z }
+    if def.motion_locks.angular_x { lock_flags = lock_flags | LOCK_ANGULAR_X }
+    if def.motion_locks.angular_y { lock_flags = lock_flags | LOCK_ANGULAR_Y }
+    if def.motion_locks.angular_z { lock_flags = lock_flags | LOCK_ANGULAR_Z }
+
+    set = solver_set_at(w, set_id)
+    sim_index = core.buffer_push(&set.body_sims)
+    sim = body_sim_at(set, sim_index)
+    sim.transform = Transform { p: def.position, q: def.rotation }
+    sim.center = def.position
+    sim.rotation0 = def.rotation
+    sim.center0 = def.position
+    sim.local_center = math.vec3_zero()
+    sim.force = math.vec3_zero()
+    sim.torque = math.vec3_zero()
+    sim.inv_mass = 0.0
+    sim.inv_inertia_local = math.mat3_zero()
+    sim.inv_inertia_world = math.mat3_zero()
+    sim.min_extent = math.HUGE
+    sim.max_extent = math.vec3_zero()
+    sim.linear_damping = def.linear_damping
+    sim.angular_damping = def.angular_damping
+    sim.gravity_scale = def.gravity_scale
+    sim.body_id = body_id
+    flags = lock_flags
+    if def.is_bullet { flags = flags | IS_BULLET }
+    if def.allow_fast_rotation { flags = flags | ALLOW_FAST_ROTATION }
+    if def.kind == BODY_DYNAMIC { flags = flags | DYNAMIC_FLAG }
+    if def.enable_sleep { flags = flags | ENABLE_SLEEP }
+    if def.enable_contact_recycling { flags = flags | ENABLE_CONTACT_RECYCLING }
+    sim.flags = flags
+    if set_id == AWAKE_SET {
+        state_index = core.buffer_push(&set.body_states)
+        state = body_state_at(set, state_index)
+        state.linear_velocity = def.linear_velocity
+        state.angular_velocity = def.angular_velocity
+        state.delta_position = math.vec3_zero()
+        state.delta_rotation = math.quat_identity()
+        state.flags = flags
+    }
+
+    if body_id == w.bodies.count {
+        index = core.buffer_push(&w.bodies)
+        fresh = body_at(w, index)
+        fresh.generation = 0
+    }
+    body = body_at(w, body_id)
+    body.user_data = def.user_data
+    body.set_index = set_id
+    body.local_index = set.body_sims.count - 1
+    body.generation = body.generation + 1
+    body.head_shape_id = NULL_INDEX
+    body.shape_count = 0
+    body.head_contact_key = NULL_INDEX
+    body.contact_count = 0
+    body.head_joint_key = NULL_INDEX
+    body.joint_count = 0
+    body.island_id = NULL_INDEX
+    body.island_index = NULL_INDEX
+    body.body_move_index = NULL_INDEX
+    body.id = body_id
+    body.sleep_threshold = def.sleep_threshold
+    body.sleep_time = 0.0
+    body.sleep_velocity = 0.0
+    body.safety_factor = def.safety_factor
+    body.mass = 0.0
+    body.inertia = math.mat3_zero()
+    body.kind = def.kind
+    body.flags = flags
+    if set_id >= AWAKE_SET { create_island_for_body(w, set_id, body) }
+    w.locked = false
+    return BodyId { index1: body_id + 1, world0: w.world_id, generation: body.generation }
+}
+
+is_body_awake(w: *World, body: *Body) -> bool { return body.set_index == AWAKE_SET }
+
+// A sleeping body's whole set wakes (the contacts and joints follow with their layers).
+wake_body(w: *World, body: *Body) -> bool {
+    if body.set_index >= FIRST_SLEEPING_SET {
+        wake_solver_set(w, body.set_index)
+        return true
+    }
+    return false
+}
+
+// A sleeping set's bodies and islands move into the awake set, states
+// made for them, and the set is destroyed.
+wake_solver_set(w: *World, set_index: int) {
+    set = solver_set_at(w, set_index)
+    awake = solver_set_at(w, AWAKE_SET)
+    i = 0
+    while i < set.body_sims.count {
+        sim = body_sim_at(set, i)
+        body = body_at(w, sim.body_id)
+        target = core.buffer_push(&awake.body_sims)
+        memcpy(awake.body_sims.data + target * sizeof(BodySim), sim as ptr, sizeof(BodySim))
+        state_index = core.buffer_push(&awake.body_states)
+        state = body_state_at(awake, state_index)
+        state.linear_velocity = math.vec3_zero()
+        state.angular_velocity = math.vec3_zero()
+        state.delta_position = math.vec3_zero()
+        state.delta_rotation = math.quat_identity()
+        state.flags = sim.flags
+        body.set_index = AWAKE_SET
+        body.local_index = target
+        body.sleep_time = 0.0
+        i = i + 1
+    }
+    i = 0
+    while i < set.island_sims.count {
+        island_id = island_sim_at(set, i).island_id
+        island = island_at(w, island_id)
+        island.set_index = AWAKE_SET
+        island.local_index = awake.island_sims.count
+        target = core.buffer_push(&awake.island_sims)
+        island_sim_at(awake, target).island_id = island_id
+        i = i + 1
+    }
+    destroy_solver_set(w, set_index)
+}
+
+// The body's joints and contacts (with their layers), its shapes and their
+// proxies, its island, its sim and state, then its id (the generation stays).
+destroy_body(id: BodyId) {
+    if body_is_valid(id) == false { return }
+    w = world_at(id.world0)
+    if w.locked { return }
+    w.locked = true
+    body = body_at(w, id.index1 - 1)
+    shape_id = body.head_shape_id
+    while shape_id != NULL_INDEX {
+        s = world_shape_at(w, shape_id)
+        if s.geometry.kind == KIND_COMPOUND { w.compound_shape_count = w.compound_shape_count - 1 }
+        if s.proxy_key != NULL_INDEX {
+            broad_phase.broad_phase_destroy_proxy(&w.broad_phase, s.proxy_key)
+            s.proxy_key = NULL_INDEX
+        }
+        if s.materials != null {
+            core.free_bytes(s.materials, s.material_count * sizeof(SurfaceMaterial))
+            s.materials = null
+            s.material_count = 0
+        }
+        core.idpool_free(&w.shape_id_pool, shape_id)
+        s.id = NULL_INDEX
+        shape_id = s.next_shape_id
+    }
+    remove_body_from_island(w, body)
+    set = solver_set_at(w, body.set_index)
+    moved_index = core.buffer_remove_swap(&set.body_sims, body.local_index)
+    if moved_index != NULL_INDEX && moved_index != body.local_index {
+        moved_sim = body_sim_at(set, body.local_index)
+        body_at(w, moved_sim.body_id).local_index = body.local_index
+    }
+    if body.set_index == AWAKE_SET {
+        core.buffer_remove_swap(&set.body_states, body.local_index)
+    } else if set.set_index >= FIRST_SLEEPING_SET && set.body_sims.count == 0 {
+        destroy_solver_set(w, set.set_index)
+    }
+    core.idpool_free(&w.body_id_pool, body.id)
+    body.set_index = NULL_INDEX
+    body.local_index = NULL_INDEX
+    body.id = NULL_INDEX
+    w.locked = false
+}
+
+// --- shapes -------------------------------------------------------------------------------------------------
+
+// The margin a shape's fat bounds get: a fraction of its size, capped.
+compute_shape_margin(g: *Shape) -> float {
+    margin = 0.0
+    kind = g.kind
+    if kind == KIND_SPHERE { margin = g.sphere.radius }
+    else if kind == KIND_CAPSULE { margin = 0.5 * math.distance(g.capsule.center2, g.capsule.center1) + g.capsule.radius }
+    else if kind == KIND_HULL {
+        points = hull.hull_points(g.hull)
+        max_extent_sqr = 0.0
+        i = 0
+        while i < g.hull.vertex_count {
+            max_extent_sqr = math.max_float(max_extent_sqr, math.distance_squared(points[i], g.hull.center))
+            i = i + 1
+        }
+        margin = sqrt(max_extent_sqr)
+    } else {
+        // Static-only shapes: the broad phase uses the speculative distance for static proxies.
+        return MAX_AABB_MARGIN
+    }
+    return math.min_float(MAX_AABB_MARGIN, AABB_MARGIN_FRACTION * margin)
+}
+
+// The shape's bounds with the speculative margin, and the fat bounds the
+// broad phase holds (a static body's grow only by the speculative distance).
+update_shape_aabbs(s: *WorldShape, t: Transform, proxy_kind: int) {
+    box = shape.compute_fat_shape_aabb(&s.geometry, t, SPECULATIVE_DISTANCE)
+    s.aabb = box
+    margin = s.aabb_margin
+    if proxy_kind == BODY_STATIC { margin = SPECULATIVE_DISTANCE }
+    s.fat_aabb = AABB { lower: math.sub(box.lower, math.vec3(margin, margin, margin)), upper: math.add(box.upper, math.vec3(margin, margin, margin)) }
+}
+
+create_shape_proxy(w: *World, s: *WorldShape, kind: int, t: Transform, force_pair_creation: bool) {
+    update_shape_aabbs(s, t, kind)
+    s.proxy_key = broad_phase.broad_phase_create_proxy(&w.broad_phase, kind, s.fat_aabb, s.filter.category_bits, s.id, force_pair_creation)
+}
+
+// A shape on a body: its slot, its geometry, its materials, its proxy in
+// the broad phase (unless the body is disabled), its place in the body's
+// list, and the body's mass updated or marked dirty.
+create_shape(body_id: BodyId, def: *ShapeDef, geometry: Shape) -> ShapeId {
+    if body_is_valid(body_id) == false { return null_shape_id() }
+    w = world_at(body_id.world0)
+    if w.locked { return null_shape_id() }
+    body = body_at(w, body_id.index1 - 1)
+    kind = geometry.kind
+    // Compounds and height fields go on static bodies only.
+    if body.kind != BODY_STATIC && (kind == KIND_COMPOUND || kind == KIND_HEIGHT_FIELD) { return null_shape_id() }
+    if kind == KIND_COMPOUND && def.is_sensor { return null_shape_id() }
+    w.locked = true
+    shape_id = core.idpool_alloc(&w.shape_id_pool)
+    if shape_id == w.shapes.count {
+        index = core.buffer_push(&w.shapes)
+        fresh = world_shape_at(w, index)
+        fresh.generation = 0
+    }
+    s = world_shape_at(w, shape_id)
+    s.geometry = geometry
+    s.geometry.density = def.density
+    s.id = shape_id
+    s.body_id = body.id
+    s.explosion_scale = def.explosion_scale
+    s.filter = def.filter
+    s.user_data = def.user_data
+    flags = 0
+    if def.enable_sensor_events { flags = flags | SHAPE_ENABLE_SENSOR_EVENTS }
+    if def.enable_contact_events { flags = flags | SHAPE_ENABLE_CONTACT_EVENTS }
+    if def.enable_custom_filtering { flags = flags | SHAPE_ENABLE_CUSTOM_FILTERING }
+    if def.enable_hit_events { flags = flags | SHAPE_ENABLE_HIT_EVENTS }
+    if def.enable_pre_solve_events { flags = flags | SHAPE_ENABLE_PRE_SOLVE_EVENTS }
+    if def.enable_speculative_contact { flags = flags | SHAPE_ENABLE_SPECULATIVE }
+    s.flags = flags
+    s.proxy_key = NULL_INDEX
+    s.local_centroid = shape.get_shape_centroid(&s.geometry)
+    s.aabb_margin = compute_shape_margin(&s.geometry)
+    s.aabb = AABB { lower: math.vec3_zero(), upper: math.vec3_zero() }
+    s.fat_aabb = s.aabb
+    s.generation = s.generation + 1
+    s.sensor_index = NULL_INDEX
+    if kind == KIND_COMPOUND {
+        w.compound_shape_count = w.compound_shape_count + 1
+        // A copy of the compound's materials, so every shape frees its array the same way.
+        count = s.geometry.compound.material_count
+        s.material_count = count
+        s.materials = core.alloc(count * sizeof(SurfaceMaterial))
+        memcpy(s.materials, (s.geometry.compound as ptr) + s.geometry.compound.material_offset, count * sizeof(SurfaceMaterial))
+        s.material = compound.get_compound_material(s.geometry.compound, 0)
+    } else if def.material_count > 1 && def.materials != null {
+        s.material_count = def.material_count
+        s.materials = core.alloc(def.material_count * sizeof(SurfaceMaterial))
+        memcpy(s.materials, def.materials, def.material_count * sizeof(SurfaceMaterial))
+        given = def.materials as SurfaceMaterial[]
+        s.material = given[0]
+    } else {
+        s.material = def.base_material
+        if def.material_count == 1 && def.materials != null {
+            given = def.materials as SurfaceMaterial[]
+            s.material = given[0]
+        }
+        s.material_count = 1
+        s.materials = null
+    }
+    s.geometry.material_count = s.material_count
+    if body.set_index != DISABLED_SET {
+        force = def.invoke_contact_creation && kind != KIND_COMPOUND
+        create_shape_proxy(w, s, body.kind, get_body_sim(w, body).transform, force)
+    }
+    if body.head_shape_id != NULL_INDEX { world_shape_at(w, body.head_shape_id).prev_shape_id = shape_id }
+    s.prev_shape_id = NULL_INDEX
+    s.next_shape_id = body.head_shape_id
+    body.head_shape_id = shape_id
+    body.shape_count = body.shape_count + 1
+    if def.is_sensor { s.sensor_index = 0 }   // the sensor layer gives it a sensor
+
+    if def.update_body_mass {
+        update_body_mass_data(w, body)
+    } else if (body.flags & DIRTY_MASS) == 0 {
+        body.flags = body.flags | DIRTY_MASS
+        sync_body_flags(w, body)
+    }
+    w.locked = false
+    return ShapeId { index1: shape_id + 1, world0: w.world_id, generation: s.generation }
+}
+
+create_sphere_shape(body_id: BodyId, def: *ShapeDef, s: Sphere) -> ShapeId { return create_shape(body_id, def, shape.sphere_shape(s, def.density)) }
+create_capsule_shape(body_id: BodyId, def: *ShapeDef, c: Capsule) -> ShapeId { return create_shape(body_id, def, shape.capsule_shape(c, def.density)) }
+create_hull_shape(body_id: BodyId, def: *ShapeDef, h: *HullData) -> ShapeId { return create_shape(body_id, def, shape.hull_shape(h, def.density)) }
+create_mesh_shape(body_id: BodyId, def: *ShapeDef, m: *MeshData, scale: Vec3) -> ShapeId {
+    return create_shape(body_id, def, shape.mesh_shape(mesh.mesh(m, scale), math.max_int(def.material_count, 1)))
+}
+create_height_field_shape(body_id: BodyId, def: *ShapeDef, h: *HeightFieldData) -> ShapeId {
+    return create_shape(body_id, def, shape.height_field_shape(h, math.max_int(def.material_count, 1)))
+}
+create_compound_shape(body_id: BodyId, def: *ShapeDef, c: *CompoundData) -> ShapeId { return create_shape(body_id, def, shape.compound_shape(c)) }
+
+shape_is_valid(id: ShapeId) -> bool {
+    if id.world0 < 0 || id.world0 >= MAX_WORLDS { return false }
+    worlds_ready()
+    w = world_at(id.world0)
+    if w.in_use == false { return false }
+    if id.index1 < 1 || id.index1 > w.shapes.count { return false }
+    s = world_shape_at(w, id.index1 - 1)
+    if s.id == NULL_INDEX { return false }
+    return s.generation == id.generation
+}
+
+get_shape_full_id(w: *World, id: ShapeId) -> *WorldShape { return world_shape_at(w, id.index1 - 1) }
+get_shape(w: *World, shape_id: int) -> *WorldShape { return world_shape_at(w, shape_id) }
+
+// The shape leaves its body's list and the broad phase; the body's mass
+// is updated when asked.
+destroy_shape(id: ShapeId, update_body_mass: bool) {
+    if shape_is_valid(id) == false { return }
+    w = world_at(id.world0)
+    if w.locked { return }
+    w.locked = true
+    s = world_shape_at(w, id.index1 - 1)
+    body = body_at(w, s.body_id)
+    if s.prev_shape_id != NULL_INDEX { world_shape_at(w, s.prev_shape_id).next_shape_id = s.next_shape_id }
+    if s.next_shape_id != NULL_INDEX { world_shape_at(w, s.next_shape_id).prev_shape_id = s.prev_shape_id }
+    if body.head_shape_id == s.id { body.head_shape_id = s.next_shape_id }
+    body.shape_count = body.shape_count - 1
+    if s.geometry.kind == KIND_COMPOUND { w.compound_shape_count = w.compound_shape_count - 1 }
+    if s.proxy_key != NULL_INDEX {
+        broad_phase.broad_phase_destroy_proxy(&w.broad_phase, s.proxy_key)
+        s.proxy_key = NULL_INDEX
+    }
+    if s.materials != null {
+        core.free_bytes(s.materials, s.material_count * sizeof(SurfaceMaterial))
+        s.materials = null
+        s.material_count = 0
+    }
+    core.idpool_free(&w.shape_id_pool, s.id)
+    s.id = NULL_INDEX
+    if update_body_mass { update_body_mass_data(w, body) }
+    w.locked = false
+}
+
+shape_get_body(id: ShapeId) -> BodyId {
+    w = world_at(id.world0)
+    return make_body_id(w, get_shape_full_id(w, id).body_id)
+}
+shape_get_aabb(id: ShapeId) -> AABB { return get_shape_full_id(world_at(id.world0), id).aabb }
+shape_get_type(id: ShapeId) -> int { return get_shape_full_id(world_at(id.world0), id).geometry.kind }
+shape_get_density(id: ShapeId) -> float { return get_shape_full_id(world_at(id.world0), id).geometry.density }
+shape_set_density(id: ShapeId, density: float, update_body_mass: bool) {
+    w = world_at(id.world0)
+    s = get_shape_full_id(w, id)
+    s.geometry.density = density
+    if update_body_mass { update_body_mass_data(w, body_at(w, s.body_id)) }
+}
+shape_get_filter(id: ShapeId) -> Filter { return get_shape_full_id(world_at(id.world0), id).filter }
+shape_set_filter(id: ShapeId, filter: Filter) { get_shape_full_id(world_at(id.world0), id).filter = filter }
+shape_get_surface_material(id: ShapeId) -> SurfaceMaterial { return get_shape_full_id(world_at(id.world0), id).material }
+shape_set_surface_material(id: ShapeId, m: SurfaceMaterial) {
+    s = get_shape_full_id(world_at(id.world0), id)
+    s.material = m
+    if s.materials != null {
+        materials = s.materials as SurfaceMaterial[]
+        materials[0] = m
+    }
+}
+shape_get_material_count(id: ShapeId) -> int { return get_shape_full_id(world_at(id.world0), id).material_count }
+shape_is_sensor(id: ShapeId) -> bool { return get_shape_full_id(world_at(id.world0), id).sensor_index != NULL_INDEX }
+shape_set_user_data(id: ShapeId, data: ptr) { get_shape_full_id(world_at(id.world0), id).user_data = data }
+shape_get_user_data(id: ShapeId) -> ptr { return get_shape_full_id(world_at(id.world0), id).user_data }
+shape_get_flags(id: ShapeId) -> int { return get_shape_full_id(world_at(id.world0), id).flags }
+
+// --- mass ---------------------------------------------------------------------------------------------------
+
+var g_masses: ptr = null   // MassData[]; the shapes' masses during an update
+var g_mass_capacity = 0
+
+// The body's mass, centre of mass, inertia about it (each shape's
+// carried over by Steiner), the inverse inertia in the world, and its
+// extents from the centre; static and kinematic bodies get no mass, and
+// a kinematic one keeps its extents (for sleeping). Fixed rotation zeroes
+// the inertia.
+update_body_mass_data(w: *World, body: *Body) {
+    sim = get_body_sim(w, body)
+    body.flags = body.flags & (0 - 1 - DIRTY_MASS)
+    sync_body_flags(w, body)
+    body.mass = 0.0
+    body.inertia = math.mat3_zero()
+    sim.inv_mass = 0.0
+    sim.inv_inertia_local = math.mat3_zero()
+    sim.inv_inertia_world = math.mat3_zero()
+    sim.local_center = math.vec3_zero()
+    sim.min_extent = math.HUGE
+    sim.max_extent = math.vec3_zero()
+    if body.head_shape_id == NULL_INDEX { return }
+
+    if body.kind != BODY_DYNAMIC {
+        sim.center = sim.transform.p
+        sim.center0 = sim.center
+        if body.kind == BODY_KINEMATIC {
+            shape_id = body.head_shape_id
+            while shape_id != NULL_INDEX {
+                s = world_shape_at(w, shape_id)
+                extent = shape.compute_shape_extent(&s.geometry, math.vec3_zero())
+                sim.min_extent = math.min_float(sim.min_extent, extent.min_extent)
+                sim.max_extent = math.max_vec3(sim.max_extent, extent.max_extent)
+                shape_id = s.next_shape_id
+            }
+        }
+        return
+    }
+
+    shape_count = body.shape_count
+    if shape_count > g_mass_capacity {
+        core.free_bytes(g_masses, g_mass_capacity * sizeof(MassData))
+        g_mass_capacity = math.max_int(shape_count, 8)
+        g_masses = core.alloc(g_mass_capacity * sizeof(MassData))
+    }
+    masses = g_masses as MassData[]
+    local_center = math.vec3_zero()
+    shape_id = body.head_shape_id
+    shape_index = 0
+    while shape_id != NULL_INDEX {
+        s = world_shape_at(w, shape_id)
+        shape_id = s.next_shape_id
+        if s.geometry.density == 0.0 {
+            masses[shape_index] = MassData { mass: 0.0, center: math.vec3_zero(), inertia: math.mat3_zero() }
+        } else {
+            mass_data = shape.compute_shape_mass(&s.geometry)
+            body.mass = body.mass + mass_data.mass
+            local_center = math.mul_add(local_center, mass_data.mass, mass_data.center)
+            masses[shape_index] = mass_data
+        }
+        shape_index = shape_index + 1
+    }
+    if body.mass > 0.0 {
+        sim.inv_mass = 1.0 / body.mass
+        local_center = math.mul_sv(sim.inv_mass, local_center)
+    }
+    shape_index = 0
+    while shape_index < shape_count {
+        mass_data = masses[shape_index]
+        if mass_data.mass != 0.0 {
+            // Shifted to the centre of mass; it can only grow.
+            offset = math.sub(local_center, mass_data.center)
+            body.inertia = math.add_mm(body.inertia, math.add_mm(mass_data.inertia, math.steiner(mass_data.mass, offset)))
+        }
+        shape_index = shape_index + 1
+    }
+    determinant = math.det(body.inertia)
+    if determinant > 0.0 {
+        sim.inv_inertia_local = math.invert_t(body.inertia)
+        rotation = math.make_matrix_from_quat(sim.transform.q)
+        sim.inv_inertia_world = math.mul_mm(math.mul_mm(rotation, sim.inv_inertia_local), math.transpose(rotation))
+    }
+    // The centre of mass moves: the velocity follows the new material point.
+    old_center = sim.center
+    sim.local_center = local_center
+    sim.center = math.transform_point(sim.transform, local_center)
+    sim.center0 = sim.center
+    state = get_body_state(w, body)
+    if state != null {
+        state.linear_velocity = math.add(state.linear_velocity, math.cross(state.angular_velocity, math.sub(sim.center, old_center)))
+    }
+    shape_id = body.head_shape_id
+    while shape_id != NULL_INDEX {
+        s = world_shape_at(w, shape_id)
+        extent = shape.compute_shape_extent(&s.geometry, local_center)
+        sim.min_extent = math.min_float(sim.min_extent, extent.min_extent)
+        sim.max_extent = math.max_vec3(sim.max_extent, extent.max_extent)
+        shape_id = s.next_shape_id
+    }
+    // (The contacts' cached relative transforms are invalidated with the contact layer.)
+    if (sim.flags & FIXED_ROTATION) == FIXED_ROTATION {
+        body.inertia = math.mat3_zero()
+        sim.inv_inertia_local = math.mat3_zero()
+        sim.inv_inertia_world = math.mat3_zero()
+    }
+}
+
+// --- the body's public face ------------------------------------------------------------------------------
+
+body_world(id: BodyId) -> *World { return world_at(id.world0) }
+
+body_get_position(id: BodyId) -> Vec3 { w = body_world(id); return get_body_sim(w, get_body_full_id(w, id)).transform.p }
+body_get_rotation(id: BodyId) -> Quat { w = body_world(id); return get_body_sim(w, get_body_full_id(w, id)).transform.q }
+body_get_transform(id: BodyId) -> Transform { w = body_world(id); return get_body_sim(w, get_body_full_id(w, id)).transform }
+body_get_local_point(id: BodyId, world_point: Vec3) -> Vec3 { return math.inv_transform_point(body_get_transform(id), world_point) }
+body_get_world_point(id: BodyId, local_point: Vec3) -> Vec3 { return math.transform_point(body_get_transform(id), local_point) }
+body_get_local_vector(id: BodyId, world_vector: Vec3) -> Vec3 { return math.inv_rotate_vector(body_get_rotation(id), world_vector) }
+body_get_world_vector(id: BodyId, local_vector: Vec3) -> Vec3 { return math.rotate_vector(body_get_rotation(id), local_vector) }
+
+// The body moved by hand: its centre and inverse world inertia follow,
+// its shapes' bounds and proxies are updated at once (a static body's
+// too, so contacts begin without a step).
+body_set_transform(id: BodyId, position: Vec3, rotation: Quat) {
+    w = body_world(id)
+    if w.locked { return }
+    body = get_body_full_id(w, id)
+    sim = get_body_sim(w, body)
+    sim.transform = Transform { p: position, q: rotation }
+    sim.center = math.transform_point(sim.transform, sim.local_center)
+    sim.rotation0 = rotation
+    sim.center0 = sim.center
+    r = math.make_matrix_from_quat(rotation)
+    sim.inv_inertia_world = math.mul_mm(math.mul_mm(r, sim.inv_inertia_local), math.transpose(r))
+    shape_id = body.head_shape_id
+    while shape_id != NULL_INDEX {
+        s = world_shape_at(w, shape_id)
+        if s.proxy_key != NULL_INDEX {
+            update_shape_aabbs(s, sim.transform, body.kind)
+            broad_phase.broad_phase_move_proxy(&w.broad_phase, s.proxy_key, s.fat_aabb)
+        }
+        shape_id = s.next_shape_id
+    }
+}
+
+body_get_linear_velocity(id: BodyId) -> Vec3 {
+    w = body_world(id)
+    state = get_body_state(w, get_body_full_id(w, id))
+    if state == null { return math.vec3_zero() }
+    return state.linear_velocity
+}
+
+body_get_angular_velocity(id: BodyId) -> Vec3 {
+    w = body_world(id)
+    state = get_body_state(w, get_body_full_id(w, id))
+    if state == null { return math.vec3_zero() }
+    return state.angular_velocity
+}
+
+// A velocity wakes a sleeping body; a static body has none.
+body_set_linear_velocity(id: BodyId, v: Vec3) {
+    w = body_world(id)
+    body = get_body_full_id(w, id)
+    if body.kind == BODY_STATIC { return }
+    if math.length_squared(v) > 0.0 { wake_body(w, body) }
+    state = get_body_state(w, body)
+    if state != null { state.linear_velocity = v }
+}
+
+body_set_angular_velocity(id: BodyId, v: Vec3) {
+    w = body_world(id)
+    body = get_body_full_id(w, id)
+    if body.kind == BODY_STATIC { return }
+    // The locks apply, so a locked axis does not wake the body.
+    wx = v.x
+    wy = v.y
+    wz = v.z
+    if (body.flags & LOCK_ANGULAR_X) != 0 { wx = 0.0 }
+    if (body.flags & LOCK_ANGULAR_Y) != 0 { wy = 0.0 }
+    if (body.flags & LOCK_ANGULAR_Z) != 0 { wz = 0.0 }
+    locked = math.vec3(wx, wy, wz)
+    if math.length_squared(locked) != 0.0 { wake_body(w, body) }
+    state = get_body_state(w, body)
+    if state != null { state.angular_velocity = locked }
+}
+
+body_get_local_point_velocity(id: BodyId, local_point: Vec3) -> Vec3 {
+    w = body_world(id)
+    body = get_body_full_id(w, id)
+    state = get_body_state(w, body)
+    if state == null { return math.vec3_zero() }
+    sim = get_body_sim(w, body)
+    r = math.rotate_vector(sim.transform.q, math.sub(local_point, sim.local_center))
+    return math.add(state.linear_velocity, math.cross(state.angular_velocity, r))
+}
+
+body_get_world_point_velocity(id: BodyId, world_point: Vec3) -> Vec3 {
+    w = body_world(id)
+    body = get_body_full_id(w, id)
+    state = get_body_state(w, body)
+    if state == null { return math.vec3_zero() }
+    sim = get_body_sim(w, body)
+    return math.add(state.linear_velocity, math.cross(state.angular_velocity, math.sub(world_point, sim.center)))
+}
+
+body_get_type(id: BodyId) -> int { return get_body_full_id(body_world(id), id).kind }
+body_get_mass(id: BodyId) -> float { return get_body_full_id(body_world(id), id).mass }
+body_get_inverse_mass(id: BodyId) -> float { w = body_world(id); return get_body_sim(w, get_body_full_id(w, id)).inv_mass }
+body_get_local_rotational_inertia(id: BodyId) -> Matrix3 { return get_body_full_id(body_world(id), id).inertia }
+body_get_world_inverse_rotational_inertia(id: BodyId) -> Matrix3 { w = body_world(id); return get_body_sim(w, get_body_full_id(w, id)).inv_inertia_world }
+body_get_local_center(id: BodyId) -> Vec3 { w = body_world(id); return get_body_sim(w, get_body_full_id(w, id)).local_center }
+body_get_world_center(id: BodyId) -> Vec3 { w = body_world(id); return get_body_sim(w, get_body_full_id(w, id)).center }
+body_get_min_extent(id: BodyId) -> float { w = body_world(id); return get_body_sim(w, get_body_full_id(w, id)).min_extent }
+body_get_max_extent(id: BodyId) -> Vec3 { w = body_world(id); return get_body_sim(w, get_body_full_id(w, id)).max_extent }
+body_get_max_extent_origin(id: BodyId) -> Vec3 {
+    w = body_world(id)
+    sim = get_body_sim(w, get_body_full_id(w, id))
+    return math.add(sim.max_extent, math.abs_vec3(sim.local_center))
+}
+
+// Mass properties set by hand, bypassing the shapes: the inverses, the
+// world inertia under the body's rotation, the velocity re-referenced
+// to the new centre, the extents about it; fixed rotation zeroes the inertia.
+body_set_mass_data(id: BodyId, mass_data: MassData) {
+    w = body_world(id)
+    if w.locked { return }
+    body = get_body_full_id(w, id)
+    sim = get_body_sim(w, body)
+    body.flags = body.flags & (0 - 1 - DIRTY_MASS)
+    sync_body_flags(w, body)
+    body.mass = mass_data.mass
+    body.inertia = mass_data.inertia
+    sim.local_center = mass_data.center
+    old_center = sim.center
+    sim.center = math.transform_point(sim.transform, mass_data.center)
+    sim.center0 = sim.center
+    sim.inv_mass = 0.0
+    if body.mass > 0.0 { sim.inv_mass = 1.0 / body.mass }
+    state = get_body_state(w, body)
+    if state != null {
+        state.linear_velocity = math.add(state.linear_velocity, math.cross(state.angular_velocity, math.sub(sim.center, old_center)))
+    }
+    determinant = math.det(body.inertia)
+    if determinant > 0.0 {
+        sim.inv_inertia_local = math.invert_t(body.inertia)
+        r = math.make_matrix_from_quat(sim.transform.q)
+        sim.inv_inertia_world = math.mul_mm(math.mul_mm(r, sim.inv_inertia_local), math.transpose(r))
+    } else {
+        sim.inv_inertia_local = math.mat3_zero()
+        sim.inv_inertia_world = math.mat3_zero()
+    }
+    if (sim.flags & FIXED_ROTATION) == FIXED_ROTATION {
+        body.inertia = math.mat3_zero()
+        sim.inv_inertia_local = math.mat3_zero()
+        sim.inv_inertia_world = math.mat3_zero()
+    }
+    sim.min_extent = math.HUGE
+    sim.max_extent = math.vec3_zero()
+    shape_id = body.head_shape_id
+    while shape_id != NULL_INDEX {
+        s = world_shape_at(w, shape_id)
+        extent = shape.compute_shape_extent(&s.geometry, mass_data.center)
+        sim.min_extent = math.min_float(sim.min_extent, extent.min_extent)
+        sim.max_extent = math.max_vec3(sim.max_extent, extent.max_extent)
+        shape_id = s.next_shape_id
+    }
+}
+
+body_get_mass_data(id: BodyId) -> MassData {
+    w = body_world(id)
+    body = get_body_full_id(w, id)
+    return MassData { mass: body.mass, center: get_body_sim(w, body).local_center, inertia: body.inertia }
+}
+
+body_apply_mass_from_shapes(id: BodyId) {
+    w = body_world(id)
+    if w.locked { return }
+    update_body_mass_data(w, get_body_full_id(w, id))
+}
+
+body_set_linear_damping(id: BodyId, damping: float) { w = body_world(id); get_body_sim(w, get_body_full_id(w, id)).linear_damping = damping }
+body_get_linear_damping(id: BodyId) -> float { w = body_world(id); return get_body_sim(w, get_body_full_id(w, id)).linear_damping }
+body_set_angular_damping(id: BodyId, damping: float) { w = body_world(id); get_body_sim(w, get_body_full_id(w, id)).angular_damping = damping }
+body_get_angular_damping(id: BodyId) -> float { w = body_world(id); return get_body_sim(w, get_body_full_id(w, id)).angular_damping }
+body_set_gravity_scale(id: BodyId, scale: float) { w = body_world(id); get_body_sim(w, get_body_full_id(w, id)).gravity_scale = scale }
+body_get_gravity_scale(id: BodyId) -> float { w = body_world(id); return get_body_sim(w, get_body_full_id(w, id)).gravity_scale }
+body_set_user_data(id: BodyId, data: ptr) { get_body_full_id(body_world(id), id).user_data = data }
+body_get_user_data(id: BodyId) -> ptr { return get_body_full_id(body_world(id), id).user_data }
+body_is_awake(id: BodyId) -> bool { return get_body_full_id(body_world(id), id).set_index == AWAKE_SET }
+body_is_enabled(id: BodyId) -> bool { return get_body_full_id(body_world(id), id).set_index != DISABLED_SET }
+body_is_sleep_enabled(id: BodyId) -> bool { return (get_body_full_id(body_world(id), id).flags & ENABLE_SLEEP) != 0 }
+body_get_sleep_threshold(id: BodyId) -> float { return get_body_full_id(body_world(id), id).sleep_threshold }
+body_set_sleep_threshold(id: BodyId, threshold: float) { get_body_full_id(body_world(id), id).sleep_threshold = threshold }
+body_get_shape_count(id: BodyId) -> int { return get_body_full_id(body_world(id), id).shape_count }
+body_get_flags(id: BodyId) -> int { return get_body_full_id(body_world(id), id).flags }
+
+// Waking a sleeping body (putting one to sleep needs the island's sleep test, with the solver).
+body_set_awake(id: BodyId, awake: bool) {
+    w = body_world(id)
+    if w.locked { return }
+    body = get_body_full_id(w, id)
+    if awake { wake_body(w, body) }
+}
+
+body_enable_sleep(id: BodyId, enable: bool) {
+    w = body_world(id)
+    body = get_body_full_id(w, id)
+    if enable {
+        body.flags = body.flags | ENABLE_SLEEP
+    } else {
+        body.flags = body.flags & (0 - 1 - ENABLE_SLEEP)
+        wake_body(w, body)
+    }
+    sync_body_flags(w, body)
+}
+
+body_set_motion_locks(id: BodyId, locks: MotionLocks) {
+    w = body_world(id)
+    body = get_body_full_id(w, id)
+    flags = body.flags & (0 - 1 - ALL_LOCKS)
+    if locks.linear_x { flags = flags | LOCK_LINEAR_X }
+    if locks.linear_y { flags = flags | LOCK_LINEAR_Y }
+    if locks.linear_z { flags = flags | LOCK_LINEAR_Z }
+    if locks.angular_x { flags = flags | LOCK_ANGULAR_X }
+    if locks.angular_y { flags = flags | LOCK_ANGULAR_Y }
+    if locks.angular_z { flags = flags | LOCK_ANGULAR_Z }
+    if flags != body.flags {
+        body.flags = flags
+        sync_body_flags(w, body)
+        update_body_mass_data(w, body)
+    }
+}
+
+body_get_motion_locks(id: BodyId) -> MotionLocks {
+    flags = get_body_full_id(body_world(id), id).flags
+    return MotionLocks { linear_x: (flags & LOCK_LINEAR_X) != 0, linear_y: (flags & LOCK_LINEAR_Y) != 0, linear_z: (flags & LOCK_LINEAR_Z) != 0,
+                         angular_x: (flags & LOCK_ANGULAR_X) != 0, angular_y: (flags & LOCK_ANGULAR_Y) != 0, angular_z: (flags & LOCK_ANGULAR_Z) != 0 }
+}
+
+// The body's shape ids into an array, up to the capacity; returns how many.
+body_get_shapes(id: BodyId, shape_ids: ShapeId[], capacity: int) -> int {
+    w = body_world(id)
+    body = get_body_full_id(w, id)
+    count = 0
+    shape_id = body.head_shape_id
+    while shape_id != NULL_INDEX && count < capacity {
+        s = world_shape_at(w, shape_id)
+        shape_ids[count] = ShapeId { index1: shape_id + 1, world0: w.world_id, generation: s.generation }
+        count = count + 1
+        shape_id = s.next_shape_id
+    }
+    return count
+}
+
+// The bounds of every shape on the body.
+body_compute_aabb(id: BodyId) -> AABB {
+    w = body_world(id)
+    body = get_body_full_id(w, id)
+    if body.head_shape_id == NULL_INDEX {
+        p = get_body_sim(w, body).transform.p
+        return AABB { lower: p, upper: p }
+    }
+    s = world_shape_at(w, body.head_shape_id)
+    box = s.aabb
+    shape_id = s.next_shape_id
+    while shape_id != NULL_INDEX {
+        s = world_shape_at(w, shape_id)
+        box = AABB { lower: math.min_vec3(box.lower, s.aabb.lower), upper: math.max_vec3(box.upper, s.aabb.upper) }
+        shape_id = s.next_shape_id
+    }
+    return box
+}
+
+// --- validation ----------------------------------------------------------------------------------------------
+
+// Every live body's sim is where its indices say, with a state in the
+// awake set and none elsewhere, every set's sims point back at live
+// bodies, every island is consistent, and the shape lists close.
+validate_solver_sets(w: *World) -> bool {
+    body_count = 0
+    i = 0
+    while i < w.bodies.count {
+        body = body_at(w, i)
+        if body.set_index != NULL_INDEX {
+            body_count = body_count + 1
+            if body.id != i { return false }
+            set = solver_set_at(w, body.set_index)
+            if set.set_index != body.set_index { return false }
+            if body.local_index < 0 || body.local_index >= set.body_sims.count { return false }
+            if body_sim_at(set, body.local_index).body_id != i { return false }
+            if body.set_index == AWAKE_SET && set.body_states.count != set.body_sims.count { return false }
+            if body.set_index == DISABLED_SET && body.island_id != NULL_INDEX { return false }
+            if body.set_index >= AWAKE_SET && body.island_id == NULL_INDEX { return false }
+            if body.island_id != NULL_INDEX && validate_island(w, body.island_id) == false { return false }
+            // The shape list.
+            count = 0
+            shape_id = body.head_shape_id
+            prev = NULL_INDEX
+            while shape_id != NULL_INDEX {
+                s = world_shape_at(w, shape_id)
+                if s.id != shape_id || s.body_id != i || s.prev_shape_id != prev { return false }
+                if body.set_index != DISABLED_SET && s.proxy_key == NULL_INDEX { return false }
+                if body.set_index == DISABLED_SET && s.proxy_key != NULL_INDEX { return false }
+                count = count + 1
+                prev = shape_id
+                shape_id = s.next_shape_id
+            }
+            if count != body.shape_count { return false }
+        }
+        i = i + 1
+    }
+    if body_count != core.idpool_count(&w.body_id_pool) { return false }
+    sim_count = 0
+    i = 0
+    while i < w.solver_sets.count {
+        set = solver_set_at(w, i)
+        if set.set_index != NULL_INDEX {
+            if set.set_index != i { return false }
+            j = 0
+            while j < set.body_sims.count {
+                body = body_at(w, body_sim_at(set, j).body_id)
+                if body.set_index != i || body.local_index != j { return false }
+                j = j + 1
+            }
+            sim_count = sim_count + set.body_sims.count
+            if i >= FIRST_SLEEPING_SET && set.body_sims.count == 0 { return false }
+            if i == STATIC_SET && set.island_sims.count != 0 { return false }
+            if i == DISABLED_SET && set.island_sims.count != 0 { return false }
+        }
+        i = i + 1
+    }
+    if sim_count != body_count { return false }
+    return true
+}

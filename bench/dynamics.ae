@@ -1,0 +1,88 @@
+// The world's bookkeeping on the same scene as bench/dynamics_box3d.c:
+// ten rounds of a world with 5,000 dynamic bodies (a box hull and an
+// offset sphere each) and 500 static ones, the mass summed, every body's
+// transform set once, then the world destroyed. No step. Single thread,
+// wall time per phase, with the mass sum as the checksum.
+import std.string
+import std.os
+import aephysics.math
+import aephysics.core
+import aephysics.dynamic_tree
+import aephysics.hull
+import aephysics.distance
+import aephysics.manifold
+import aephysics.mesh
+import aephysics.height_field
+import aephysics.material
+import aephysics.sphere
+import aephysics.capsule
+import aephysics.compound
+import aephysics.shape
+import aephysics.broad_phase
+import aephysics.mesh_contact
+import aephysics.dynamics
+
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+
+clock() -> long { return os.now_monotonic_ns() }
+ms(ns: long) -> float { return (ns as float) / 1000000.0 }
+
+const ROUNDS = 10
+const DYNAMIC = 5000
+const STATIC = 500
+
+main() {
+    box = hull.make_box_hull(0.5, 0.5, 0.5)
+    ids_block = calloc(DYNAMIC + STATIC, sizeof(BodyId))
+    ids = ids_block as BodyId[]
+    create_ns = 0 as long
+    move_ns = 0 as long
+    destroy_ns = 0 as long
+    mass_sum = 0.0
+    round = 0
+    while round < ROUNDS {
+        t0 = clock()
+        world_def = dynamics.default_world_def()
+        world_id = dynamics.create_world(&world_def)
+        shape_def = dynamics.default_shape_def()
+        shape_def.density = 1.0
+        i = 0
+        while i < DYNAMIC {
+            body_def = dynamics.default_body_def()
+            body_def.kind = dynamics.BODY_DYNAMIC
+            body_def.position = math.vec3((2 * (i % 100)) as float, (2 + 2 * ((i / 100) % 50)) as float, (2 * (i / 5000)) as float)
+            ids[i] = dynamics.create_body(world_id, &body_def)
+            dynamics.create_hull_shape(ids[i], &shape_def, box)
+            dynamics.create_sphere_shape(ids[i], &shape_def, manifold.sphere(math.vec3(0.6, 0.0, 0.0), 0.25))
+            mass_sum = mass_sum + dynamics.body_get_mass(ids[i])
+            i = i + 1
+        }
+        i = 0
+        while i < STATIC {
+            body_def = dynamics.default_body_def()
+            body_def.position = math.vec3((2 * (i % 100)) as float, 0.0, (20 + 2 * (i / 100)) as float)
+            ids[DYNAMIC + i] = dynamics.create_body(world_id, &body_def)
+            dynamics.create_hull_shape(ids[DYNAMIC + i], &shape_def, box)
+            i = i + 1
+        }
+        t1 = clock()
+        i = 0
+        while i < DYNAMIC {
+            p = dynamics.body_get_position(ids[i])
+            p.y = p.y + 0.1
+            dynamics.body_set_transform(ids[i], p, dynamics.body_get_rotation(ids[i]))
+            i = i + 1
+        }
+        t2 = clock()
+        dynamics.destroy_world(world_id)
+        t3 = clock()
+        create_ns = create_ns + (t1 - t0)
+        move_ns = move_ns + (t2 - t1)
+        destroy_ns = destroy_ns + (t3 - t2)
+        round = round + 1
+    }
+    println("aephysics dynamics: ${ROUNDS} rounds: create ${DYNAMIC + STATIC} bodies and ${2 * DYNAMIC + STATIC} shapes ${ms(create_ns)} ms, move ${DYNAMIC} bodies ${ms(move_ns)} ms, destroy ${ms(destroy_ns)} ms (mass sum ${mass_sum})")
+    free(ids_block)
+    hull.destroy_hull(box)
+}

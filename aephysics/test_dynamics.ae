@@ -1,0 +1,578 @@
+// aephysics.dynamics against the step-free parts of the reference's
+// (Box3D's) test_body.c and test_world.c: the mass of one far sphere and
+// of eight on a far cube's corners (Steiner's shift against a clean
+// oracle), the deferred mass and the extents it computes, the mass data
+// set by hand (round trip, the world inertia under a rotation, fixed
+// rotation, zero mass, the velocity re-referenced to the new centre),
+// the extents of kinematic and dynamic bodies; a world's validity, the
+// bodies created and destroyed, the ids caught by their generations,
+// worlds recycled; and beyond it every set (static, disabled, awake and
+// asleep), the shapes' lists and proxies, the transforms and velocities,
+// destruction in every order with the solver sets validated throughout.
+
+import std.string
+import aephysics.math
+import aephysics.core
+import aephysics.dynamic_tree
+import aephysics.hull
+import aephysics.distance
+import aephysics.manifold
+import aephysics.mesh
+import aephysics.height_field
+import aephysics.material
+import aephysics.sphere
+import aephysics.capsule
+import aephysics.compound
+import aephysics.shape
+import aephysics.broad_phase
+import aephysics.mesh_contact
+import aephysics.dynamics
+
+extern calloc(count: int, size: int) -> ptr
+extern exit(code: int)
+extern free(p: ptr)
+
+var failures = 0
+var checks = 0
+
+ensure(name: string, ok: bool) {
+    checks = checks + 1
+    if !ok {
+        println("dynamics: FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+small(name: string, value: float, tolerance: float) {
+    ensure("${name} (${value})", math.abs_float(value) < tolerance)
+}
+
+new_world() -> WorldId {
+    def = dynamics.default_world_def()
+    return dynamics.create_world(&def)
+}
+
+dynamic_body_def() -> BodyDef {
+    def = dynamics.default_body_def()
+    def.kind = dynamics.BODY_DYNAMIC
+    return def
+}
+
+valid(world_id: WorldId) -> bool { return dynamics.validate_solver_sets(dynamics.get_world(world_id.index1 - 1)) }
+
+// The mass data of a body of spheres, as the reference's SphereBodyMass.
+sphere_body_mass(centers: Vec3[], count: int, radius: float, density: float) -> MassData {
+    world_id = new_world()
+    bdef = dynamic_body_def()
+    body_id = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    sdef.density = density
+    i = 0
+    while i < count {
+        dynamics.create_sphere_shape(body_id, &sdef, manifold.sphere(centers[i], radius))
+        i = i + 1
+    }
+    dynamics.body_apply_mass_from_shapes(body_id)
+    md = dynamics.body_get_mass_data(body_id)
+    ensure("sphere body world valid", valid(world_id))
+    dynamics.destroy_world(world_id)
+    return md
+}
+
+test_mass() {
+    // One sphere far from the origin: the centre lands on it, the inertia is the bare central one.
+    centers_block = calloc(8, sizeof(Vec3))
+    centers = centers_block as Vec3[]
+    centers[0] = math.vec3(100.0, 0.0 - 50.0, 75.0)
+    md = sphere_body_mass(centers, 1, 0.5, 1.0)
+    mass = (4.0 / 3.0) * math.PI * 0.125
+    central = 0.4 * mass * 0.25
+    small("far sphere mass", md.mass - mass, 0.0001)
+    small("far sphere centre x", md.center.x - 100.0, 0.001)
+    small("far sphere centre y", md.center.y + 50.0, 0.001)
+    small("far sphere centre z", md.center.z - 75.0, 0.001)
+    small("far sphere inertia xx", md.inertia.cx.x - central, 0.001)
+    small("far sphere inertia yy", md.inertia.cy.y - central, 0.001)
+    small("far sphere inertia zz", md.inertia.cz.z - central, 0.001)
+    small("far sphere inertia yx", md.inertia.cy.x, 0.001)
+    small("far sphere inertia zx", md.inertia.cz.x, 0.001)
+    small("far sphere inertia zy", md.inertia.cz.y, 0.001)
+
+    // Eight spheres on a far cube's corners: the centre at the cube's, the tensor diagonal.
+    k = 0
+    sx = 0 - 1
+    while sx <= 1 {
+        sy = 0 - 1
+        while sy <= 1 {
+            sz = 0 - 1
+            while sz <= 1 {
+                centers[k] = math.vec3(100.0 + (sx as float), 100.0 + (sy as float), 100.0 + (sz as float))
+                k = k + 1
+                sz = sz + 2
+            }
+            sy = sy + 2
+        }
+        sx = sx + 2
+    }
+    md = sphere_body_mass(centers, 8, 0.5, 1.0)
+    diag = 8.0 * 0.4 * mass * 0.25 + 16.0 * mass
+    small("cube mass", md.mass - 8.0 * mass, 0.001)
+    small("cube centre x", md.center.x - 100.0, 0.01)
+    small("cube centre y", md.center.y - 100.0, 0.01)
+    small("cube centre z", md.center.z - 100.0, 0.01)
+    small("cube inertia xx", md.inertia.cx.x - diag, 0.01)
+    small("cube inertia yy", md.inertia.cy.y - diag, 0.01)
+    small("cube inertia zz", md.inertia.cz.z - diag, 0.01)
+    small("cube inertia yx", md.inertia.cy.x, 0.01)
+    small("cube inertia zx", md.inertia.cz.x, 0.01)
+    small("cube inertia zy", md.inertia.cz.y, 0.01)
+    free(centers_block)
+
+    // A deferred mass leaves the body dirty and its extents untouched;
+    // applying the mass, or setting it, computes the extents and clears the flag.
+    world_id = new_world()
+    w = dynamics.get_world(world_id.index1 - 1)
+    bdef = dynamic_body_def()
+    sdef = dynamics.default_shape_def()
+    sdef.density = 1.0
+    sdef.update_body_mass = false
+    s = manifold.sphere(math.vec3_zero(), 0.5)
+    apply_id = dynamics.create_body(world_id, &bdef)
+    dynamics.create_sphere_shape(apply_id, &sdef, s)
+    apply_body = dynamics.get_body_full_id(w, apply_id)
+    apply_sim = dynamics.get_body_sim(w, apply_body)
+    ensure("deferred: dirty", (apply_body.flags & dynamics.DIRTY_MASS) != 0)
+    ensure("deferred: no extent", apply_sim.min_extent == math.HUGE)
+    dynamics.body_apply_mass_from_shapes(apply_id)
+    ensure("applied: clean", (apply_body.flags & dynamics.DIRTY_MASS) == 0)
+    ensure("applied: extent", apply_sim.min_extent < math.HUGE)
+    mass_id = dynamics.create_body(world_id, &bdef)
+    dynamics.create_sphere_shape(mass_id, &sdef, s)
+    mass_body = dynamics.get_body_full_id(w, mass_id)
+    mass_sim = dynamics.get_body_sim(w, mass_body)
+    ensure("deferred again: dirty", (mass_body.flags & dynamics.DIRTY_MASS) != 0)
+    dynamics.body_set_mass_data(mass_id, MassData { mass: 2.0, center: math.vec3_zero(), inertia: math.make_diagonal_matrix(0.2, 0.2, 0.2) })
+    ensure("set: clean", (mass_body.flags & dynamics.DIRTY_MASS) == 0)
+    ensure("set: extent", mass_sim.min_extent < math.HUGE)
+    ensure("deferred world valid", valid(world_id))
+    dynamics.destroy_world(world_id)
+}
+
+test_set_mass_data() {
+    diag = math.make_diagonal_matrix(2.0, 4.0, 8.0)
+    // The round trip through the getters.
+    world_id = new_world()
+    bdef = dynamic_body_def()
+    bdef.position = math.vec3(5.0, 0.0 - 3.0, 2.0)
+    body_id = dynamics.create_body(world_id, &bdef)
+    center = math.vec3(0.1, 0.2, 0.3)
+    dynamics.body_set_mass_data(body_id, MassData { mass: 3.0, center: center, inertia: diag })
+    small("mass", dynamics.body_get_mass(body_id) - 3.0, 0.000001)
+    small("inverse mass", dynamics.body_get_inverse_mass(body_id) - 1.0 / 3.0, 0.000001)
+    md = dynamics.body_get_mass_data(body_id)
+    small("mass data mass", md.mass - 3.0, 0.000001)
+    small("mass data centre", math.distance(md.center, center), 0.000001)
+    small("mass data inertia", md.inertia.cx.x - 2.0 + md.inertia.cy.y - 4.0 + md.inertia.cz.z - 8.0, 0.000001)
+    small("local centre", math.distance(dynamics.body_get_local_center(body_id), center), 0.000001)
+    li = dynamics.body_get_local_rotational_inertia(body_id)
+    small("local inertia", li.cx.x - 2.0 + li.cy.y - 4.0 + li.cz.z - 8.0, 0.000001)
+    inv = dynamics.body_get_world_inverse_rotational_inertia(body_id)
+    small("world inverse xx", inv.cx.x - 0.5, 0.00001)
+    small("world inverse yy", inv.cy.y - 0.25, 0.00001)
+    small("world inverse zz", inv.cz.z - 0.125, 0.00001)
+    small("world inverse off diagonal", math.abs_float(inv.cy.x) + math.abs_float(inv.cz.x) + math.abs_float(inv.cx.y) + math.abs_float(inv.cz.y) + math.abs_float(inv.cx.z) + math.abs_float(inv.cy.z), 0.00001)
+    wc = dynamics.body_get_world_center(body_id)
+    small("world centre", math.distance(wc, math.vec3(5.1, 0.0 - 2.8, 2.3)), 0.00001)
+    dynamics.destroy_world(world_id)
+
+    // A quarter turn about z swaps the x and y moments in the world inverse.
+    world_id = new_world()
+    bdef = dynamic_body_def()
+    bdef.rotation = math.make_quat_from_axis_angle(math.vec3_axis_z(), 0.5 * math.PI)
+    body_id = dynamics.create_body(world_id, &bdef)
+    dynamics.body_set_mass_data(body_id, MassData { mass: 1.0, center: math.vec3_zero(), inertia: diag })
+    li = dynamics.body_get_local_rotational_inertia(body_id)
+    small("rotated local inertia", li.cx.x - 2.0 + li.cy.y - 4.0 + li.cz.z - 8.0, 0.000001)
+    inv = dynamics.body_get_world_inverse_rotational_inertia(body_id)
+    small("rotated world inverse xx", inv.cx.x - 0.25, 0.0001)
+    small("rotated world inverse yy", inv.cy.y - 0.5, 0.0001)
+    small("rotated world inverse zz", inv.cz.z - 0.125, 0.0001)
+    small("rotated world inverse off diagonal", math.abs_float(inv.cy.x) + math.abs_float(inv.cz.x) + math.abs_float(inv.cx.y) + math.abs_float(inv.cz.y) + math.abs_float(inv.cx.z) + math.abs_float(inv.cy.z), 0.0001)
+    dynamics.destroy_world(world_id)
+
+    // Fixed rotation keeps the mass and zeroes the inertia.
+    world_id = new_world()
+    bdef = dynamic_body_def()
+    bdef.motion_locks.angular_x = true
+    bdef.motion_locks.angular_y = true
+    bdef.motion_locks.angular_z = true
+    body_id = dynamics.create_body(world_id, &bdef)
+    dynamics.body_set_mass_data(body_id, MassData { mass: 5.0, center: math.vec3_zero(), inertia: diag })
+    small("fixed mass", dynamics.body_get_mass(body_id) - 5.0, 0.000001)
+    small("fixed inverse mass", dynamics.body_get_inverse_mass(body_id) - 0.2, 0.000001)
+    li = dynamics.body_get_local_rotational_inertia(body_id)
+    small("fixed local inertia", li.cx.x + li.cy.y + li.cz.z, 0.000001)
+    inv = dynamics.body_get_world_inverse_rotational_inertia(body_id)
+    small("fixed world inverse", inv.cx.x + inv.cy.y + inv.cz.z, 0.000001)
+    md = dynamics.body_get_mass_data(body_id)
+    small("fixed mass data inertia", md.inertia.cx.x + md.inertia.cy.y + md.inertia.cz.z, 0.000001)
+    dynamics.destroy_world(world_id)
+
+    // Zero mass: the inverses collapse to zero.
+    world_id = new_world()
+    bdef = dynamic_body_def()
+    body_id = dynamics.create_body(world_id, &bdef)
+    dynamics.body_set_mass_data(body_id, MassData { mass: 0.0, center: math.vec3_zero(), inertia: math.mat3_zero() })
+    small("zero inverse mass", dynamics.body_get_inverse_mass(body_id), 0.000001)
+    li = dynamics.body_get_local_rotational_inertia(body_id)
+    small("zero local inertia", li.cx.x + li.cy.y + li.cz.z, 0.000001)
+    inv = dynamics.body_get_world_inverse_rotational_inertia(body_id)
+    small("zero world inverse", inv.cx.x + inv.cy.y + inv.cz.z, 0.000001)
+    dynamics.destroy_world(world_id)
+
+    // A spinning body's velocity is re-referenced to the new centre: v += omega x (new - old).
+    world_id = new_world()
+    bdef = dynamic_body_def()
+    bdef.position = math.vec3(7.0, 1.0, 0.0 - 4.0)
+    body_id = dynamics.create_body(world_id, &bdef)
+    omega = math.vec3(1.0, 2.0, 4.0)
+    dynamics.body_set_linear_velocity(body_id, math.vec3(1.0, 0.0 - 2.0, 3.0))
+    dynamics.body_set_angular_velocity(body_id, omega)
+    dynamics.body_set_mass_data(body_id, MassData { mass: 3.0, center: math.vec3(0.5, 0.25, 0.125), inertia: diag })
+    v = dynamics.body_get_linear_velocity(body_id)
+    small("velocity x", v.x - (1.0 - 0.75), 0.000001)
+    small("velocity y", v.y - (0.0 - 2.0 + 1.875), 0.000001)
+    small("velocity z", v.z - (3.0 - 0.75), 0.000001)
+    wv = dynamics.body_get_angular_velocity(body_id)
+    small("angular velocity kept", math.distance(wv, omega), 0.000001)
+    dynamics.destroy_world(world_id)
+}
+
+test_extents() {
+    world_id = new_world()
+    sdef = dynamics.default_shape_def()
+    sdef.density = 1.0
+    // Kinematic bodies measure from the body origin.
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_KINEMATIC
+    capsule_id = dynamics.create_body(world_id, &bdef)
+    dynamics.create_capsule_shape(capsule_id, &sdef, manifold.capsule(math.vec3(0.0 - 2.0, 0.0, 0.0), math.vec3(0.0 - 1.0, 0.0, 0.0), 0.2))
+    e = dynamics.body_get_max_extent(capsule_id)
+    small("kinematic capsule max x", e.x - 2.2, 0.00001)
+    small("kinematic capsule max y", e.y - 0.2, 0.00001)
+    small("kinematic capsule max z", e.z - 0.2, 0.00001)
+    small("kinematic capsule min", dynamics.body_get_min_extent(capsule_id) - 0.2, 0.00001)
+    sphere_id = dynamics.create_body(world_id, &bdef)
+    dynamics.create_sphere_shape(sphere_id, &sdef, manifold.sphere(math.vec3(1.0, 2.0, 3.0), 0.5))
+    e = dynamics.body_get_max_extent(sphere_id)
+    small("kinematic sphere max x", e.x - 1.5, 0.00001)
+    small("kinematic sphere max y", e.y - 2.5, 0.00001)
+    small("kinematic sphere max z", e.z - 3.5, 0.00001)
+    small("kinematic sphere min", dynamics.body_get_min_extent(sphere_id) - 0.5, 0.00001)
+    ensure("kinematic bodies have no mass", dynamics.body_get_mass(sphere_id) == 0.0)
+    // Dynamic bodies measure from the centre of mass: a light sphere hung
+    // off a cube pulls the centre toward it.
+    bdef.kind = dynamics.BODY_DYNAMIC
+    cube_id = dynamics.create_body(world_id, &bdef)
+    cube = hull.make_box_hull(0.5, 0.5, 0.5)
+    dynamics.create_hull_shape(cube_id, &sdef, cube)
+    dynamics.create_sphere_shape(cube_id, &sdef, manifold.sphere(math.vec3(1.0, 0.0, 0.0), 0.2))
+    lc = dynamics.body_get_local_center(cube_id)
+    ensure("centre pulled toward the sphere", lc.x > 0.0 && lc.x < 0.5)
+    e = dynamics.body_get_max_extent(cube_id)
+    small("cube max x", e.x - (1.2 - lc.x), 0.00001)
+    small("cube max y", e.y - 0.5, 0.00001)
+    small("cube max z", e.z - 0.5, 0.00001)
+    small("cube min", dynamics.body_get_min_extent(cube_id) - 0.2, 0.00001)
+    oe = dynamics.body_get_max_extent_origin(cube_id)
+    small("cube origin extent x", oe.x - 1.2, 0.00001)
+    small("cube origin extent y", oe.y - 0.5, 0.00001)
+    small("cube origin extent z", oe.z - 0.5, 0.00001)
+    // A mesh has no mass: the sphere alone places the centre at x = 1, the mesh's far edge four out.
+    vertices_block = calloc(6, sizeof(Vec3))
+    vertices = vertices_block as Vec3[]
+    vertices[0] = math.vec3(0.0 - 3.0, 0.0, 0.0 - 1.0)
+    vertices[1] = math.vec3(0.0 - 2.0, 0.0, 1.0)
+    vertices[2] = math.vec3(0.0 - 1.0, 0.0, 0.0 - 1.0)
+    vertices[3] = math.vec3(1.0, 0.0, 0.0 - 1.0)
+    vertices[4] = math.vec3(2.0, 0.0, 1.0)
+    vertices[5] = math.vec3(3.0, 0.0, 0.0 - 1.0)
+    indices_block = calloc(6, 4)
+    indices = indices_block as int[]
+    i = 0
+    while i < 6 {
+        indices[i] = i
+        i = i + 1
+    }
+    mdef = mesh.mesh_def()
+    mdef.vertices = vertices_block
+    mdef.indices = indices_block
+    mdef.vertex_count = 6
+    mdef.triangle_count = 2
+    md = mesh.create_mesh(&mdef, null, 0)
+    mesh_id = dynamics.create_body(world_id, &bdef)
+    dynamics.create_sphere_shape(mesh_id, &sdef, manifold.sphere(math.vec3(1.0, 0.0, 0.0), 0.2))
+    dynamics.create_mesh_shape(mesh_id, &sdef, md, math.vec3_one())
+    lc = dynamics.body_get_local_center(mesh_id)
+    small("mesh body centre", lc.x - 1.0, 0.00001)
+    e = dynamics.body_get_max_extent(mesh_id)
+    small("mesh body max x", e.x - 4.0, 0.0001)
+    small("mesh body max y", e.y - 0.2, 0.0001)
+    small("mesh body max z", e.z - 1.0, 0.0001)
+    small("mesh body min", dynamics.body_get_min_extent(mesh_id) - 0.2, 0.00001)
+    ensure("extents world valid", valid(world_id))
+    dynamics.destroy_world(world_id)
+    mesh.destroy_mesh(md)
+    free(indices_block)
+    free(vertices_block)
+    hull.destroy_hull(cube)
+}
+
+test_worlds_and_ids() {
+    // A world is valid until destroyed, and its ids die with it.
+    world_id = new_world()
+    ensure("world valid", dynamics.world_is_valid(world_id))
+    bdef = dynamics.default_body_def()
+    body1 = dynamics.create_body(world_id, &bdef)
+    ensure("body 1 valid", dynamics.body_is_valid(body1))
+    body2 = dynamics.create_body(world_id, &bdef)
+    ensure("body 2 valid", dynamics.body_is_valid(body2))
+    dynamics.destroy_body(body1)
+    ensure("body 1 destroyed", dynamics.body_is_valid(body1) == false)
+    ensure("body 2 still valid", dynamics.body_is_valid(body2))
+    // A new body takes the freed slot with a new generation: the old id stays dead.
+    body3 = dynamics.create_body(world_id, &bdef)
+    ensure("slot recycled", body3.index1 == body1.index1 && body3.generation != body1.generation)
+    ensure("old id dead", dynamics.body_is_valid(body1) == false && dynamics.body_is_valid(body3))
+    dynamics.destroy_body(body2)
+    ensure("body 2 destroyed", dynamics.body_is_valid(body2) == false)
+    dynamics.destroy_world(world_id)
+    ensure("world destroyed", dynamics.world_is_valid(world_id) == false)
+    ensure("ids die with the world", dynamics.body_is_valid(body2) == false && dynamics.body_is_valid(body3) == false)
+    // A null id is never valid.
+    ensure("null body id", dynamics.body_is_valid(dynamics.null_body_id()) == false)
+    ensure("null shape id", dynamics.shape_is_valid(dynamics.null_shape_id()) == false)
+
+    // Worlds recycled: half the slots, a hundred times, each with a body.
+    ids_block = calloc(64, sizeof(WorldId))
+    ids = ids_block as WorldId[]
+    round = 0
+    ok = true
+    while round < 100 {
+        j = 0
+        while j < 64 {
+            ids[j] = new_world()
+            if dynamics.world_is_valid(ids[j]) == false { ok = false }
+            dynamics.create_body(ids[j], &bdef)
+            j = j + 1
+        }
+        j = 63
+        while j >= 0 {
+            dynamics.destroy_world(ids[j])
+            if dynamics.world_is_valid(ids[j]) { ok = false }
+            j = j - 1
+        }
+        round = round + 1
+    }
+    ensure("worlds recycled", ok)
+    free(ids_block)
+    // A world's slot reused: the old world id is dead.
+    a = new_world()
+    dynamics.destroy_world(a)
+    b = new_world()
+    ensure("world slot reused with a new generation", b.index1 == a.index1 && b.generation != a.generation && dynamics.world_is_valid(a) == false)
+    dynamics.destroy_world(b)
+}
+
+test_sets_and_shapes() {
+    world_id = new_world()
+    w = dynamics.get_world(world_id.index1 - 1)
+    cube = hull.make_box_hull(0.5, 0.5, 0.5)
+    sdef = dynamics.default_shape_def()
+    // A static, a kinematic, an awake dynamic, a sleeping dynamic and a disabled body.
+    bdef = dynamics.default_body_def()
+    static_id = dynamics.create_body(world_id, &bdef)
+    bdef.kind = dynamics.BODY_KINEMATIC
+    kinematic_id = dynamics.create_body(world_id, &bdef)
+    bdef.kind = dynamics.BODY_DYNAMIC
+    awake_id = dynamics.create_body(world_id, &bdef)
+    bdef.is_awake = false
+    asleep_id = dynamics.create_body(world_id, &bdef)
+    bdef.is_awake = true
+    bdef.is_enabled = false
+    disabled_id = dynamics.create_body(world_id, &bdef)
+    ensure("five bodies", dynamics.world_body_count(w) == 5)
+    ensure("static set", dynamics.get_body_full_id(w, static_id).set_index == dynamics.STATIC_SET)
+    ensure("kinematic awake", dynamics.get_body_full_id(w, kinematic_id).set_index == dynamics.AWAKE_SET)
+    ensure("dynamic awake", dynamics.body_is_awake(awake_id))
+    ensure("asleep in its own set", dynamics.get_body_full_id(w, asleep_id).set_index >= dynamics.FIRST_SLEEPING_SET && dynamics.body_is_awake(asleep_id) == false)
+    ensure("disabled set", dynamics.get_body_full_id(w, disabled_id).set_index == dynamics.DISABLED_SET && dynamics.body_is_enabled(disabled_id) == false)
+    ensure("awake count", dynamics.world_awake_body_count(w) == 2)
+    ensure("three islands", dynamics.world_island_count(w) == 3)
+    ensure("four sets", dynamics.world_solver_set_count(w) == 4)
+    ensure("sets valid", valid(world_id))
+    // A static body has no state; an awake one does.
+    ensure("static has no state", dynamics.get_body_state(w, dynamics.get_body_full_id(w, static_id)) == null)
+    ensure("awake has a state", dynamics.get_body_state(w, dynamics.get_body_full_id(w, awake_id)) != null)
+    // Shapes on each: the disabled body's get no proxy, the others do, in the tree of their type.
+    dynamics.create_hull_shape(static_id, &sdef, cube)
+    dynamics.create_hull_shape(kinematic_id, &sdef, cube)
+    dynamics.create_hull_shape(awake_id, &sdef, cube)
+    s2 = dynamics.create_sphere_shape(awake_id, &sdef, manifold.sphere(math.vec3(1.0, 0.0, 0.0), 0.25))
+    dynamics.create_hull_shape(asleep_id, &sdef, cube)
+    disabled_shape = dynamics.create_hull_shape(disabled_id, &sdef, cube)
+    ensure("six shapes", dynamics.world_shape_count(w) == 6)
+    ensure("shapes valid", dynamics.shape_is_valid(s2) && dynamics.shape_is_valid(disabled_shape))
+    ensure("shape's body", dynamics.shape_get_body(s2).index1 == awake_id.index1)
+    ensure("two shapes on the awake body", dynamics.body_get_shape_count(awake_id) == 2)
+    ensure("disabled shape has no proxy", dynamics.get_shape_full_id(w, disabled_shape).proxy_key == dynamics.NULL_INDEX)
+    static_shape = dynamics.get_shape(w, dynamics.get_body_full_id(w, static_id).head_shape_id)
+    ensure("static shape in the static tree", broad_phase.proxy_type(static_shape.proxy_key) == broad_phase.BODY_STATIC)
+    awake_shape = dynamics.get_shape_full_id(w, s2)
+    ensure("dynamic shape in the dynamic tree", broad_phase.proxy_type(awake_shape.proxy_key) == broad_phase.BODY_DYNAMIC)
+    ensure("dynamic tree holds three", dynamic_tree.tree_get_proxy_count(broad_phase.broad_phase_tree(&w.broad_phase, broad_phase.BODY_DYNAMIC)) == 3)
+    ensure("kinematic tree holds one", dynamic_tree.tree_get_proxy_count(broad_phase.broad_phase_tree(&w.broad_phase, broad_phase.BODY_KINEMATIC)) == 1)
+    // The awake body's mass came from both shapes (water density by default).
+    small("awake body mass", dynamics.body_get_mass(awake_id) - 1000.0 * (1.0 + (4.0 / 3.0) * math.PI * 0.015625), 0.001)
+    ensure("shape bounds hold the sphere", dynamics.shape_get_aabb(s2).upper.x > 1.24 && dynamics.shape_get_aabb(s2).lower.x < 0.76)
+    box = dynamics.body_compute_aabb(awake_id)
+    ensure("body bounds hold both", box.lower.x < 0.0 - 0.49 && box.upper.x > 1.24)
+    ids_block = calloc(4, sizeof(ShapeId))
+    ids = ids_block as ShapeId[]
+    ensure("body shape ids", dynamics.body_get_shapes(awake_id, ids, 4) == 2 && dynamics.shape_is_valid(ids[0]) && dynamics.shape_is_valid(ids[1]))
+    free(ids_block)
+    ensure("sets valid with shapes", valid(world_id))
+    // A transform set by hand moves the shapes' bounds and proxies.
+    dynamics.body_set_transform(awake_id, math.vec3(10.0, 0.0, 0.0), math.quat_identity())
+    ensure("moved bounds", dynamics.shape_get_aabb(s2).lower.x > 10.7)
+    small("moved centre", dynamics.body_get_world_center(awake_id).x - 10.0 - dynamics.body_get_local_center(awake_id).x, 0.00001)
+    // Velocities: a static body takes none; a sleeping body wakes when given one.
+    dynamics.body_set_linear_velocity(static_id, math.vec3(1.0, 0.0, 0.0))
+    ensure("static keeps no velocity", math.length(dynamics.body_get_linear_velocity(static_id)) == 0.0)
+    dynamics.body_set_linear_velocity(asleep_id, math.vec3(1.0, 0.0, 0.0))
+    ensure("velocity wakes", dynamics.body_is_awake(asleep_id) && dynamics.body_get_linear_velocity(asleep_id).x == 1.0)
+    ensure("woken set gone", dynamics.world_solver_set_count(w) == 3 && dynamics.world_awake_body_count(w) == 3)
+    ensure("sets valid after waking", valid(world_id))
+    // Locks: a locked axis takes no angular velocity.
+    dynamics.body_set_motion_locks(awake_id, MotionLocks { linear_x: false, linear_y: false, linear_z: false, angular_x: true, angular_y: false, angular_z: false })
+    dynamics.body_set_angular_velocity(awake_id, math.vec3(1.0, 2.0, 3.0))
+    wv = dynamics.body_get_angular_velocity(awake_id)
+    ensure("locked axis stays still", wv.x == 0.0 && wv.y == 2.0 && wv.z == 3.0)
+    ensure("locks read back", dynamics.body_get_motion_locks(awake_id).angular_x && dynamics.body_get_motion_locks(awake_id).angular_y == false)
+    // The point velocities.
+    dynamics.body_set_linear_velocity(awake_id, math.vec3(1.0, 0.0, 0.0))
+    dynamics.body_set_angular_velocity(awake_id, math.vec3(0.0, 0.0, 1.0))
+    pv = dynamics.body_get_world_point_velocity(awake_id, math.add(dynamics.body_get_world_center(awake_id), math.vec3(1.0, 0.0, 0.0)))
+    small("point velocity x", pv.x - 1.0, 0.00001)
+    small("point velocity y", pv.y - 1.0, 0.00001)
+    // Damping, gravity scale, user data, sleep.
+    dynamics.body_set_linear_damping(awake_id, 0.3)
+    dynamics.body_set_angular_damping(awake_id, 0.4)
+    dynamics.body_set_gravity_scale(awake_id, 0.5)
+    ensure("damping and gravity scale", dynamics.body_get_linear_damping(awake_id) == 0.3 && dynamics.body_get_angular_damping(awake_id) == 0.4 && dynamics.body_get_gravity_scale(awake_id) == 0.5)
+    dynamics.body_enable_sleep(awake_id, false)
+    ensure("sleep disabled", dynamics.body_is_sleep_enabled(awake_id) == false)
+    dynamics.body_set_sleep_threshold(awake_id, 0.1)
+    ensure("sleep threshold", dynamics.body_get_sleep_threshold(awake_id) == 0.1)
+    // Shape properties.
+    dynamics.shape_set_density(s2, 2.0, true)
+    ensure("density set", dynamics.shape_get_density(s2) == 2.0)
+    m = material.default_surface_material()
+    m.friction = 0.3
+    dynamics.shape_set_surface_material(s2, m)
+    ensure("material set", dynamics.shape_get_surface_material(s2).friction == 0.3)
+    ensure("shape type", dynamics.shape_get_type(s2) == shape.SHAPE_SPHERE)
+    // Destroying a shape updates the mass and the list; destroying the last leaves none.
+    dynamics.destroy_shape(s2, true)
+    ensure("shape destroyed", dynamics.shape_is_valid(s2) == false && dynamics.body_get_shape_count(awake_id) == 1)
+    small("mass without the sphere", dynamics.body_get_mass(awake_id) - 1000.0, 0.001)
+    ensure("sets valid after a shape's destruction", valid(world_id))
+    // Bodies destroyed in a scrambled order, the sets valid each time.
+    dynamics.destroy_body(kinematic_id)
+    ensure("valid after the kinematic", valid(world_id))
+    dynamics.destroy_body(disabled_id)
+    ensure("valid after the disabled", valid(world_id))
+    dynamics.destroy_body(awake_id)
+    ensure("valid after the awake", valid(world_id))
+    ensure("proxies gone with the bodies", dynamic_tree.tree_get_proxy_count(broad_phase.broad_phase_tree(&w.broad_phase, broad_phase.BODY_DYNAMIC)) == 1)
+    dynamics.destroy_body(static_id)
+    dynamics.destroy_body(asleep_id)
+    ensure("no bodies, no islands", dynamics.world_body_count(w) == 0 && dynamics.world_island_count(w) == 0 && dynamics.world_shape_count(w) == 0)
+    ensure("valid when empty", valid(world_id))
+    dynamics.destroy_world(world_id)
+    hull.destroy_hull(cube)
+
+    // Ten bodies created then destroyed, as the reference's DestroyAllBodiesWorld (without its steps).
+    world_id = new_world()
+    w = dynamics.get_world(world_id.index1 - 1)
+    cube = hull.make_box_hull(0.5, 0.5, 0.5)
+    bodies_block = calloc(10, sizeof(BodyId))
+    bodies = bodies_block as BodyId[]
+    bdef = dynamic_body_def()
+    i = 0
+    while i < 10 {
+        bodies[i] = dynamics.create_body(world_id, &bdef)
+        dynamics.create_hull_shape(bodies[i], &sdef, cube)
+        i = i + 1
+    }
+    ensure("ten bodies", dynamics.world_body_count(w) == 10 && valid(world_id))
+    i = 9
+    while i >= 0 {
+        dynamics.destroy_body(bodies[i])
+        i = i - 1
+    }
+    ensure("all destroyed", dynamics.world_body_count(w) == 0 && valid(world_id))
+    free(bodies_block)
+    dynamics.destroy_world(world_id)
+    hull.destroy_hull(cube)
+
+    // Static-only kinds on a dynamic body are refused; a compound on a static body is taken.
+    world_id = new_world()
+    w = dynamics.get_world(world_id.index1 - 1)
+    bdef = dynamic_body_def()
+    dyn_id = dynamics.create_body(world_id, &bdef)
+    field = height_field.create_grid(4, 4, math.vec3_one(), false)
+    ensure("height field refused on a dynamic body", dynamics.create_height_field_shape(dyn_id, &sdef, field).index1 == 0)
+    bdef = dynamics.default_body_def()
+    ground_id = dynamics.create_body(world_id, &bdef)
+    hf_shape = dynamics.create_height_field_shape(ground_id, &sdef, field)
+    ensure("height field on a static body", dynamics.shape_is_valid(hf_shape))
+    mat = material.default_surface_material()
+    spheres_block = calloc(2, sizeof(CompoundSphereDef))
+    spheres = spheres_block as CompoundSphereDef[]
+    spheres[0] = compound.compound_sphere_def(manifold.sphere(math.vec3_zero(), 0.5), mat)
+    mat.friction = 0.2
+    spheres[1] = compound.compound_sphere_def(manifold.sphere(math.vec3(3.0, 0.0, 0.0), 0.5), mat)
+    cdef = compound.compound_def()
+    cdef.spheres = spheres_block
+    cdef.sphere_count = 2
+    c = compound.create_compound(&cdef)
+    c_shape = dynamics.create_compound_shape(ground_id, &sdef, c)
+    ensure("compound on a static body", dynamics.shape_is_valid(c_shape) && w.compound_shape_count == 1)
+    ensure("compound materials copied", dynamics.shape_get_material_count(c_shape) == 2)
+    ensure("compound gets no forced pairs", dynamics.get_shape_full_id(w, c_shape).proxy_key != dynamics.NULL_INDEX)
+    ensure("mixed world valid", valid(world_id))
+    dynamics.destroy_world(world_id)
+    compound.destroy_compound(c)
+    free(spheres_block)
+    height_field.destroy_height_field(field)
+}
+
+main() {
+    before = core.alloc_count()
+    test_mass()
+    test_set_mass_data()
+    test_extents()
+    test_worlds_and_ids()
+    test_sets_and_shapes()
+    // The scratch stays allocated: the worlds' block, the masses, and the mesh's three.
+    ensure("every other counted allocation was freed (${core.alloc_count() - before})", core.alloc_count() == before + 5)
+
+    println("dynamics: ${checks} checks")
+    if failures == 0 {
+        println("dynamics: all checks passed")
+    } else {
+        println("dynamics: ${failures} failure(s)")
+        exit(1)
+    }
+}

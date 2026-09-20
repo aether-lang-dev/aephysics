@@ -374,3 +374,24 @@ threshold is cos 5 degrees); the far clip points of a hull face are
 kept as speculative ones, as the reference keeps them. The test checks
 the seams (a sphere on an interior edge or vertex gives one point), the
 cache's persistence and the cull.
+
+## dynamics (bookkeeping)
+
+`bench/dynamics.ae` and `bench/dynamics_box3d.c`: ten rounds of a world
+with 5,000 dynamic bodies (a box hull and an offset sphere each, the
+mass computed from both) and 500 static ones, the mass summed, every
+dynamic body's transform set once (its shapes' bounds and proxies
+updated), then the world destroyed. No step.
+
+| phase, 10 rounds | aephysics | Box3D |
+|---|---|---|
+| 5,500 bodies and 10,500 shapes created | **113 ms** | 122 |
+| 5,000 transforms set | **38** | 55 |
+| the world destroyed | 5.0 | **5.1** |
+
+The same mass sum (53,272.5). Creation is 0.93x: the reference's hull
+database hashes every hull shape's bytes and refcounts them, which this
+layer does not do (a hull shape keeps the pointer it was given). The
+transforms are 0.7x: the reference's b3Body_SetTransform also invalidates
+the body's contacts and validates, which arrive with the contact layer;
+the comparison will be redone then.
