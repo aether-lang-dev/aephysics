@@ -246,12 +246,35 @@ started until its tests pass.
      it before the bodies move, springs, motors at their speed and
      bounded by their force, the forces and torques from the impulses,
      the warm start).
-   - `aephysics.solver`: solver.c's stages (the Soft Step: integrate
-     velocities, warm start, solve, integrate positions, relax,
-     restitution, store impulses, per graph colour), continuous
-     collision, the sleep decision, the enlarged bounds and the broad
-     phase update. Single-threaded first; the stage/block structure kept
-     so the parallel layer only adds workers.
+   - `aephysics.solver` (done, PR #21): solver.c on one thread in the
+     reference's stage order (prepare joints and contacts; per sub-step
+     integrate velocities with the gyroscopic Newton step, warm start,
+     solve, integrate positions with the locks and speed caps, relax;
+     restitution; store), the overflow constraints first in every pass
+     and joints before contacts in a colour; finalize bodies (transforms
+     from the deltas, sleep velocities, move events, the transient flags,
+     fast bodies swept in solve_continuous with the time of impact
+     against the static tree -- bullets against all three, later -- the
+     bounds and proxies), the joint and hit events, the tree refits, the
+     sensors' hits, the island split the last step asked for and the
+     sleep decision. The shape module gained shape_time_of_impact (mesh,
+     height field and compound sweeps with the reference's early outs and
+     centroid-sphere fallback); dynamics the events, the per-step bit
+     sets, the pre-solve callback and the user material ids; math the
+     rotation integration and the modified cross; core stack_grow. 42
+     checks stepping by hand: free fall against the sub-stepped closed
+     form, a cube settling and sleeping with its contact, a push waking
+     it, a stack of three, a bounce with its hit event, a weld's joint
+     event and its force, a pendulum's length, a sphere at 200 m/s
+     stopped by a wall 0.2 thick (and tunnelling with continuous off),
+     a bullet stopping at a dynamic cube, a sensor swept through, and two
+     worlds of twenty cubes alike bit for bit after two seconds. Found on
+     the way: putting islands to sleep creates solver sets and can move
+     the sets' array, so the awake set is looked up again in that loop.
+     The bench pair against b3World_Step lands at 1.9-2.0x with the same
+     heights, awake and contact counts: the reference's convex contacts
+     go four wide in SIMD and it computes in floats; ours are scalar
+     doubles. The wide path is the next performance layer (issue #22).
    - `aephysics.physics_world`: the step (collide, solve, events), the
      world queries (overlap, casts, the mover's planes and time of
      impact through the broad phase), the events, the public setters.

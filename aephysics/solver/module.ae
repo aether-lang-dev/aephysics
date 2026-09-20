@@ -1,0 +1,711 @@
+// aephysics.solver -- the Soft Step: the constraints of the awake set
+// prepared, then for each sub-step the velocities integrated (gravity,
+// forces, damping, the gyroscopic torque by Newton's method), the joints
+// and contacts warm started and solved with bias colour by colour, the
+// positions integrated (motion locks, the speed caps), the constraints
+// relaxed without bias; then restitution, the impulses stored, the
+// bodies finalised (transforms from the deltas, sleep velocities, move
+// events, fast bodies swept against the world for the time of impact,
+// the shapes' bounds and the broad phase's proxies), the joint and hit
+// events, the trees refit, the bullets swept last, the sensors told of
+// the sweeps' hits, and the islands that nothing keeps awake put to
+// sleep.
+//
+// This is Box3D's solver.c (Erin Catto, MIT), the reference this
+// engine is measured against, on one thread: the reference cuts the
+// work into blocks that workers claim by atomics and synchronises the
+// stages by sync bits; here the stages run in the same order, colour
+// by colour, joints before contacts, the overflow constraints first in
+// every pass as the reference has them. Names are the reference's
+// without its prefix, in snake case: b3Solve is solve,
+// b3SolveContinuous is solve_continuous.
+import std.string
+import aephysics.math
+import aephysics.core
+import aephysics.dynamic_tree
+import aephysics.distance
+import aephysics.shape
+import aephysics.broad_phase
+import aephysics.dynamics
+import aephysics.contact_solver
+import aephysics.joint_solver
+
+exports (
+    solve, integrate_velocities, integrate_positions, finalize_bodies, solve_continuous,
+    MAX_ROTATION, GYROSCOPIC_ITERATIONS, RESTITUTION_ITERATIONS
+)
+
+const NULL_INDEX = 0 - 1
+const MAX_ROTATION = 0.78539816339744830962   // a quarter turn per step at most
+const GYROSCOPIC_ITERATIONS = 1
+const RESTITUTION_ITERATIONS = 1
+const MAX_CONTINUOUS_SENSOR_HITS = 8
+
+state_at(base: ptr, index: int) -> *BodyState { return (base + index * sizeof(BodyState)) as *BodyState }
+sim_at(base: ptr, index: int) -> *BodySim { return (base + index * sizeof(BodySim)) as *BodySim }
+
+// --- the body stages -------------------------------------------------------------------------------------------
+
+// The awake bodies' velocities over a sub-step: forces and gravity, the
+// damping as a Pade step, and the gyroscopic torque by one Newton step
+// in the body's frame (long thin bodies tumble right).
+integrate_velocities(ctx: *StepContext) {
+    w = ctx.world
+    awake = dynamics.get_solver_set(w, dynamics.AWAKE_SET)
+    gravity = w.gravity
+    h = ctx.h
+    i = 0
+    while i < awake.body_sims.count {
+        sim = sim_at(ctx.sims, i)
+        state = state_at(ctx.states, i)
+        v = state.linear_velocity
+        wv = state.angular_velocity
+        linear_damping = 1.0 / (1.0 + h * sim.linear_damping)
+        angular_damping = 1.0 / (1.0 + h * sim.angular_damping)
+        gravity_scale = 0.0
+        if sim.inv_mass > 0.0 { gravity_scale = sim.gravity_scale }
+        linear_delta = math.blend2(h * sim.inv_mass, sim.force, h * gravity_scale, gravity)
+        v = math.mul_add(linear_delta, linear_damping, v)
+        angular_delta = math.mul_sv(h, math.mul_mv(sim.inv_inertia_world, sim.torque))
+        wv = math.mul_add(angular_delta, angular_damping, wv)
+        // Gyroscopic: I (w2 - w1) + h w2 x (I w2) = 0, solved for w2 in the body's frame.
+        q = math.mul_quat(state.delta_rotation, sim.transform.q)
+        inertia = math.invert_matrix(sim.inv_inertia_local)
+        omega1 = math.inv_rotate_vector(q, wv)
+        omega2 = omega1
+        i00 = inertia.cx.x
+        i01 = inertia.cy.x
+        i02 = inertia.cz.x
+        i11 = inertia.cy.y
+        i12 = inertia.cz.y
+        i22 = inertia.cz.z
+        iteration = 0
+        while iteration < GYROSCOPIC_ITERATIONS {
+            w1 = omega2.x
+            w2 = omega2.y
+            w3 = omega2.z
+            iw1 = i00 * w1 + i01 * w2 + i02 * w3
+            iw2 = i01 * w1 + i11 * w2 + i12 * w3
+            iw3 = i02 * w1 + i12 * w2 + i22 * w3
+            dw = math.sub(omega2, omega1)
+            b = math.vec3(i00 * dw.x + i01 * dw.y + i02 * dw.z + h * (w2 * iw3 - w3 * iw2),
+                          i01 * dw.x + i11 * dw.y + i12 * dw.z + h * (w3 * iw1 - w1 * iw3),
+                          i02 * dw.x + i12 * dw.y + i22 * dw.z + h * (w1 * iw2 - w2 * iw1))
+            jac = Matrix3 { cx: math.vec3(i00 + h * (w2 * i02 - w3 * i01), i01 + h * (w3 * i00 - w1 * i02 - iw3), i02 + h * (w1 * i01 - w2 * i00 + iw2)),
+                            cy: math.vec3(i01 + h * (w2 * i12 - w3 * i11 + iw3), i11 + h * (w3 * i01 - w1 * i12), i12 + h * (w1 * i11 - w2 * i01 - iw1)),
+                            cz: math.vec3(i02 + h * (w2 * i22 - w3 * i12 - iw2), i12 + h * (w3 * i02 - w1 * i22 + iw1), i22 + h * (w1 * i12 - w2 * i02)) }
+            omega2 = math.sub(omega2, math.solve3(jac, b))
+            iteration = iteration + 1
+        }
+        wv = math.rotate_vector(q, omega2)
+        state.linear_velocity = v
+        state.angular_velocity = wv
+        i = i + 1
+    }
+}
+
+// The awake bodies' deltas over a sub-step, after the motion locks (a
+// last constraint) and the speed caps (a body may not cross more than a
+// quarter turn per step unless it asked for fast rotation).
+integrate_positions(ctx: *StepContext) {
+    w = ctx.world
+    awake = dynamics.get_solver_set(w, dynamics.AWAKE_SET)
+    h = ctx.h
+    max_linear_speed = ctx.max_linear_velocity
+    max_angular_speed = MAX_ROTATION * ctx.inv_dt
+    max_linear_squared = max_linear_speed * max_linear_speed
+    max_angular_squared = max_angular_speed * max_angular_speed
+    i = 0
+    while i < awake.body_states.count {
+        state = state_at(ctx.states, i)
+        v = state.linear_velocity
+        wv = state.angular_velocity
+        flags = state.flags
+        if (flags & dynamics.LOCK_LINEAR_X) != 0 { v.x = 0.0 }
+        if (flags & dynamics.LOCK_LINEAR_Y) != 0 { v.y = 0.0 }
+        if (flags & dynamics.LOCK_LINEAR_Z) != 0 { v.z = 0.0 }
+        if (flags & dynamics.LOCK_ANGULAR_X) != 0 { wv.x = 0.0 }
+        if (flags & dynamics.LOCK_ANGULAR_Y) != 0 { wv.y = 0.0 }
+        if (flags & dynamics.LOCK_ANGULAR_Z) != 0 { wv.z = 0.0 }
+        if math.dot(v, v) > max_linear_squared {
+            v = math.mul_sv(max_linear_speed / math.length(v), v)
+            state.flags = state.flags | dynamics.IS_SPEED_CAPPED
+        }
+        if math.dot(wv, wv) > max_angular_squared && (flags & dynamics.ALLOW_FAST_ROTATION) == 0 {
+            wv = math.mul_sv(max_angular_speed / math.length(wv), wv)
+            state.flags = state.flags | dynamics.IS_SPEED_CAPPED
+        }
+        state.linear_velocity = v
+        state.angular_velocity = wv
+        state.delta_position = math.mul_add(state.delta_position, h, v)
+        state.delta_rotation = math.integrate_rotation(state.delta_rotation, math.mul_sv(h, wv))
+        i = i + 1
+    }
+}
+
+// --- continuous collision ------------------------------------------------------------------------------------
+
+struct ContinuousContext {
+    w: *World
+    fast_sim: *BodySim
+    fast_shape: *WorldShape
+    sweep: Sweep
+    base: Vec3                     // the sweep is relative to it, for precision far from the origin
+    fraction: float
+    sensor_hits: ptr               // SensorHit[MAX_CONTINUOUS_SENSOR_HITS]
+    sensor_fractions: ptr          // float[MAX_CONTINUOUS_SENSOR_HITS]
+    sensor_count: int
+}
+
+var g_sensor_hits: ptr = null
+var g_sensor_fractions: ptr = null
+
+continuous_buffers_ready() {
+    if g_sensor_hits == null {
+        g_sensor_hits = core.alloc(MAX_CONTINUOUS_SENSOR_HITS * sizeof(SensorHit))
+        g_sensor_fractions = core.alloc(MAX_CONTINUOUS_SENSOR_HITS * 8)
+    }
+}
+
+// A proxy in the swept bounds of a fast shape: the time of impact
+// against it, unless the same body, a filtered pair, a bullet, or a
+// sensor that does not want events; a sensor hit is kept for the sensor
+// pass, a solid hit that comes sooner (and that the pre-solve callback
+// accepts) becomes the fraction.
+continuous_query_visitor(proxy_id: int, user_data: long, context: ptr) -> bool {
+    ctx = context as *ContinuousContext
+    shape_id = user_data as int
+    fast_shape = ctx.fast_shape
+    if shape_id == fast_shape.id { return true }
+    w = ctx.w
+    s = dynamics.world_shape_at(w, shape_id)
+    if s.body_id == fast_shape.body_id { return true }
+    is_sensor = s.sensor_index != NULL_INDEX
+    if is_sensor && ((s.flags & dynamics.SHAPE_ENABLE_SENSOR_EVENTS) == 0 || (fast_shape.flags & dynamics.SHAPE_ENABLE_SENSOR_EVENTS) == 0) { return true }
+    if shape.should_shapes_collide(fast_shape.filter, s.filter) == false { return true }
+    body = dynamics.body_at(w, s.body_id)
+    sim = dynamics.get_body_sim(w, body)
+    if (sim.flags & dynamics.IS_BULLET) != 0 { return true }
+    fast_body = dynamics.body_at(w, ctx.fast_sim.body_id)
+    if dynamics.should_bodies_collide(w, fast_body, body) == false { return true }
+    if w.has_custom_filter && ((s.flags & dynamics.SHAPE_ENABLE_CUSTOM_FILTERING) != 0 || (fast_shape.flags & dynamics.SHAPE_ENABLE_CUSTOM_FILTERING) != 0) {
+        filter = w.custom_filter
+        if filter(dynamics.make_shape_id(w, s), dynamics.make_shape_id(w, fast_shape), w.custom_filter_context) == false { return true }
+    }
+    sweep_a = dynamics.make_relative_sweep(sim, ctx.base)
+    output = shape.shape_time_of_impact(&s.geometry, &fast_shape.geometry, sweep_a, ctx.sweep, ctx.fraction, is_sensor)
+    if is_sensor {
+        if output.fraction <= ctx.fraction && ctx.sensor_count < MAX_CONTINUOUS_SENSOR_HITS {
+            hits = ctx.sensor_hits as SensorHit[]
+            fractions = ctx.sensor_fractions as float[]
+            hits[ctx.sensor_count] = SensorHit { sensor_id: s.id, visitor_id: fast_shape.id }
+            fractions[ctx.sensor_count] = output.fraction
+            ctx.sensor_count = ctx.sensor_count + 1
+        }
+    } else if 0.0 < output.fraction && output.fraction < ctx.fraction {
+        did_hit = true
+        if w.has_pre_solve && ((s.flags & dynamics.SHAPE_ENABLE_PRE_SOLVE_EVENTS) != 0 || (fast_shape.flags & dynamics.SHAPE_ENABLE_PRE_SOLVE_EVENTS) != 0) {
+            pre_solve = w.pre_solve
+            did_hit = pre_solve(dynamics.make_shape_id(w, s), dynamics.make_shape_id(w, fast_shape), math.add(ctx.base, output.point), output.normal, w.pre_solve_context)
+        }
+        if did_hit {
+            ctx.fast_sim.flags = ctx.fast_sim.flags | dynamics.HAD_TIME_OF_IMPACT
+            ctx.fraction = output.fraction
+        }
+    }
+    return true
+}
+
+// A shape's bounds after the sweep, and the fat bounds and proxy grown when they no longer hold it.
+grow_bounds(w: *World, s: *WorldShape, sim: *BodySim, is_bullet: bool) {
+    if math.aabb_contains(s.fat_aabb, s.aabb) { return }
+    margin = math.vec3(s.aabb_margin, s.aabb_margin, s.aabb_margin)
+    s.fat_aabb = AABB { lower: math.sub(s.aabb.lower, margin), upper: math.add(s.aabb.upper, margin) }
+    sim.flags = sim.flags | dynamics.ENLARGE_BOUNDS
+    // A bullet's proxies are enlarged later, serially.
+    if is_bullet == false { broad_phase.broad_phase_mark_proxy_moved(&w.broad_phase, s.proxy_key, s.fat_aabb) }
+}
+
+// A fast body swept against the static world (a bullet against the
+// kinematic and dynamic ones too): the earliest time of impact over its
+// shapes, the body advanced to it (its move event corrected), the
+// bounds recomputed at the impact pose and the proxies grown; the
+// sensor hits sooner than the solid hit kept for the sensors.
+solve_continuous(w: *World, sim_index: int) {
+    continuous_buffers_ready()
+    awake = dynamics.get_solver_set(w, dynamics.AWAKE_SET)
+    fast_sim = dynamics.body_sim_at(awake, sim_index)
+    base = fast_sim.center0
+    sweep = dynamics.make_relative_sweep(fast_sim, base)
+    xf1 = Transform { p: math.sub(sweep.c1, math.rotate_vector(sweep.q1, sweep.local_center)), q: sweep.q1 }
+    xf2 = Transform { p: math.sub(sweep.c2, math.rotate_vector(sweep.q2, sweep.local_center)), q: sweep.q2 }
+    static_tree = broad_phase.broad_phase_tree(&w.broad_phase, dynamics.BODY_STATIC)
+    kinematic_tree = broad_phase.broad_phase_tree(&w.broad_phase, dynamics.BODY_KINEMATIC)
+    dynamic_tree_ = broad_phase.broad_phase_tree(&w.broad_phase, dynamics.BODY_DYNAMIC)
+    fast_body = dynamics.body_at(w, fast_sim.body_id)
+    ctx = ContinuousContext { w: w, fast_sim: fast_sim, fast_shape: null, sweep: sweep, base: base, fraction: 1.0,
+                              sensor_hits: g_sensor_hits, sensor_fractions: g_sensor_fractions, sensor_count: 0 }
+    is_bullet = (fast_sim.flags & dynamics.IS_BULLET) != 0
+    mask = dynamic_tree.default_mask_bits()
+    shape_id = fast_body.head_shape_id
+    while shape_id != NULL_INDEX {
+        fast_shape = dynamics.world_shape_at(w, shape_id)
+        shape_id = fast_shape.next_shape_id
+        ctx.fast_shape = fast_shape
+        box1 = fast_shape.aabb
+        // xf2 is relative to the base; the box back in world space, kept for the no-impact case.
+        box2 = math.offset_aabb(shape.compute_shape_aabb(&fast_shape.geometry, xf2), base)
+        fast_shape.aabb = box2
+        kind = fast_shape.geometry.kind
+        if kind == shape.SHAPE_MESH || kind == shape.SHAPE_HEIGHT_FIELD { continue }
+        if fast_shape.sensor_index != NULL_INDEX { continue }
+        swept = math.aabb_union(box1, box2)
+        dynamic_tree.tree_query(static_tree, swept, mask, false, continuous_query_visitor, (&ctx) as ptr)
+        if is_bullet {
+            dynamic_tree.tree_query(kinematic_tree, swept, mask, false, continuous_query_visitor, (&ctx) as ptr)
+            dynamic_tree.tree_query(dynamic_tree_, swept, mask, false, continuous_query_visitor, (&ctx) as ptr)
+        }
+    }
+    if ctx.fraction < 1.0 {
+        q = math.nlerp(sweep.q1, sweep.q2, ctx.fraction)
+        c = math.lerp(sweep.c1, sweep.c2, ctx.fraction)
+        origin = math.sub(c, math.rotate_vector(q, sweep.local_center))
+        t = Transform { p: math.add(base, origin), q: q }
+        center = math.add(base, c)
+        fast_sim.transform = t
+        fast_sim.center = center
+        fast_sim.rotation0 = q
+        fast_sim.center0 = center
+        dynamics.body_move_event_at(w, sim_index).transform = t
+        shape_id = fast_body.head_shape_id
+        while shape_id != NULL_INDEX {
+            s = dynamics.world_shape_at(w, shape_id)
+            s.aabb = shape.compute_fat_shape_aabb(&s.geometry, t, dynamics.SPECULATIVE_DISTANCE)
+            grow_bounds(w, s, fast_sim, is_bullet)
+            shape_id = s.next_shape_id
+        }
+    } else {
+        fast_sim.rotation0 = fast_sim.transform.q
+        fast_sim.center0 = fast_sim.center
+        shape_id = fast_body.head_shape_id
+        while shape_id != NULL_INDEX {
+            s = dynamics.world_shape_at(w, shape_id)
+            grow_bounds(w, s, fast_sim, is_bullet)
+            shape_id = s.next_shape_id
+        }
+    }
+    hits = ctx.sensor_hits as SensorHit[]
+    fractions = ctx.sensor_fractions as float[]
+    i = 0
+    while i < ctx.sensor_count {
+        if fractions[i] < ctx.fraction {
+            index = core.buffer_push(&w.sensor_hits)
+            target = dynamics.sensor_hit_at(w, index)
+            target.sensor_id = hits[i].sensor_id
+            target.visitor_id = hits[i].visitor_id
+        }
+        i = i + 1
+    }
+}
+
+// --- finalize -------------------------------------------------------------------------------------------------
+
+// Every awake body after the sub-steps: its centre and rotation from the
+// deltas, the sleep velocity from its fastest point and its position
+// correction, the move event, the transient flags gathered, the sleep
+// timer (a fast body swept instead, a bullet kept for later), the world
+// inverse inertia, the island kept awake or a split candidate noted,
+// and the shapes' bounds and proxies updated.
+finalize_bodies(ctx: *StepContext) {
+    w = ctx.world
+    awake = dynamics.get_solver_set(w, dynamics.AWAKE_SET)
+    enable_sleep = w.enable_sleep
+    enable_continuous = w.enable_continuous
+    time_step = ctx.dt
+    inv_time_step = ctx.inv_dt
+    bullets = ctx.bullet_bodies as int[]
+    sim_index = 0
+    while sim_index < awake.body_sims.count {
+        state = state_at(ctx.states, sim_index)
+        sim = sim_at(ctx.sims, sim_index)
+        v = state.linear_velocity
+        wv = state.angular_velocity
+        local_omega = math.inv_rotate_vector(sim.transform.q, wv)
+        local_delta_rotation = math.inv_rotate_vector(sim.transform.q, state.delta_rotation.v)
+        sim.center = math.add(sim.center, state.delta_position)
+        sim.transform.q = math.normalize_quat(math.mul_quat(state.delta_rotation, sim.transform.q))
+        velocity_arc = math.modified_cross(math.abs_vec3(local_omega), sim.max_extent)
+        max_velocity = math.length(v) + math.length(velocity_arc)
+        rotation_arc = math.modified_cross(math.abs_vec3(local_delta_rotation), sim.max_extent)
+        max_delta_position = math.length(state.delta_position) + 2.0 * math.length(rotation_arc)
+        sleep_velocity = math.max_float(max_velocity, 0.5 * inv_time_step * max_delta_position)
+        state.delta_position = math.vec3_zero()
+        state.delta_rotation = math.quat_identity()
+        sim.transform.p = math.sub(sim.center, math.rotate_vector(sim.transform.q, sim.local_center))
+        body = dynamics.body_at(w, sim.body_id)
+        body.body_move_index = sim_index
+        body.sleep_velocity = sleep_velocity
+        event = dynamics.body_move_event_at(w, sim_index)
+        event.user_data = body.user_data
+        event.transform = sim.transform
+        event.body_id = dynamics.make_body_id(w, sim.body_id)
+        event.fell_asleep = false
+        sim.force = math.vec3_zero()
+        sim.torque = math.vec3_zero()
+        transient = dynamics.IS_SPEED_CAPPED | dynamics.HAD_TIME_OF_IMPACT
+        body.flags = body.flags & (0 - 1 - dynamics.BODY_TRANSIENT_FLAGS)
+        body.flags = body.flags | (sim.flags & transient) | (state.flags & transient)
+        sim.flags = sim.flags & (0 - 1 - dynamics.BODY_TRANSIENT_FLAGS)
+        state.flags = state.flags & (0 - 1 - dynamics.BODY_TRANSIENT_FLAGS)
+        if enable_sleep == false || (body.flags & dynamics.ENABLE_SLEEP) == 0 || sleep_velocity > body.sleep_threshold {
+            body.sleep_time = 0.0
+            max_motion = math.max_float(max_delta_position, max_velocity * time_step)
+            if body.kind == dynamics.BODY_DYNAMIC && enable_continuous && max_motion > body.safety_factor * sim.min_extent {
+                sim.flags = sim.flags | dynamics.IS_FAST
+                if (sim.flags & dynamics.IS_BULLET) != 0 {
+                    bullets[ctx.bullet_body_count] = sim_index
+                    ctx.bullet_body_count = ctx.bullet_body_count + 1
+                } else {
+                    solve_continuous(w, sim_index)
+                }
+            } else {
+                sim.center0 = sim.center
+                sim.rotation0 = sim.transform.q
+            }
+        } else {
+            sim.center0 = sim.center
+            sim.rotation0 = sim.transform.q
+            body.sleep_time = body.sleep_time + time_step
+        }
+        rotation = math.make_matrix_from_quat(sim.transform.q)
+        sim.inv_inertia_world = math.mul_mm(math.mul_mm(rotation, sim.inv_inertia_local), math.transpose(rotation))
+        island = dynamics.island_at(w, body.island_id)
+        if body.sleep_time < dynamics.TIME_TO_SLEEP {
+            core.bitset_set(&w.awake_island_bits, island.local_index)
+        } else if island.constraint_remove_count > 0 {
+            // Wants to sleep but its island needs splitting first: the sleepiest candidate, ties to the larger id.
+            if body.sleep_time > w.split_sleep_time || (body.sleep_time == w.split_sleep_time && body.island_id > w.split_island_candidate) {
+                w.split_island_candidate = body.island_id
+                w.split_sleep_time = body.sleep_time
+            }
+        }
+        // A fast body's bounds were done by the sweep (a bullet's come later).
+        if (sim.flags & dynamics.IS_FAST) == 0 {
+            t = sim.transform
+            shape_id = body.head_shape_id
+            while shape_id != NULL_INDEX {
+                s = dynamics.world_shape_at(w, shape_id)
+                s.aabb = shape.compute_fat_shape_aabb(&s.geometry, t, dynamics.SPECULATIVE_DISTANCE)
+                if math.aabb_contains(s.fat_aabb, s.aabb) == false {
+                    margin = math.vec3(s.aabb_margin, s.aabb_margin, s.aabb_margin)
+                    s.fat_aabb = AABB { lower: math.sub(s.aabb.lower, margin), upper: math.add(s.aabb.upper, margin) }
+                    broad_phase.broad_phase_mark_proxy_moved(&w.broad_phase, s.proxy_key, s.fat_aabb)
+                }
+                shape_id = s.next_shape_id
+            }
+        }
+        sim_index = sim_index + 1
+    }
+}
+
+// --- the solve -------------------------------------------------------------------------------------------------
+
+// A colour's joints solved, the ones past their thresholds flagged for the joint events.
+solve_joints_flagging(ctx: *StepContext, color: *GraphColor, use_bias: bool) {
+    w = ctx.world
+    max = math.MAX_FLOAT
+    i = 0
+    while i < color.joint_sims.count {
+        sim = dynamics.joint_sim_at(&color.joint_sims, i)
+        joint_solver.solve_joint(sim, ctx, use_bias)
+        if use_bias && (sim.force_threshold < max || sim.torque_threshold < max) && core.bitset_get(&w.joint_state_bits, sim.joint_id) == false {
+            reaction = dynamics.get_joint_reaction(w, sim, ctx.inv_h)
+            if reaction.force >= sim.force_threshold || reaction.torque >= sim.torque_threshold {
+                core.bitset_set(&w.joint_state_bits, sim.joint_id)
+            }
+        }
+        i = i + 1
+    }
+}
+
+// The joint events from the flagged joints.
+report_joint_events(w: *World) {
+    core.buffer_clear(&w.joint_events)
+    bits = &w.joint_state_bits
+    block = 0
+    while block < bits.block_count {
+        words = bits.bits as long[]
+        word = words[block]
+        while word != (0 as long) {
+            joint_id = 64 * block + core.ctz64(word)
+            j = dynamics.joint_at(w, joint_id)
+            index = core.buffer_push(&w.joint_events)
+            events = w.joint_events.data as JointEvent[]
+            events[index] = JointEvent { joint_id: dynamics.make_joint_id(w, j), user_data: j.user_data }
+            word = word & (word - (1 as long))
+        }
+        block = block + 1
+    }
+}
+
+// The hit events from the flagged contacts: the point that approached fastest.
+report_hit_events(w: *World) {
+    core.buffer_clear(&w.contact_hit_events)
+    threshold = w.hit_event_threshold
+    bits = &w.hit_event_bits
+    block = 0
+    while block < bits.block_count {
+        words = bits.bits as long[]
+        word = words[block]
+        while word != (0 as long) {
+            contact_id = 64 * block + core.ctz64(word)
+            c = dynamics.contact_at(w, contact_id)
+            shape_a = dynamics.world_shape_at(w, c.shape_id_a)
+            shape_b = dynamics.world_shape_at(w, c.shape_id_b)
+            sim_a = dynamics.get_body_sim(w, dynamics.body_at(w, shape_a.body_id))
+            sim_b = dynamics.get_body_sim(w, dynamics.body_at(w, shape_b.body_id))
+            mid = math.lerp(sim_a.center, sim_b.center, 0.5)
+            found = false
+            triangle_index = 0
+            approach = threshold
+            point = math.vec3_zero()
+            normal = math.vec3_zero()
+            i = 0
+            while i < c.manifold_count {
+                m = dynamics.manifold_at(c, i)
+                p = 0
+                while p < m.point_count {
+                    mp = dynamics.manifold_point_at(m, p)
+                    speed = 0.0 - mp.normal_velocity
+                    if speed > approach && mp.total_normal_impulse > 0.0 {
+                        approach = speed
+                        point = math.add(mid, math.lerp(mp.anchor_a, mp.anchor_b, 0.5))
+                        normal = m.normal
+                        triangle_index = mp.triangle_index
+                        found = true
+                    }
+                    p = p + 1
+                }
+                i = i + 1
+            }
+            if found {
+                index = core.buffer_push(&w.contact_hit_events)
+                events = w.contact_hit_events.data as ContactHitEvent[]
+                events[index] = ContactHitEvent { shape_id_a: dynamics.make_shape_id(w, shape_a), shape_id_b: dynamics.make_shape_id(w, shape_b),
+                                                  contact_id: dynamics.make_contact_id(w, c), point: point, normal: normal, approach_speed: approach,
+                                                  user_material_id_a: dynamics.shape_user_material_id(shape_a, c.child_index, triangle_index),
+                                                  user_material_id_b: dynamics.shape_user_material_id(shape_b, 0, triangle_index) }
+            }
+            word = word & (word - (1 as long))
+        }
+        block = block + 1
+    }
+}
+
+// The move events sized to the awake bodies.
+resize_move_events(w: *World, count: int) {
+    core.buffer_clear(&w.body_move_events)
+    i = 0
+    while i < count {
+        core.buffer_push(&w.body_move_events)
+        i = i + 1
+    }
+}
+
+// The step's solve (b3Solve). The world's step counter advances; with
+// no awake body nothing else happens.
+solve(w: *World, ctx: *StepContext) {
+    w.step_index = w.step_index + (1 as long)
+    awake = dynamics.get_solver_set(w, dynamics.AWAKE_SET)
+    awake_body_count = awake.body_sims.count
+    if awake_body_count == 0 { return }
+    stack = &w.stack
+    ctx.bullet_body_count = 0
+    ctx.bullet_bodies = core.stack_alloc(stack, awake_body_count * 4)
+    ctx.sims = awake.body_sims.data
+    ctx.states = awake.body_states.data
+    resize_move_events(w, awake_body_count)
+
+    // The constraints' scratch: one block over the active colours, the overflow's own.
+    contact_total = 0
+    manifold_total = 0
+    active_count = 0
+    c = 0
+    while c < dynamics.OVERFLOW_INDEX {
+        color = dynamics.graph_color(w, c)
+        contact_solver.count_color_constraints(color)
+        contact_total = contact_total + color.contact_constraint_count
+        manifold_total = manifold_total + color.manifold_constraint_count
+        if color.contact_constraint_count + color.joint_sims.count > 0 { active_count = active_count + 1 }
+        c = c + 1
+    }
+    ctx.active_color_count = active_count
+    contact_block = core.stack_alloc(stack, contact_total * sizeof(ContactConstraint))
+    manifold_block = core.stack_alloc(stack, manifold_total * sizeof(ManifoldConstraint))
+    contact_base = 0
+    manifold_base = 0
+    c = 0
+    while c < dynamics.OVERFLOW_INDEX {
+        color = dynamics.graph_color(w, c)
+        color.contact_constraints = contact_block + contact_base * sizeof(ContactConstraint)
+        color.manifold_constraints = manifold_block + manifold_base * sizeof(ManifoldConstraint)
+        contact_base = contact_base + color.contact_constraint_count
+        manifold_base = manifold_base + color.manifold_constraint_count
+        c = c + 1
+    }
+    overflow = dynamics.graph_color(w, dynamics.OVERFLOW_INDEX)
+    contact_solver.count_color_constraints(overflow)
+    overflow.contact_constraints = core.stack_alloc(stack, overflow.contact_constraint_count * sizeof(ContactConstraint))
+    overflow.manifold_constraints = core.stack_alloc(stack, overflow.manifold_constraint_count * sizeof(ManifoldConstraint))
+    core.bitset_set_count_and_clear(&w.joint_state_bits, core.idpool_capacity(&w.joint_id_pool))
+    core.bitset_set_count_and_clear(&w.hit_event_bits, core.idpool_capacity(&w.contact_id_pool))
+
+    // Prepare: joints then contacts, the overflow after the colours (the reference's order).
+    c = 0
+    while c < dynamics.OVERFLOW_INDEX {
+        color = dynamics.graph_color(w, c)
+        joint_solver.prepare_joints(ctx, color)
+        contact_solver.prepare_contacts(ctx, color)
+        c = c + 1
+    }
+    joint_solver.prepare_joints(ctx, overflow)
+    contact_solver.prepare_contacts(ctx, overflow)
+
+    sub = 0
+    while sub < ctx.sub_step_count {
+        integrate_velocities(ctx)
+        // Warm start: the overflow first, then each colour, joints before contacts.
+        joint_solver.warm_start_joints(ctx, overflow)
+        contact_solver.warm_start_contacts(ctx, overflow.contact_constraints, overflow.contact_constraint_count)
+        c = 0
+        while c < dynamics.OVERFLOW_INDEX {
+            color = dynamics.graph_color(w, c)
+            joint_solver.warm_start_joints(ctx, color)
+            contact_solver.warm_start_contacts(ctx, color.contact_constraints, color.contact_constraint_count)
+            c = c + 1
+        }
+        // Solve with bias.
+        solve_joints_flagging(ctx, overflow, true)
+        contact_solver.solve_contacts(ctx, overflow.contact_constraints, overflow.contact_constraint_count, true)
+        c = 0
+        while c < dynamics.OVERFLOW_INDEX {
+            color = dynamics.graph_color(w, c)
+            solve_joints_flagging(ctx, color, true)
+            contact_solver.solve_contacts(ctx, color.contact_constraints, color.contact_constraint_count, true)
+            c = c + 1
+        }
+        integrate_positions(ctx)
+        // Relax.
+        solve_joints_flagging(ctx, overflow, false)
+        contact_solver.solve_contacts(ctx, overflow.contact_constraints, overflow.contact_constraint_count, false)
+        c = 0
+        while c < dynamics.OVERFLOW_INDEX {
+            color = dynamics.graph_color(w, c)
+            solve_joints_flagging(ctx, color, false)
+            contact_solver.solve_contacts(ctx, color.contact_constraints, color.contact_constraint_count, false)
+            c = c + 1
+        }
+        sub = sub + 1
+    }
+    // Restitution.
+    iteration = 0
+    while iteration < RESTITUTION_ITERATIONS {
+        contact_solver.apply_restitution(ctx, overflow.contact_constraints, overflow.contact_constraint_count)
+        c = 0
+        while c < dynamics.OVERFLOW_INDEX {
+            color = dynamics.graph_color(w, c)
+            contact_solver.apply_restitution(ctx, color.contact_constraints, color.contact_constraint_count)
+            c = c + 1
+        }
+        iteration = iteration + 1
+    }
+    // Store.
+    has_hits = contact_solver.store_impulses(ctx, overflow.contact_constraints, overflow.contact_constraint_count, &w.hit_event_bits)
+    c = 0
+    while c < dynamics.OVERFLOW_INDEX {
+        color = dynamics.graph_color(w, c)
+        if contact_solver.store_impulses(ctx, color.contact_constraints, color.contact_constraint_count, &w.hit_event_bits) { has_hits = true }
+        c = c + 1
+    }
+
+    // The island split the last step asked for (the reference runs it beside the solve).
+    if w.split_island_id != NULL_INDEX {
+        dynamics.split_island(w, w.split_island_id)
+        w.split_island_id = NULL_INDEX
+    }
+    core.buffer_clear(&w.sensor_hits)
+    core.bitset_set_count_and_clear(&w.awake_island_bits, awake.island_sims.count)
+    w.split_island_candidate = NULL_INDEX
+    w.split_sleep_time = 0.0
+
+    finalize_bodies(ctx)
+
+    core.stack_free(stack, overflow.manifold_constraints)
+    core.stack_free(stack, overflow.contact_constraints)
+    core.stack_free(stack, manifold_block)
+    core.stack_free(stack, contact_block)
+    c = 0
+    while c < dynamics.GRAPH_COLOR_COUNT {
+        color = dynamics.graph_color(w, c)
+        color.contact_constraints = null
+        color.manifold_constraints = null
+        c = c + 1
+    }
+
+    report_joint_events(w)
+    if has_hits { report_hit_events(w) } else { core.buffer_clear(&w.contact_hit_events) }
+
+    dynamic_tree.tree_refit(broad_phase.broad_phase_tree(&w.broad_phase, dynamics.BODY_KINEMATIC))
+    dynamic_tree.tree_refit(broad_phase.broad_phase_tree(&w.broad_phase, dynamics.BODY_DYNAMIC))
+
+    // Bullets: swept against everything now that the trees hold the step's moves, their proxies enlarged serially.
+    bullets = ctx.bullet_bodies as int[]
+    i = 0
+    while i < ctx.bullet_body_count {
+        solve_continuous(w, bullets[i])
+        i = i + 1
+    }
+    tree = broad_phase.broad_phase_tree(&w.broad_phase, dynamics.BODY_DYNAMIC)
+    i = 0
+    while i < ctx.bullet_body_count {
+        bullet_sim = dynamics.body_sim_at(awake, bullets[i])
+        if (bullet_sim.flags & dynamics.ENLARGE_BOUNDS) != 0 {
+            bullet_sim.flags = bullet_sim.flags & (0 - 1 - dynamics.ENLARGE_BOUNDS)
+            bullet_body = dynamics.body_at(w, bullet_sim.body_id)
+            shape_id = bullet_body.head_shape_id
+            while shape_id != NULL_INDEX {
+                s = dynamics.world_shape_at(w, shape_id)
+                proxy_id = broad_phase.proxy_id(s.proxy_key)
+                if math.aabb_contains(dynamic_tree.tree_get_aabb(tree, proxy_id), s.fat_aabb) == false {
+                    dynamic_tree.tree_enlarge_proxy(tree, proxy_id, s.fat_aabb)
+                }
+                shape_id = s.next_shape_id
+            }
+        }
+        i = i + 1
+    }
+    core.stack_free(stack, ctx.bullet_bodies)
+    ctx.bullet_bodies = null
+    ctx.bullet_body_count = 0
+
+    // The sweeps' sensor hits to their sensors.
+    i = 0
+    while i < w.sensor_hits.count {
+        hit = dynamics.sensor_hit_at(w, i)
+        dynamics.add_sensor_hit(w, dynamics.world_shape_at(w, hit.sensor_id), dynamics.world_shape_at(w, hit.visitor_id))
+        i = i + 1
+    }
+
+    // Sleep: the split candidate for the next step, then every island no body kept awake (in reverse, as sleeping moves islands).
+    if w.enable_sleep {
+        if w.split_island_candidate != NULL_INDEX { w.split_island_id = w.split_island_candidate }
+        // Sleeping creates sets, which can move the sets' array: the awake set is found again each time.
+        island_index = awake.island_sims.count - 1
+        while island_index >= 0 {
+            if core.bitset_get(&w.awake_island_bits, island_index) == false {
+                dynamics.try_sleep_island(w, dynamics.island_sim_at(dynamics.get_solver_set(w, dynamics.AWAKE_SET), island_index).island_id)
+            }
+            island_index = island_index - 1
+        }
+    }
+}

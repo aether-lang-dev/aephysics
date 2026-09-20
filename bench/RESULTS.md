@@ -463,3 +463,25 @@ About 0.5 to 0.6 microseconds per joint per solve, on one core. The
 reference solves joints the same way (scalar, per graph colour); its
 numbers come with the step's pair.
 
+## solver
+
+`bench/solver.ae` and `bench/solver_box3d.c`: the step end to end (the
+pairs, the narrow phase, the Soft Step) against the reference's
+b3World_Step, one thread, 120 steps of 1/60 with four sub-steps: 5,000
+cubes dropped from a metre onto a slab in a 100 by 50 grid (they land,
+slide and settle), and 100 stacks of 10 cubes (dynamic pairs in every
+colour).
+
+| scene, 120 steps | aephysics | Box3D |
+|---|---|---|
+| 5,000 cubes falling onto a slab | 308 ms | **163** |
+| 100 stacks of 10 cubes | 61 | **30** |
+
+The same height sums (2,499.65 and 4,983.87), every body asleep at the
+end, the same contact counts (5,000 and 1,000). We are 1.9-2.0x: the
+reference solves its convex contacts four at a time in SIMD lanes and
+computes in single precision, and this engine solves them one at a
+time in doubles (Aether's float). The wide contact path, laid over the
+same constraint data, is the next performance layer (issue #22); the
+narrow phase's 1.7x (issue #17) is the rest.
+

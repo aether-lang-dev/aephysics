@@ -87,7 +87,7 @@ exports (
     shape_set_user_data, shape_get_user_data, shape_get_flags,
     create_island, destroy_island, validate_island, create_solver_set, destroy_solver_set, wake_solver_set,
     validate_solver_sets, get_solver_set, get_island, world_island_count, world_solver_set_count,
-    body_sim_at, body_state_at, world_shape_at, island_at, solver_set_at, body_at,
+    body_sim_at, body_state_at, island_sim_at, world_shape_at, island_at, solver_set_at, body_at,
     Manifold, ManifoldPoint, ContactSpec, ContactId, ContactBeginTouchEvent, ContactEndTouchEvent, JointSim, GraphColor, ConstraintGraph,
     GRAPH_COLOR_COUNT, OVERFLOW_INDEX, DYNAMIC_COLOR_COUNT, MAX_MANIFOLD_POINTS,
     CONTACT_TOUCHING, CONTACT_ENABLE_CONTACT_EVENTS, CONTACT_STATIC, CONTACT_RECYCLE, SIM_TOUCHING, SIM_MESH_CONTACT,
@@ -122,7 +122,11 @@ exports (
     Sensor, SensorBeginTouchEvent, SensorEndTouchEvent, sensor_at, world_sensor_count,
     world_sensor_begin_event_count, world_sensor_begin_event, world_sensor_end_event_count, world_sensor_end_event,
     shape_enable_sensor_events, shape_are_sensor_events_enabled, shape_get_sensor_capacity, shape_get_sensor_data,
-    shape_get_contact_capacity, add_sensor_hit, overlap_sensors, validate_joints
+    shape_get_contact_capacity, add_sensor_hit, overlap_sensors, validate_joints,
+    BodyMoveEvent, ContactHitEvent, JointEvent, SensorHit, TIME_TO_SLEEP,
+    world_body_move_event_count, world_body_move_event, world_contact_hit_event_count, world_contact_hit_event,
+    world_joint_event_count, world_joint_event, world_set_pre_solve, world_clear_pre_solve,
+    shape_user_material_id, make_relative_sweep, body_move_event_at, sensor_hit_at
 )
 
 extern memset(block: ptr, value: int, size: int) -> ptr
@@ -172,6 +176,7 @@ const JOINT_REVOLUTE = 5
 const JOINT_SPHERICAL = 6
 const JOINT_WELD = 7
 const JOINT_WHEEL = 8
+const TIME_TO_SLEEP = 0.5
 const JOINT_DATA_BYTES = 544   // JointSim.data: room for the largest kind's data (the spherical joint's 520)
 // The shape kinds (the shape module's, restated).
 const KIND_SPHERE = 0
@@ -946,6 +951,38 @@ struct SensorEndTouchEvent {
     visitor_shape_id: ShapeId
 }
 
+// A body that moved this step (one per awake body, in the awake set's order).
+struct BodyMoveEvent {
+    user_data: ptr
+    transform: Transform
+    body_id: BodyId
+    fell_asleep: bool
+}
+
+// A contact that closed faster than the hit threshold this step.
+struct ContactHitEvent {
+    shape_id_a: ShapeId
+    shape_id_b: ShapeId
+    contact_id: ContactId
+    point: Vec3
+    normal: Vec3
+    approach_speed: float
+    user_material_id_a: long
+    user_material_id_b: long
+}
+
+// A joint whose reaction crossed its force or torque threshold this step.
+struct JointEvent {
+    joint_id: JointId
+    user_data: ptr
+}
+
+// A sensor a fast shape swept through, found by the continuous pass.
+struct SensorHit {
+    sensor_id: int
+    visitor_id: int
+}
+
 // One colour of the constraint graph: no two constraints in it share a
 // dynamic body, so the solver can run them side by side.
 struct GraphColor {
@@ -1033,6 +1070,18 @@ struct World {
     custom_filter: fn(ShapeId, ShapeId, ptr) -> bool
     custom_filter_context: ptr
     has_custom_filter: bool
+    pre_solve: fn(ShapeId, ShapeId, Vec3, Vec3, ptr) -> bool
+    pre_solve_context: ptr
+    has_pre_solve: bool
+    body_move_events: Buffer       // BodyMoveEvent, one per awake body after a step
+    contact_hit_events: Buffer     // ContactHitEvent
+    joint_events: Buffer           // JointEvent
+    joint_state_bits: BitSet       // the solver's: joints past their thresholds
+    hit_event_bits: BitSet         // contacts with a hit
+    awake_island_bits: BitSet      // islands a body kept awake
+    sensor_hits: Buffer            // SensorHit, from the continuous pass
+    split_island_candidate: int    // the sleepiest island that needs splitting
+    split_sleep_time: float
     compound_shape_count: int
     step_index: long
     split_island_id: int
@@ -1180,6 +1229,16 @@ create_world(def: *WorldDef) -> WorldId {
     w.sensor_end_events1 = core.buffer_create(sizeof(SensorEndTouchEvent), 4)
     w.sensor_event_bits = core.bitset_create(64)
     w.has_custom_filter = false
+    w.has_pre_solve = false
+    w.body_move_events = core.buffer_create(sizeof(BodyMoveEvent), math.max_int(16, def.dynamic_body_count))
+    w.contact_hit_events = core.buffer_create(sizeof(ContactHitEvent), 4)
+    w.joint_events = core.buffer_create(sizeof(JointEvent), 4)
+    w.joint_state_bits = core.bitset_create(64)
+    w.hit_event_bits = core.bitset_create(64)
+    w.awake_island_bits = core.bitset_create(64)
+    w.sensor_hits = core.buffer_create(sizeof(SensorHit), 4)
+    w.split_island_candidate = NULL_INDEX
+    w.split_sleep_time = 0.0
     w.contact_id_pool = core.idpool_create()
     w.contacts = core.buffer_create(sizeof(Contact), math.max_int(16, def.contact_count))
     w.joint_id_pool = core.idpool_create()
@@ -1234,6 +1293,13 @@ destroy_world(id: WorldId) {
     core.buffer_destroy(&w.sensor_end_events0)
     core.buffer_destroy(&w.sensor_end_events1)
     core.bitset_destroy(&w.sensor_event_bits)
+    core.buffer_destroy(&w.body_move_events)
+    core.buffer_destroy(&w.contact_hit_events)
+    core.buffer_destroy(&w.joint_events)
+    core.bitset_destroy(&w.joint_state_bits)
+    core.bitset_destroy(&w.hit_event_bits)
+    core.bitset_destroy(&w.awake_island_bits)
+    core.buffer_destroy(&w.sensor_hits)
     i = 0
     while i < w.contacts.count {
         c = contact_at(w, i)
@@ -5210,6 +5276,73 @@ overlap_sensors(w: *World) {
         }
         sensor_index = sensor_index + 1
     }
+}
+
+// --- the step's events and helpers ---------------------------------------------------------------------------
+
+body_move_event_at(w: *World, index: int) -> *BodyMoveEvent { return (w.body_move_events.data + index * sizeof(BodyMoveEvent)) as *BodyMoveEvent }
+sensor_hit_at(w: *World, index: int) -> *SensorHit { return (w.sensor_hits.data + index * sizeof(SensorHit)) as *SensorHit }
+world_body_move_event_count(w: *World) -> int { return w.body_move_events.count }
+world_body_move_event(w: *World, index: int) -> BodyMoveEvent {
+    events = w.body_move_events.data as BodyMoveEvent[]
+    return events[index]
+}
+world_contact_hit_event_count(w: *World) -> int { return w.contact_hit_events.count }
+world_contact_hit_event(w: *World, index: int) -> ContactHitEvent {
+    events = w.contact_hit_events.data as ContactHitEvent[]
+    return events[index]
+}
+world_joint_event_count(w: *World) -> int { return w.joint_events.count }
+world_joint_event(w: *World, index: int) -> JointEvent {
+    events = w.joint_events.data as JointEvent[]
+    return events[index]
+}
+
+// The pre-solve callback: a continuous hit it refuses is ignored.
+world_set_pre_solve(w: *World, callback_fn: fn(ShapeId, ShapeId, Vec3, Vec3, ptr) -> bool, context: ptr) {
+    w.pre_solve = callback_fn
+    w.pre_solve_context = context
+    w.has_pre_solve = true
+}
+
+world_clear_pre_solve(w: *World) { w.has_pre_solve = false }
+
+// The user material id of a hit point on a shape: a mesh's or height
+// field's per-triangle material, a compound child's through its map, a
+// convex shape's first (b3GetShapeUserMaterialId).
+shape_user_material_id(s: *WorldShape, child_index: int, triangle_index: int) -> long {
+    if s.material_count == 0 { return 0 as long }
+    material_index = 0
+    kind = s.geometry.kind
+    if kind == KIND_MESH {
+        indices = mesh.mesh_material_indices(s.geometry.mesh.data)
+        material_index = indices[triangle_index]
+    } else if kind == KIND_HEIGHT_FIELD {
+        material_index = height_field.get_height_field_material(s.geometry.height_field, triangle_index)
+    } else if kind == KIND_COMPOUND {
+        child = compound.get_compound_child(s.geometry.compound, child_index)
+        if child.kind == KIND_MESH {
+            indices = mesh.mesh_material_indices(child.mesh.data)
+            mesh_material_index = math.clamp_int(indices[triangle_index], 0, compound.MAX_COMPOUND_MESH_MATERIALS - 1)
+            if mesh_material_index == 0 { material_index = child.material_index0 }
+            else if mesh_material_index == 1 { material_index = child.material_index1 }
+            else if mesh_material_index == 2 { material_index = child.material_index2 }
+            else { material_index = child.material_index3 }
+        } else {
+            material_index = child.material_index0
+        }
+    }
+    material_index = math.clamp_int(material_index, 0, s.material_count - 1)
+    if s.materials == null { return s.material.user_material_id }
+    materials = s.materials as SurfaceMaterial[]
+    return materials[material_index].user_material_id
+}
+
+// A body's motion over the step relative to a base point (the sweep in
+// single precision near the base).
+make_relative_sweep(sim: *BodySim, base: Vec3) -> Sweep {
+    return Sweep { local_center: sim.local_center, c1: math.sub(sim.center0, base), c2: math.sub(sim.center, base),
+                   q1: sim.rotation0, q2: sim.transform.q }
 }
 
 // --- joint and sensor validation ------------------------------------------------------------------------------

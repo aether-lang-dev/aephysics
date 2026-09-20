@@ -36,7 +36,7 @@ exports (
     ints_remove_swap, ints_count, ints_capacity, ints_bytes,
     buffer_create, buffer_destroy, buffer_reserve, buffer_push, buffer_pop, buffer_clear,
     buffer_remove_swap, buffer_count, buffer_capacity, buffer_bytes,
-    stack_create, stack_destroy, stack_alloc, stack_free, stack_capacity, stack_allocation,
+    stack_create, stack_grow, stack_destroy, stack_alloc, stack_free, stack_capacity, stack_allocation,
     stack_max_allocation,
     arena_create, arena_destroy, arena_bump, arena_sync, arena_capacity, arena_peak
 )
@@ -811,6 +811,16 @@ stack_free(s: *Stack, mem: ptr) {
     }
     s.allocation = s.allocation - entry.size
     s.entry_count = s.entry_count - 1
+}
+
+// The block regrown to the peak of the allocations so far, once everything
+// is freed (the end of a step): the next step's allocations fit in it.
+stack_grow(s: *Stack) {
+    if s.entry_count != 0 || s.max_allocation <= s.capacity { return }
+    free_bytes(s.memory, s.capacity)
+    s.capacity = s.max_allocation + s.max_allocation / 2
+    s.memory = alloc(s.capacity)
+    s.index = 0
 }
 
 stack_capacity(s: *Stack) -> int { return s.capacity }
