@@ -1,0 +1,812 @@
+// aephysics.compound against the reference's (Box3D's) test_compound.c:
+// a mixed compound and one of each single kind, the materials shared,
+// distinct, across kinds and through a mesh, the hulls and meshes
+// shared by pointer and by content or kept distinct, the child order
+// and transforms, the bounds, the ray cast (miss, nearest, a turned
+// hull's normal), the shape cast (nearest, miss, the turned hull), the
+// mesh material remap, the overlap (plain, transformed, every kind, a
+// segment), the box query with its early exit, and the mover (two
+// boxes, a turned child); and beyond it the compound through the shape
+// dispatch and a field of a thousand spheres. The byte roundtrip is not
+// ported.
+
+import std.string
+import aephysics.math
+import aephysics.core
+import aephysics.dynamic_tree
+import aephysics.hull
+import aephysics.distance
+import aephysics.manifold
+import aephysics.mesh
+import aephysics.height_field
+import aephysics.material
+import aephysics.sphere
+import aephysics.capsule
+import aephysics.compound
+import aephysics.shape
+
+extern calloc(count: int, size: int) -> ptr
+extern exit(code: int)
+extern free(p: ptr)
+extern sin(x: float) -> float
+extern cos(x: float) -> float
+
+var failures = 0
+var checks = 0
+
+ensure(name: string, ok: bool) {
+    checks = checks + 1
+    if !ok {
+        println("compound: FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+small(name: string, value: float, tolerance: float) {
+    ensure("${name} (${value})", math.abs_float(value) < tolerance)
+}
+
+make_material(friction: float, user_id: int) -> SurfaceMaterial {
+    m = material.default_surface_material()
+    m.friction = friction
+    m.user_material_id = user_id as long
+    return m
+}
+
+// One block per kind of definition array; the def points at them.
+struct Defs {
+    capsules: ptr
+    hulls: ptr
+    meshes: ptr
+    spheres: ptr
+    def: CompoundDef
+}
+
+make_defs(capsule_count: int, hull_count: int, mesh_count: int, sphere_count: int) -> Defs {
+    d = Defs { capsules: calloc(math.max_int(capsule_count, 1), sizeof(CompoundCapsuleDef)),
+               hulls: calloc(math.max_int(hull_count, 1), sizeof(CompoundHullDef)),
+               meshes: calloc(math.max_int(mesh_count, 1), sizeof(CompoundMeshDef)),
+               spheres: calloc(math.max_int(sphere_count, 1), sizeof(CompoundSphereDef)),
+               def: compound.compound_def() }
+    d.def.capsules = d.capsules
+    d.def.capsule_count = capsule_count
+    d.def.hulls = d.hulls
+    d.def.hull_count = hull_count
+    d.def.meshes = d.meshes
+    d.def.mesh_count = mesh_count
+    d.def.spheres = d.spheres
+    d.def.sphere_count = sphere_count
+    return d
+}
+
+free_defs(d: Defs) {
+    free(d.capsules)
+    free(d.hulls)
+    free(d.meshes)
+    free(d.spheres)
+}
+
+point_proxy(block: ptr, p: Vec3, radius: float) -> ShapeProxy {
+    points = block as Vec3[]
+    points[0] = p
+    return distance.shape_proxy(block, 1, radius)
+}
+
+test_create() {
+    mat = material.default_surface_material()
+    box = hull.make_box_hull(0.5, 0.5, 0.5)
+    md = mesh.create_box_mesh(math.vec3_zero(), math.vec3(0.5, 0.5, 0.5), false)
+    mats = calloc(1, sizeof(SurfaceMaterial))
+    mat_array = mats as SurfaceMaterial[]
+    mat_array[0] = mat
+
+    d = make_defs(1, 1, 1, 2)
+    capsules = d.capsules as CompoundCapsuleDef[]
+    capsules[0] = compound.compound_capsule_def(manifold.capsule(math.vec3(0.0 - 1.0, 0.0, 0.0), math.vec3(1.0, 0.0, 0.0), 0.25), mat)
+    hulls = d.hulls as CompoundHullDef[]
+    hulls[0] = compound.compound_hull_def(box, math.transform_identity(), mat)
+    meshes = d.meshes as CompoundMeshDef[]
+    meshes[0] = compound.compound_mesh_def(md, math.transform_identity(), math.vec3_one(), mats, 1)
+    spheres = d.spheres as CompoundSphereDef[]
+    spheres[0] = compound.compound_sphere_def(manifold.sphere(math.vec3(5.0, 0.0, 0.0), 0.5), mat)
+    spheres[1] = compound.compound_sphere_def(manifold.sphere(math.vec3(0.0 - 5.0, 0.0, 0.0), 0.5), mat)
+    c = compound.create_compound(&d.def)
+    ensure("mixed created", c != null)
+    ensure("mixed version", c.version == compound.COMPOUND_VERSION)
+    ensure("mixed bytes", c.byte_count > sizeof(CompoundData))
+    ensure("mixed counts", c.capsule_count == 1 && c.hull_count == 1 && c.mesh_count == 1 && c.sphere_count == 2)
+    ensure("mixed one material", c.material_count == 1)
+    ensure("mixed shared", c.shared_hull_count == 1 && c.shared_mesh_count == 1)
+    ensure("mixed tree", c.tree.node_end >= 2 && c.tree.proxy_count == 5 && c.tree.nodes != null && c.tree.proxies != null)
+    ensure("mixed tree valid", dynamic_tree.tree_validate(&c.tree))
+    ensure("mixed child count", compound.compound_child_count(c) == 5)
+    // The shared hull and mesh are copies: equal bytes at their own addresses.
+    ch = compound.get_compound_hull(c, 0)
+    ensure("hull copied", ch.hull != box && ch.hull.byte_count == box.byte_count && ch.hull.hash == box.hash)
+    ensure("hull copy valid", hull.is_valid_hull(ch.hull))
+    cm = compound.get_compound_mesh(c, 0)
+    ensure("mesh copied", cm.mesh_data != md && cm.mesh_data.byte_count == md.byte_count && cm.mesh_data.hash == md.hash)
+    ensure("mesh copy valid", mesh.is_valid_mesh(cm.mesh_data))
+    compound.destroy_compound(c)
+    free_defs(d)
+
+    // One of each kind alone.
+    d = make_defs(1, 0, 0, 0)
+    capsules = d.capsules as CompoundCapsuleDef[]
+    capsules[0] = compound.compound_capsule_def(manifold.capsule(math.vec3_zero(), math.vec3(1.0, 0.0, 0.0), 0.5), mat)
+    c = compound.create_compound(&d.def)
+    ensure("capsule only", c != null && c.capsule_count == 1 && c.hull_count == 0 && c.mesh_count == 0 && c.sphere_count == 0)
+    compound.destroy_compound(c)
+    free_defs(d)
+    d = make_defs(0, 1, 0, 0)
+    hulls = d.hulls as CompoundHullDef[]
+    hulls[0] = compound.compound_hull_def(box, math.transform_identity(), mat)
+    c = compound.create_compound(&d.def)
+    ensure("hull only", c != null && c.hull_count == 1 && c.shared_hull_count == 1 && c.capsule_count == 0)
+    compound.destroy_compound(c)
+    free_defs(d)
+    d = make_defs(0, 0, 1, 0)
+    meshes = d.meshes as CompoundMeshDef[]
+    meshes[0] = compound.compound_mesh_def(md, math.transform_identity(), math.vec3_one(), mats, 1)
+    c = compound.create_compound(&d.def)
+    ensure("mesh only", c != null && c.mesh_count == 1 && c.shared_mesh_count == 1)
+    compound.destroy_compound(c)
+    free_defs(d)
+    d = make_defs(0, 0, 0, 1)
+    spheres = d.spheres as CompoundSphereDef[]
+    spheres[0] = compound.compound_sphere_def(manifold.sphere(math.vec3_zero(), 1.0), mat)
+    c = compound.create_compound(&d.def)
+    ensure("sphere only", c != null && c.sphere_count == 1)
+    compound.destroy_compound(c)
+    free_defs(d)
+    // Nothing at all.
+    d = make_defs(0, 0, 0, 0)
+    ensure("an empty compound is refused", compound.create_compound(&d.def) == null)
+    free_defs(d)
+
+    mesh.destroy_mesh(md)
+    hull.destroy_hull(box)
+    free(mats)
+}
+
+test_materials() {
+    // Three capsules with one material share one slot.
+    mat = make_material(0.4, 7)
+    d = make_defs(3, 0, 0, 0)
+    capsules = d.capsules as CompoundCapsuleDef[]
+    i = 0
+    while i < 3 {
+        capsules[i] = compound.compound_capsule_def(manifold.capsule(math.vec3(i as float, 0.0, 0.0), math.vec3((i + 1) as float, 0.0, 0.0), 0.25), mat)
+        i = i + 1
+    }
+    c = compound.create_compound(&d.def)
+    ensure("dedup count", c.material_count == 1)
+    ensure("dedup indices", compound.get_compound_capsule(c, 0).material_index == 0 && compound.get_compound_capsule(c, 1).material_index == 0 &&
+                             compound.get_compound_capsule(c, 2).material_index == 0)
+    small("dedup friction", compound.get_compound_material(c, 0).friction - 0.4, 0.000001)
+    compound.destroy_compound(c)
+
+    // Three distinct materials keep three slots, each found by its id.
+    i = 0
+    while i < 3 {
+        capsules[i].material = make_material(0.1 * ((i + 1) as float), i + 1)
+        i = i + 1
+    }
+    c = compound.create_compound(&d.def)
+    ensure("distinct count", c.material_count == 3)
+    mats = compound.get_compound_materials(c)
+    i = 0
+    while i < 3 {
+        cc = compound.get_compound_capsule(c, i)
+        ensure("distinct index ${i}", cc.material_index >= 0 && cc.material_index < 3)
+        ensure("distinct id ${i}", mats[cc.material_index].user_material_id == ((i + 1) as long))
+        i = i + 1
+    }
+    // Materials differing only in the id, the colour or the tangent velocity are distinct.
+    capsules[1].material = make_material(0.1, 1)
+    capsules[1].material.custom_color = 5
+    capsules[2].material = make_material(0.1, 1)
+    capsules[2].material.tangent_velocity = math.vec3(0.0, 0.0, 1.0)
+    capsules[0].material = make_material(0.1, 1)
+    compound.destroy_compound(c)
+    c = compound.create_compound(&d.def)
+    ensure("every field distinguishes", c.material_count == 3)
+    compound.destroy_compound(c)
+    free_defs(d)
+
+    // One material across a capsule, a hull and a sphere: one slot.
+    mat = make_material(0.5, 99)
+    box = hull.make_box_hull(0.5, 0.5, 0.5)
+    d = make_defs(1, 1, 0, 1)
+    capsules = d.capsules as CompoundCapsuleDef[]
+    capsules[0] = compound.compound_capsule_def(manifold.capsule(math.vec3_zero(), math.vec3(1.0, 0.0, 0.0), 0.25), mat)
+    hulls = d.hulls as CompoundHullDef[]
+    hulls[0] = compound.compound_hull_def(box, math.transform_identity(), mat)
+    spheres = d.spheres as CompoundSphereDef[]
+    spheres[0] = compound.compound_sphere_def(manifold.sphere(math.vec3(5.0, 0.0, 0.0), 0.5), mat)
+    c = compound.create_compound(&d.def)
+    ensure("cross-kind count", c.material_count == 1)
+    ensure("cross-kind indices", compound.get_compound_capsule(c, 0).material_index == 0 && compound.get_compound_hull(c, 0).material_index == 0 &&
+                                  compound.get_compound_sphere(c, 0).material_index == 0)
+    compound.destroy_compound(c)
+    free_defs(d)
+
+    // A mesh's materials go through the same table as the convex ones.
+    mat = make_material(0.3, 11)
+    md = mesh.create_box_mesh(math.vec3_zero(), math.vec3_one(), false)
+    ensure("box mesh has one material", md.material_count == 1)
+    mats_block = calloc(1, sizeof(SurfaceMaterial))
+    mat_array = mats_block as SurfaceMaterial[]
+    mat_array[0] = mat
+    d = make_defs(0, 0, 1, 1)
+    meshes = d.meshes as CompoundMeshDef[]
+    meshes[0] = compound.compound_mesh_def(md, math.transform_identity(), math.vec3_one(), mats_block, 1)
+    spheres = d.spheres as CompoundSphereDef[]
+    spheres[0] = compound.compound_sphere_def(manifold.sphere(math.vec3(5.0, 0.0, 0.0), 0.5), mat)
+    c = compound.create_compound(&d.def)
+    ensure("mesh material shared", c.material_count == 1)
+    compound.destroy_compound(c)
+    free_defs(d)
+    free(mats_block)
+    mesh.destroy_mesh(md)
+    hull.destroy_hull(box)
+}
+
+test_sharing() {
+    mat = material.default_surface_material()
+    // Three instances of one hull pointer: one shared hull.
+    box = hull.make_box_hull(1.0, 1.0, 1.0)
+    d = make_defs(0, 3, 0, 0)
+    hulls = d.hulls as CompoundHullDef[]
+    i = 0
+    while i < 3 {
+        t = math.transform_identity()
+        t.p.x = (4 * i) as float
+        hulls[i] = compound.compound_hull_def(box, t, mat)
+        i = i + 1
+    }
+    c = compound.create_compound(&d.def)
+    ensure("hull instances", c.hull_count == 3)
+    ensure("hull shared by pointer", c.shared_hull_count == 1)
+    ensure("hull instances share the copy", compound.get_compound_hull(c, 0).hull == compound.get_compound_hull(c, 2).hull)
+    small("hull instance transform", compound.get_compound_hull(c, 2).transform.p.x - 8.0, 0.000001)
+    compound.destroy_compound(c)
+    free_defs(d)
+
+    // Two hulls built alike are byte-identical: one shared hull.
+    box_b = hull.make_box_hull(1.0, 1.0, 1.0)
+    ensure("two hull blocks", box != box_b)
+    d = make_defs(0, 2, 0, 0)
+    hulls = d.hulls as CompoundHullDef[]
+    hulls[0] = compound.compound_hull_def(box, math.transform_identity(), mat)
+    t = math.transform_identity()
+    t.p.x = 5.0
+    hulls[1] = compound.compound_hull_def(box_b, t, mat)
+    c = compound.create_compound(&d.def)
+    ensure("hull shared by content", c.shared_hull_count == 1)
+    compound.destroy_compound(c)
+    // A different hull stays distinct.
+    box_c = hull.make_box_hull(2.0, 1.0, 1.0)
+    hulls[1] = compound.compound_hull_def(box_c, t, mat)
+    c = compound.create_compound(&d.def)
+    ensure("hulls distinct", c.shared_hull_count == 2)
+    compound.destroy_compound(c)
+    free_defs(d)
+    hull.destroy_hull(box_c)
+    hull.destroy_hull(box_b)
+    hull.destroy_hull(box)
+
+    // The same for meshes.
+    md = mesh.create_box_mesh(math.vec3_zero(), math.vec3_one(), false)
+    mats_block = calloc(1, sizeof(SurfaceMaterial))
+    mat_array = mats_block as SurfaceMaterial[]
+    mat_array[0] = mat
+    d = make_defs(0, 0, 3, 0)
+    meshes = d.meshes as CompoundMeshDef[]
+    i = 0
+    while i < 3 {
+        t = math.transform_identity()
+        t.p.x = (4 * i) as float
+        meshes[i] = compound.compound_mesh_def(md, t, math.vec3_one(), mats_block, 1)
+        i = i + 1
+    }
+    c = compound.create_compound(&d.def)
+    ensure("mesh instances", c.mesh_count == 3)
+    ensure("mesh shared by pointer", c.shared_mesh_count == 1)
+    compound.destroy_compound(c)
+    free_defs(d)
+    md_b = mesh.create_box_mesh(math.vec3_zero(), math.vec3_one(), false)
+    ensure("two mesh blocks", md != md_b)
+    d = make_defs(0, 0, 2, 0)
+    meshes = d.meshes as CompoundMeshDef[]
+    meshes[0] = compound.compound_mesh_def(md, math.transform_identity(), math.vec3_one(), mats_block, 1)
+    t = math.transform_identity()
+    t.p.x = 5.0
+    meshes[1] = compound.compound_mesh_def(md_b, t, math.vec3_one(), mats_block, 1)
+    c = compound.create_compound(&d.def)
+    ensure("mesh shared by content", c.shared_mesh_count == 1)
+    compound.destroy_compound(c)
+    md_c = mesh.create_box_mesh(math.vec3_zero(), math.vec3(2.0, 1.0, 1.0), false)
+    meshes[1] = compound.compound_mesh_def(md_c, t, math.vec3_one(), mats_block, 1)
+    c = compound.create_compound(&d.def)
+    ensure("meshes distinct", c.shared_mesh_count == 2)
+    compound.destroy_compound(c)
+    free_defs(d)
+    free(mats_block)
+    mesh.destroy_mesh(md_c)
+    mesh.destroy_mesh(md_b)
+    mesh.destroy_mesh(md)
+}
+
+test_children_and_bounds() {
+    mat = material.default_surface_material()
+    box = hull.make_box_hull(0.5, 0.5, 0.5)
+    md = mesh.create_box_mesh(math.vec3_zero(), math.vec3(0.5, 0.5, 0.5), false)
+    mats_block = calloc(1, sizeof(SurfaceMaterial))
+    mat_array = mats_block as SurfaceMaterial[]
+    mat_array[0] = mat
+    d = make_defs(2, 1, 1, 1)
+    capsules = d.capsules as CompoundCapsuleDef[]
+    capsules[0] = compound.compound_capsule_def(manifold.capsule(math.vec3_zero(), math.vec3(1.0, 0.0, 0.0), 0.2), mat)
+    capsules[1] = compound.compound_capsule_def(manifold.capsule(math.vec3(0.0, 2.0, 0.0), math.vec3(1.0, 2.0, 0.0), 0.2), mat)
+    hulls = d.hulls as CompoundHullDef[]
+    t = math.transform_identity()
+    t.p = math.vec3(5.0, 0.0, 0.0)
+    hulls[0] = compound.compound_hull_def(box, t, mat)
+    meshes = d.meshes as CompoundMeshDef[]
+    t = math.transform_identity()
+    t.p = math.vec3(0.0, 0.0, 5.0)
+    meshes[0] = compound.compound_mesh_def(md, t, math.vec3_one(), mats_block, 1)
+    spheres = d.spheres as CompoundSphereDef[]
+    spheres[0] = compound.compound_sphere_def(manifold.sphere(math.vec3(0.0 - 5.0, 0.0, 0.0), 0.5), mat)
+    c = compound.create_compound(&d.def)
+    // The order is capsules, hulls, meshes, spheres.
+    ensure("child kinds", compound.get_compound_child(c, 0).kind == shape.SHAPE_CAPSULE && compound.get_compound_child(c, 1).kind == shape.SHAPE_CAPSULE &&
+                          compound.get_compound_child(c, 2).kind == shape.SHAPE_HULL && compound.get_compound_child(c, 3).kind == shape.SHAPE_MESH &&
+                          compound.get_compound_child(c, 4).kind == shape.SHAPE_SPHERE)
+    // A capsule's and a sphere's transform is the identity: their place is in their centres.
+    cap0 = compound.get_compound_child(c, 0)
+    small("capsule child transform x", cap0.transform.p.x, math.EPSILON)
+    small("capsule child transform y", cap0.transform.p.y, math.EPSILON)
+    small("capsule child transform z", cap0.transform.p.z, math.EPSILON)
+    small("capsule child centre", cap0.capsule.center2.x - 1.0, math.EPSILON)
+    sph = compound.get_compound_child(c, 4)
+    small("sphere child transform", sph.transform.p.x, math.EPSILON)
+    small("sphere child centre", sph.sphere.center.x + 5.0, math.EPSILON)
+    // A hull's and a mesh's carry their stored transform.
+    h = compound.get_compound_child(c, 2)
+    small("hull child transform", h.transform.p.x - 5.0, math.EPSILON)
+    m = compound.get_compound_child(c, 3)
+    small("mesh child transform", m.transform.p.z - 5.0, math.EPSILON)
+    ensure("mesh child data", m.mesh.data != null)
+    compound.destroy_compound(c)
+    free_defs(d)
+
+    // The bounds contain the children and move with the transform.
+    d = make_defs(0, 0, 0, 2)
+    spheres = d.spheres as CompoundSphereDef[]
+    spheres[0] = compound.compound_sphere_def(manifold.sphere(math.vec3(0.0 - 3.0, 0.0, 0.0), 1.0), mat)
+    spheres[1] = compound.compound_sphere_def(manifold.sphere(math.vec3(4.0, 0.0, 0.0), 0.5), mat)
+    c = compound.create_compound(&d.def)
+    local = compound.compute_compound_aabb(c, math.transform_identity())
+    ensure("bounds lower x", local.lower.x <= 0.0 - 4.0 + 0.00001)
+    ensure("bounds upper x", local.upper.x >= 4.5 - 0.00001)
+    ensure("bounds lower y", local.lower.y <= 0.0 - 1.0 + 0.00001)
+    ensure("bounds upper y", local.upper.y >= 1.0 - 0.00001)
+    xf = Transform { p: math.vec3(10.0, 20.0, 30.0), q: math.quat_identity() }
+    world = compound.compute_compound_aabb(c, xf)
+    small("moved bounds x", world.lower.x - (local.lower.x + 10.0), 0.0001)
+    small("moved bounds y", world.upper.y - (local.upper.y + 20.0), 0.0001)
+    small("moved bounds z", world.lower.z - (local.lower.z + 30.0), 0.0001)
+    compound.destroy_compound(c)
+    free_defs(d)
+    free(mats_block)
+    mesh.destroy_mesh(md)
+    hull.destroy_hull(box)
+}
+
+test_casts() {
+    mat = material.default_surface_material()
+    point_block = calloc(1, sizeof(Vec3))
+
+    // A ray above a sphere misses.
+    d = make_defs(0, 0, 0, 1)
+    spheres = d.spheres as CompoundSphereDef[]
+    spheres[0] = compound.compound_sphere_def(manifold.sphere(math.vec3_zero(), 0.5), mat)
+    c = compound.create_compound(&d.def)
+    ensure("ray miss", compound.ray_cast_compound(c, math.vec3(0.0 - 5.0, 5.0, 0.0), math.vec3(10.0, 0.0, 0.0), 1.0).hit == false)
+    compound.destroy_compound(c)
+    free_defs(d)
+
+    // Two spheres along x: the ray hits the nearer, with its material.
+    d = make_defs(0, 0, 0, 2)
+    spheres = d.spheres as CompoundSphereDef[]
+    spheres[0] = compound.compound_sphere_def(manifold.sphere(math.vec3(5.0, 0.0, 0.0), 1.0), make_material(0.4, 100))
+    spheres[1] = compound.compound_sphere_def(manifold.sphere(math.vec3(10.0, 0.0, 0.0), 1.0), make_material(0.4, 200))
+    c = compound.create_compound(&d.def)
+    out = compound.ray_cast_compound(c, math.vec3_zero(), math.vec3(20.0, 0.0, 0.0), 1.0)
+    ensure("ray nearest hit", out.hit)
+    small("ray nearest fraction", out.fraction - 0.2, 0.0001)
+    small("ray nearest normal", out.normal.x + 1.0, 0.0001)
+    ensure("ray nearest child", out.child_index == 0)
+    ensure("ray nearest material", compound.get_compound_material(c, out.material_index).user_material_id == (100 as long))
+    // From the far side, the other one.
+    out = compound.ray_cast_compound(c, math.vec3(15.0, 0.0, 0.0), math.vec3(0.0 - 20.0, 0.0, 0.0), 1.0)
+    ensure("ray from the far side", out.hit && out.child_index == 1 && compound.get_compound_material(c, out.material_index).user_material_id == (200 as long))
+    small("ray from the far side fraction", out.fraction - 0.2, 0.0001)
+    // The shape cast: a sphere of radius 0.25 stops at x = 3.75.
+    out = compound.shape_cast_compound(c, point_proxy(point_block, math.vec3_zero(), 0.25), math.vec3(20.0, 0.0, 0.0), 1.0, false)
+    ensure("shape cast nearest hit", out.hit)
+    small("shape cast nearest fraction", out.fraction - 3.75 / 20.0, 0.001)
+    ensure("shape cast nearest child", out.child_index == 0)
+    compound.destroy_compound(c)
+    free_defs(d)
+
+    // A unit box turned a quarter about z at x 5: the normal comes back in the compound's frame.
+    box = hull.make_box_hull(1.0, 1.0, 1.0)
+    d = make_defs(0, 1, 0, 0)
+    hulls = d.hulls as CompoundHullDef[]
+    hulls[0] = compound.compound_hull_def(box, Transform { p: math.vec3(5.0, 0.0, 0.0), q: math.make_quat_from_axis_angle(math.vec3_axis_z(), 0.5 * math.PI) }, mat)
+    c = compound.create_compound(&d.def)
+    out = compound.ray_cast_compound(c, math.vec3_zero(), math.vec3(20.0, 0.0, 0.0), 1.0)
+    ensure("turned hull ray hit", out.hit)
+    small("turned hull ray fraction", out.fraction - 0.2, 0.0001)
+    small("turned hull ray normal x", out.normal.x + 1.0, 0.001)
+    small("turned hull ray normal y", out.normal.y, 0.001)
+    small("turned hull ray normal z", out.normal.z, 0.001)
+    out = compound.shape_cast_compound(c, point_proxy(point_block, math.vec3_zero(), 0.25), math.vec3(20.0, 0.0, 0.0), 1.0, false)
+    ensure("turned hull shape cast hit", out.hit)
+    small("turned hull shape cast fraction", out.fraction - 3.75 / 20.0, 0.001)
+    small("turned hull shape cast normal x", out.normal.x + 1.0, 0.001)
+    small("turned hull shape cast normal y", out.normal.y, 0.001)
+    small("turned hull shape cast normal z", out.normal.z, 0.001)
+    small("turned hull shape cast point x", out.point.x - 4.0, 0.001)
+    small("turned hull shape cast point y", out.point.y, 0.001)
+    small("turned hull shape cast point z", out.point.z, 0.001)
+    ensure("turned hull shape cast child", out.child_index == 0)
+    compound.destroy_compound(c)
+    free_defs(d)
+    hull.destroy_hull(box)
+
+    // A shape cast that misses, and an empty proxy.
+    d = make_defs(0, 0, 0, 1)
+    spheres = d.spheres as CompoundSphereDef[]
+    spheres[0] = compound.compound_sphere_def(manifold.sphere(math.vec3(5.0, 0.0, 0.0), 1.0), mat)
+    c = compound.create_compound(&d.def)
+    ensure("shape cast miss", compound.shape_cast_compound(c, point_proxy(point_block, math.vec3(0.0, 5.0, 0.0), 0.25), math.vec3(20.0, 0.0, 0.0), 1.0, false).hit == false)
+    ensure("empty proxy", compound.shape_cast_compound(c, distance.shape_proxy(point_block, 0, 0.25), math.vec3(20.0, 0.0, 0.0), 1.0, false).hit == false)
+    compound.destroy_compound(c)
+    free_defs(d)
+
+    // A mesh of two triangles with a material each: the hit's material is remapped into the table.
+    vertices_block = calloc(6, sizeof(Vec3))
+    vertices = vertices_block as Vec3[]
+    vertices[0] = math.vec3(0.0 - 3.0, 0.0, 0.0 - 1.0)
+    vertices[1] = math.vec3(0.0 - 2.0, 0.0, 1.0)
+    vertices[2] = math.vec3(0.0 - 1.0, 0.0, 0.0 - 1.0)
+    vertices[3] = math.vec3(1.0, 0.0, 0.0 - 1.0)
+    vertices[4] = math.vec3(2.0, 0.0, 1.0)
+    vertices[5] = math.vec3(3.0, 0.0, 0.0 - 1.0)
+    indices_block = calloc(6, 4)
+    indices = indices_block as int[]
+    i = 0
+    while i < 6 {
+        indices[i] = i
+        i = i + 1
+    }
+    material_indices_block = calloc(2, 4)
+    material_indices = material_indices_block as int[]
+    material_indices[1] = 1
+    mdef = mesh.mesh_def()
+    mdef.vertices = vertices_block
+    mdef.indices = indices_block
+    mdef.material_indices = material_indices_block
+    mdef.vertex_count = 6
+    mdef.triangle_count = 2
+    md = mesh.create_mesh(&mdef, null, 0)
+    ensure("two-material mesh", md.material_count == 2)
+    mats_block = calloc(2, sizeof(SurfaceMaterial))
+    mat_array = mats_block as SurfaceMaterial[]
+    mat_array[0] = make_material(0.3, 100)
+    mat_array[1] = make_material(0.7, 200)
+    d = make_defs(0, 0, 1, 0)
+    meshes = d.meshes as CompoundMeshDef[]
+    meshes[0] = compound.compound_mesh_def(md, math.transform_identity(), math.vec3_one(), mats_block, 2)
+    c = compound.create_compound(&d.def)
+    ensure("remap table", c.material_count == 2)
+    out = compound.ray_cast_compound(c, math.vec3(0.0 - 2.0, 5.0, 0.0), math.vec3(0.0, 0.0 - 10.0, 0.0), 1.0)
+    ensure("remap ray a", out.hit && compound.get_compound_material(c, out.material_index).user_material_id == (100 as long))
+    out = compound.ray_cast_compound(c, math.vec3(2.0, 5.0, 0.0), math.vec3(0.0, 0.0 - 10.0, 0.0), 1.0)
+    ensure("remap ray b", out.hit && compound.get_compound_material(c, out.material_index).user_material_id == (200 as long))
+    out = compound.shape_cast_compound(c, point_proxy(point_block, math.vec3(2.0, 5.0, 0.0), 0.1), math.vec3(0.0, 0.0 - 10.0, 0.0), 1.0, false)
+    ensure("remap shape cast", out.hit && compound.get_compound_material(c, out.material_index).user_material_id == (200 as long))
+    // The mover's plane on the second triangle carries the same material.
+    planes_block = calloc(8, sizeof(PlaneResult))
+    planes = planes_block as PlaneResult[]
+    count = compound.collide_mover_and_compound(planes, 8, c, manifold.capsule(math.vec3(2.0, 0.2, 0.0), math.vec3(2.0, 1.2, 0.0), 0.3))
+    ensure("remap mover (${count})", count == 1)
+    if count == 1 { ensure("remap mover material", compound.get_compound_material(c, planes[0].material_index).user_material_id == (200 as long)) }
+    free(planes_block)
+    compound.destroy_compound(c)
+    free_defs(d)
+    free(mats_block)
+    mesh.destroy_mesh(md)
+    free(material_indices_block)
+    free(indices_block)
+    free(vertices_block)
+    free(point_block)
+}
+
+test_overlap() {
+    mat = material.default_surface_material()
+    point_block = calloc(2, sizeof(Vec3))
+    points = point_block as Vec3[]
+    d = make_defs(0, 0, 0, 2)
+    spheres = d.spheres as CompoundSphereDef[]
+    spheres[0] = compound.compound_sphere_def(manifold.sphere(math.vec3(0.0 - 3.0, 0.0, 0.0), 0.5), mat)
+    spheres[1] = compound.compound_sphere_def(manifold.sphere(math.vec3(3.0, 0.0, 0.0), 0.5), mat)
+    c = compound.create_compound(&d.def)
+    ensure("gap is clear", compound.overlap_compound(c, math.transform_identity(), point_proxy(point_block, math.vec3_zero(), 0.25)) == false)
+    ensure("second sphere overlaps", compound.overlap_compound(c, math.transform_identity(), point_proxy(point_block, math.vec3(3.0, 0.0, 0.0), 0.1)))
+    // Under a transform the proxy arrives in world space.
+    t = Transform { p: math.vec3(10.0, 20.0, 30.0), q: math.make_quat_from_axis_angle(math.vec3_axis_z(), 0.5 * math.PI) }
+    ensure("moved gap is clear", compound.overlap_compound(c, t, point_proxy(point_block, math.transform_point(t, math.vec3_zero()), 0.25)) == false)
+    ensure("moved sphere overlaps", compound.overlap_compound(c, t, point_proxy(point_block, math.transform_point(t, math.vec3(3.0, 0.0, 0.0)), 0.1)))
+    ensure("a stale local point misses", compound.overlap_compound(c, t, point_proxy(point_block, math.vec3(3.0, 0.0, 0.0), 0.1)) == false)
+    // A segment proxy, point by point.
+    t = Transform { p: math.vec3(0.0 - 40.0, 15.0, 7.0), q: math.make_quat_from_axis_angle(math.vec3_axis_y(), 0.5 * math.PI) }
+    points[0] = math.transform_point(t, math.vec3(0.0 - 1.0, 0.0, 0.0))
+    points[1] = math.transform_point(t, math.vec3(1.0, 0.0, 0.0))
+    ensure("segment in the gap", compound.overlap_compound(c, t, distance.shape_proxy(point_block, 2, 0.25)) == false)
+    points[1] = math.transform_point(t, math.vec3(2.9, 0.0, 0.0))
+    ensure("segment reaching the sphere", compound.overlap_compound(c, t, distance.shape_proxy(point_block, 2, 0.25)))
+    compound.destroy_compound(c)
+    free_defs(d)
+
+    // One child of every kind, far apart, under a transform.
+    box = hull.make_box_hull(0.5, 0.5, 0.5)
+    md = mesh.create_box_mesh(math.vec3_zero(), math.vec3(0.5, 0.5, 0.5), false)
+    mats_block = calloc(1, sizeof(SurfaceMaterial))
+    mat_array = mats_block as SurfaceMaterial[]
+    mat_array[0] = mat
+    d = make_defs(1, 1, 1, 1)
+    capsules = d.capsules as CompoundCapsuleDef[]
+    capsules[0] = compound.compound_capsule_def(manifold.capsule(math.vec3(0.0 - 10.0, 0.0, 0.0), math.vec3(0.0 - 9.0, 0.0, 0.0), 0.25), mat)
+    hulls = d.hulls as CompoundHullDef[]
+    hulls[0] = compound.compound_hull_def(box, Transform { p: math.vec3_zero(), q: math.make_quat_from_axis_angle(math.vec3_axis_z(), 0.25 * math.PI) }, mat)
+    meshes = d.meshes as CompoundMeshDef[]
+    meshes[0] = compound.compound_mesh_def(md, Transform { p: math.vec3(10.0, 0.0, 0.0), q: math.make_quat_from_axis_angle(math.vec3_axis_y(), 0.5 * math.PI) }, math.vec3_one(), mats_block, 1)
+    spheres = d.spheres as CompoundSphereDef[]
+    spheres[0] = compound.compound_sphere_def(manifold.sphere(math.vec3(20.0, 0.0, 0.0), 0.5), mat)
+    c = compound.create_compound(&d.def)
+    t = Transform { p: math.vec3(100.0, 200.0, 300.0), q: math.make_quat_from_axis_angle(math.vec3_axis_z(), 0.5 * math.PI) }
+    ensure("capsule child overlaps", compound.overlap_compound(c, t, point_proxy(point_block, math.transform_point(t, math.vec3(0.0 - 9.5, 0.0, 0.0)), 0.1)))
+    ensure("hull child overlaps", compound.overlap_compound(c, t, point_proxy(point_block, math.transform_point(t, math.vec3_zero()), 0.1)))
+    ensure("mesh child overlaps", compound.overlap_compound(c, t, point_proxy(point_block, math.transform_point(t, math.vec3(10.0, 0.45, 0.0)), 0.1)))
+    ensure("sphere child overlaps", compound.overlap_compound(c, t, point_proxy(point_block, math.transform_point(t, math.vec3(20.0, 0.0, 0.0)), 0.1)))
+    ensure("gap between hull and mesh", compound.overlap_compound(c, t, point_proxy(point_block, math.transform_point(t, math.vec3(5.0, 0.0, 0.0)), 0.1)) == false)
+    compound.destroy_compound(c)
+    free_defs(d)
+    free(mats_block)
+    mesh.destroy_mesh(md)
+    hull.destroy_hull(box)
+    free(point_block)
+}
+
+struct Accumulator {
+    indices: ptr     // int[8]
+    count: int
+    stop_after: int  // -1 never
+}
+
+accumulate(c: *CompoundData, child_index: int, context: ptr) -> bool {
+    acc = context as *Accumulator
+    indices = acc.indices as int[]
+    if acc.count < 8 {
+        indices[acc.count] = child_index
+        acc.count = acc.count + 1
+    }
+    if acc.stop_after >= 0 && acc.count >= acc.stop_after { return false }
+    return true
+}
+
+test_query_and_mover() {
+    mat = material.default_surface_material()
+    d = make_defs(0, 0, 0, 3)
+    spheres = d.spheres as CompoundSphereDef[]
+    spheres[0] = compound.compound_sphere_def(manifold.sphere(math.vec3(0.0 - 10.0, 0.0, 0.0), 0.5), mat)
+    spheres[1] = compound.compound_sphere_def(manifold.sphere(math.vec3_zero(), 0.5), mat)
+    spheres[2] = compound.compound_sphere_def(manifold.sphere(math.vec3(10.0, 0.0, 0.0), 0.5), mat)
+    c = compound.create_compound(&d.def)
+    indices_block = calloc(8, 4)
+    indices = indices_block as int[]
+    acc = Accumulator { indices: indices_block, count: 0, stop_after: 0 - 1 }
+    compound.query_compound(c, AABB { lower: math.vec3(0.0 - 1.0, 0.0 - 1.0, 0.0 - 1.0), upper: math.vec3(1.0, 1.0, 1.0) }, accumulate, (&acc) as ptr)
+    ensure("query the middle", acc.count == 1 && indices[0] == 1)
+    acc = Accumulator { indices: indices_block, count: 0, stop_after: 1 }
+    wide = AABB { lower: math.vec3(0.0 - 20.0, 0.0 - 1.0, 0.0 - 1.0), upper: math.vec3(20.0, 1.0, 1.0) }
+    compound.query_compound(c, wide, accumulate, (&acc) as ptr)
+    ensure("query stops early", acc.count == 1)
+    acc = Accumulator { indices: indices_block, count: 0, stop_after: 0 - 1 }
+    compound.query_compound(c, wide, accumulate, (&acc) as ptr)
+    ensure("query all three", acc.count == 3)
+    ensure("query each once", indices[0] + indices[1] + indices[2] == 3 && indices[0] != indices[1] && indices[1] != indices[2] && indices[0] != indices[2])
+    compound.destroy_compound(c)
+    free_defs(d)
+
+    // Two boxes side by side with a gap; a capsule lying across both
+    // gets a plane from each pointing up.
+    box = hull.make_box_hull(0.5, 0.5, 0.5)
+    d = make_defs(0, 2, 0, 0)
+    hulls = d.hulls as CompoundHullDef[]
+    hulls[0] = compound.compound_hull_def(box, Transform { p: math.vec3(0.0 - 1.0, 0.0, 0.0), q: math.quat_identity() }, mat)
+    hulls[1] = compound.compound_hull_def(box, Transform { p: math.vec3(1.0, 0.0, 0.0), q: math.quat_identity() }, mat)
+    c = compound.create_compound(&d.def)
+    mover = manifold.capsule(math.vec3(0.0 - 1.0, 0.6, 0.0), math.vec3(1.0, 0.6, 0.0), 0.2)
+    planes_block = calloc(8, sizeof(PlaneResult))
+    planes = planes_block as PlaneResult[]
+    count = compound.collide_mover_and_compound(planes, 8, c, mover)
+    ensure("mover two planes (${count})", count >= 2)
+    up = 0
+    i = 0
+    while i < count {
+        if planes[i].plane.normal.y > 0.9 { up = up + 1 }
+        i = i + 1
+    }
+    ensure("mover planes point up", up >= 2)
+    ensure("mover children", count == 2 && planes[0].child_index != planes[1].child_index)
+    ensure("mover capacity", compound.collide_mover_and_compound(planes, 1, c, mover) <= 1)
+    ensure("mover no capacity", compound.collide_mover_and_compound(planes, 0, c, mover) == 0)
+    compound.destroy_compound(c)
+    free_defs(d)
+
+    // A child turned a quarter about z: its plane comes back in the compound's frame.
+    d = make_defs(0, 1, 0, 0)
+    hulls = d.hulls as CompoundHullDef[]
+    hulls[0] = compound.compound_hull_def(box, Transform { p: math.vec3_zero(), q: math.make_quat_from_axis_angle(math.vec3_axis_z(), 0.5 * math.PI) }, make_material(0.25, 77))
+    c = compound.create_compound(&d.def)
+    mover = manifold.capsule(math.vec3(0.0 - 0.1, 0.6, 0.0), math.vec3(0.1, 0.6, 0.0), 0.2)
+    count = compound.collide_mover_and_compound(planes, 8, c, mover)
+    ensure("turned child plane", count >= 1)
+    if count >= 1 {
+        small("turned child normal x", planes[0].plane.normal.x, 0.001)
+        small("turned child normal y", planes[0].plane.normal.y - 1.0, 0.001)
+        small("turned child normal z", planes[0].plane.normal.z, 0.001)
+        small("turned child point", planes[0].point.y - 0.5, 0.001)
+        ensure("turned child index", planes[0].child_index == 0)
+        ensure("turned child material", compound.get_compound_material(c, planes[0].material_index).user_material_id == (77 as long))
+    }
+    compound.destroy_compound(c)
+    free_defs(d)
+    free(planes_block)
+    free(indices_block)
+    hull.destroy_hull(box)
+}
+
+test_through_shape() {
+    // The compound as a Shape under a transform: every query goes through the dispatch.
+    _mat = material.default_surface_material()
+    box = hull.make_box_hull(1.0, 1.0, 1.0)
+    d = make_defs(0, 1, 0, 1)
+    hulls = d.hulls as CompoundHullDef[]
+    hulls[0] = compound.compound_hull_def(box, Transform { p: math.vec3(5.0, 0.0, 0.0), q: math.quat_identity() }, make_material(0.3, 5))
+    spheres = d.spheres as CompoundSphereDef[]
+    spheres[0] = compound.compound_sphere_def(manifold.sphere(math.vec3(0.0 - 5.0, 0.0, 0.0), 1.0), make_material(0.4, 6))
+    c = compound.create_compound(&d.def)
+    sh = shape.compound_shape(c)
+    ensure("compound shape kind", sh.kind == shape.SHAPE_COMPOUND && sh.material_count == 2)
+    t = Transform { p: math.vec3(10.0, 20.0, 30.0), q: math.make_quat_from_axis_angle(math.vec3_axis_z(), 0.5 * math.PI) }
+    // Local x is world y: the hull sits at world (10, 25, 30), the sphere at (10, 15, 30).
+    bounds = shape.compute_shape_aabb(&sh, t)
+    small("compound bounds upper y", bounds.upper.y - 26.0, 0.0001)
+    small("compound bounds lower y", bounds.lower.y - 14.0, 0.0001)
+    small("compound centroid", math.length(shape.get_shape_centroid(&sh)), 0.0001)
+    extent = shape.compute_shape_extent(&sh, math.vec3_zero())
+    small("compound extent", extent.max_extent.x - 6.0, 0.0001)
+    ensure("compound has no mass", shape.compute_shape_mass(&sh).mass == 0.0)
+    // A world ray down onto the hull's top (world y 26) from above.
+    out = shape.ray_cast_shape(&sh, t, math.vec3(10.0, 30.0, 30.0), math.vec3(0.0, 0.0 - 8.0, 0.0), 1.0)
+    ensure("compound ray hit", out.hit)
+    small("compound ray fraction", out.fraction - 0.5, 0.0001)
+    small("compound ray normal", out.normal.y - 1.0, 0.0001)
+    ensure("compound ray child", out.child_index == 0)
+    ensure("compound ray material", compound.get_compound_material(c, out.material_index).user_material_id == (5 as long))
+    // A world ray up onto the sphere's underside (world y 14).
+    out = shape.ray_cast_shape(&sh, t, math.vec3(10.0, 10.0, 30.0), math.vec3(0.0, 8.0, 0.0), 1.0)
+    ensure("compound ray sphere", out.hit && out.child_index == 1)
+    small("compound ray sphere fraction", out.fraction - 0.5, 0.0001)
+    ensure("compound ray sphere material", compound.get_compound_material(c, out.material_index).user_material_id == (6 as long))
+    // A shape cast of a small sphere down onto the hull.
+    point_block = calloc(1, sizeof(Vec3))
+    out = shape.shape_cast_shape(&sh, t, point_proxy(point_block, math.vec3(10.0, 30.0, 30.0), 0.5), math.vec3(0.0, 0.0 - 8.0, 0.0), 1.0, false)
+    ensure("compound shape cast hit", out.hit && out.child_index == 0)
+    small("compound shape cast fraction", out.fraction - 3.5 / 8.0, 0.001)
+    small("compound shape cast normal", out.normal.y - 1.0, 0.001)
+    // The overlap.
+    ensure("compound overlap", shape.overlap_shape(&sh, t, point_proxy(point_block, math.vec3(10.0, 26.4, 30.0), 0.5)))
+    ensure("compound clear", shape.overlap_shape(&sh, t, point_proxy(point_block, math.vec3(10.0, 26.6, 30.0), 0.5)) == false)
+    // The mover standing on the hull.
+    planes_block = calloc(8, sizeof(PlaneResult))
+    planes = planes_block as PlaneResult[]
+    mover = manifold.capsule(math.vec3(10.0, 26.2, 30.0), math.vec3(10.0, 27.2, 30.0), 0.3)
+    count = shape.collide_mover(planes, 8, &sh, t, mover)
+    ensure("compound mover (${count})", count == 1)
+    if count == 1 {
+        small("compound mover normal", planes[0].plane.normal.y - 1.0, 0.0001)
+        small("compound mover offset", planes[0].plane.offset - 0.1, 0.0001)
+        ensure("compound mover child and material", planes[0].child_index == 0 && planes[0].material_index == 0)
+    }
+    free(planes_block)
+    free(point_block)
+    compound.destroy_compound(c)
+    free_defs(d)
+    hull.destroy_hull(box)
+}
+
+var field_visits = 0
+
+count_child(c: *CompoundData, child_index: int, context: ptr) -> bool {
+    field_visits = field_visits + 1
+    return true
+}
+
+test_field() {
+    // A thousand spheres on a grid: the tree finds the few in a box, the
+    // ray the nearest, the cast through them all.
+    mat = material.default_surface_material()
+    d = make_defs(0, 0, 0, 1000)
+    spheres = d.spheres as CompoundSphereDef[]
+    i = 0
+    while i < 1000 {
+        x = (i % 10) as float
+        y = ((i / 10) % 10) as float
+        z = (i / 100) as float
+        spheres[i] = compound.compound_sphere_def(manifold.sphere(math.vec3(2.0 * x, 2.0 * y, 2.0 * z), 0.5), mat)
+        i = i + 1
+    }
+    c = compound.create_compound(&d.def)
+    ensure("field created", c != null && c.sphere_count == 1000 && c.tree.proxy_count == 1000)
+    ensure("field tree valid", dynamic_tree.tree_validate(&c.tree))
+    ensure("field tree height", dynamic_tree.tree_get_height(&c.tree) <= 16)
+    field_visits = 0
+    // Centres 4 and 6 on each axis: two per axis, eight spheres.
+    compound.query_compound(c, AABB { lower: math.vec3(3.0, 3.0, 3.0), upper: math.vec3(7.0, 7.0, 7.0) }, count_child, null)
+    ensure("field query (${field_visits})", field_visits == 8)
+    out = compound.ray_cast_compound(c, math.vec3(0.0 - 5.0, 4.0, 4.0), math.vec3(30.0, 0.0, 0.0), 1.0)
+    ensure("field ray", out.hit && out.child_index == 0 * 1 + 2 * 10 + 2 * 100)
+    small("field ray fraction", out.fraction - 4.5 / 30.0, 0.0001)
+    out = compound.ray_cast_compound(c, math.vec3(25.0, 4.0, 4.0), math.vec3(0.0 - 30.0, 0.0, 0.0), 1.0)
+    ensure("field ray back", out.hit && out.child_index == 9 + 2 * 10 + 2 * 100)
+    point_block = calloc(1, sizeof(Vec3))
+    out = compound.shape_cast_compound(c, point_proxy(point_block, math.vec3(4.0, 30.0, 4.0), 0.25), math.vec3(0.0, 0.0 - 40.0, 0.0), 1.0, false)
+    ensure("field shape cast", out.hit && out.child_index == 2 + 9 * 10 + 2 * 100)
+    small("field shape cast fraction", out.fraction - (30.0 - 18.75) / 40.0, 0.001)
+    ensure("field overlap", compound.overlap_compound(c, math.transform_identity(), point_proxy(point_block, math.vec3(18.0, 18.0, 18.0), 0.1)))
+    ensure("field clear", compound.overlap_compound(c, math.transform_identity(), point_proxy(point_block, math.vec3(1.0, 1.0, 1.0), 0.1)) == false)
+    free(point_block)
+    compound.destroy_compound(c)
+    free_defs(d)
+}
+
+main() {
+    before = core.alloc_count()
+    test_create()
+    test_materials()
+    test_sharing()
+    test_children_and_bounds()
+    test_casts()
+    test_overlap()
+    test_query_and_mover()
+    test_through_shape()
+    test_field()
+    // The scratch stays allocated: compound's three blocks, mesh's three, sphere's two, shape's one.
+    ensure("every other counted allocation was freed (${core.alloc_count() - before})", core.alloc_count() == before + 9)
+
+    println("compound: ${checks} checks")
+    if failures == 0 {
+        println("compound: all checks passed")
+    } else {
+        println("compound: ${failures} failure(s)")
+        exit(1)
+    }
+}

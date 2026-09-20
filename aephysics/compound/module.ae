@@ -1,0 +1,780 @@
+// aephysics.compound -- the baked compound: capsules, hulls, meshes and
+// spheres packed into one block under a static bounding volume tree,
+// the hulls and meshes shared by content, the materials shared by
+// value; and the queries over it: bounds, overlap, ray cast, shape
+// cast, the box query, the character mover's planes.
+//
+// The compound is Box3D's compound.c (Erin Catto, MIT), the reference
+// this engine is measured against: the child order (capsules, hulls,
+// meshes, spheres), the tree built once with a full rebuild and carried
+// in the block, the one level of indirection from a hull or mesh
+// instance to its shared data, a mesh child's four material slots
+// remapped into the compound's table, and every query brought into the
+// child's frame and its result carried back. Names are the reference's
+// without its prefix, in snake case: b3CreateCompound is
+// create_compound.
+//
+// Differences: the byte roundtrip (b3ConvertCompoundToBytes) is not
+// ported, as with the tree's, the mesh's and the height field's; a
+// child's material indices are four named fields; the shared-content
+// maps are core's LongMap on the hull's and the mesh's own hash with a
+// byte comparison behind it.
+import std.string
+import aephysics.math
+import aephysics.core
+import aephysics.dynamic_tree
+import aephysics.hull
+import aephysics.distance
+import aephysics.manifold
+import aephysics.mesh
+import aephysics.material
+import aephysics.sphere
+import aephysics.capsule
+
+exports (
+    CompoundCapsuleDef, CompoundHullDef, CompoundMeshDef, CompoundSphereDef, CompoundDef,
+    CompoundData, CompoundCapsule, CompoundHull, CompoundMesh, CompoundSphere, ChildShape,
+    COMPOUND_VERSION, MAX_COMPOUND_MESH_MATERIALS, MAX_CHILD_SHAPES, NULL_INDEX,
+    compound_def, compound_capsule_def, compound_hull_def, compound_mesh_def, compound_sphere_def,
+    create_compound, destroy_compound,
+    get_compound_materials, get_compound_material, get_compound_capsule, get_compound_hull,
+    get_compound_mesh, get_compound_sphere, get_compound_child, compound_child_count,
+    compute_compound_aabb, overlap_compound, ray_cast_compound, shape_cast_compound,
+    query_compound, collide_mover_and_compound, make_compound_child_sweep
+)
+
+extern memcpy(dst: ptr, src: ptr, size: int) -> ptr
+extern memset(block: ptr, value: int, size: int) -> ptr
+extern memcmp(a: ptr, b: ptr, size: int) -> int
+
+const NULL_INDEX = 0 - 1
+const COMPOUND_VERSION = 0x5C0E7B9A
+const MAX_COMPOUND_MESH_MATERIALS = 4
+// The child index shares a 64-bit key with two shape ids in the reference's tables.
+const MAX_CHILD_SHAPES = 1 << 20
+// The shape module's kinds (it is above this one): sphere 0, capsule 1, hull 2, mesh 3.
+const KIND_SPHERE = 0
+const KIND_CAPSULE = 1
+const KIND_HULL = 2
+const KIND_MESH = 3
+
+// --- definitions -----------------------------------------------------------------------------
+
+struct CompoundCapsuleDef {
+    capsule: Capsule
+    material: SurfaceMaterial
+}
+
+struct CompoundHullDef {
+    hull: *HullData          // shared; copied into the compound
+    transform: Transform     // the hull into the compound's frame
+    material: SurfaceMaterial
+}
+
+struct CompoundMeshDef {
+    mesh_data: *MeshData     // shared; copied into the compound
+    transform: Transform
+    scale: Vec3              // may be negative on any axis
+    materials: ptr           // SurfaceMaterial[], lined up with the triangles' material indices
+    material_count: int
+}
+
+struct CompoundSphereDef {
+    sphere: Sphere
+    material: SurfaceMaterial
+}
+
+// Everything here is copied into the compound; nothing is kept.
+struct CompoundDef {
+    capsules: ptr            // CompoundCapsuleDef[]
+    capsule_count: int
+    hulls: ptr               // CompoundHullDef[]
+    hull_count: int
+    meshes: ptr              // CompoundMeshDef[]
+    mesh_count: int
+    spheres: ptr             // CompoundSphereDef[]
+    sphere_count: int
+}
+
+compound_def() -> CompoundDef {
+    return CompoundDef { capsules: null, capsule_count: 0, hulls: null, hull_count: 0, meshes: null, mesh_count: 0,
+                         spheres: null, sphere_count: 0 }
+}
+
+compound_capsule_def(c: Capsule, material: SurfaceMaterial) -> CompoundCapsuleDef {
+    return CompoundCapsuleDef { capsule: c, material: material }
+}
+
+compound_hull_def(h: *HullData, t: Transform, material: SurfaceMaterial) -> CompoundHullDef {
+    return CompoundHullDef { hull: h, transform: t, material: material }
+}
+
+compound_mesh_def(m: *MeshData, t: Transform, scale: Vec3, materials: ptr, material_count: int) -> CompoundMeshDef {
+    return CompoundMeshDef { mesh_data: m, transform: t, scale: scale, materials: materials, material_count: material_count }
+}
+
+compound_sphere_def(s: Sphere, material: SurfaceMaterial) -> CompoundSphereDef {
+    return CompoundSphereDef { sphere: s, material: material }
+}
+
+// --- the block ----------------------------------------------------------------------------------
+
+// One block: the tree's nodes, proxies and traversal stack, the material
+// table, the capsules, the hull instances then the shared hulls, the
+// mesh instances then the shared meshes, the spheres, at byte offsets.
+struct CompoundData {
+    version: int
+    byte_count: int
+    node_offset: int
+    proxy_offset: int
+    stack_offset: int
+    tree: DynamicTree        // its pointers into this block; never inserted into
+    material_offset: int
+    material_count: int
+    capsule_offset: int
+    capsule_count: int
+    hull_offset: int         // the HullInstance array
+    hull_count: int
+    shared_hull_count: int
+    mesh_offset: int         // the MeshInstance array
+    mesh_count: int
+    shared_mesh_count: int
+    sphere_offset: int
+    sphere_count: int
+}
+
+// A capsule as stored and as returned.
+struct CompoundCapsule {
+    capsule: Capsule
+    material_index: int
+}
+
+// A hull instance as stored: the offset of its shared hull in the block.
+struct HullInstance {
+    transform: Transform
+    hull_offset: int
+    material_index: int
+}
+
+// A hull instance as returned.
+struct CompoundHull {
+    hull: *HullData
+    transform: Transform
+    material_index: int
+}
+
+// A mesh instance as stored: the triangle's material index, clamped to
+// four, selects one of its slots in the compound's table.
+struct MeshInstance {
+    transform: Transform
+    scale: Vec3
+    mesh_offset: int
+    material_index0: int
+    material_index1: int
+    material_index2: int
+    material_index3: int
+}
+
+struct CompoundMesh {
+    mesh_data: *MeshData
+    transform: Transform
+    scale: Vec3
+    material_index0: int
+    material_index1: int
+    material_index2: int
+    material_index3: int
+}
+
+struct CompoundSphere {
+    sphere: Sphere
+    material_index: int
+}
+
+// A child of any kind: the fields of the other kinds are unused. The
+// capsule's and sphere's transform is the identity, their place being
+// in their centres; material index 0 serves the convex kinds.
+struct ChildShape {
+    kind: int
+    capsule: Capsule
+    hull: *HullData
+    mesh: Mesh
+    sphere: Sphere
+    transform: Transform
+    material_index0: int
+    material_index1: int
+    material_index2: int
+    material_index3: int
+}
+
+align8(x: int) -> int { return (x + 7) & (0 - 8) }
+
+get_compound_materials(c: *CompoundData) -> SurfaceMaterial[] { return ((c as ptr) + c.material_offset) as SurfaceMaterial[] }
+
+get_compound_material(c: *CompoundData, index: int) -> SurfaceMaterial {
+    materials = get_compound_materials(c)
+    return materials[index]
+}
+
+get_compound_capsule(c: *CompoundData, index: int) -> CompoundCapsule {
+    capsules = ((c as ptr) + c.capsule_offset) as CompoundCapsule[]
+    return capsules[index]
+}
+
+get_compound_hull(c: *CompoundData, index: int) -> CompoundHull {
+    instances = ((c as ptr) + c.hull_offset) as HullInstance[]
+    return CompoundHull { hull: ((c as ptr) + instances[index].hull_offset) as *HullData, transform: instances[index].transform,
+                          material_index: instances[index].material_index }
+}
+
+get_compound_mesh(c: *CompoundData, index: int) -> CompoundMesh {
+    instances = ((c as ptr) + c.mesh_offset) as MeshInstance[]
+    return CompoundMesh { mesh_data: ((c as ptr) + instances[index].mesh_offset) as *MeshData, transform: instances[index].transform,
+                          scale: instances[index].scale, material_index0: instances[index].material_index0,
+                          material_index1: instances[index].material_index1, material_index2: instances[index].material_index2,
+                          material_index3: instances[index].material_index3 }
+}
+
+get_compound_sphere(c: *CompoundData, index: int) -> CompoundSphere {
+    spheres = ((c as ptr) + c.sphere_offset) as CompoundSphere[]
+    return spheres[index]
+}
+
+compound_child_count(c: *CompoundData) -> int { return c.capsule_count + c.hull_count + c.mesh_count + c.sphere_count }
+
+empty_child() -> ChildShape {
+    return ChildShape { kind: KIND_SPHERE, capsule: Capsule { center1: math.vec3_zero(), center2: math.vec3_zero(), radius: 0.0 },
+                        hull: null, mesh: Mesh { data: null, scale: math.vec3_one() }, sphere: Sphere { center: math.vec3_zero(), radius: 0.0 },
+                        transform: math.transform_identity(), material_index0: 0, material_index1: 0, material_index2: 0, material_index3: 0 }
+}
+
+// The child at an index, in the order capsules, hulls, meshes, spheres.
+get_compound_child(c: *CompoundData, child_index: int) -> ChildShape {
+    child = empty_child()
+    index = child_index
+    if index < c.capsule_count {
+        cc = get_compound_capsule(c, index)
+        child.kind = KIND_CAPSULE
+        child.capsule = cc.capsule
+        child.material_index0 = cc.material_index
+        return child
+    }
+    index = index - c.capsule_count
+    if index < c.hull_count {
+        ch = get_compound_hull(c, index)
+        child.kind = KIND_HULL
+        child.hull = ch.hull
+        child.transform = ch.transform
+        child.material_index0 = ch.material_index
+        return child
+    }
+    index = index - c.hull_count
+    if index < c.mesh_count {
+        cm = get_compound_mesh(c, index)
+        child.kind = KIND_MESH
+        child.mesh = Mesh { data: cm.mesh_data, scale: cm.scale }
+        child.transform = cm.transform
+        child.material_index0 = cm.material_index0
+        child.material_index1 = cm.material_index1
+        child.material_index2 = cm.material_index2
+        child.material_index3 = cm.material_index3
+        return child
+    }
+    index = index - c.mesh_count
+    cs = get_compound_sphere(c, index)
+    child.kind = KIND_SPHERE
+    child.sphere = cs.sphere
+    child.material_index0 = cs.material_index
+    return child
+}
+
+child_material(child: ChildShape, slot: int) -> int {
+    if slot <= 0 { return child.material_index0 }
+    if slot == 1 { return child.material_index1 }
+    if slot == 2 { return child.material_index2 }
+    return child.material_index3
+}
+
+// --- creation --------------------------------------------------------------------------------------
+
+// The material table under construction: the materials so far, and a
+// map from a material's hash to its index.
+struct MaterialTable {
+    materials: ptr           // SurfaceMaterial[]
+    count: int
+    capacity: int
+    map: LongMap
+    scratch: ptr             // the eight words a material hashes as
+}
+
+// A material's hash over its fields, written as eight words so the
+// struct's padding never enters.
+material_hash(scratch: ptr, m: SurfaceMaterial) -> long {
+    words = scratch as float[]
+    words[0] = m.friction
+    words[1] = m.restitution
+    words[2] = m.rolling_resistance
+    words[3] = m.tangent_velocity.x
+    words[4] = m.tangent_velocity.y
+    words[5] = m.tangent_velocity.z
+    ids = scratch as long[]
+    ids[6] = m.user_material_id
+    ids[7] = m.custom_color as long
+    return core.hash_bytes(scratch, 64)
+}
+
+// The index of a material in the table, added if new.
+table_index(t: *MaterialTable, m: SurfaceMaterial) -> int {
+    h = material_hash(t.scratch, m)
+    materials = t.materials as SurfaceMaterial[]
+    found = core.map_get(&t.map, h, NULL_INDEX)
+    if found != NULL_INDEX && material.same_material(materials[found], m) { return found }
+    index = t.count
+    materials[index] = m
+    t.count = t.count + 1
+    if found == NULL_INDEX { core.map_set(&t.map, h, index) }
+    return index
+}
+
+// A shared block (a hull or a mesh) by its hash, verified by its bytes;
+// the index of an equal one seen before, or the count (a new one).
+shared_index(map: *LongMap, hash: long, block: ptr, byte_count: int, blocks: ptr[], counts: int[], count: int) -> int {
+    found = core.map_get(map, hash, NULL_INDEX)
+    if found != NULL_INDEX && counts[found] == byte_count && memcmp(blocks[found], block, byte_count) == 0 { return found }
+    blocks[count] = block
+    counts[count] = byte_count
+    if found == NULL_INDEX { core.map_set(map, hash, count) }
+    return count
+}
+
+all_bits() -> long { return (0 as long) - (1 as long) }
+
+// The compound from its definition: the children's bounds go into a
+// tree rebuilt in full, the materials into a shared table, the hulls and
+// meshes deduplicated by content, then everything is packed into one
+// block. Null when there are no children or too many.
+create_compound(def: *CompoundDef) -> *CompoundData {
+    capsule_count = def.capsule_count
+    hull_count = def.hull_count
+    mesh_count = def.mesh_count
+    sphere_count = def.sphere_count
+    convex_count = capsule_count + hull_count + sphere_count
+    shape_count = convex_count + mesh_count
+    if shape_count == 0 || shape_count >= MAX_CHILD_SHAPES { return null }
+
+    tree = dynamic_tree.tree_create(shape_count)
+    child_index = 0
+    capsule_defs = def.capsules as CompoundCapsuleDef[]
+    hull_defs = def.hulls as CompoundHullDef[]
+    mesh_defs = def.meshes as CompoundMeshDef[]
+    sphere_defs = def.spheres as CompoundSphereDef[]
+
+    capsule_instances_block = core.alloc(math.max_int(capsule_count, 1) * sizeof(CompoundCapsule))
+    capsule_instances = capsule_instances_block as CompoundCapsule[]
+    hull_instances_block = core.alloc(math.max_int(hull_count, 1) * sizeof(HullInstance))
+    hull_instances = hull_instances_block as HullInstance[]
+    mesh_instances_block = core.alloc(math.max_int(mesh_count, 1) * sizeof(MeshInstance))
+    mesh_instances = mesh_instances_block as MeshInstance[]
+    sphere_instances_block = core.alloc(math.max_int(sphere_count, 1) * sizeof(CompoundSphere))
+    sphere_instances = sphere_instances_block as CompoundSphere[]
+
+    material_capacity = convex_count
+    i = 0
+    while i < mesh_count {
+        material_capacity = material_capacity + math.max_int(mesh_defs[i].material_count, 1)
+        i = i + 1
+    }
+    table = MaterialTable { materials: core.alloc(material_capacity * sizeof(SurfaceMaterial)), count: 0, capacity: material_capacity,
+                            map: core.map_create(2 * material_capacity), scratch: core.alloc(64) }
+
+    // Capsules.
+    i = 0
+    while i < capsule_count {
+        capsule_instances[i] = CompoundCapsule { capsule: capsule_defs[i].capsule, material_index: table_index(&table, capsule_defs[i].material) }
+        box = capsule.compute_capsule_aabb(capsule_defs[i].capsule, math.transform_identity())
+        dynamic_tree.tree_create_proxy(&tree, box, all_bits(), child_index as long)
+        child_index = child_index + 1
+        i = i + 1
+    }
+
+    // Hulls: an instance each, the shared ones once.
+    shared_hulls_block = core.alloc(math.max_int(hull_count, 1) * 8)
+    shared_hulls = shared_hulls_block as ptr[]
+    shared_hull_sizes_block = core.alloc(math.max_int(hull_count, 1) * 4)
+    shared_hull_sizes = shared_hull_sizes_block as int[]
+    shared_hull_offsets_block = core.alloc(math.max_int(hull_count, 1) * 4)
+    shared_hull_offsets = shared_hull_offsets_block as int[]
+    shared_hull_count = 0
+    hull_map = core.map_create(2 * math.max_int(hull_count, 1))
+    i = 0
+    while i < hull_count {
+        h = hull_defs[i].hull
+        box = hull.compute_hull_aabb(h, hull_defs[i].transform)
+        dynamic_tree.tree_create_proxy(&tree, box, all_bits(), child_index as long)
+        child_index = child_index + 1
+        shared = shared_index(&hull_map, h.hash, h as ptr, h.byte_count, shared_hulls, shared_hull_sizes, shared_hull_count)
+        if shared == shared_hull_count { shared_hull_count = shared_hull_count + 1 }
+        // The offset is not known yet: the shared index stands in for it.
+        hull_instances[i] = HullInstance { transform: hull_defs[i].transform, hull_offset: shared, material_index: table_index(&table, hull_defs[i].material) }
+        i = i + 1
+    }
+    core.map_destroy(&hull_map)
+
+    // Meshes.
+    shared_meshes_block = core.alloc(math.max_int(mesh_count, 1) * 8)
+    shared_meshes = shared_meshes_block as ptr[]
+    shared_mesh_sizes_block = core.alloc(math.max_int(mesh_count, 1) * 4)
+    shared_mesh_sizes = shared_mesh_sizes_block as int[]
+    shared_mesh_offsets_block = core.alloc(math.max_int(mesh_count, 1) * 4)
+    shared_mesh_offsets = shared_mesh_offsets_block as int[]
+    shared_mesh_count = 0
+    mesh_map = core.map_create(2 * math.max_int(mesh_count, 1))
+    i = 0
+    while i < mesh_count {
+        md = mesh_defs[i].mesh_data
+        box = mesh.compute_mesh_aabb(md, mesh_defs[i].transform, mesh_defs[i].scale)
+        dynamic_tree.tree_create_proxy(&tree, box, all_bits(), child_index as long)
+        child_index = child_index + 1
+        // The mesh's materials go through the same table; only four slots travel.
+        slots = math.min_int(mesh_defs[i].material_count, MAX_COMPOUND_MESH_MATERIALS)
+        mesh_materials = mesh_defs[i].materials as SurfaceMaterial[]
+        instance = MeshInstance { transform: mesh_defs[i].transform, scale: mesh_defs[i].scale, mesh_offset: 0,
+                                  material_index0: 0, material_index1: 0, material_index2: 0, material_index3: 0 }
+        if slots > 0 { instance.material_index0 = table_index(&table, mesh_materials[0]) }
+        if slots > 1 { instance.material_index1 = table_index(&table, mesh_materials[1]) }
+        if slots > 2 { instance.material_index2 = table_index(&table, mesh_materials[2]) }
+        if slots > 3 { instance.material_index3 = table_index(&table, mesh_materials[3]) }
+        shared = shared_index(&mesh_map, md.hash, md as ptr, md.byte_count, shared_meshes, shared_mesh_sizes, shared_mesh_count)
+        if shared == shared_mesh_count { shared_mesh_count = shared_mesh_count + 1 }
+        instance.mesh_offset = shared
+        mesh_instances[i] = instance
+        i = i + 1
+    }
+    core.map_destroy(&mesh_map)
+
+    // Spheres.
+    i = 0
+    while i < sphere_count {
+        sphere_instances[i] = CompoundSphere { sphere: sphere_defs[i].sphere, material_index: table_index(&table, sphere_defs[i].material) }
+        box = sphere.compute_sphere_aabb(sphere_defs[i].sphere, math.transform_identity())
+        dynamic_tree.tree_create_proxy(&tree, box, all_bits(), child_index as long)
+        child_index = child_index + 1
+        i = i + 1
+    }
+
+    dynamic_tree.tree_rebuild(&tree, true)
+
+    // The layout. The rebuild is dense, so only the live nodes travel.
+    byte_count = align8(sizeof(CompoundData))
+    node_offset = byte_count
+    byte_count = byte_count + align8(tree.node_end * sizeof(TreeNode))
+    proxy_offset = byte_count
+    byte_count = byte_count + align8(tree.proxy_count * sizeof(TreeProxy))
+    stack_offset = byte_count
+    byte_count = byte_count + align8(dynamic_tree.TREE_STACK_SIZE * 4)
+    material_offset = byte_count
+    byte_count = byte_count + align8(table.count * sizeof(SurfaceMaterial))
+    capsule_offset = byte_count
+    byte_count = byte_count + align8(capsule_count * sizeof(CompoundCapsule))
+    hull_offset = byte_count
+    byte_count = byte_count + align8(hull_count * sizeof(HullInstance))
+    i = 0
+    while i < shared_hull_count {
+        shared_hull_offsets[i] = byte_count
+        byte_count = byte_count + align8(shared_hull_sizes[i])
+        i = i + 1
+    }
+    mesh_offset = byte_count
+    byte_count = byte_count + align8(mesh_count * sizeof(MeshInstance))
+    i = 0
+    while i < shared_mesh_count {
+        shared_mesh_offsets[i] = byte_count
+        byte_count = byte_count + align8(shared_mesh_sizes[i])
+        i = i + 1
+    }
+    sphere_offset = byte_count
+    byte_count = byte_count + align8(sphere_count * sizeof(CompoundSphere))
+
+    block = core.alloc(byte_count)
+    memset(block, 0, byte_count)
+    c = block as *CompoundData
+    c.version = COMPOUND_VERSION
+    c.byte_count = byte_count
+    c.node_offset = node_offset
+    c.proxy_offset = proxy_offset
+    c.stack_offset = stack_offset
+    c.material_offset = material_offset
+    c.material_count = table.count
+    c.capsule_offset = capsule_offset
+    c.capsule_count = capsule_count
+    c.hull_offset = hull_offset
+    c.hull_count = hull_count
+    c.shared_hull_count = shared_hull_count
+    c.mesh_offset = mesh_offset
+    c.mesh_count = mesh_count
+    c.shared_mesh_count = shared_mesh_count
+    c.sphere_offset = sphere_offset
+    c.sphere_count = sphere_count
+
+    // The baked tree: its nodes, proxies and stack in the block; nothing
+    // for insertions or rebuilds.
+    memcpy(block + node_offset, tree.nodes, tree.node_end * sizeof(TreeNode))
+    memcpy(block + proxy_offset, tree.proxies, tree.proxy_count * sizeof(TreeProxy))
+    c.tree = DynamicTree { nodes: block + node_offset, parents: null, proxies: block + proxy_offset,
+                           node_end: tree.node_end, node_capacity: tree.node_end, pair_free_list: NULL_INDEX,
+                           proxy_count: tree.proxy_count, proxy_capacity: tree.proxy_count, proxy_free_list: NULL_INDEX,
+                           swap_nodes: null, leaf_indices: null, leaf_nodes: null, leaf_centers: null,
+                           rebuild_capacity: 0, dfs_ordered: tree.dfs_ordered,
+                           stack: block + stack_offset, stack_dist: null, copy_stack: null }
+    dynamic_tree.tree_destroy(&tree)
+
+    memcpy(block + material_offset, table.materials, table.count * sizeof(SurfaceMaterial))
+    if capsule_count > 0 { memcpy(block + capsule_offset, capsule_instances_block, capsule_count * sizeof(CompoundCapsule)) }
+    i = 0
+    while i < hull_count {
+        hull_instances[i].hull_offset = shared_hull_offsets[hull_instances[i].hull_offset]
+        i = i + 1
+    }
+    if hull_count > 0 { memcpy(block + hull_offset, hull_instances_block, hull_count * sizeof(HullInstance)) }
+    i = 0
+    while i < shared_hull_count {
+        memcpy(block + shared_hull_offsets[i], shared_hulls[i], shared_hull_sizes[i])
+        i = i + 1
+    }
+    i = 0
+    while i < mesh_count {
+        mesh_instances[i].mesh_offset = shared_mesh_offsets[mesh_instances[i].mesh_offset]
+        i = i + 1
+    }
+    if mesh_count > 0 { memcpy(block + mesh_offset, mesh_instances_block, mesh_count * sizeof(MeshInstance)) }
+    i = 0
+    while i < shared_mesh_count {
+        memcpy(block + shared_mesh_offsets[i], shared_meshes[i], shared_mesh_sizes[i])
+        i = i + 1
+    }
+    if sphere_count > 0 { memcpy(block + sphere_offset, sphere_instances_block, sphere_count * sizeof(CompoundSphere)) }
+
+    core.map_destroy(&table.map)
+    core.free_bytes(table.scratch, 64)
+    core.free_bytes(table.materials, material_capacity * sizeof(SurfaceMaterial))
+    core.free_bytes(shared_hulls_block, math.max_int(hull_count, 1) * 8)
+    core.free_bytes(shared_hull_sizes_block, math.max_int(hull_count, 1) * 4)
+    core.free_bytes(shared_hull_offsets_block, math.max_int(hull_count, 1) * 4)
+    core.free_bytes(shared_meshes_block, math.max_int(mesh_count, 1) * 8)
+    core.free_bytes(shared_mesh_sizes_block, math.max_int(mesh_count, 1) * 4)
+    core.free_bytes(shared_mesh_offsets_block, math.max_int(mesh_count, 1) * 4)
+    core.free_bytes(capsule_instances_block, math.max_int(capsule_count, 1) * sizeof(CompoundCapsule))
+    core.free_bytes(hull_instances_block, math.max_int(hull_count, 1) * sizeof(HullInstance))
+    core.free_bytes(mesh_instances_block, math.max_int(mesh_count, 1) * sizeof(MeshInstance))
+    core.free_bytes(sphere_instances_block, math.max_int(sphere_count, 1) * sizeof(CompoundSphere))
+    return c
+}
+
+destroy_compound(c: *CompoundData) { core.free_bytes(c as ptr, c.byte_count) }
+
+// --- queries ---------------------------------------------------------------------------------------
+
+compute_compound_aabb(c: *CompoundData, t: Transform) -> AABB {
+    return math.aabb_transform(t, dynamic_tree.tree_get_root_bounds(&c.tree))
+}
+
+// The proxy in the compound's frame, one query at a time.
+struct OverlapContext {
+    compound: *CompoundData
+    proxy: ShapeProxy
+    overlap: bool
+}
+
+overlap_visitor(proxy_id: int, user_data: long, context: ptr) -> bool {
+    ctx = context as *OverlapContext
+    child = get_compound_child(ctx.compound, user_data as int)
+    hit = false
+    if child.kind == KIND_CAPSULE { hit = capsule.overlap_capsule(child.capsule, child.transform, ctx.proxy) }
+    else if child.kind == KIND_HULL { hit = hull.overlap_hull(child.hull, child.transform, ctx.proxy) }
+    else if child.kind == KIND_MESH { hit = mesh.overlap_mesh(child.mesh, child.transform, ctx.proxy) }
+    else if child.kind == KIND_SPHERE { hit = sphere.overlap_sphere(child.sphere, child.transform, ctx.proxy) }
+    if hit {
+        ctx.overlap = true
+        return false
+    }
+    return true
+}
+
+var g_local: ptr = null    // Vec3[MAX_SHAPE_CAST_POINTS]: the proxy in the compound's frame
+var g_child: ptr = null    // Vec3[MAX_SHAPE_CAST_POINTS]: the proxy in a child's frame
+
+scratch_ready() {
+    if g_local == null {
+        g_local = core.alloc(distance.MAX_SHAPE_CAST_POINTS * sizeof(Vec3))
+        g_child = core.alloc(distance.MAX_SHAPE_CAST_POINTS * sizeof(Vec3))
+    }
+}
+
+// Whether a proxy in world space overlaps any child of the compound
+// under its transform: the proxy is brought into the compound's frame,
+// the tree culls, each child tests in its own frame.
+overlap_compound(c: *CompoundData, shape_transform: Transform, proxy: ShapeProxy) -> bool {
+    scratch_ready()
+    ctx = OverlapContext { compound: c, proxy: mesh.make_local_proxy(proxy, shape_transform, g_local), overlap: false }
+    bounds = mesh.compute_proxy_aabb(ctx.proxy)
+    dynamic_tree.tree_query(&c.tree, bounds, all_bits(), false, overlap_visitor, (&ctx) as ptr)
+    return ctx.overlap
+}
+
+// A cast in progress: the best hit so far, and the shape cast's proxy
+// (the tree's box cast carries only the advancing fraction).
+struct CastContext {
+    compound: *CompoundData
+    output: CastOutput
+    proxy: ShapeProxy
+    translation: Vec3
+    can_encroach: bool
+}
+
+// A child's material for a hit: slot 0 for the convex kinds, the
+// triangle's (clamped to four) for a mesh.
+hit_material(child: ChildShape, output: CastOutput) -> int {
+    if child.kind == KIND_MESH { return child_material(child, math.min_int(output.material_index, MAX_COMPOUND_MESH_MATERIALS - 1)) }
+    return child.material_index0
+}
+
+ray_visitor(input: *RayCastInput, proxy_id: int, user_data: long, context: ptr) -> float {
+    ctx = context as *CastContext
+    child_index = user_data as int
+    child = get_compound_child(ctx.compound, child_index)
+    origin = math.inv_transform_point(child.transform, input.origin)
+    translation = math.inv_rotate_vector(child.transform.q, input.translation)
+    output = distance.empty_cast_output()
+    if child.kind == KIND_CAPSULE { output = capsule.ray_cast_capsule(child.capsule, origin, translation, input.max_fraction) }
+    else if child.kind == KIND_HULL { output = hull.ray_cast_hull(child.hull, origin, translation, input.max_fraction) }
+    else if child.kind == KIND_MESH { output = mesh.ray_cast_mesh(child.mesh, origin, translation, input.max_fraction) }
+    else if child.kind == KIND_SPHERE { output = sphere.ray_cast_sphere(child.sphere, origin, translation, input.max_fraction) }
+    if output.hit {
+        output.material_index = hit_material(child, output)
+        output.point = math.transform_point(child.transform, output.point)
+        output.normal = math.rotate_vector(child.transform.q, output.normal)
+        output.child_index = child_index
+        ctx.output = output
+        return output.fraction
+    }
+    return input.max_fraction
+}
+
+// A ray in the compound's frame against its children, nearest first
+// through the tree, with the child and the material of the hit.
+ray_cast_compound(c: *CompoundData, origin: Vec3, translation: Vec3, max_fraction: float) -> CastOutput {
+    ctx = CastContext { compound: c, output: distance.empty_cast_output(), proxy: distance.shape_proxy(null, 0, 0.0),
+                        translation: translation, can_encroach: false }
+    input = RayCastInput { origin: origin, translation: translation, max_fraction: max_fraction }
+    dynamic_tree.tree_ray_cast(&c.tree, &input, all_bits(), false, ray_visitor, (&ctx) as ptr)
+    return ctx.output
+}
+
+box_visitor(input: *BoxCastInput, proxy_id: int, user_data: long, context: ptr) -> float {
+    ctx = context as *CastContext
+    child_index = user_data as int
+    child = get_compound_child(ctx.compound, child_index)
+    local_proxy = mesh.make_local_proxy(ctx.proxy, child.transform, g_child)
+    translation = math.inv_rotate_vector(child.transform.q, ctx.translation)
+    output = distance.empty_cast_output()
+    if child.kind == KIND_CAPSULE { output = capsule.shape_cast_capsule(child.capsule, local_proxy, translation, input.max_fraction, ctx.can_encroach) }
+    else if child.kind == KIND_HULL { output = hull.shape_cast_hull(child.hull, local_proxy, translation, input.max_fraction, ctx.can_encroach) }
+    else if child.kind == KIND_MESH { output = mesh.shape_cast_mesh(child.mesh, local_proxy, translation, input.max_fraction, ctx.can_encroach) }
+    else if child.kind == KIND_SPHERE { output = sphere.shape_cast_sphere(child.sphere, local_proxy, translation, input.max_fraction, ctx.can_encroach) }
+    if output.hit {
+        output.material_index = hit_material(child, output)
+        output.point = math.transform_point(child.transform, output.point)
+        output.normal = math.rotate_vector(child.transform.q, output.normal)
+        output.child_index = child_index
+        ctx.output = output
+        return output.fraction
+    }
+    return input.max_fraction
+}
+
+// A proxy in the compound's frame swept against its children: the tree
+// casts the proxy's box, each child the proxy in its own frame.
+shape_cast_compound(c: *CompoundData, proxy: ShapeProxy, translation: Vec3, max_fraction: float, can_encroach: bool) -> CastOutput {
+    if proxy.count == 0 { return distance.empty_cast_output() }
+    scratch_ready()
+    ctx = CastContext { compound: c, output: distance.empty_cast_output(), proxy: proxy, translation: translation, can_encroach: can_encroach }
+    input = BoxCastInput { box: mesh.compute_proxy_aabb(proxy), translation: translation, max_fraction: max_fraction }
+    dynamic_tree.tree_box_cast(&c.tree, &input, all_bits(), false, box_visitor, (&ctx) as ptr)
+    return ctx.output
+}
+
+struct QueryContext {
+    compound: *CompoundData
+    visitor: fn(*CompoundData, int, ptr) -> bool
+    user_context: ptr
+}
+
+query_visitor(proxy_id: int, user_data: long, context: ptr) -> bool {
+    ctx = context as *QueryContext
+    return ctx.visitor(ctx.compound, user_data as int, ctx.user_context)
+}
+
+// Every child whose bounds overlap a box in the compound's frame, to the
+// visitor, until it returns false.
+query_compound(c: *CompoundData, bounds: AABB, visitor: fn(*CompoundData, int, ptr) -> bool, context: ptr) {
+    ctx = QueryContext { compound: c, visitor: visitor, user_context: context }
+    dynamic_tree.tree_query(&c.tree, bounds, dynamic_tree.default_mask_bits(), false, query_visitor, (&ctx) as ptr)
+}
+
+struct MoverContext {
+    compound: *CompoundData
+    planes: PlaneResult[]
+    capacity: int
+    count: int
+    mover: Capsule
+}
+
+const MOVER_SCRATCH = 64
+var g_planes: ptr = null   // PlaneResult[MOVER_SCRATCH]: one child's planes before they are appended
+
+mover_visitor(proxy_id: int, user_data: long, context: ptr) -> bool {
+    ctx = context as *MoverContext
+    child_index = user_data as int
+    child = get_compound_child(ctx.compound, child_index)
+    local_mover = Capsule { center1: math.inv_transform_point(child.transform, ctx.mover.center1),
+                            center2: math.inv_transform_point(child.transform, ctx.mover.center2), radius: ctx.mover.radius }
+    // A child writes into the scratch (a mesh up to its size), then its planes are appended.
+    capacity = math.min_int(ctx.capacity - ctx.count, MOVER_SCRATCH)
+    scratch = g_planes as PlaneResult[]
+    plane_count = 0
+    if child.kind == KIND_CAPSULE { plane_count = capsule.collide_mover_and_capsule(scratch, child.capsule, local_mover) }
+    else if child.kind == KIND_HULL { plane_count = mesh.collide_mover_and_hull(scratch, child.hull, local_mover) }
+    else if child.kind == KIND_MESH { plane_count = mesh.collide_mover_and_mesh(scratch, capacity, child.mesh, local_mover) }
+    else if child.kind == KIND_SPHERE { plane_count = sphere.collide_mover_and_sphere(scratch, child.sphere, local_mover) }
+    planes = ctx.planes
+    i = 0
+    while i < plane_count {
+        p = scratch[i]
+        p.plane.normal = math.rotate_vector(child.transform.q, p.plane.normal)
+        p.point = math.transform_point(child.transform, p.point)
+        p.child_index = child_index
+        p.material_index = child_material(child, math.min_int(p.material_index, MAX_COMPOUND_MESH_MATERIALS - 1))
+        planes[ctx.count + i] = p
+        i = i + 1
+    }
+    ctx.count = ctx.count + plane_count
+    return ctx.count < ctx.capacity
+}
+
+// The planes of the children the mover's capsule (in the compound's
+// frame) touches, up to the capacity, each carried back from its
+// child's frame with the child and the material.
+collide_mover_and_compound(planes: PlaneResult[], capacity: int, c: *CompoundData, mover: Capsule) -> int {
+    if capacity == 0 { return 0 }
+    if g_planes == null { g_planes = core.alloc(MOVER_SCRATCH * sizeof(PlaneResult)) }
+    ctx = MoverContext { compound: c, planes: planes, capacity: capacity, count: 0, mover: mover }
+    r = math.vec3(mover.radius, mover.radius, mover.radius)
+    bounds = AABB { lower: math.sub(math.min_vec3(mover.center1, mover.center2), r), upper: math.add(math.max_vec3(mover.center1, mover.center2), r) }
+    dynamic_tree.tree_query(&c.tree, bounds, all_bits(), false, mover_visitor, (&ctx) as ptr)
+    return ctx.count
+}
+
+// A child's sweep at rest under the compound's transform (xf = compound * child).
+make_compound_child_sweep(compound_transform: Transform, child_transform: Transform) -> Sweep {
+    xf = math.mul_transforms(compound_transform, child_transform)
+    return Sweep { local_center: math.vec3_zero(), c1: xf.p, c2: xf.p, q1: xf.q, q2: xf.q }
+}

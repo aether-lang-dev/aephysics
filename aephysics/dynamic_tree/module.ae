@@ -722,7 +722,8 @@ validate_subtree(t: *DynamicTree, node_index: int, leaf_count: int[]) -> int {
 
     pair = left_child(n.flag_index)
     if (pair & 1) != 0 || pair < 2 || pair >= t.node_end { return 0 - 1 }
-    if parents[pair] != node_index || parents[pair + 1] != node_index { return 0 - 1 }
+    // A baked tree (a compound's) carries no parents.
+    if t.parents != null && (parents[pair] != node_index || parents[pair + 1] != node_index) { return 0 - 1 }
     if t.dfs_ordered && node_index >= pair { return 0 - 1 }
     c1 = nodes[pair]
     c2 = nodes[pair + 1]
@@ -746,7 +747,7 @@ tree_validate(t: *DynamicTree) -> bool {
     nodes = t.nodes as TreeNode[]
     parents = t.parents as int[]
     proxies = t.proxies as TreeProxy[]
-    if parents[ROOT_NODE] != NULL_INDEX { return false }
+    if t.parents != null && parents[ROOT_NODE] != NULL_INDEX { return false }
     if is_empty_node(nodes[ROOT_NODE + 1].flag_index) == false { return false }
 
     free_pair_count = 0
@@ -754,6 +755,7 @@ tree_validate(t: *DynamicTree) -> bool {
     while pair != NULL_INDEX {
         if (pair & 1) != 0 || pair < 2 || pair >= t.node_end { return false }
         if is_empty_node(nodes[pair].flag_index) == false || is_empty_node(nodes[pair + 1].flag_index) == false { return false }
+        if t.parents == null { return false }
         pair = parents[pair]
         free_pair_count = free_pair_count + 1
         if 2 * free_pair_count >= t.node_end { return false }

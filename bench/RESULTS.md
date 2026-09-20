@@ -274,3 +274,35 @@ is 2.5x and the overlap 2x: both are one GJK call on proxies with
 radii, where the box-against-box work of the distance layer sat at
 1.3-1.5x; the radius handling in `distance.shape_cast` and
 `shape_distance` is the place to profile (aephysics#9).
+
+## compound
+
+`bench/compound.ae` and `bench/compound_box3d.c`: a compound of 2,000
+children (1,000 spheres, 500 capsules and 500 instances of one box hull
+on a 20 x 10 x 10 grid, two materials) built ten times; 100,000 rays
+through it; 100,000 box queries over it; 10,000 sphere shape casts down
+through it; 10,000 overlaps and 10,000 mover planes under a transform.
+
+| phase | aephysics | Box3D |
+|---|---|---|
+| 10 builds (2,000 children) | **9.9 ms** | 14.3 |
+| 100,000 ray casts | 75.4 | **25.7** |
+| 100,000 box queries | 8.7 | **6.5** |
+| 10,000 shape casts | 10.7 | **5.0** |
+| 10,000 overlaps | 1.5 | **0.9** |
+| 10,000 mover planes | 1.2 | **0.9** |
+
+The same answers: 50,450 ray hits with equal sums of fraction and child
+index, 777,892 query visits, 5,098 cast hits, 3,278 overlaps, 5,090
+mover planes with equal offset sums. The build is faster here (0.7x;
+the content maps are core's LongMap on the hull's and the mesh's own
+hash, the reference rehashes every block through a generic table); the
+queries, overlaps and movers 1.3-1.6x; the shape cast 2.1x (issue #9's
+radius GJK). The ray cast is 2.9x: a probe with a visitor that does
+nothing shows the time in `dynamic_tree.tree_ray_cast` itself (77 ms
+for 520,000 leaf visits), not in the children -- the tree layer showed
+the same cast at 1.9x on a sparser scene, the reference's SIMD slab
+test against scalar doubles. The traversal is the place to profile
+(aephysics#10). The compound is 379 KB here against 231 KB there: the
+tree's nodes and proxies are our wider doubles and longs, and the
+block carries the traversal stack.

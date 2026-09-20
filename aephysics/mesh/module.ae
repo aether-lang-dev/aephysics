@@ -34,7 +34,7 @@ exports (
     create_grid_mesh, create_wave_mesh, create_torus_mesh, create_box_mesh, create_hollow_box_mesh,
     create_platform_mesh,
     overlap_mesh, compute_mesh_aabb, ray_cast_mesh, shape_cast_mesh, get_mesh_triangle,
-    collide_mover_and_mesh, query_mesh,
+    collide_mover_and_mesh, collide_mover_and_hull, query_mesh,
     test_bounds_triangle_overlap, intersect_ray_triangle, make_local_proxy, compute_proxy_aabb
 )
 
@@ -1482,6 +1482,26 @@ get_mesh_triangle(sh: Mesh, triangle_index: int) -> Triangle {
     }
     return Triangle { v1: math.mul(scale, vertices[t.index1]), v2: math.mul(scale, vertices[t.index2]), v3: math.mul(scale, vertices[t.index3]),
                       i1: t.index1, i2: t.index2, i3: t.index3, flags: f }
+}
+
+// The mover's plane against a hull by GJK on the core segment: none when
+// the segment is inside (a mesh could not do better, so a hull does not).
+collide_mover_and_hull(planes: PlaneResult[], h: *HullData, mover: Capsule) -> int {
+    scratch_ready()
+    segment = g_local as Vec3[]
+    segment[0] = mover.center1
+    segment[1] = mover.center2
+    input = DistanceInput { proxy_a: hull.hull_proxy(h), proxy_b: distance.shape_proxy(g_local, 2, mover.radius),
+                            transform: math.transform_identity(), use_radii: false }
+    cache = distance.empty_cache()
+    output = distance.shape_distance(&input, &cache, null, 0)
+    if output.distance == 0.0 { return 0 }
+    if output.distance <= mover.radius {
+        planes[0] = PlaneResult { plane: Plane { normal: output.normal, offset: mover.radius - output.distance }, point: output.point_a,
+                                  triangle_index: 0, child_index: 0, material_index: 0 }
+        return 1
+    }
+    return 0
 }
 
 // The planes of the front-facing triangles the mover's capsule is

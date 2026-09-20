@@ -105,9 +105,23 @@ started until its tests pass.
    to profile (aephysics#9). The world-bound half of shape.c (creation
    on a body, the broad-phase proxy, materials, events) comes with the
    dynamics.
-11. **compound**: compound.c (the baked compound: children under a
-   static tree, materials and hulls shared by content) with
-   test_compound.c, and the compound branch of the shape dispatch.
+11. **compound** (done): compound.c as `aephysics.compound`: the
+   children's bounds into a tree rebuilt in full and carried in the
+   block with its traversal stack, materials deduplicated field by field
+   through core's LongMap, hulls and meshes by their own hash and bytes,
+   a mesh child's four material slots remapped; overlap, ray and shape
+   casts, the box query and the mover through the tree, each child in
+   its own frame. 159 checks: test_compound.c's creation, materials,
+   sharing, child order, bounds, casts, remap, overlap, query and mover
+   subtests (the byte roundtrip is not ported), plus the compound
+   through the shape dispatch and a field of a thousand spheres. The
+   same results as the reference; the build 0.7x, the queries 1.3-1.6x,
+   the ray cast 2.9x with the time in the tree's traversal itself
+   (aephysics#10). To make the dispatch reach the compound without a
+   cycle, sphere.c and capsule.c became `aephysics.sphere` and
+   `aephysics.capsule`, the material `aephysics.material`, and the
+   hull's mover moved beside the mesh's; `aephysics.shape` imports them
+   all. `tree_validate` accepts a baked tree (no parents).
 12. **dynamics**: `body`, `contact`, `constraint_graph` (graph colouring),
    `solver_set`, `island`, `solver` (the Soft Step: sub-stepping, relax
    iterations, restitution), `contact_solver` (scalar first; the wide SIMD
