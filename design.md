@@ -76,21 +76,32 @@ started until its tests pass.
    mirrored scale, the mover. The same trees as the reference; traversals
    1.7-2x (its SIMD box tests). The mesh contact's cluster reduction
    (mesh_contact.c) is dynamics-side and comes with the contacts.
-9. **collision, static**: `height_field`, `shape` (mass properties, ray
-   and shape casts per shape). Tests: `test_collision`, `test_shape`,
-   `test_height_field`.
-10. **dynamics**: `body`, `contact`, `constraint_graph` (graph colouring),
+9. **height_field** (done): height_field.c as `aephysics.height_field`:
+   the heights quantised to a global range, materials and holes per
+   cell, the edge flags against the four neighbours, either winding;
+   overlap, the ray and shape casts by a DDA walk of the swept box's
+   leading corner through the cells, the mover's planes, the box query.
+   113 checks: test_height_field.c's create, index mapping, winding,
+   flat ray, overlap, straddle, brute-force shape and ray casts over a
+   wave, back-side and clockwise culling (the file roundtrip is not
+   ported), plus the flags of a ridge and of holes, a scaled field, the
+   query and the mover. The same results as the reference; the query at
+   parity, the casts 1.4-2x. The heights, materials and flags are ints
+   for want of 16- and 8-bit arrays, 3x the reference's bytes.
+10. **shape**: shape.c (mass properties, ray and shape casts per shape,
+   compounds). Test: `test_shape`.
+11. **dynamics**: `body`, `contact`, `constraint_graph` (graph colouring),
    `solver_set`, `island`, `solver` (the Soft Step: sub-stepping, relax
    iterations, restitution), `contact_solver` (scalar first; the wide SIMD
    path second, measured), the joints (revolute, prismatic, distance,
    motor, weld, wheel, spherical), `sensor`, `mover` (the character mover),
    `physics_world`. Tests: `test_body`, `test_joint`, `test_world`,
    `test_mover`, `test_determinism`, `test_large_world`.
-11. **parallel**: `parallel_for` and the scheduler over Aether's actors;
+12. **parallel**: `parallel_for` and the scheduler over Aether's actors;
    the benchmarks by thread count as the original records them.
-12. **recording and replay**, `world_snapshot`: last, since they are the
+13. **recording and replay**, `world_snapshot`: last, since they are the
    tooling and not the engine.
-13. **benchmarks**: `reference/benchmark/main.c`'s nine scenes ported, run
+14. **benchmarks**: `reference/benchmark/main.c`'s nine scenes ported, run
    against the C build on the same machine, recorded under `benchmark/`.
 
 ## Measures
