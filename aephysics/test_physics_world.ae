@@ -582,25 +582,30 @@ wave_pile(cube: *HullData) -> long {
         step = step + 1
         if physics_world.get_awake_body_count(world_id) == 0 { sleep_step = step }
     }
-    hash = 0 as long
+    // The checksum: the positions summed with weights (no integer overflow, exact to compare).
+    hash = 0.0
     i = 1
     while i <= count {
         p = dynamics.body_get_position(dynamics.make_body_id(dynamics.get_world(world_id.index1 - 1), i))
-        hash = hash * (31 as long) + ((p.x * 1000000.0) as long) + ((p.y * 1000.0) as long) + ((p.z * 1000000.0) as long)
+        hash = hash + p.x * 1.0 + p.y * 0.001 + p.z * 1000.0
         i = i + 1
     }
     dynamics.destroy_world(world_id)
     hull.destroy_hull(slab)
-    println("physics_world: wave pile slept at step ${sleep_step}, hash ${hash}")
-    return hash * (1000 as long) + (sleep_step as long)
+    println("physics_world: wave pile slept at step ${sleep_step}, checksum ${hash}")
+    g_sleep_step = sleep_step
+    return hash
 }
+
+var g_sleep_step = 0
 
 test_determinism() {
     cube = hull.make_box_hull(0.5, 0.5, 0.5)
     first = wave_pile(cube)
+    first_step = g_sleep_step
     second = wave_pile(cube)
-    ensure("determinism: the wave pile repeats", first == second)
-    ensure("determinism: it slept", (first % (1000 as long)) > (0 as long))
+    ensure("determinism: the wave pile repeats", first == second && g_sleep_step == first_step)
+    ensure("determinism: it slept", first_step > 0)
     hull.destroy_hull(cube)
 }
 
