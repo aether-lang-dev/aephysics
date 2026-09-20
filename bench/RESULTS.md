@@ -303,6 +303,6 @@ nothing shows the time in `dynamic_tree.tree_ray_cast` itself (77 ms
 for 520,000 leaf visits), not in the children -- the tree layer showed
 the same cast at 1.9x on a sparser scene, the reference's SIMD slab
 test against scalar doubles. The traversal is the place to profile
-(aephysics#10). The compound is 379 KB here against 231 KB there: the
+(aephysics#11). The compound is 379 KB here against 231 KB there: the
 tree's nodes and proxies are our wider doubles and longs, and the
 block carries the traversal stack.

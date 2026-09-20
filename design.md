@@ -117,7 +117,7 @@ started until its tests pass.
    through the shape dispatch and a field of a thousand spheres. The
    same results as the reference; the build 0.7x, the queries 1.3-1.6x,
    the ray cast 2.9x with the time in the tree's traversal itself
-   (aephysics#10). To make the dispatch reach the compound without a
+   (aephysics#11). To make the dispatch reach the compound without a
    cycle, sphere.c and capsule.c became `aephysics.sphere` and
    `aephysics.capsule`, the material `aephysics.material`, and the
    hull's mover moved beside the mesh's; `aephysics.shape` imports them
