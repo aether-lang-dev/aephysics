@@ -1,0 +1,11 @@
+[package]
+name = "aephysics"
+description = "A rigid body physics engine in Aether"
+
+[build]
+# What the tests and benchmarks are built with: -O3 and a wider inlining
+# budget, so the small maths (a 3x3 product, a rotation, a quaternion
+# product) inline into the solvers as the reference's static inline
+# headers do; the joint grid runs 1.6x faster than at -O2 for it. The
+# numbers are in bench/RESULTS.md under "Build flags".
+cflags = "-O3 --param max-inline-insns-auto=400 --param inline-unit-growth=400"
