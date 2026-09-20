@@ -565,14 +565,24 @@ const MAX_CHILD_SHAPES = 1048576
 // integers and xor alone collides. The murmur3 finaliser, with logical
 // shifts written out. The low 32 bits are the hash; zero is the empty
 // slot's mark, so a zero hash is nudged to one.
+// A 32-bit mix, overflow-free: the 27-bit constant 0x45d9f3b keeps every
+// product under 2^59 (a signed long overflow is undefined in the C
+// underneath, and gcc at -O2 made two inlined copies of a 64-bit mixer
+// disagree, so a key stored by one was not found by the other).
+mix32(value: long) -> long {
+    x = value & (4294967295 as long)
+    x = ((x ^ lsr(x, 16)) * (73244475 as long)) & (4294967295 as long)
+    x = ((x ^ lsr(x, 16)) * (73244475 as long)) & (4294967295 as long)
+    return x ^ lsr(x, 16)
+}
+
+// A 32-bit hash of a long, never zero (zero marks an empty slot): the
+// low half mixed, the high half folded in and mixed again, so a pair of
+// small ints packed in the two halves hashes by both and by their order.
 key_hash(key: long) -> int {
-    h = key
-    h = h ^ lsr(h, 33)
-    h = h * (0 - 48043033244054079 as long)     // 0xff51afd7ed558ccd
-    h = h ^ lsr(h, 33)
-    h = h * (0 - 4265267296055464877 as long)   // 0xc4ceb9fe1a85ec53
-    h = h ^ lsr(h, 33)
-    hash = (h & 4294967295) as int
+    x = mix32(key)
+    x = mix32(x ^ (lsr(key, 32) & (4294967295 as long)))
+    hash = x as int
     if hash == 0 { hash = 1 }
     return hash
 }

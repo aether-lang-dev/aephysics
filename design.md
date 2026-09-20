@@ -140,13 +140,16 @@ started until its tests pass.
      (the point culling and the per-cluster reduction are pure; the
      triangle cache it refreshes is the contact's, so the entry point
      takes the cache as a struct).
-   - `aephysics.broad_phase`: broad_phase.c's trees per body type,
-     proxies keyed by type in the low bits, the moved-sibling gathering,
-     the self and cross pair walks and the pair set; the pair filter and
-     the pair emission are visitors, since the reference does its shape
-     filtering and contact creation inside. Own test: pairs found and
-     not found across moves, a compound's children, the pair set's
-     persistence.
+   - `aephysics.broad_phase` (done): broad_phase.c's trees per body
+     type, proxies keyed by type in the low bits, the moved-sibling
+     gathering, the self and cross pair walks and the pair set; the pair
+     filter and the compound lookups are visitors, and the update leaves
+     sorted keys for the client to turn into contacts. 36 checks against
+     a brute force: pairs found and not found across moves, the filter,
+     a forced static proxy, a destroyed proxy, a compound's children.
+     Found and fixed on the way: core's key_hash multiplied signed
+     longs (undefined in C; gcc at -O2 made two inlined copies disagree)
+     -- it now mixes in 32-bit products.
    - `aephysics.dynamics`: one module for the world's state and its
      bookkeeping -- the World with its arrays (bodies, shapes, contacts,
      joints, islands, solver sets), the ids with generations, the

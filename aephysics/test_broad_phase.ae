@@ -1,0 +1,384 @@
+// aephysics.broad_phase: the reference has no test of its own for the
+// broad phase (its world tests cover it), so this one is ours: proxies
+// keyed by type, the pairs found on a grid of dynamic boxes over a
+// static ground against a brute force over the boxes, the pair set
+// hiding pairs that have a contact and the update finding nothing when
+// nothing moved, moves finding only the new pairs and a destroyed proxy
+// finding none, the kinematic tree, the filter visitor, a static proxy
+// forced into pairs, a compound's pairs one per child, the sort, and
+// the keys' layout.
+
+import std.string
+import aephysics.math
+import aephysics.core
+import aephysics.dynamic_tree
+import aephysics.hull
+import aephysics.distance
+import aephysics.manifold
+import aephysics.mesh
+import aephysics.material
+import aephysics.sphere
+import aephysics.capsule
+import aephysics.compound
+import aephysics.broad_phase
+
+extern calloc(count: int, size: int) -> ptr
+extern exit(code: int)
+extern free(p: ptr)
+
+var failures = 0
+var checks = 0
+
+ensure(name: string, ok: bool) {
+    checks = checks + 1
+    if !ok {
+        println("broad_phase: FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+all_bits() -> long { return (0 as long) - (1 as long) }
+
+// The scene the visitors see: every shape's box and body, the odd ones
+// filtered out when asked, and one compound.
+struct Scene {
+    boxes: ptr           // AABB[]
+    bodies: ptr          // int[]: a body per shape (shapes on one body never pair)
+    keys: ptr            // int[]: the proxy keys
+    count: int
+    filter_odd: bool
+    compound_shape: int  // or -1
+    compound_tree: ptr
+    compound_transform: Transform
+    should_calls: int
+}
+
+should_pair(a: int, b: int, context: ptr) -> bool {
+    scene = context as *Scene
+    scene.should_calls = scene.should_calls + 1
+    bodies = scene.bodies as int[]
+    if bodies[a] == bodies[b] { return false }
+    if scene.filter_odd && ((a & 1) == 1 || (b & 1) == 1) { return false }
+    return true
+}
+
+compound_tree_of(shape: int, context: ptr) -> ptr {
+    scene = context as *Scene
+    if shape == scene.compound_shape { return scene.compound_tree }
+    return null
+}
+
+compound_transform_of(shape: int, context: ptr) -> Transform {
+    scene = context as *Scene
+    return scene.compound_transform
+}
+
+visitors(scene: *Scene) -> PairVisitors {
+    return PairVisitors { should_pair: should_pair, compound_tree_of: compound_tree_of, compound_transform: compound_transform_of, context: scene as ptr }
+}
+
+// The pairs a brute force finds among the boxes whose visitor passes,
+// leaving out the ones the set already holds.
+brute_force_count(scene: *Scene, bp: *BroadPhase) -> int {
+    boxes = scene.boxes as AABB[]
+    bodies = scene.bodies as int[]
+    keys = scene.keys as int[]
+    count = 0
+    i = 0
+    while i < scene.count {
+        j = i + 1
+        while j < scene.count {
+            kind_i = broad_phase.proxy_type(keys[i])
+            kind_j = broad_phase.proxy_type(keys[j])
+            // Two static or two kinematic proxies never pair; nor static with kinematic.
+            movable = kind_i == broad_phase.BODY_DYNAMIC || kind_j == broad_phase.BODY_DYNAMIC
+            if movable && math.aabb_overlaps(boxes[i], boxes[j]) && bodies[i] != bodies[j] {
+                odd = scene.filter_odd && ((i & 1) == 1 || (j & 1) == 1)
+                if odd == false && broad_phase.has_pair(bp, core.shape_pair_key(i, j, 0)) == false { count = count + 1 }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return count
+}
+
+// Every key the update found is a real overlap of two passing shapes.
+keys_are_overlaps(scene: *Scene, bp: *BroadPhase) -> bool {
+    boxes = scene.boxes as AABB[]
+    bodies = scene.bodies as int[]
+    n = broad_phase.pair_key_count(bp)
+    i = 0
+    while i < n {
+        key = broad_phase.pair_key(bp, i)
+        a = broad_phase.pair_key_shape_a(key)
+        b = broad_phase.pair_key_shape_b(key)
+        if a >= b { return false }
+        if math.aabb_overlaps(boxes[a], boxes[b]) == false { return false }
+        if bodies[a] == bodies[b] { return false }
+        if i > 0 && key <= broad_phase.pair_key(bp, i - 1) { return false }
+        i = i + 1
+    }
+    return true
+}
+
+// The keys become contacts: into the pair set.
+adopt_keys(bp: *BroadPhase) {
+    n = broad_phase.pair_key_count(bp)
+    i = 0
+    while i < n {
+        broad_phase.add_pair(bp, broad_phase.pair_key(bp, i))
+        i = i + 1
+    }
+}
+
+box_at(center: Vec3, half: float) -> AABB {
+    h = math.vec3(half, half, half)
+    return AABB { lower: math.sub(center, h), upper: math.add(center, h) }
+}
+
+test_keys() {
+    ensure("proxy key layout", broad_phase.proxy_type(broad_phase.proxy_key(37, 2)) == 2 && broad_phase.proxy_id(broad_phase.proxy_key(37, 2)) == 37)
+    key = core.shape_pair_key(5, 3, 7)
+    ensure("pair key orders the shapes", broad_phase.pair_key_shape_a(key) == 3 && broad_phase.pair_key_shape_b(key) == 5 && broad_phase.pair_key_child(key) == 7)
+    ensure("pair key is symmetric", core.shape_pair_key(3, 5, 7) == key)
+    ensure("child distinguishes keys", core.shape_pair_key(3, 5, 8) != key)
+    // The sort: a scrambled array of longs, with duplicates.
+    block = calloc(1000, 8)
+    values = block as long[]
+    i = 0
+    while i < 1000 {
+        values[i] = (((i * 7919) % 613) as long) * (1000000007 as long) + ((i % 3) as long)
+        i = i + 1
+    }
+    broad_phase.sort_longs(values, 1000)
+    sorted = true
+    i = 1
+    while i < 1000 {
+        if values[i] < values[i - 1] { sorted = false }
+        i = i + 1
+    }
+    ensure("sort_longs sorts", sorted)
+    broad_phase.sort_longs(values, 1)
+    broad_phase.sort_longs(values, 0)
+    free(block)
+}
+
+test_grid() {
+    bp_block = calloc(1, sizeof(BroadPhase))
+    bp = bp_block as *BroadPhase
+    broad_phase.create_broad_phase(bp, Capacity { static_shape_count: 4, dynamic_shape_count: 64, contact_count: 64 })
+    // A 6 x 6 grid of dynamic unit boxes at 1.5 spacing (no overlaps yet),
+    // a static ground under them, and a kinematic platform through the
+    // first row.
+    count = 38
+    scene_block = calloc(1, sizeof(Scene))
+    scene = scene_block as *Scene
+    scene.boxes = calloc(count, sizeof(AABB))
+    scene.bodies = calloc(count, 4)
+    scene.keys = calloc(count, 4)
+    scene.count = count
+    scene.compound_shape = 0 - 1
+    boxes = scene.boxes as AABB[]
+    bodies = scene.bodies as int[]
+    keys = scene.keys as int[]
+    i = 0
+    while i < 36 {
+        boxes[i] = box_at(math.vec3(1.5 * ((i % 6) as float), 1.0, 1.5 * ((i / 6) as float)), 0.5)
+        bodies[i] = i
+        keys[i] = broad_phase.broad_phase_create_proxy(bp, broad_phase.BODY_DYNAMIC, boxes[i], all_bits(), i, false)
+        i = i + 1
+    }
+    boxes[36] = AABB { lower: math.vec3(0.0 - 2.0, 0.0 - 1.0, 0.0 - 2.0), upper: math.vec3(10.0, 0.6, 10.0) }
+    bodies[36] = 36
+    keys[36] = broad_phase.broad_phase_create_proxy(bp, broad_phase.BODY_STATIC, boxes[36], all_bits(), 36, false)
+    boxes[37] = AABB { lower: math.vec3(0.0 - 2.0, 0.8, 0.0 - 0.6), upper: math.vec3(10.0, 1.2, 0.0 - 0.4) }
+    bodies[37] = 37
+    keys[37] = broad_phase.broad_phase_create_proxy(bp, broad_phase.BODY_KINEMATIC, boxes[37], all_bits(), 37, false)
+    ensure("proxy kinds", broad_phase.proxy_type(keys[0]) == broad_phase.BODY_DYNAMIC && broad_phase.proxy_type(keys[36]) == broad_phase.BODY_STATIC && broad_phase.proxy_type(keys[37]) == broad_phase.BODY_KINEMATIC)
+    ensure("shape index round trip", broad_phase.broad_phase_get_shape_index(bp, keys[36]) == 36 && broad_phase.broad_phase_get_shape_index(bp, keys[17]) == 17)
+    ensure("test overlap", broad_phase.broad_phase_test_overlap(bp, keys[0], keys[36]) && broad_phase.broad_phase_test_overlap(bp, keys[0], keys[1]) == false)
+    ensure("trees valid", broad_phase.validate_broad_phase(bp))
+
+    // The first update: every box on the ground (36), the first row on the platform (6).
+    expected = brute_force_count(scene, bp)
+    n = broad_phase.update_broad_phase_pairs(bp, visitors(scene), false)
+    ensure("first update count (${n} of ${expected})", n == expected && n == 42)
+    ensure("first update keys are overlaps", keys_are_overlaps(scene, bp))
+    ensure("the visitor was asked for each (${scene.should_calls})", scene.should_calls == 42)
+    ensure("no moved flags after the update", broad_phase.validate_no_moved(bp))
+    ensure("trees valid after the update", broad_phase.validate_broad_phase(bp))
+    // The keys become contacts (an update clears the last keys, so they
+    // are taken before the next one).
+    adopt_keys(bp)
+    ensure("pair set holds them", broad_phase.pair_count(bp) == 42 && broad_phase.has_pair(bp, core.shape_pair_key(0, 36, 0)))
+    // Nothing moved: nothing to find.
+    n = broad_phase.update_broad_phase_pairs(bp, visitors(scene), false)
+    ensure("quiet update", n == 0)
+    // A proxy moved onto its neighbour reports only the new pair, not the ones it has.
+    boxes[8] = box_at(math.vec3(1.5 * 2.0 - 0.7, 1.0, 1.5), 0.5)
+    broad_phase.broad_phase_move_proxy(bp, keys[8], boxes[8])
+    expected = brute_force_count(scene, bp)
+    n = broad_phase.update_broad_phase_pairs(bp, visitors(scene), false)
+    ensure("move finds the new pair (${n} of ${expected})", n == expected && n == 1)
+    ensure("the new pair", broad_phase.pair_key_shape_a(broad_phase.pair_key(bp, 0)) == 7 && broad_phase.pair_key_shape_b(broad_phase.pair_key(bp, 0)) == 8)
+    adopt_keys(bp)
+    // Marking a proxy moved without moving it finds nothing new.
+    broad_phase.broad_phase_mark_proxy_moved(bp, keys[8], boxes[8])
+    n = broad_phase.update_broad_phase_pairs(bp, visitors(scene), false)
+    ensure("a mark alone finds nothing", n == 0)
+    // A contact ends: its pair leaves the set, and the next move finds it again.
+    broad_phase.remove_pair(bp, core.shape_pair_key(7, 8, 0))
+    broad_phase.broad_phase_move_proxy(bp, keys[7], boxes[7])
+    n = broad_phase.update_broad_phase_pairs(bp, visitors(scene), false)
+    ensure("a removed pair is found again", n == 1 && broad_phase.pair_key_shape_a(broad_phase.pair_key(bp, 0)) == 7)
+    adopt_keys(bp)
+    // Several move at once, some onto each other, some onto the platform.
+    i = 12
+    while i < 18 {
+        boxes[i] = box_at(math.vec3(0.7 * ((i - 12) as float), 1.0, 0.0 - 0.3), 0.5)
+        broad_phase.broad_phase_move_proxy(bp, keys[i], boxes[i])
+        i = i + 1
+    }
+    expected = brute_force_count(scene, bp)
+    n = broad_phase.update_broad_phase_pairs(bp, visitors(scene), false)
+    ensure("a row moved (${n} of ${expected})", n == expected && n > 5)
+    ensure("a row moved: keys are overlaps", keys_are_overlaps(scene, bp))
+    adopt_keys(bp)
+    // The filter: with the odd shapes refused, a move of an even one onto an odd finds nothing.
+    scene.filter_odd = true
+    boxes[20] = box_at(math.vec3(1.5 * 3.0 - 0.7, 1.0, 1.5 * 3.0), 0.5)
+    broad_phase.broad_phase_move_proxy(bp, keys[20], boxes[20])
+    n = broad_phase.update_broad_phase_pairs(bp, visitors(scene), false)
+    ensure("the filter refuses", n == 0)
+    scene.filter_odd = false
+    broad_phase.broad_phase_move_proxy(bp, keys[20], boxes[20])
+    n = broad_phase.update_broad_phase_pairs(bp, visitors(scene), false)
+    ensure("the same move without the filter", n == 1 && broad_phase.pair_key_shape_a(broad_phase.pair_key(bp, 0)) == 20 && broad_phase.pair_key_shape_b(broad_phase.pair_key(bp, 0)) == 21)
+    adopt_keys(bp)
+    // Shapes on one body never pair.
+    bodies[21] = 22
+    bodies[22] = 22
+    boxes[21] = box_at(math.vec3(1.5 * 4.0 - 0.7, 1.0, 1.5 * 3.0), 0.5)
+    broad_phase.broad_phase_move_proxy(bp, keys[21], boxes[21])
+    n = broad_phase.update_broad_phase_pairs(bp, visitors(scene), false)
+    ensure("one body's shapes do not pair", n == 0)
+    // A static proxy forced into pairs finds the dynamic boxes over it.
+    boxes[36] = AABB { lower: math.vec3(0.0 - 2.0, 0.0 - 1.0, 0.0 - 2.0), upper: math.vec3(10.0, 0.6, 10.0) }
+    broad_phase.remove_pair(bp, core.shape_pair_key(0, 36, 0))
+    broad_phase.remove_pair(bp, core.shape_pair_key(1, 36, 0))
+    broad_phase.broad_phase_destroy_proxy(bp, keys[36])
+    keys[36] = broad_phase.broad_phase_create_proxy(bp, broad_phase.BODY_STATIC, boxes[36], all_bits(), 36, true)
+    n = broad_phase.update_broad_phase_pairs(bp, visitors(scene), false)
+    ensure("a forced static proxy pairs (${n})", n == 2)
+    adopt_keys(bp)
+    // A static proxy created without the force finds nothing until a dynamic one moves onto it.
+    broad_phase.remove_pair(bp, core.shape_pair_key(0, 36, 0))
+    broad_phase.broad_phase_destroy_proxy(bp, keys[36])
+    keys[36] = broad_phase.broad_phase_create_proxy(bp, broad_phase.BODY_STATIC, boxes[36], all_bits(), 36, false)
+    n = broad_phase.update_broad_phase_pairs(bp, visitors(scene), false)
+    ensure("a quiet static proxy", n == 0)
+    broad_phase.broad_phase_move_proxy(bp, keys[0], boxes[0])
+    n = broad_phase.update_broad_phase_pairs(bp, visitors(scene), false)
+    ensure("then the mover finds it", n == 1 && broad_phase.pair_key_shape_b(broad_phase.pair_key(bp, 0)) == 36)
+    adopt_keys(bp)
+    // A destroyed proxy is found by no one.
+    broad_phase.broad_phase_destroy_proxy(bp, keys[7])
+    keys[7] = 0 - 1
+    boxes[7] = AABB { lower: math.vec3(100.0, 100.0, 100.0), upper: math.vec3(100.0, 100.0, 100.0) }
+    boxes[6] = box_at(math.vec3(1.5, 1.0, 1.5), 0.5)
+    broad_phase.broad_phase_move_proxy(bp, keys[6], boxes[6])
+    n = broad_phase.update_broad_phase_pairs(bp, visitors(scene), false)
+    ensure("a destroyed proxy is not found", keys_are_overlaps(scene, bp))
+    ensure("trees valid at the end", broad_phase.validate_broad_phase(bp))
+
+    broad_phase.destroy_broad_phase(bp)
+    free(scene.keys)
+    free(scene.bodies)
+    free(scene.boxes)
+    free(scene_block)
+    free(bp_block)
+}
+
+test_compound_pairs() {
+    // A static compound of three spheres along x under one dynamic box:
+    // the pair comes out once per child the box's bounds overlap.
+    mat = material.default_surface_material()
+    spheres_block = calloc(3, sizeof(CompoundSphereDef))
+    spheres = spheres_block as CompoundSphereDef[]
+    spheres[0] = compound.compound_sphere_def(manifold.sphere(math.vec3_zero(), 0.5), mat)
+    spheres[1] = compound.compound_sphere_def(manifold.sphere(math.vec3(3.0, 0.0, 0.0), 0.5), mat)
+    spheres[2] = compound.compound_sphere_def(manifold.sphere(math.vec3(6.0, 0.0, 0.0), 0.5), mat)
+    def = compound.compound_def()
+    def.spheres = spheres_block
+    def.sphere_count = 3
+    c = compound.create_compound(&def)
+
+    bp_block = calloc(1, sizeof(BroadPhase))
+    bp = bp_block as *BroadPhase
+    broad_phase.create_broad_phase(bp, Capacity { static_shape_count: 4, dynamic_shape_count: 4, contact_count: 4 })
+    scene_block = calloc(1, sizeof(Scene))
+    scene = scene_block as *Scene
+    scene.boxes = calloc(2, sizeof(AABB))
+    scene.bodies = calloc(2, 4)
+    scene.keys = calloc(2, 4)
+    scene.count = 2
+    scene.compound_shape = 1
+    scene.compound_tree = (&c.tree) as ptr
+    // The compound's body is moved up by 10 and turned a quarter about z: its local x is world y.
+    scene.compound_transform = Transform { p: math.vec3(0.0, 10.0, 0.0), q: math.make_quat_from_axis_angle(math.vec3_axis_z(), 0.5 * math.PI) }
+    boxes = scene.boxes as AABB[]
+    bodies = scene.bodies as int[]
+    keys = scene.keys as int[]
+    bodies[0] = 0
+    bodies[1] = 1
+    // The box straddles the children at local x 0 and 3 (world y 10 and 13), not the one at 6.
+    boxes[0] = AABB { lower: math.vec3(0.0 - 0.6, 9.5, 0.0 - 0.6), upper: math.vec3(0.6, 13.2, 0.6) }
+    boxes[1] = compound.compute_compound_aabb(c, scene.compound_transform)
+    keys[0] = broad_phase.broad_phase_create_proxy(bp, broad_phase.BODY_DYNAMIC, boxes[0], all_bits(), 0, false)
+    keys[1] = broad_phase.broad_phase_create_proxy(bp, broad_phase.BODY_STATIC, boxes[1], all_bits(), 1, false)
+    n = broad_phase.update_broad_phase_pairs(bp, visitors(scene), true)
+    ensure("compound pairs (${n})", n == 2)
+    if n == 2 {
+        k0 = broad_phase.pair_key(bp, 0)
+        k1 = broad_phase.pair_key(bp, 1)
+        ensure("compound pair shapes", broad_phase.pair_key_shape_a(k0) == 0 && broad_phase.pair_key_shape_b(k0) == 1)
+        ensure("compound pair children", broad_phase.pair_key_child(k0) == 0 && broad_phase.pair_key_child(k1) == 1)
+    }
+    adopt_keys(bp)
+    // Without the compound flag the pair is plain; with it and the pair set holding one child, only the other comes.
+    broad_phase.remove_pair(bp, core.shape_pair_key(0, 1, 1))
+    broad_phase.broad_phase_move_proxy(bp, keys[0], boxes[0])
+    n = broad_phase.update_broad_phase_pairs(bp, visitors(scene), true)
+    ensure("compound child already paired is skipped", n == 1 && broad_phase.pair_key_child(broad_phase.pair_key(bp, 0)) == 1)
+    // The gauntlet refusing the pair drops every child.
+    bodies[1] = 0
+    broad_phase.remove_pair(bp, core.shape_pair_key(0, 1, 0))
+    broad_phase.broad_phase_move_proxy(bp, keys[0], boxes[0])
+    n = broad_phase.update_broad_phase_pairs(bp, visitors(scene), true)
+    ensure("compound pair refused drops every child", n == 0)
+    broad_phase.destroy_broad_phase(bp)
+    free(scene.keys)
+    free(scene.bodies)
+    free(scene.boxes)
+    free(scene_block)
+    free(bp_block)
+    compound.destroy_compound(c)
+    free(spheres_block)
+}
+
+main() {
+    before = core.alloc_count()
+    test_keys()
+    test_grid()
+    test_compound_pairs()
+    ensure("every counted allocation was freed (${core.alloc_count() - before})", core.alloc_count() == before)
+
+    println("broad_phase: ${checks} checks")
+    if failures == 0 {
+        println("broad_phase: all checks passed")
+    } else {
+        println("broad_phase: ${failures} failure(s)")
+        exit(1)
+    }
+}

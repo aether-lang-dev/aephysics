@@ -1,0 +1,96 @@
+// The broad phase on its own: 10,000 dynamic unit boxes on a jittered
+// 25 x 16 x 25 grid at 1.4 spacing over a static ground (so a quarter
+// of the neighbours touch), the first update finding every pair, then
+// 20 steps in which every box drifts a little and only the new pairs
+// come out, each update's keys adopted into the pair set. The reference
+// finds its pairs inside its world (broad_phase.c calls into shapes and
+// contacts), so it has no free-standing counterpart here; its pair
+// update is measured against ours through the world benchmarks. Single
+// thread, wall time per phase, with the pair counts as the checksum.
+import std.string
+import std.os
+import aephysics.math
+import aephysics.core
+import aephysics.dynamic_tree
+import aephysics.broad_phase
+
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+extern sin(x: float) -> float
+extern cos(x: float) -> float
+
+clock() -> long { return os.now_monotonic_ns() }
+ms(ns: long) -> float { return (ns as float) / 1000000.0 }
+
+const COUNT = 10000
+const STEPS = 20
+
+var g_bodies: ptr = null
+
+should_pair(a: int, b: int, context: ptr) -> bool { return a != b }
+no_compound(shape: int, context: ptr) -> ptr { return null }
+identity(shape: int, context: ptr) -> Transform { return math.transform_identity() }
+
+all_bits() -> long { return (0 as long) - (1 as long) }
+
+adopt(bp: *BroadPhase) {
+    n = broad_phase.pair_key_count(bp)
+    i = 0
+    while i < n {
+        broad_phase.add_pair(bp, broad_phase.pair_key(bp, i))
+        i = i + 1
+    }
+}
+
+main() {
+    bp_block = calloc(1, sizeof(BroadPhase))
+    bp = bp_block as *BroadPhase
+    broad_phase.create_broad_phase(bp, Capacity { static_shape_count: 16, dynamic_shape_count: COUNT, contact_count: 4 * COUNT })
+    boxes_block = calloc(COUNT + 1, sizeof(AABB))
+    boxes = boxes_block as AABB[]
+    keys_block = calloc(COUNT + 1, 4)
+    keys = keys_block as int[]
+    visitors = PairVisitors { should_pair: should_pair, compound_tree_of: no_compound, compound_transform: identity, context: null }
+
+    t0 = clock()
+    i = 0
+    while i < COUNT {
+        x = (i % 25) as float
+        y = ((i / 25) % 16) as float
+        z = (i / 400) as float
+        jitter = 0.3 * sin(7.0 * (i as float))
+        c = math.vec3(1.4 * x + jitter, 1.0 + 1.4 * y, 1.4 * z + 0.3 * cos(11.0 * (i as float)))
+        boxes[i] = AABB { lower: math.sub(c, math.vec3(0.5, 0.5, 0.5)), upper: math.add(c, math.vec3(0.5, 0.5, 0.5)) }
+        keys[i] = broad_phase.broad_phase_create_proxy(bp, broad_phase.BODY_DYNAMIC, boxes[i], all_bits(), i, false)
+        i = i + 1
+    }
+    boxes[COUNT] = AABB { lower: math.vec3(0.0 - 5.0, 0.0 - 1.0, 0.0 - 5.0), upper: math.vec3(40.0, 0.6, 40.0) }
+    keys[COUNT] = broad_phase.broad_phase_create_proxy(bp, broad_phase.BODY_STATIC, boxes[COUNT], all_bits(), COUNT, false)
+    t1 = clock()
+    first = broad_phase.update_broad_phase_pairs(bp, visitors, false)
+    adopt(bp)
+    t2 = clock()
+
+    found = 0
+    step = 0
+    while step < STEPS {
+        i = 0
+        while i < COUNT {
+            d = math.vec3(0.05 * sin((i + step) as float), 0.05 * cos((3 * i + step) as float), 0.05 * sin((5 * i + 2 * step) as float))
+            boxes[i] = AABB { lower: math.add(boxes[i].lower, d), upper: math.add(boxes[i].upper, d) }
+            broad_phase.broad_phase_move_proxy(bp, keys[i], boxes[i])
+            i = i + 1
+        }
+        n = broad_phase.update_broad_phase_pairs(bp, visitors, false)
+        found = found + n
+        adopt(bp)
+        step = step + 1
+    }
+    t3 = clock()
+
+    println("aephysics broad_phase: ${COUNT} proxies created ${ms(t1 - t0)} ms, first update ${ms(t2 - t1)} ms (${first} pairs), ${STEPS} steps of moves and updates ${ms(t3 - t2)} ms (${found} new pairs, ${broad_phase.pair_count(bp)} in the set)")
+    broad_phase.destroy_broad_phase(bp)
+    free(keys_block)
+    free(boxes_block)
+    free(bp_block)
+}
