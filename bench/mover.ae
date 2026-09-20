@@ -1,0 +1,49 @@
+// The plane solver on the same scene as bench/mover_box3d.c: 1,000,000
+// solves of a target against six planes tilted around it (a floor, four
+// walls leaning in, a soft ceiling), each followed by a velocity clip.
+// Single thread, wall time, with the sums of the deltas and iteration
+// counts as the checksum.
+import std.string
+import std.os
+import aephysics.math
+import aephysics.mover
+
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+extern sin(x: float) -> float
+extern cos(x: float) -> float
+
+clock() -> long { return os.now_monotonic_ns() }
+ms(ns: long) -> float { return (ns as float) / 1000000.0 }
+
+const SOLVES = 1000000
+
+main() {
+    planes_block = calloc(6, sizeof(CollisionPlane))
+    planes = planes_block as CollisionPlane[]
+    planes[0] = mover.collision_plane(Plane { normal: math.vec3(0.0, 1.0, 0.0), offset: 0.0 }, math.MAX_FLOAT, true)
+    planes[1] = mover.collision_plane(Plane { normal: math.normalize(math.vec3(1.0, 0.3, 0.0)), offset: 0.0 - 1.0 }, math.MAX_FLOAT, true)
+    planes[2] = mover.collision_plane(Plane { normal: math.normalize(math.vec3(0.0 - 1.0, 0.3, 0.0)), offset: 0.0 - 1.0 }, math.MAX_FLOAT, true)
+    planes[3] = mover.collision_plane(Plane { normal: math.normalize(math.vec3(0.0, 0.3, 1.0)), offset: 0.0 - 1.0 }, math.MAX_FLOAT, true)
+    planes[4] = mover.collision_plane(Plane { normal: math.normalize(math.vec3(0.0, 0.3, 0.0 - 1.0)), offset: 0.0 - 1.0 }, math.MAX_FLOAT, true)
+    planes[5] = mover.collision_plane(Plane { normal: math.vec3(0.0, 0.0 - 1.0, 0.0), offset: 0.0 - 2.0 }, 0.1, false)
+
+    t0 = clock()
+    delta_sum = 0.0
+    clip_sum = 0.0
+    iterations = 0
+    i = 0
+    while i < SOLVES {
+        t = (i as float) / (SOLVES as float)
+        target = math.vec3(1.6 * sin(13.0 * t), 0.0 - 0.5 + 3.0 * cos(7.0 * t), 1.6 * sin(17.0 * t))
+        result = mover.solve_planes(target, planes, 6)
+        delta_sum = delta_sum + result.delta.x + result.delta.y + result.delta.z
+        iterations = iterations + result.iteration_count
+        v = mover.clip_vector(math.vec3(2.0 * sin(5.0 * t), 0.0 - 3.0, 2.0 * cos(5.0 * t)), planes, 6)
+        clip_sum = clip_sum + v.x + v.y + v.z
+        i = i + 1
+    }
+    t1 = clock()
+    println("aephysics mover: ${SOLVES} solves ${ms(t1 - t0)} ms (delta sum ${delta_sum}, ${iterations} iterations, clip sum ${clip_sum})")
+    free(planes_block)
+}

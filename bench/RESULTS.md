@@ -306,3 +306,19 @@ test against scalar doubles. The traversal is the place to profile
 (aephysics#11). The compound is 379 KB here against 231 KB there: the
 tree's nodes and proxies are our wider doubles and longs, and the
 block carries the traversal stack.
+
+## mover
+
+`bench/mover.ae` and `bench/mover_box3d.c`: 1,000,000 solves of a
+target against six planes tilted around it (a floor, four walls leaning
+in, a soft ceiling), each followed by a velocity clip.
+
+| phase | aephysics | Box3D |
+|---|---|---|
+| 1,000,000 plane solves and clips | **64.6 ms** | 73.2 |
+
+The same answers: equal sums of the deltas and of the clipped
+velocities, 1,662,623 iterations here against 1,662,624 there (one
+convergence test on the float's side of the slop). The solver runs
+at 0.9x: the reference reads its planes through a pointer per pass
+where the loop here indexes the array.

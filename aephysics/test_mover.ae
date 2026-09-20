@@ -1,0 +1,245 @@
+// aephysics.mover against the reference's (Box3D's) test_mover.c: the
+// plane solver on two parallel planes and on a game's pair with a deep
+// target, and the shapes' mover collisions that need no world: the
+// sphere, capsule and hull separated, touching and in deep overlap
+// (never a zero normal), the mesh's back side and mirrored scale, the
+// height field's back side, report and clockwise winding; and beyond
+// it the clipping of a velocity, a soft plane's limit, and a corner.
+// The mover through a world (materials, filters, the time of impact)
+// comes with the world.
+
+import std.string
+import aephysics.math
+import aephysics.core
+import aephysics.hull
+import aephysics.distance
+import aephysics.manifold
+import aephysics.mesh
+import aephysics.height_field
+import aephysics.material
+import aephysics.sphere
+import aephysics.capsule
+import aephysics.mover
+
+extern calloc(count: int, size: int) -> ptr
+extern exit(code: int)
+extern free(p: ptr)
+
+var failures = 0
+var checks = 0
+
+ensure(name: string, ok: bool) {
+    checks = checks + 1
+    if !ok {
+        println("mover: FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+small(name: string, value: float, tolerance: float) {
+    ensure("${name} (${value})", math.abs_float(value) < tolerance)
+}
+
+rigid(normal: Vec3, offset: float) -> CollisionPlane {
+    return mover.collision_plane(Plane { normal: normal, offset: offset }, math.MAX_FLOAT, true)
+}
+
+test_solver() {
+    planes_block = calloc(4, sizeof(CollisionPlane))
+    planes = planes_block as CollisionPlane[]
+    // Two parallel planes: the target is pushed to the farther one in two sweeps.
+    planes[0] = rigid(math.vec3(0.0, 0.0, 1.0), 0.5)
+    planes[1] = rigid(math.vec3(0.0, 0.0, 1.0), 1.0)
+    result = mover.solve_planes(math.vec3_zero(), planes, 2)
+    ensure("parallel iterations (${result.iteration_count})", result.iteration_count == 2)
+    small("parallel delta", result.delta.z - 1.0, 0.0055)
+    small("parallel push 0", planes[0].push, 0.000001)
+    small("parallel push 1", planes[1].push - 0.995, 0.000001)
+
+    // A game's pair with the target deep inside: every iteration is spent.
+    planes[0] = rigid(math.vec3(0.0, 0.0 - 0.23941046, 0.970918416), 0.390724182)
+    planes[1] = rigid(math.vec3(0.0, 0.0, 1.0), 1.49998093)
+    target = math.vec3(0.0 - 2.5390625, 0.0, 0.0 - 73.6880798)
+    planes[0].plane.offset = planes[0].plane.offset - math.dot(planes[0].plane.normal, target)
+    planes[1].plane.offset = planes[1].plane.offset - math.dot(planes[1].plane.normal, target)
+    result = mover.solve_planes(math.vec3_zero(), planes, 2)
+    ensure("game planes spend every iteration", result.iteration_count == mover.MAX_PLANE_ITERATIONS)
+
+    // A corner of two walls: the target into both is pushed out of both,
+    // to rest a slop inside each (the slop that stops the jitter).
+    planes[0] = rigid(math.vec3(1.0, 0.0, 0.0), 0.0)
+    planes[1] = rigid(math.vec3(0.0, 1.0, 0.0), 0.0)
+    result = mover.solve_planes(math.vec3(0.0 - 1.0, 0.0 - 1.0, 0.0), planes, 2)
+    small("corner x", result.delta.x + math.LINEAR_SLOP, 0.000001)
+    small("corner y", result.delta.y + math.LINEAR_SLOP, 0.000001)
+    ensure("corner iterations", result.iteration_count == 1)
+    // Nothing to push: no iterations, the target unchanged.
+    result = mover.solve_planes(math.vec3(1.0, 1.0, 0.0), planes, 2)
+    ensure("clear target", result.iteration_count == 0 && result.delta.x == 1.0 && result.delta.y == 1.0)
+    // A soft plane pushes only to its limit.
+    planes[0] = mover.collision_plane(Plane { normal: math.vec3(0.0, 1.0, 0.0), offset: 0.0 }, 0.25, false)
+    result = mover.solve_planes(math.vec3(0.0, 0.0 - 1.0, 0.0), planes, 1)
+    small("soft plane limit", result.delta.y + 0.75, 0.000001)
+    small("soft plane push", planes[0].push - 0.25, 0.000001)
+
+    // The velocity is clipped against the planes that pushed and clip;
+    // a soft plane and one that did not push are skipped.
+    planes[0] = rigid(math.vec3(0.0, 1.0, 0.0), 0.0)
+    planes[1] = rigid(math.vec3(1.0, 0.0, 0.0), 0.0)
+    planes[2] = mover.collision_plane(Plane { normal: math.vec3(0.0, 0.0, 1.0), offset: 0.0 }, 0.25, false)
+    result = mover.solve_planes(math.vec3(0.0 - 1.0, 0.0 - 1.0, 0.0 - 1.0), planes, 3)
+    v = mover.clip_vector(math.vec3(0.0 - 2.0, 0.0 - 3.0, 0.0 - 4.0), planes, 3)
+    small("clipped x", v.x, 0.000001)
+    small("clipped y", v.y, 0.000001)
+    small("soft plane does not clip", v.z + 4.0, 0.000001)
+    v = mover.clip_vector(math.vec3(2.0, 3.0, 4.0), planes, 3)
+    ensure("a velocity leaving the planes is kept", v.x == 2.0 && v.y == 3.0 && v.z == 4.0)
+    planes[0].push = 0.0
+    v = mover.clip_vector(math.vec3(0.0 - 2.0, 0.0 - 3.0, 0.0), planes, 3)
+    small("a plane without push does not clip", v.y + 3.0, 0.000001)
+    free(planes_block)
+}
+
+test_shape_movers() {
+    planes_block = calloc(4, sizeof(PlaneResult))
+    planes = planes_block as PlaneResult[]
+    // The sphere: separated, touching (0.1 into the combined radius), and
+    // the mover's axis through the centre (the deep case: a perpendicular
+    // of the axis, the full combined radius).
+    s = manifold.sphere(math.vec3_zero(), 0.5)
+    ensure("sphere separated", sphere.collide_mover_and_sphere(planes, s, manifold.capsule(math.vec3(4.0, 3.0, 0.0), math.vec3(6.0, 3.0, 0.0), 0.2)) == 0)
+    count = sphere.collide_mover_and_sphere(planes, s, manifold.capsule(math.vec3(0.0 - 1.0, 0.6, 0.0), math.vec3(1.0, 0.6, 0.0), 0.2))
+    ensure("sphere touching", count == 1)
+    ensure("sphere touching normalized", math.is_normalized(planes[0].plane.normal))
+    ensure("sphere touching up", planes[0].plane.normal.y > 0.99)
+    small("sphere touching offset", planes[0].plane.offset - 0.1, 0.00001)
+    count = sphere.collide_mover_and_sphere(planes, s, manifold.capsule(math.vec3(0.0 - 1.0, 0.0, 0.0), math.vec3(1.0, 0.0, 0.0), 0.2))
+    ensure("sphere deep", count == 1)
+    ensure("sphere deep normalized", math.is_normalized(planes[0].plane.normal))
+    small("sphere deep perpendicular", planes[0].plane.normal.x, 0.00001)
+    small("sphere deep offset", planes[0].plane.offset - 0.7, 0.00001)
+
+    // The capsule: separated, touching, crossing (perpendicular to both), coincident.
+    c = manifold.capsule(math.vec3(0.0 - 1.0, 0.0, 0.0), math.vec3(1.0, 0.0, 0.0), 0.3)
+    ensure("capsule separated", capsule.collide_mover_and_capsule(planes, c, manifold.capsule(math.vec3(0.0 - 1.0, 5.0, 0.0), math.vec3(1.0, 5.0, 0.0), 0.2)) == 0)
+    count = capsule.collide_mover_and_capsule(planes, c, manifold.capsule(math.vec3(0.0 - 1.0, 0.4, 0.0), math.vec3(1.0, 0.4, 0.0), 0.2))
+    ensure("capsule touching", count == 1 && math.is_normalized(planes[0].plane.normal) && planes[0].plane.normal.y > 0.99)
+    small("capsule touching offset", planes[0].plane.offset - 0.1, 0.00001)
+    count = capsule.collide_mover_and_capsule(planes, c, manifold.capsule(math.vec3(0.0, 0.0, 0.0 - 1.0), math.vec3(0.0, 0.0, 1.0), 0.2))
+    ensure("capsule crossing", count == 1 && math.is_normalized(planes[0].plane.normal))
+    small("capsule crossing x", planes[0].plane.normal.x, 0.00001)
+    small("capsule crossing z", planes[0].plane.normal.z, 0.00001)
+    small("capsule crossing offset", planes[0].plane.offset - 0.5, 0.00001)
+    count = capsule.collide_mover_and_capsule(planes, c, manifold.capsule(math.vec3(0.0 - 1.0, 0.0, 0.0), math.vec3(1.0, 0.0, 0.0), 0.2))
+    ensure("capsule coincident", count == 1 && math.is_normalized(planes[0].plane.normal))
+    small("capsule coincident perpendicular", planes[0].plane.normal.x, 0.00001)
+    small("capsule coincident offset", planes[0].plane.offset - 0.5, 0.00001)
+
+    // The hull: separated, touching, and the segment inside (the plane is dropped).
+    box = hull.make_box_hull(0.5, 0.5, 0.5)
+    ensure("hull separated", mesh.collide_mover_and_hull(planes, box, manifold.capsule(math.vec3(0.0 - 0.3, 5.0, 0.0), math.vec3(0.3, 5.0, 0.0), 0.2)) == 0)
+    count = mesh.collide_mover_and_hull(planes, box, manifold.capsule(math.vec3(0.0 - 0.3, 0.6, 0.0), math.vec3(0.3, 0.6, 0.0), 0.2))
+    ensure("hull touching", count == 1 && math.is_normalized(planes[0].plane.normal) && planes[0].plane.normal.y > 0.99)
+    small("hull touching offset", planes[0].plane.offset - 0.1, 0.0001)
+    ensure("hull deep drops the plane", mesh.collide_mover_and_hull(planes, box, manifold.capsule(math.vec3(0.0 - 0.2, 0.0, 0.0), math.vec3(0.2, 0.0, 0.0), 0.1)) == 0)
+    hull.destroy_hull(box)
+
+    // Two upward triangles on y = 0 with a material each.
+    vertices_block = calloc(6, sizeof(Vec3))
+    vertices = vertices_block as Vec3[]
+    vertices[0] = math.vec3(0.0 - 3.0, 0.0, 0.0 - 1.0)
+    vertices[1] = math.vec3(0.0 - 2.0, 0.0, 1.0)
+    vertices[2] = math.vec3(0.0 - 1.0, 0.0, 0.0 - 1.0)
+    vertices[3] = math.vec3(1.0, 0.0, 0.0 - 1.0)
+    vertices[4] = math.vec3(2.0, 0.0, 1.0)
+    vertices[5] = math.vec3(3.0, 0.0, 0.0 - 1.0)
+    indices_block = calloc(6, 4)
+    indices = indices_block as int[]
+    i = 0
+    while i < 6 {
+        indices[i] = i
+        i = i + 1
+    }
+    material_indices_block = calloc(2, 4)
+    material_indices = material_indices_block as int[]
+    material_indices[1] = 1
+    mdef = mesh.mesh_def()
+    mdef.vertices = vertices_block
+    mdef.indices = indices_block
+    mdef.material_indices = material_indices_block
+    mdef.vertex_count = 6
+    mdef.triangle_count = 2
+    md = mesh.create_mesh(&mdef, null, 0)
+    // On the front of the left triangle a plane comes back; from behind it is culled.
+    sh = mesh.mesh(md, math.vec3_one())
+    count = mesh.collide_mover_and_mesh(planes, 4, sh, manifold.capsule(math.vec3(0.0 - 2.0, 0.15, 0.0), math.vec3(0.0 - 2.0, 0.35, 0.0), 0.2))
+    ensure("mesh front", count == 1 && planes[0].plane.normal.y > 0.99 && planes[0].child_index == 0)
+    ensure("mesh front triangle", count == 1 && planes[0].triangle_index >= 0 && planes[0].triangle_index < md.triangle_count)
+    ensure("mesh back culled", mesh.collide_mover_and_mesh(planes, 4, sh, manifold.capsule(math.vec3(0.0 - 2.0, 0.0 - 0.35, 0.0), math.vec3(0.0 - 2.0, 0.0 - 0.15, 0.0), 0.2)) == 0)
+    // Mirrored in x: the winding flips and the collision flips it back; local x = -2 is the right triangle, material 1.
+    sh = mesh.mesh(md, math.vec3(0.0 - 1.0, 1.0, 1.0))
+    count = mesh.collide_mover_and_mesh(planes, 4, sh, manifold.capsule(math.vec3(0.0 - 2.0, 0.15, 0.0), math.vec3(0.0 - 2.0, 0.35, 0.0), 0.2))
+    ensure("mirrored mesh front", count == 1 && planes[0].plane.normal.y > 0.99)
+    ensure("mirrored mesh material", count == 1 && planes[0].material_index == 1)
+    mesh_materials = mesh.mesh_material_indices(md)
+    ensure("mirrored mesh triangle material", count == 1 && mesh_materials[planes[0].triangle_index] == 1)
+    ensure("mirrored mesh back culled", mesh.collide_mover_and_mesh(planes, 4, sh, manifold.capsule(math.vec3(0.0 - 2.0, 0.0 - 0.35, 0.0), math.vec3(0.0 - 2.0, 0.0 - 0.15, 0.0), 0.2)) == 0)
+    mesh.destroy_mesh(md)
+    free(material_indices_block)
+    free(indices_block)
+    free(vertices_block)
+
+    // A flat 3 x 3 field: the front (upper) face pushes, the back is culled,
+    // the triangle and material are reported, and a clockwise field faces down.
+    heights = calloc(9, 8)
+    materials_block = calloc(4, 4)
+    materials = materials_block as int[]
+    def = height_field.height_field_def()
+    def.heights = heights
+    def.material_indices = materials_block
+    def.count_x = 3
+    def.count_z = 3
+    hf = height_field.create_height_field(&def)
+    count = height_field.collide_mover_and_height_field(planes, 4, hf, manifold.capsule(math.vec3(0.3, 0.15, 0.25), math.vec3(0.3, 0.35, 0.25), 0.2))
+    ensure("field front", count == 1 && planes[0].plane.normal.y > 0.99)
+    small("field front offset", planes[0].plane.offset - 0.05, 0.0001)
+    ensure("field back culled", height_field.collide_mover_and_height_field(planes, 4, hf, manifold.capsule(math.vec3(0.3, 0.0 - 0.35, 0.25), math.vec3(0.3, 0.0 - 0.15, 0.25), 0.2)) == 0)
+    height_field.destroy_height_field(hf)
+    materials[0] = 1
+    materials[1] = 2
+    hf = height_field.create_height_field(&def)
+    count = height_field.collide_mover_and_height_field(planes, 4, hf, manifold.capsule(math.vec3(0.3, 0.15, 0.25), math.vec3(0.3, 0.35, 0.25), 0.2))
+    ensure("field report first", count == 1 && planes[0].triangle_index == 0 && planes[0].child_index == 0 && planes[0].material_index == 1)
+    count = height_field.collide_mover_and_height_field(planes, 4, hf, manifold.capsule(math.vec3(1.3, 0.15, 0.3), math.vec3(1.3, 0.35, 0.3), 0.2))
+    ensure("field report second", count == 1 && planes[0].triangle_index == 2 && planes[0].material_index == 2)
+    height_field.destroy_height_field(hf)
+    materials[0] = 0
+    materials[1] = 0
+    def.clockwise_winding = true
+    hf = height_field.create_height_field(&def)
+    count = height_field.collide_mover_and_height_field(planes, 4, hf, manifold.capsule(math.vec3(0.3, 0.0 - 0.35, 0.25), math.vec3(0.3, 0.0 - 0.15, 0.25), 0.2))
+    ensure("clockwise field below", count == 1 && planes[0].plane.normal.y < 0.0 - 0.99)
+    small("clockwise field offset", planes[0].plane.offset - 0.05, 0.0001)
+    ensure("clockwise field triangle", count == 1 && (planes[0].triangle_index == 0 || planes[0].triangle_index == 1))
+    ensure("clockwise field above culled", height_field.collide_mover_and_height_field(planes, 4, hf, manifold.capsule(math.vec3(0.3, 0.15, 0.25), math.vec3(0.3, 0.35, 0.25), 0.2)) == 0)
+    height_field.destroy_height_field(hf)
+    free(materials_block)
+    free(heights)
+    free(planes_block)
+}
+
+main() {
+    before = core.alloc_count()
+    test_solver()
+    test_shape_movers()
+    // The scratch stays allocated: mesh's three blocks, the height field's three, sphere's length.
+    ensure("every other counted allocation was freed (${core.alloc_count() - before})", core.alloc_count() == before + 7)
+
+    println("mover: ${checks} checks")
+    if failures == 0 {
+        println("mover: all checks passed")
+    } else {
+        println("mover: ${failures} failure(s)")
+        exit(1)
+    }
+}
