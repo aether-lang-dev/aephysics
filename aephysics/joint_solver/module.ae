@@ -1,0 +1,2244 @@
+// aephysics.joint_solver -- the seven joints solved: for each kind its
+// prepare (the frames in world space relative to the centres of mass,
+// the effective masses, the springs' softness), warm start (last
+// step's impulses reapplied), and solve (soft or rigid constraints
+// with speculative limits, springs and motors, the position error from
+// the bodies' deltas); the kinds' accessors (limits, springs, motors,
+// the current angles and translations, the forces and torques from the
+// impulses); and joint.c's dispatch, which clamps the constraint hertz
+// to a quarter of the sub-step rate.
+//
+// This is Box3D's distance_joint.c, motor_joint.c, parallel_joint.c,
+// prismatic_joint.c, revolute_joint.c, spherical_joint.c, weld_joint.c
+// and wheel_joint.c with joint.c's solver half (Erin Catto, MIT), the
+// reference this engine is measured against. Names are the reference's
+// without its prefix, in snake case: b3PrepareRevoluteJoint is
+// prepare_revolute_joint, b3DistanceJoint_SetLength is
+// distance_joint_set_length. The kinds' data lives in the joint sim's
+// block (dynamics.distance_joint_of and its siblings); the step
+// context is the contact solver's.
+import std.string
+import aephysics.math
+import aephysics.core
+import aephysics.dynamics
+import aephysics.contact_solver
+
+exports (
+    prepare_joint, warm_start_joint, solve_joint, prepare_joints, warm_start_joints, solve_joints,
+    joint_get_constraint_force, joint_get_constraint_torque, get_joint_constraint_force, get_joint_constraint_torque,
+    prepare_distance_joint, warm_start_distance_joint, solve_distance_joint,
+    prepare_motor_joint, warm_start_motor_joint, solve_motor_joint,
+    prepare_parallel_joint, warm_start_parallel_joint, solve_parallel_joint,
+    prepare_prismatic_joint, warm_start_prismatic_joint, solve_prismatic_joint,
+    prepare_revolute_joint, warm_start_revolute_joint, solve_revolute_joint,
+    prepare_spherical_joint, warm_start_spherical_joint, solve_spherical_joint,
+    prepare_weld_joint, warm_start_weld_joint, solve_weld_joint,
+    prepare_wheel_joint, warm_start_wheel_joint, solve_wheel_joint,
+    distance_joint_set_length, distance_joint_get_length, distance_joint_enable_limit, distance_joint_is_limit_enabled,
+    distance_joint_set_length_range, distance_joint_get_min_length, distance_joint_get_max_length, distance_joint_get_current_length,
+    distance_joint_enable_spring, distance_joint_is_spring_enabled, distance_joint_set_spring_force_range,
+    distance_joint_get_lower_spring_force, distance_joint_get_upper_spring_force, distance_joint_set_spring_hertz,
+    distance_joint_set_spring_damping_ratio, distance_joint_get_spring_hertz, distance_joint_get_spring_damping_ratio,
+    distance_joint_enable_motor, distance_joint_is_motor_enabled, distance_joint_set_motor_speed, distance_joint_get_motor_speed,
+    distance_joint_get_motor_force, distance_joint_set_max_motor_force, distance_joint_get_max_motor_force,
+    motor_joint_set_linear_velocity, motor_joint_get_linear_velocity, motor_joint_set_angular_velocity, motor_joint_get_angular_velocity,
+    motor_joint_set_max_velocity_torque, motor_joint_get_max_velocity_torque, motor_joint_set_max_velocity_force,
+    motor_joint_get_max_velocity_force, motor_joint_set_linear_hertz, motor_joint_get_linear_hertz, motor_joint_set_linear_damping_ratio,
+    motor_joint_get_linear_damping_ratio, motor_joint_set_angular_hertz, motor_joint_get_angular_hertz,
+    motor_joint_set_angular_damping_ratio, motor_joint_get_angular_damping_ratio, motor_joint_set_max_spring_force,
+    motor_joint_get_max_spring_force, motor_joint_set_max_spring_torque, motor_joint_get_max_spring_torque,
+    parallel_joint_set_spring_hertz, parallel_joint_get_spring_hertz, parallel_joint_set_spring_damping_ratio,
+    parallel_joint_get_spring_damping_ratio, parallel_joint_set_max_torque, parallel_joint_get_max_torque,
+    prismatic_joint_enable_spring, prismatic_joint_is_spring_enabled, prismatic_joint_set_spring_hertz, prismatic_joint_get_spring_hertz,
+    prismatic_joint_set_spring_damping_ratio, prismatic_joint_get_spring_damping_ratio, prismatic_joint_set_target_translation,
+    prismatic_joint_get_target_translation, prismatic_joint_enable_limit, prismatic_joint_is_limit_enabled, prismatic_joint_get_lower_limit,
+    prismatic_joint_get_upper_limit, prismatic_joint_set_limits, prismatic_joint_get_translation, prismatic_joint_enable_motor,
+    prismatic_joint_is_motor_enabled, prismatic_joint_set_motor_speed, prismatic_joint_get_motor_speed, prismatic_joint_set_max_motor_force,
+    prismatic_joint_get_max_motor_force, prismatic_joint_get_motor_force, prismatic_joint_get_speed,
+    revolute_joint_enable_limit, revolute_joint_is_limit_enabled, revolute_joint_get_lower_limit, revolute_joint_get_upper_limit,
+    revolute_joint_set_limits, revolute_joint_get_angle, revolute_joint_enable_spring, revolute_joint_is_spring_enabled,
+    revolute_joint_set_target_angle, revolute_joint_get_target_angle, revolute_joint_set_spring_hertz, revolute_joint_get_spring_hertz,
+    revolute_joint_set_spring_damping_ratio, revolute_joint_get_spring_damping_ratio, revolute_joint_enable_motor,
+    revolute_joint_is_motor_enabled, revolute_joint_set_motor_speed, revolute_joint_get_motor_speed, revolute_joint_set_max_motor_torque,
+    revolute_joint_get_max_motor_torque, revolute_joint_get_motor_torque,
+    spherical_joint_enable_cone_limit, spherical_joint_is_cone_limit_enabled, spherical_joint_get_cone_limit, spherical_joint_set_cone_limit,
+    spherical_joint_get_cone_angle, spherical_joint_enable_twist_limit, spherical_joint_is_twist_limit_enabled,
+    spherical_joint_get_lower_twist_limit, spherical_joint_get_upper_twist_limit, spherical_joint_set_twist_limits,
+    spherical_joint_get_twist_angle, spherical_joint_enable_spring, spherical_joint_is_spring_enabled, spherical_joint_set_target_rotation,
+    spherical_joint_get_target_rotation, spherical_joint_set_spring_hertz, spherical_joint_get_spring_hertz,
+    spherical_joint_set_spring_damping_ratio, spherical_joint_get_spring_damping_ratio, spherical_joint_enable_motor,
+    spherical_joint_is_motor_enabled, spherical_joint_set_motor_velocity, spherical_joint_get_motor_velocity,
+    spherical_joint_set_max_motor_torque, spherical_joint_get_max_motor_torque, spherical_joint_get_motor_torque,
+    weld_joint_set_linear_hertz, weld_joint_get_linear_hertz, weld_joint_set_linear_damping_ratio, weld_joint_get_linear_damping_ratio,
+    weld_joint_set_angular_hertz, weld_joint_get_angular_hertz, weld_joint_set_angular_damping_ratio, weld_joint_get_angular_damping_ratio,
+    wheel_joint_enable_suspension, wheel_joint_is_suspension_enabled, wheel_joint_set_suspension_hertz, wheel_joint_get_suspension_hertz,
+    wheel_joint_set_suspension_damping_ratio, wheel_joint_get_suspension_damping_ratio, wheel_joint_enable_suspension_limit,
+    wheel_joint_is_suspension_limit_enabled, wheel_joint_get_lower_suspension_limit, wheel_joint_get_upper_suspension_limit,
+    wheel_joint_set_suspension_limits, wheel_joint_enable_spin_motor, wheel_joint_is_spin_motor_enabled, wheel_joint_set_spin_motor_speed,
+    wheel_joint_get_spin_motor_speed, wheel_joint_set_max_spin_torque, wheel_joint_get_max_spin_torque, wheel_joint_enable_steering,
+    wheel_joint_is_steering_enabled, wheel_joint_set_steering_hertz, wheel_joint_get_steering_hertz, wheel_joint_set_steering_damping_ratio,
+    wheel_joint_get_steering_damping_ratio, wheel_joint_set_max_steering_torque, wheel_joint_get_max_steering_torque,
+    wheel_joint_enable_steering_limit, wheel_joint_is_steering_limit_enabled, wheel_joint_get_lower_steering_limit,
+    wheel_joint_get_upper_steering_limit, wheel_joint_set_steering_limits, wheel_joint_set_target_steering_angle,
+    wheel_joint_get_target_steering_angle, wheel_joint_get_spin_speed, wheel_joint_get_spin_torque, wheel_joint_get_steering_angle,
+    wheel_joint_get_steering_torque
+)
+
+extern sqrt(x: float) -> float
+
+const NULL_INDEX = 0 - 1
+
+// --- shared pieces --------------------------------------------------------------------------------------------
+
+var g_dummy: ptr = null   // BodyState: a static body's, identity, never written
+
+dummy_state() -> *BodyState {
+    if g_dummy == null {
+        g_dummy = core.alloc(sizeof(BodyState))
+        d = g_dummy as *BodyState
+        d.delta_rotation = math.quat_identity()
+    }
+    return g_dummy as *BodyState
+}
+
+state_of(ctx: *StepContext, index: int) -> *BodyState {
+    if index == NULL_INDEX { return dummy_state() }
+    return (ctx.states + index * sizeof(BodyState)) as *BodyState
+}
+
+// The bodies of a joint for its prepare: their sims (wherever their sets
+// are) and their indices in the awake set (NULL_INDEX when not awake).
+struct JointBodies {
+    sim_a: *BodySim
+    sim_b: *BodySim
+    index_a: int
+    index_b: int
+}
+
+// The base of every prepare: the bodies' inverse masses onto the sim,
+// the fixed-rotation flag when the inertias sum to nothing.
+prepare_base(base: *JointSim, ctx: *StepContext) -> JointBodies {
+    w = ctx.world
+    body_a = dynamics.body_at(w, base.body_id_a)
+    body_b = dynamics.body_at(w, base.body_id_b)
+    sim_a = dynamics.get_body_sim(w, body_a)
+    sim_b = dynamics.get_body_sim(w, body_b)
+    base.inv_mass_a = sim_a.inv_mass
+    base.inv_mass_b = sim_b.inv_mass
+    base.inv_inertia_a = sim_a.inv_inertia_world
+    base.inv_inertia_b = sim_b.inv_inertia_world
+    base.fixed_rotation = math.det(math.add_mm(base.inv_inertia_a, base.inv_inertia_b)) < 1000.0 * math.TINY
+    index_a = NULL_INDEX
+    if body_a.set_index == dynamics.AWAKE_SET { index_a = body_a.local_index }
+    index_b = NULL_INDEX
+    if body_b.set_index == dynamics.AWAKE_SET { index_b = body_b.local_index }
+    return JointBodies { sim_a: sim_a, sim_b: sim_b, index_a: index_a, index_b: index_b }
+}
+
+// A joint frame in world rotation, its origin relative to the centre of mass.
+world_frame(sim: *BodySim, local_frame: Transform) -> Transform {
+    return Transform { p: math.rotate_vector(sim.transform.q, math.sub(local_frame.p, sim.local_center)),
+                       q: math.mul_quat(sim.transform.q, local_frame.q) }
+}
+
+// The perpendicular axes of a hinge: half the rotated relative rotation's x and y.
+perp_axis(quat_a: Quat, rel_q: Quat, axis: Vec3) -> Vec3 {
+    return math.mul_sv(0.5, math.rotate_vector(quat_a, math.add(math.mul_sv(rel_q.s, axis), math.cross(rel_q.v, axis))))
+}
+
+// The point constraint's mass matrix: (mA + mB) I - skew(rA) iA skew(rA) - skew(rB) iB skew(rB).
+point_mass_matrix(m_a: float, i_a: Matrix3, r_a: Vec3, m_b: float, i_b: Matrix3, r_b: Vec3) -> Matrix3 {
+    s_a = math.skew(r_a)
+    s_b = math.skew(r_b)
+    k_a = math.mul_mm(s_a, math.mul_mm(i_a, s_a))
+    k_b = math.mul_mm(s_b, math.mul_mm(i_b, s_b))
+    k = math.negate_mat3(math.add_mm(k_a, k_b))
+    k.cx.x = k.cx.x + m_a + m_b
+    k.cy.y = k.cy.y + m_a + m_b
+    k.cz.z = k.cz.z + m_a + m_b
+    return k
+}
+
+// The velocities written back to the dynamic bodies only.
+store_velocities(state_a: *BodyState, v_a: Vec3, w_a: Vec3, state_b: *BodyState, v_b: Vec3, w_b: Vec3) {
+    if (state_a.flags & dynamics.DYNAMIC_FLAG) != 0 {
+        state_a.linear_velocity = v_a
+        state_a.angular_velocity = w_a
+    }
+    if (state_b.flags & dynamics.DYNAMIC_FLAG) != 0 {
+        state_b.linear_velocity = v_b
+        state_b.angular_velocity = w_b
+    }
+}
+
+// The bias, mass scale and impulse scale of a limit: speculative when
+// the limit is clear, the constraint's softness when violated and biased.
+struct LimitScales {
+    bias: float
+    mass_scale: float
+    impulse_scale: float
+}
+
+limit_scales(base: *JointSim, ctx: *StepContext, c: float, use_bias: bool) -> LimitScales {
+    if c > 0.0 { return LimitScales { bias: c * ctx.inv_h, mass_scale: 1.0, impulse_scale: 0.0 } }
+    if use_bias {
+        return LimitScales { bias: base.constraint_softness.bias_rate * c, mass_scale: base.constraint_softness.mass_scale,
+                             impulse_scale: base.constraint_softness.impulse_scale }
+    }
+    return LimitScales { bias: 0.0, mass_scale: 1.0, impulse_scale: 0.0 }
+}
+
+// A joint id's sim when it is of the kind, else null.
+sim_of(id: JointId, kind: int) -> *JointSim { return dynamics.get_joint_sim_of_kind(id, kind) }
+
+// --- distance joint -----------------------------------------------------------------------------------------------
+
+// C = |pB - pA| - L along the axis u: K = mA + mB + (rA x u) iA (rA x u) + (rB x u) iB (rB x u).
+prepare_distance_joint(base: *JointSim, ctx: *StepContext) {
+    bodies = prepare_base(base, ctx)
+    j = dynamics.distance_joint_of(base)
+    j.index_a = bodies.index_a
+    j.index_b = bodies.index_b
+    sim_a = bodies.sim_a
+    sim_b = bodies.sim_b
+    j.anchor_a = math.rotate_vector(sim_a.transform.q, math.sub(base.local_frame_a.p, sim_a.local_center))
+    j.anchor_b = math.rotate_vector(sim_b.transform.q, math.sub(base.local_frame_b.p, sim_b.local_center))
+    j.delta_center = math.sub(sim_b.center, sim_a.center)
+    r_a = j.anchor_a
+    r_b = j.anchor_b
+    axis = math.normalize(math.add(math.sub(r_b, r_a), j.delta_center))
+    cr_a = math.cross(r_a, axis)
+    cr_b = math.cross(r_b, axis)
+    k = base.inv_mass_a + base.inv_mass_b + math.dot(cr_a, math.mul_mv(base.inv_inertia_a, cr_a)) + math.dot(cr_b, math.mul_mv(base.inv_inertia_b, cr_b))
+    j.axial_mass = 0.0
+    if k > 0.0 { j.axial_mass = 1.0 / k }
+    j.distance_softness = dynamics.make_soft(j.hertz, j.damping_ratio, ctx.h)
+    if ctx.enable_warm_starting == false {
+        j.impulse = 0.0
+        j.lower_impulse = 0.0
+        j.upper_impulse = 0.0
+        j.motor_impulse = 0.0
+    }
+}
+
+warm_start_distance_joint(base: *JointSim, ctx: *StepContext) {
+    j = dynamics.distance_joint_of(base)
+    state_a = state_of(ctx, j.index_a)
+    state_b = state_of(ctx, j.index_b)
+    r_a = math.rotate_vector(state_a.delta_rotation, j.anchor_a)
+    r_b = math.rotate_vector(state_b.delta_rotation, j.anchor_b)
+    ds = math.add(math.sub(state_b.delta_position, state_a.delta_position), math.sub(r_b, r_a))
+    axis = math.normalize(math.add(j.delta_center, ds))
+    p = math.mul_sv(j.impulse + j.lower_impulse - j.upper_impulse + j.motor_impulse, axis)
+    if (state_a.flags & dynamics.DYNAMIC_FLAG) != 0 {
+        state_a.linear_velocity = math.mul_sub(state_a.linear_velocity, base.inv_mass_a, p)
+        state_a.angular_velocity = math.sub(state_a.angular_velocity, math.mul_mv(base.inv_inertia_a, math.cross(r_a, p)))
+    }
+    if (state_b.flags & dynamics.DYNAMIC_FLAG) != 0 {
+        state_b.linear_velocity = math.mul_add(state_b.linear_velocity, base.inv_mass_b, p)
+        state_b.angular_velocity = math.add(state_b.angular_velocity, math.mul_mv(base.inv_inertia_b, math.cross(r_b, p)))
+    }
+}
+
+// Soft when the spring is on and the limits leave room (spring, then
+// the limits as speculative inequalities, then the motor); rigid otherwise.
+solve_distance_joint(base: *JointSim, ctx: *StepContext, use_bias: bool) {
+    m_a = base.inv_mass_a
+    m_b = base.inv_mass_b
+    i_a = base.inv_inertia_a
+    i_b = base.inv_inertia_b
+    j = dynamics.distance_joint_of(base)
+    state_a = state_of(ctx, j.index_a)
+    state_b = state_of(ctx, j.index_b)
+    v_a = state_a.linear_velocity
+    w_a = state_a.angular_velocity
+    v_b = state_b.linear_velocity
+    w_b = state_b.angular_velocity
+    r_a = math.rotate_vector(state_a.delta_rotation, j.anchor_a)
+    r_b = math.rotate_vector(state_b.delta_rotation, j.anchor_b)
+    ds = math.add(math.sub(state_b.delta_position, state_a.delta_position), math.sub(r_b, r_a))
+    separation = math.add(j.delta_center, ds)
+    len = math.length(separation)
+    axis = math.normalize(separation)
+    if j.enable_spring && (j.min_length < j.max_length || j.enable_limit == false) {
+        if j.hertz > 0.0 {
+            vr = math.add(math.sub(v_b, v_a), math.sub(math.cross(w_b, r_b), math.cross(w_a, r_a)))
+            cdot = math.dot(axis, vr)
+            c = len - j.length
+            bias = j.distance_softness.bias_rate * c
+            m = j.distance_softness.mass_scale * j.axial_mass
+            old_impulse = j.impulse
+            impulse = 0.0 - m * (cdot + bias) - j.distance_softness.impulse_scale * old_impulse
+            j.impulse = math.clamp_float(j.impulse + impulse, j.lower_spring_force * ctx.h, j.upper_spring_force * ctx.h)
+            impulse = j.impulse - old_impulse
+            p = math.mul_sv(impulse, axis)
+            v_a = math.mul_sub(v_a, m_a, p)
+            w_a = math.sub(w_a, math.mul_mv(i_a, math.cross(r_a, p)))
+            v_b = math.mul_add(v_b, m_b, p)
+            w_b = math.add(w_b, math.mul_mv(i_b, math.cross(r_b, p)))
+        }
+        if j.enable_limit {
+            // Lower.
+            vr = math.add(math.sub(v_b, v_a), math.sub(math.cross(w_b, r_b), math.cross(w_a, r_a)))
+            cdot = math.dot(axis, vr)
+            scales = limit_scales(base, ctx, len - j.min_length, use_bias)
+            impulse = 0.0 - scales.mass_scale * j.axial_mass * (cdot + scales.bias) - scales.impulse_scale * j.lower_impulse
+            new_impulse = math.max_float(0.0, j.lower_impulse + impulse)
+            impulse = new_impulse - j.lower_impulse
+            j.lower_impulse = new_impulse
+            p = math.mul_sv(impulse, axis)
+            v_a = math.mul_sub(v_a, m_a, p)
+            w_a = math.sub(w_a, math.mul_mv(i_a, math.cross(r_a, p)))
+            v_b = math.mul_add(v_b, m_b, p)
+            w_b = math.add(w_b, math.mul_mv(i_b, math.cross(r_b, p)))
+            // Upper.
+            vr = math.add(math.sub(v_a, v_b), math.sub(math.cross(w_a, r_a), math.cross(w_b, r_b)))
+            cdot = math.dot(axis, vr)
+            scales = limit_scales(base, ctx, j.max_length - len, use_bias)
+            impulse = 0.0 - scales.mass_scale * j.axial_mass * (cdot + scales.bias) - scales.impulse_scale * j.upper_impulse
+            new_impulse = math.max_float(0.0, j.upper_impulse + impulse)
+            impulse = new_impulse - j.upper_impulse
+            j.upper_impulse = new_impulse
+            p = math.mul_sv(0.0 - impulse, axis)
+            v_a = math.mul_sub(v_a, m_a, p)
+            w_a = math.sub(w_a, math.mul_mv(i_a, math.cross(r_a, p)))
+            v_b = math.mul_add(v_b, m_b, p)
+            w_b = math.add(w_b, math.mul_mv(i_b, math.cross(r_b, p)))
+        }
+        if j.enable_motor {
+            vr = math.add(math.sub(v_b, v_a), math.sub(math.cross(w_b, r_b), math.cross(w_a, r_a)))
+            cdot = math.dot(axis, vr)
+            impulse = j.axial_mass * (j.motor_speed - cdot)
+            old_impulse = j.motor_impulse
+            max_impulse = ctx.h * j.max_motor_force
+            j.motor_impulse = math.clamp_float(j.motor_impulse + impulse, 0.0 - max_impulse, max_impulse)
+            impulse = j.motor_impulse - old_impulse
+            p = math.mul_sv(impulse, axis)
+            v_a = math.mul_sub(v_a, m_a, p)
+            w_a = math.sub(w_a, math.mul_mv(i_a, math.cross(r_a, p)))
+            v_b = math.mul_add(v_b, m_b, p)
+            w_b = math.add(w_b, math.mul_mv(i_b, math.cross(r_b, p)))
+        }
+    } else {
+        vr = math.add(math.sub(v_b, v_a), math.sub(math.cross(w_b, r_b), math.cross(w_a, r_a)))
+        cdot = math.dot(axis, vr)
+        c = len - j.length
+        bias = 0.0
+        mass_scale = 1.0
+        impulse_scale = 0.0
+        if use_bias {
+            bias = base.constraint_softness.bias_rate * c
+            mass_scale = base.constraint_softness.mass_scale
+            impulse_scale = base.constraint_softness.impulse_scale
+        }
+        impulse = 0.0 - mass_scale * j.axial_mass * (cdot + bias) - impulse_scale * j.impulse
+        j.impulse = j.impulse + impulse
+        p = math.mul_sv(impulse, axis)
+        v_a = math.mul_sub(v_a, m_a, p)
+        w_a = math.sub(w_a, math.mul_mv(i_a, math.cross(r_a, p)))
+        v_b = math.mul_add(v_b, m_b, p)
+        w_b = math.add(w_b, math.mul_mv(i_b, math.cross(r_b, p)))
+    }
+    store_velocities(state_a, v_a, w_a, state_b, v_b, w_b)
+}
+
+get_distance_joint_force(w: *World, base: *JointSim) -> Vec3 {
+    j = dynamics.distance_joint_of(base)
+    xf_a = dynamics.get_body_transform(w, base.body_id_a)
+    xf_b = dynamics.get_body_transform(w, base.body_id_b)
+    p_a = math.transform_point(xf_a, base.local_frame_a.p)
+    p_b = math.transform_point(xf_b, base.local_frame_b.p)
+    axis = math.normalize(math.sub(p_b, p_a))
+    return math.mul_sv((j.impulse + j.lower_impulse - j.upper_impulse + j.motor_impulse) * w.inv_h, axis)
+}
+
+distance_joint_set_length(id: JointId, length: float) {
+    base = sim_of(id, dynamics.JOINT_DISTANCE)
+    if base == null { return }
+    j = dynamics.distance_joint_of(base)
+    j.length = math.clamp_float(length, math.LINEAR_SLOP, math.HUGE)
+    j.impulse = 0.0
+    j.lower_impulse = 0.0
+    j.upper_impulse = 0.0
+}
+distance_joint_get_length(id: JointId) -> float { return dynamics.distance_joint_of(sim_of(id, dynamics.JOINT_DISTANCE)).length }
+distance_joint_enable_limit(id: JointId, flag: bool) {
+    base = sim_of(id, dynamics.JOINT_DISTANCE)
+    if base != null { dynamics.distance_joint_of(base).enable_limit = flag }
+}
+distance_joint_is_limit_enabled(id: JointId) -> bool { return dynamics.distance_joint_of(sim_of(id, dynamics.JOINT_DISTANCE)).enable_limit }
+distance_joint_set_length_range(id: JointId, min_length: float, max_length: float) {
+    base = sim_of(id, dynamics.JOINT_DISTANCE)
+    if base == null { return }
+    j = dynamics.distance_joint_of(base)
+    lo = math.clamp_float(min_length, math.LINEAR_SLOP, math.HUGE)
+    hi = math.clamp_float(max_length, math.LINEAR_SLOP, math.HUGE)
+    j.min_length = math.min_float(lo, hi)
+    j.max_length = math.max_float(lo, hi)
+    j.impulse = 0.0
+    j.lower_impulse = 0.0
+    j.upper_impulse = 0.0
+}
+distance_joint_get_min_length(id: JointId) -> float { return dynamics.distance_joint_of(sim_of(id, dynamics.JOINT_DISTANCE)).min_length }
+distance_joint_get_max_length(id: JointId) -> float { return dynamics.distance_joint_of(sim_of(id, dynamics.JOINT_DISTANCE)).max_length }
+distance_joint_get_current_length(id: JointId) -> float {
+    base = sim_of(id, dynamics.JOINT_DISTANCE)
+    if base == null { return 0.0 }
+    w = dynamics.get_world(id.world0)
+    xf_a = dynamics.get_body_transform(w, base.body_id_a)
+    xf_b = dynamics.get_body_transform(w, base.body_id_b)
+    return math.distance(math.transform_point(xf_b, base.local_frame_b.p), math.transform_point(xf_a, base.local_frame_a.p))
+}
+distance_joint_enable_spring(id: JointId, flag: bool) {
+    base = sim_of(id, dynamics.JOINT_DISTANCE)
+    if base != null { dynamics.distance_joint_of(base).enable_spring = flag }
+}
+distance_joint_is_spring_enabled(id: JointId) -> bool { return dynamics.distance_joint_of(sim_of(id, dynamics.JOINT_DISTANCE)).enable_spring }
+distance_joint_set_spring_force_range(id: JointId, lower: float, upper: float) {
+    base = sim_of(id, dynamics.JOINT_DISTANCE)
+    if base == null { return }
+    j = dynamics.distance_joint_of(base)
+    j.lower_spring_force = lower
+    j.upper_spring_force = upper
+}
+distance_joint_get_lower_spring_force(id: JointId) -> float { return dynamics.distance_joint_of(sim_of(id, dynamics.JOINT_DISTANCE)).lower_spring_force }
+distance_joint_get_upper_spring_force(id: JointId) -> float { return dynamics.distance_joint_of(sim_of(id, dynamics.JOINT_DISTANCE)).upper_spring_force }
+distance_joint_set_spring_hertz(id: JointId, hertz: float) {
+    base = sim_of(id, dynamics.JOINT_DISTANCE)
+    if base != null { dynamics.distance_joint_of(base).hertz = hertz }
+}
+distance_joint_set_spring_damping_ratio(id: JointId, ratio: float) {
+    base = sim_of(id, dynamics.JOINT_DISTANCE)
+    if base != null { dynamics.distance_joint_of(base).damping_ratio = ratio }
+}
+distance_joint_get_spring_hertz(id: JointId) -> float { return dynamics.distance_joint_of(sim_of(id, dynamics.JOINT_DISTANCE)).hertz }
+distance_joint_get_spring_damping_ratio(id: JointId) -> float { return dynamics.distance_joint_of(sim_of(id, dynamics.JOINT_DISTANCE)).damping_ratio }
+distance_joint_enable_motor(id: JointId, flag: bool) {
+    base = sim_of(id, dynamics.JOINT_DISTANCE)
+    if base == null { return }
+    j = dynamics.distance_joint_of(base)
+    if flag != j.enable_motor {
+        j.enable_motor = flag
+        j.motor_impulse = 0.0
+    }
+}
+distance_joint_is_motor_enabled(id: JointId) -> bool { return dynamics.distance_joint_of(sim_of(id, dynamics.JOINT_DISTANCE)).enable_motor }
+distance_joint_set_motor_speed(id: JointId, speed: float) {
+    base = sim_of(id, dynamics.JOINT_DISTANCE)
+    if base != null { dynamics.distance_joint_of(base).motor_speed = speed }
+}
+distance_joint_get_motor_speed(id: JointId) -> float { return dynamics.distance_joint_of(sim_of(id, dynamics.JOINT_DISTANCE)).motor_speed }
+distance_joint_get_motor_force(id: JointId) -> float {
+    base = sim_of(id, dynamics.JOINT_DISTANCE)
+    if base == null { return 0.0 }
+    return dynamics.get_world(id.world0).inv_h * dynamics.distance_joint_of(base).motor_impulse
+}
+distance_joint_set_max_motor_force(id: JointId, force: float) {
+    base = sim_of(id, dynamics.JOINT_DISTANCE)
+    if base != null { dynamics.distance_joint_of(base).max_motor_force = force }
+}
+distance_joint_get_max_motor_force(id: JointId) -> float { return dynamics.distance_joint_of(sim_of(id, dynamics.JOINT_DISTANCE)).max_motor_force }
+
+// --- motor joint --------------------------------------------------------------------------------------------------
+
+prepare_motor_joint(base: *JointSim, ctx: *StepContext) {
+    bodies = prepare_base(base, ctx)
+    j = dynamics.motor_joint_of(base)
+    j.index_a = bodies.index_a
+    j.index_b = bodies.index_b
+    j.frame_a = world_frame(bodies.sim_a, base.local_frame_a)
+    j.frame_b = world_frame(bodies.sim_b, base.local_frame_b)
+    j.delta_center = math.sub(bodies.sim_b.center, bodies.sim_a.center)
+    j.linear_spring = dynamics.make_soft(j.linear_hertz, j.linear_damping_ratio, ctx.h)
+    j.angular_spring = dynamics.make_soft(j.angular_hertz, j.angular_damping_ratio, ctx.h)
+    j.angular_mass = math.invert_matrix(math.add_mm(base.inv_inertia_a, base.inv_inertia_b))
+    if ctx.enable_warm_starting == false {
+        j.linear_velocity_impulse = math.vec3_zero()
+        j.angular_velocity_impulse = math.vec3_zero()
+        j.linear_spring_impulse = math.vec3_zero()
+        j.angular_spring_impulse = math.vec3_zero()
+    }
+}
+
+warm_start_motor_joint(base: *JointSim, ctx: *StepContext) {
+    j = dynamics.motor_joint_of(base)
+    state_a = state_of(ctx, j.index_a)
+    state_b = state_of(ctx, j.index_b)
+    r_a = math.rotate_vector(state_a.delta_rotation, j.frame_a.p)
+    r_b = math.rotate_vector(state_b.delta_rotation, j.frame_b.p)
+    linear = math.add(j.linear_velocity_impulse, j.linear_spring_impulse)
+    angular = math.add(j.angular_velocity_impulse, j.angular_spring_impulse)
+    // The reference writes both bodies here, static ones included (a
+    // static body's dummy state is written and forgotten).
+    if (state_a.flags & dynamics.DYNAMIC_FLAG) != 0 {
+        state_a.linear_velocity = math.mul_sub(state_a.linear_velocity, base.inv_mass_a, linear)
+        state_a.angular_velocity = math.sub(state_a.angular_velocity, math.mul_mv(base.inv_inertia_a, math.add(math.cross(r_a, linear), angular)))
+    }
+    if (state_b.flags & dynamics.DYNAMIC_FLAG) != 0 {
+        state_b.linear_velocity = math.mul_add(state_b.linear_velocity, base.inv_mass_b, linear)
+        state_b.angular_velocity = math.add(state_b.angular_velocity, math.mul_mv(base.inv_inertia_b, math.add(math.cross(r_b, linear), angular)))
+    }
+}
+
+// The angular spring towards frame alignment, the angular velocity
+// target, the linear spring towards frame coincidence, the linear
+// velocity target; each bounded by its maximum over the sub-step.
+solve_motor_joint(base: *JointSim, ctx: *StepContext) {
+    m_a = base.inv_mass_a
+    m_b = base.inv_mass_b
+    i_a = base.inv_inertia_a
+    i_b = base.inv_inertia_b
+    j = dynamics.motor_joint_of(base)
+    state_a = state_of(ctx, j.index_a)
+    state_b = state_of(ctx, j.index_b)
+    v_a = state_a.linear_velocity
+    w_a = state_a.angular_velocity
+    v_b = state_b.linear_velocity
+    w_b = state_b.angular_velocity
+    quat_a = math.mul_quat(state_a.delta_rotation, j.frame_a.q)
+    quat_b = math.mul_quat(state_b.delta_rotation, j.frame_b.q)
+    if math.dot_quat(quat_a, quat_b) < 0.0 { quat_b = math.negate_quat(quat_b) }
+    rel_q = math.inv_mul_quat(quat_a, quat_b)
+    if j.max_spring_torque > 0.0 && j.angular_hertz > 0.0 {
+        delta_rotation = math.delta_quat_to_rotation(rel_q, math.quat_identity())
+        c = math.neg(math.rotate_vector(quat_a, delta_rotation))
+        bias = math.mul_sv(j.angular_spring.bias_rate, c)
+        cdot = math.sub(w_b, w_a)
+        max_impulse = ctx.h * j.max_spring_torque
+        old_impulse = j.angular_spring_impulse
+        impulse = math.mul_sub(math.mul_sv(0.0 - j.angular_spring.mass_scale, math.mul_mv(j.angular_mass, math.add(cdot, bias))), j.angular_spring.impulse_scale, old_impulse)
+        j.angular_spring_impulse = math.add(old_impulse, impulse)
+        if math.length_squared(j.angular_spring_impulse) > max_impulse * max_impulse {
+            j.angular_spring_impulse = math.mul_sv(max_impulse, math.normalize(j.angular_spring_impulse))
+        }
+        impulse = math.sub(j.angular_spring_impulse, old_impulse)
+        w_a = math.sub(w_a, math.mul_mv(i_a, impulse))
+        w_b = math.add(w_b, math.mul_mv(i_b, impulse))
+    }
+    if j.max_velocity_torque > 0.0 {
+        cdot = math.sub(math.sub(w_b, w_a), j.angular_velocity)
+        impulse = math.neg(math.mul_mv(j.angular_mass, cdot))
+        max_impulse = ctx.h * j.max_velocity_torque
+        old_impulse = j.angular_velocity_impulse
+        j.angular_velocity_impulse = math.add(old_impulse, impulse)
+        if math.length_squared(j.angular_velocity_impulse) > max_impulse * max_impulse {
+            j.angular_velocity_impulse = math.mul_sv(max_impulse, math.normalize(j.angular_velocity_impulse))
+        }
+        impulse = math.sub(j.angular_velocity_impulse, old_impulse)
+        w_a = math.sub(w_a, math.mul_mv(i_a, impulse))
+        w_b = math.add(w_b, math.mul_mv(i_b, impulse))
+    }
+    r_a = math.rotate_vector(state_a.delta_rotation, j.frame_a.p)
+    r_b = math.rotate_vector(state_b.delta_rotation, j.frame_b.p)
+    if j.max_spring_force > 0.0 && j.linear_hertz > 0.0 {
+        c = math.add(math.add(math.sub(state_b.delta_position, state_a.delta_position), math.sub(r_b, r_a)), j.delta_center)
+        bias = math.mul_sv(j.linear_spring.bias_rate, c)
+        cdot = math.sub(math.add(v_b, math.cross(w_b, r_b)), math.add(v_a, math.cross(w_a, r_a)))
+        k = point_mass_matrix(m_a, i_a, r_a, m_b, i_b, r_b)
+        b = math.solve3(k, math.add(cdot, bias))
+        old_impulse = j.linear_spring_impulse
+        impulse = math.mul_sub(math.mul_sv(0.0 - j.linear_spring.mass_scale, b), j.linear_spring.impulse_scale, old_impulse)
+        max_impulse = ctx.h * j.max_spring_force
+        j.linear_spring_impulse = math.add(j.linear_spring_impulse, impulse)
+        if math.length_squared(j.linear_spring_impulse) > max_impulse * max_impulse {
+            j.linear_spring_impulse = math.mul_sv(max_impulse, math.normalize(j.linear_spring_impulse))
+        }
+        impulse = math.sub(j.linear_spring_impulse, old_impulse)
+        v_a = math.mul_sub(v_a, m_a, impulse)
+        w_a = math.sub(w_a, math.mul_mv(i_a, math.cross(r_a, impulse)))
+        v_b = math.mul_add(v_b, m_b, impulse)
+        w_b = math.add(w_b, math.mul_mv(i_b, math.cross(r_b, impulse)))
+    }
+    if j.max_velocity_force > 0.0 {
+        cdot = math.sub(math.sub(math.add(v_b, math.cross(w_b, r_b)), math.add(v_a, math.cross(w_a, r_a))), j.linear_velocity)
+        k = point_mass_matrix(m_a, i_a, r_a, m_b, i_b, r_b)
+        impulse = math.neg(math.solve3(k, cdot))
+        old_impulse = j.linear_velocity_impulse
+        max_impulse = ctx.h * j.max_velocity_force
+        j.linear_velocity_impulse = math.add(j.linear_velocity_impulse, impulse)
+        if math.length_squared(j.linear_velocity_impulse) > max_impulse * max_impulse {
+            j.linear_velocity_impulse = math.mul_sv(max_impulse, math.normalize(j.linear_velocity_impulse))
+        }
+        impulse = math.sub(j.linear_velocity_impulse, old_impulse)
+        v_a = math.mul_sub(v_a, m_a, impulse)
+        w_a = math.sub(w_a, math.mul_mv(i_a, math.cross(r_a, impulse)))
+        v_b = math.mul_add(v_b, m_b, impulse)
+        w_b = math.add(w_b, math.mul_mv(i_b, math.cross(r_b, impulse)))
+    }
+    store_velocities(state_a, v_a, w_a, state_b, v_b, w_b)
+}
+
+get_motor_joint_force(w: *World, base: *JointSim) -> Vec3 {
+    j = dynamics.motor_joint_of(base)
+    return math.mul_sv(w.inv_h, math.add(j.linear_velocity_impulse, j.linear_spring_impulse))
+}
+get_motor_joint_torque(w: *World, base: *JointSim) -> Vec3 {
+    j = dynamics.motor_joint_of(base)
+    return math.mul_sv(w.inv_h, math.add(j.angular_velocity_impulse, j.angular_spring_impulse))
+}
+
+motor_joint_set_linear_velocity(id: JointId, v: Vec3) {
+    base = sim_of(id, dynamics.JOINT_MOTOR)
+    if base != null { dynamics.motor_joint_of(base).linear_velocity = v }
+}
+motor_joint_get_linear_velocity(id: JointId) -> Vec3 { return dynamics.motor_joint_of(sim_of(id, dynamics.JOINT_MOTOR)).linear_velocity }
+motor_joint_set_angular_velocity(id: JointId, v: Vec3) {
+    base = sim_of(id, dynamics.JOINT_MOTOR)
+    if base != null { dynamics.motor_joint_of(base).angular_velocity = v }
+}
+motor_joint_get_angular_velocity(id: JointId) -> Vec3 { return dynamics.motor_joint_of(sim_of(id, dynamics.JOINT_MOTOR)).angular_velocity }
+motor_joint_set_max_velocity_torque(id: JointId, value: float) {
+    base = sim_of(id, dynamics.JOINT_MOTOR)
+    if base != null { dynamics.motor_joint_of(base).max_velocity_torque = value }
+}
+motor_joint_get_max_velocity_torque(id: JointId) -> float { return dynamics.motor_joint_of(sim_of(id, dynamics.JOINT_MOTOR)).max_velocity_torque }
+motor_joint_set_max_velocity_force(id: JointId, value: float) {
+    base = sim_of(id, dynamics.JOINT_MOTOR)
+    if base != null { dynamics.motor_joint_of(base).max_velocity_force = value }
+}
+motor_joint_get_max_velocity_force(id: JointId) -> float { return dynamics.motor_joint_of(sim_of(id, dynamics.JOINT_MOTOR)).max_velocity_force }
+motor_joint_set_linear_hertz(id: JointId, value: float) {
+    base = sim_of(id, dynamics.JOINT_MOTOR)
+    if base != null { dynamics.motor_joint_of(base).linear_hertz = value }
+}
+motor_joint_get_linear_hertz(id: JointId) -> float { return dynamics.motor_joint_of(sim_of(id, dynamics.JOINT_MOTOR)).linear_hertz }
+motor_joint_set_linear_damping_ratio(id: JointId, value: float) {
+    base = sim_of(id, dynamics.JOINT_MOTOR)
+    if base != null { dynamics.motor_joint_of(base).linear_damping_ratio = value }
+}
+motor_joint_get_linear_damping_ratio(id: JointId) -> float { return dynamics.motor_joint_of(sim_of(id, dynamics.JOINT_MOTOR)).linear_damping_ratio }
+motor_joint_set_angular_hertz(id: JointId, value: float) {
+    base = sim_of(id, dynamics.JOINT_MOTOR)
+    if base != null { dynamics.motor_joint_of(base).angular_hertz = value }
+}
+motor_joint_get_angular_hertz(id: JointId) -> float { return dynamics.motor_joint_of(sim_of(id, dynamics.JOINT_MOTOR)).angular_hertz }
+motor_joint_set_angular_damping_ratio(id: JointId, value: float) {
+    base = sim_of(id, dynamics.JOINT_MOTOR)
+    if base != null { dynamics.motor_joint_of(base).angular_damping_ratio = value }
+}
+motor_joint_get_angular_damping_ratio(id: JointId) -> float { return dynamics.motor_joint_of(sim_of(id, dynamics.JOINT_MOTOR)).angular_damping_ratio }
+motor_joint_set_max_spring_force(id: JointId, value: float) {
+    base = sim_of(id, dynamics.JOINT_MOTOR)
+    if base != null { dynamics.motor_joint_of(base).max_spring_force = value }
+}
+motor_joint_get_max_spring_force(id: JointId) -> float { return dynamics.motor_joint_of(sim_of(id, dynamics.JOINT_MOTOR)).max_spring_force }
+motor_joint_set_max_spring_torque(id: JointId, value: float) {
+    base = sim_of(id, dynamics.JOINT_MOTOR)
+    if base != null { dynamics.motor_joint_of(base).max_spring_torque = value }
+}
+motor_joint_get_max_spring_torque(id: JointId) -> float { return dynamics.motor_joint_of(sim_of(id, dynamics.JOINT_MOTOR)).max_spring_torque }
+
+// --- parallel joint -----------------------------------------------------------------------------------------------
+
+prepare_parallel_joint(base: *JointSim, ctx: *StepContext) {
+    bodies = prepare_base(base, ctx)
+    j = dynamics.parallel_joint_of(base)
+    j.index_a = bodies.index_a
+    j.index_b = bodies.index_b
+    j.quat_a = math.mul_quat(bodies.sim_a.transform.q, base.local_frame_a.q)
+    j.quat_b = math.mul_quat(bodies.sim_b.transform.q, base.local_frame_b.q)
+    rel_q = math.inv_mul_quat(j.quat_a, j.quat_b)
+    j.perp_axis_x = perp_axis(j.quat_a, rel_q, math.vec3_axis_x())
+    j.perp_axis_y = perp_axis(j.quat_a, rel_q, math.vec3_axis_y())
+    j.softness = dynamics.make_soft(j.hertz, j.damping_ratio, ctx.h)
+    if ctx.enable_warm_starting == false { j.perp_impulse = Vec2 { x: 0.0, y: 0.0 } }
+}
+
+warm_start_parallel_joint(base: *JointSim, ctx: *StepContext) {
+    j = dynamics.parallel_joint_of(base)
+    state_a = state_of(ctx, j.index_a)
+    state_b = state_of(ctx, j.index_b)
+    angular = math.blend2(j.perp_impulse.x, j.perp_axis_x, j.perp_impulse.y, j.perp_axis_y)
+    if (state_a.flags & dynamics.DYNAMIC_FLAG) != 0 { state_a.angular_velocity = math.sub(state_a.angular_velocity, math.mul_mv(base.inv_inertia_a, angular)) }
+    if (state_b.flags & dynamics.DYNAMIC_FLAG) != 0 { state_b.angular_velocity = math.add(state_b.angular_velocity, math.mul_mv(base.inv_inertia_b, angular)) }
+}
+
+// The z axes kept collinear by a two-row spring on the perpendicular
+// axes, bounded by the maximum torque over the sub-step.
+solve_parallel_joint(base: *JointSim, ctx: *StepContext) {
+    i_a = base.inv_inertia_a
+    i_b = base.inv_inertia_b
+    j = dynamics.parallel_joint_of(base)
+    state_a = state_of(ctx, j.index_a)
+    state_b = state_of(ctx, j.index_b)
+    w_a = state_a.angular_velocity
+    w_b = state_b.angular_velocity
+    quat_a = math.mul_quat(state_a.delta_rotation, j.quat_a)
+    quat_b = math.mul_quat(state_b.delta_rotation, j.quat_b)
+    if math.dot_quat(quat_a, quat_b) < 0.0 { quat_b = math.negate_quat(quat_b) }
+    rel_q = math.inv_mul_quat(quat_a, quat_b)
+    if base.fixed_rotation == false && j.max_torque > 0.0 {
+        bias = Vec2 { x: j.softness.bias_rate * rel_q.v.x, y: j.softness.bias_rate * rel_q.v.y }
+        perp_x = perp_axis(quat_a, rel_q, math.vec3_axis_x())
+        perp_y = perp_axis(quat_a, rel_q, math.vec3_axis_y())
+        j.perp_axis_x = perp_x
+        j.perp_axis_y = perp_y
+        inertia_sum = math.add_mm(i_a, i_b)
+        kxx = math.dot(perp_x, math.mul_mv(inertia_sum, perp_x))
+        kyy = math.dot(perp_y, math.mul_mv(inertia_sum, perp_y))
+        kxy = math.dot(perp_x, math.mul_mv(inertia_sum, perp_y))
+        k = Matrix2 { cx: Vec2 { x: kxx, y: kxy }, cy: Vec2 { x: kxy, y: kyy } }
+        w_rel = math.sub(w_b, w_a)
+        cdot = Vec2 { x: math.dot(w_rel, perp_x), y: math.dot(w_rel, perp_y) }
+        max_impulse = ctx.h * j.max_torque
+        old_impulse = j.perp_impulse
+        sol = math.solve2(k, math.add2(cdot, bias))
+        delta = Vec2 { x: 0.0 - j.softness.mass_scale * sol.x - j.softness.impulse_scale * old_impulse.x,
+                       y: 0.0 - j.softness.mass_scale * sol.y - j.softness.impulse_scale * old_impulse.y }
+        j.perp_impulse = math.add2(old_impulse, delta)
+        if math.dot2(j.perp_impulse, j.perp_impulse) > max_impulse * max_impulse {
+            j.perp_impulse = math.mul_sv2(max_impulse / sqrt(math.dot2(j.perp_impulse, j.perp_impulse)), j.perp_impulse)
+        }
+        delta = math.sub2(j.perp_impulse, old_impulse)
+        angular = math.blend2(delta.x, perp_x, delta.y, perp_y)
+        w_a = math.sub(w_a, math.mul_mv(i_a, angular))
+        w_b = math.add(w_b, math.mul_mv(i_b, angular))
+    }
+    if (state_a.flags & dynamics.DYNAMIC_FLAG) != 0 { state_a.angular_velocity = w_a }
+    if (state_b.flags & dynamics.DYNAMIC_FLAG) != 0 { state_b.angular_velocity = w_b }
+}
+
+get_parallel_joint_torque(w: *World, base: *JointSim) -> Vec3 {
+    j = dynamics.parallel_joint_of(base)
+    rel_q = math.inv_mul_quat(j.quat_a, j.quat_b)
+    j.perp_axis_x = perp_axis(j.quat_a, rel_q, math.vec3_axis_x())
+    j.perp_axis_y = perp_axis(j.quat_a, rel_q, math.vec3_axis_y())
+    return math.mul_sv(w.inv_h, math.blend2(j.perp_impulse.x, j.perp_axis_x, j.perp_impulse.y, j.perp_axis_y))
+}
+
+parallel_joint_set_spring_hertz(id: JointId, value: float) {
+    base = sim_of(id, dynamics.JOINT_PARALLEL)
+    if base != null { dynamics.parallel_joint_of(base).hertz = value }
+}
+parallel_joint_get_spring_hertz(id: JointId) -> float { return dynamics.parallel_joint_of(sim_of(id, dynamics.JOINT_PARALLEL)).hertz }
+parallel_joint_set_spring_damping_ratio(id: JointId, value: float) {
+    base = sim_of(id, dynamics.JOINT_PARALLEL)
+    if base != null { dynamics.parallel_joint_of(base).damping_ratio = value }
+}
+parallel_joint_get_spring_damping_ratio(id: JointId) -> float { return dynamics.parallel_joint_of(sim_of(id, dynamics.JOINT_PARALLEL)).damping_ratio }
+parallel_joint_set_max_torque(id: JointId, value: float) {
+    base = sim_of(id, dynamics.JOINT_PARALLEL)
+    if base != null { dynamics.parallel_joint_of(base).max_torque = value }
+}
+parallel_joint_get_max_torque(id: JointId) -> float { return dynamics.parallel_joint_of(sim_of(id, dynamics.JOINT_PARALLEL)).max_torque }
+
+// --- prismatic joint -----------------------------------------------------------------------------------------------
+
+prepare_prismatic_joint(base: *JointSim, ctx: *StepContext) {
+    bodies = prepare_base(base, ctx)
+    j = dynamics.prismatic_joint_of(base)
+    j.index_a = bodies.index_a
+    j.index_b = bodies.index_b
+    j.frame_a = world_frame(bodies.sim_a, base.local_frame_a)
+    j.frame_b = world_frame(bodies.sim_b, base.local_frame_b)
+    j.delta_center = math.sub(bodies.sim_b.center, bodies.sim_a.center)
+    j.rotation_mass = math.invert_matrix(math.add_mm(base.inv_inertia_a, base.inv_inertia_b))
+    matrix_a = math.make_matrix_from_quat(j.frame_a.q)
+    j.joint_axis = matrix_a.cx
+    j.perp_axis_y = matrix_a.cy
+    j.perp_axis_z = matrix_a.cz
+    j.spring_softness = dynamics.make_soft(j.hertz, j.damping_ratio, ctx.h)
+    if ctx.enable_warm_starting == false {
+        j.perp_impulse = Vec2 { x: 0.0, y: 0.0 }
+        j.angular_impulse = math.vec3_zero()
+        j.motor_impulse = 0.0
+        j.spring_impulse = 0.0
+        j.lower_impulse = 0.0
+        j.upper_impulse = 0.0
+    }
+}
+
+warm_start_prismatic_joint(base: *JointSim, ctx: *StepContext) {
+    j = dynamics.prismatic_joint_of(base)
+    state_a = state_of(ctx, j.index_a)
+    state_b = state_of(ctx, j.index_b)
+    r_a = math.rotate_vector(state_a.delta_rotation, j.frame_a.p)
+    r_b = math.rotate_vector(state_b.delta_rotation, j.frame_b.p)
+    d = math.add(math.add(math.sub(state_b.delta_position, state_a.delta_position), j.delta_center), math.sub(r_b, r_a))
+    axis = math.rotate_vector(state_a.delta_rotation, j.joint_axis)
+    s_ax = math.cross(math.add(r_a, d), axis)
+    s_bx = math.cross(r_b, axis)
+    perp_y = math.rotate_vector(state_a.delta_rotation, j.perp_axis_y)
+    perp_z = math.rotate_vector(state_a.delta_rotation, j.perp_axis_z)
+    s_ay = math.cross(math.add(r_a, d), perp_y)
+    s_by = math.cross(r_b, perp_y)
+    s_az = math.cross(math.add(r_a, d), perp_z)
+    s_bz = math.cross(r_b, perp_z)
+    axial = j.spring_impulse + j.motor_impulse + j.lower_impulse - j.upper_impulse
+    p = math.blend3(axial, axis, j.perp_impulse.x, perp_y, j.perp_impulse.y, perp_z)
+    l_a = math.add(math.blend3(axial, s_ax, j.perp_impulse.x, s_ay, j.perp_impulse.y, s_az), j.angular_impulse)
+    l_b = math.add(math.blend3(axial, s_bx, j.perp_impulse.x, s_by, j.perp_impulse.y, s_bz), j.angular_impulse)
+    v_a = math.mul_sub(state_a.linear_velocity, base.inv_mass_a, p)
+    w_a = math.sub(state_a.angular_velocity, math.mul_mv(base.inv_inertia_a, l_a))
+    v_b = math.mul_add(state_b.linear_velocity, base.inv_mass_b, p)
+    w_b = math.add(state_b.angular_velocity, math.mul_mv(base.inv_inertia_b, l_b))
+    store_velocities(state_a, v_a, w_a, state_b, v_b, w_b)
+}
+
+// Along frame A's x axis: the spring, the motor, the limits (only
+// within a quarter of the range of them, speculatively); the rotation
+// locked by a three-row constraint; the point kept on the line by two.
+// The axial mass is fresh each sub-step so a stressed joint stays put.
+solve_prismatic_joint(base: *JointSim, ctx: *StepContext, use_bias: bool) {
+    m_a = base.inv_mass_a
+    m_b = base.inv_mass_b
+    i_a = base.inv_inertia_a
+    i_b = base.inv_inertia_b
+    j = dynamics.prismatic_joint_of(base)
+    state_a = state_of(ctx, j.index_a)
+    state_b = state_of(ctx, j.index_b)
+    v_a = state_a.linear_velocity
+    w_a = state_a.angular_velocity
+    v_b = state_b.linear_velocity
+    w_b = state_b.angular_velocity
+    fixed_rotation = base.fixed_rotation
+    r_a = math.rotate_vector(state_a.delta_rotation, j.frame_a.p)
+    r_b = math.rotate_vector(state_b.delta_rotation, j.frame_b.p)
+    d = math.add(math.add(math.sub(state_b.delta_position, state_a.delta_position), j.delta_center), math.sub(r_b, r_a))
+    axis = math.rotate_vector(state_a.delta_rotation, j.joint_axis)
+    s_ax = math.cross(math.add(r_a, d), axis)
+    s_bx = math.cross(r_b, axis)
+    translation = math.dot(d, axis)
+    ka = m_a + m_b + math.dot(s_ax, math.mul_mv(i_a, s_ax)) + math.dot(s_bx, math.mul_mv(i_b, s_bx))
+    axial_mass = 0.0
+    if ka > 0.0 { axial_mass = 1.0 / ka }
+    if j.enable_spring && fixed_rotation == false {
+        c = translation - j.target_translation
+        bias = j.spring_softness.bias_rate * c
+        v_rel = math.sub(math.sub(math.add(v_b, math.cross(w_b, r_b)), v_a), math.cross(w_a, math.add(r_a, d)))
+        cdot = math.dot(v_rel, axis)
+        delta = 0.0 - j.spring_softness.mass_scale * axial_mass * (cdot + bias) - j.spring_softness.impulse_scale * j.spring_impulse
+        j.spring_impulse = j.spring_impulse + delta
+        v_a = math.mul_sub(v_a, m_a, math.mul_sv(delta, axis))
+        w_a = math.sub(w_a, math.mul_mv(i_a, math.mul_sv(delta, s_ax)))
+        v_b = math.mul_add(v_b, m_b, math.mul_sv(delta, axis))
+        w_b = math.add(w_b, math.mul_mv(i_b, math.mul_sv(delta, s_bx)))
+    }
+    if j.enable_motor && fixed_rotation == false {
+        v_rel = math.sub(math.sub(math.add(v_b, math.cross(w_b, r_b)), v_a), math.cross(w_a, math.add(r_a, d)))
+        cdot = math.dot(v_rel, axis) - j.motor_speed
+        delta = 0.0 - axial_mass * cdot
+        max_impulse = j.max_motor_force * ctx.h
+        new_impulse = math.clamp_float(j.motor_impulse + delta, 0.0 - max_impulse, max_impulse)
+        delta = new_impulse - j.motor_impulse
+        j.motor_impulse = new_impulse
+        v_a = math.mul_sub(v_a, m_a, math.mul_sv(delta, axis))
+        w_a = math.sub(w_a, math.mul_mv(i_a, math.mul_sv(delta, s_ax)))
+        v_b = math.mul_add(v_b, m_b, math.mul_sv(delta, axis))
+        w_b = math.add(w_b, math.mul_mv(i_b, math.mul_sv(delta, s_bx)))
+    }
+    if j.enable_limit && fixed_rotation == false {
+        speculative = 0.25 * (j.upper_translation - j.lower_translation)
+        // Lower.
+        c = translation - j.lower_translation
+        if c < speculative {
+            scales = limit_scales(base, ctx, c, use_bias)
+            v_rel = math.sub(math.sub(math.add(v_b, math.cross(w_b, r_b)), v_a), math.cross(w_a, math.add(r_a, d)))
+            cdot = math.dot(v_rel, axis)
+            old_impulse = j.lower_impulse
+            delta = 0.0 - scales.mass_scale * axial_mass * (cdot + scales.bias) - scales.impulse_scale * old_impulse
+            j.lower_impulse = math.max_float(old_impulse + delta, 0.0)
+            delta = j.lower_impulse - old_impulse
+            v_a = math.mul_sub(v_a, m_a, math.mul_sv(delta, axis))
+            w_a = math.sub(w_a, math.mul_mv(i_a, math.mul_sv(delta, s_ax)))
+            v_b = math.mul_add(v_b, m_b, math.mul_sv(delta, axis))
+            w_b = math.add(w_b, math.mul_mv(i_b, math.mul_sv(delta, s_bx)))
+        } else {
+            j.lower_impulse = 0.0
+        }
+        // Upper, with the signs flipped.
+        c = j.upper_translation - translation
+        if c < speculative {
+            scales = limit_scales(base, ctx, c, use_bias)
+            v_rel = math.sub(math.sub(math.add(v_b, math.cross(w_b, r_b)), v_a), math.cross(w_a, math.add(r_a, d)))
+            cdot = 0.0 - math.dot(v_rel, axis)
+            old_impulse = j.upper_impulse
+            delta = 0.0 - scales.mass_scale * axial_mass * (cdot + scales.bias) - scales.impulse_scale * old_impulse
+            j.upper_impulse = math.max_float(old_impulse + delta, 0.0)
+            neg_delta = old_impulse - j.upper_impulse
+            v_a = math.mul_sub(v_a, m_a, math.mul_sv(neg_delta, axis))
+            w_a = math.sub(w_a, math.mul_mv(i_a, math.mul_sv(neg_delta, s_ax)))
+            v_b = math.mul_add(v_b, m_b, math.mul_sv(neg_delta, axis))
+            w_b = math.add(w_b, math.mul_mv(i_b, math.mul_sv(neg_delta, s_bx)))
+        } else {
+            j.upper_impulse = 0.0
+        }
+    }
+    if fixed_rotation == false {
+        bias = math.vec3_zero()
+        mass_scale = 1.0
+        impulse_scale = 0.0
+        if use_bias {
+            quat_a = math.mul_quat(state_a.delta_rotation, j.frame_a.q)
+            quat_b = math.mul_quat(state_b.delta_rotation, j.frame_b.q)
+            rel_q = math.inv_mul_quat(quat_a, quat_b)
+            delta_rotation = math.delta_quat_to_rotation(rel_q, math.quat_identity())
+            bias = math.mul_sv(base.constraint_softness.bias_rate, math.neg(math.rotate_vector(quat_a, delta_rotation)))
+            mass_scale = base.constraint_softness.mass_scale
+            impulse_scale = base.constraint_softness.impulse_scale
+        }
+        cdot = math.sub(w_b, w_a)
+        impulse = math.sub(math.mul_sv(0.0 - mass_scale, math.mul_mv(j.rotation_mass, math.add(cdot, bias))), math.mul_sv(impulse_scale, j.angular_impulse))
+        j.angular_impulse = math.add(j.angular_impulse, impulse)
+        w_a = math.sub(w_a, math.mul_mv(i_a, impulse))
+        w_b = math.add(w_b, math.mul_mv(i_b, impulse))
+    }
+    // The point on the line.
+    perp_y = math.rotate_vector(state_a.delta_rotation, j.perp_axis_y)
+    perp_z = math.rotate_vector(state_a.delta_rotation, j.perp_axis_z)
+    bias2 = Vec2 { x: 0.0, y: 0.0 }
+    mass_scale2 = 1.0
+    impulse_scale2 = 0.0
+    if use_bias {
+        bias2 = math.mul_sv2(base.constraint_softness.bias_rate, Vec2 { x: math.dot(perp_y, d), y: math.dot(perp_z, d) })
+        mass_scale2 = base.constraint_softness.mass_scale
+        impulse_scale2 = base.constraint_softness.impulse_scale
+    }
+    v_rel = math.sub(math.sub(math.add(v_b, math.cross(w_b, r_b)), v_a), math.cross(w_a, math.add(r_a, d)))
+    cdot2 = Vec2 { x: math.dot(perp_y, v_rel), y: math.dot(perp_z, v_rel) }
+    s_ay = math.cross(math.add(r_a, d), perp_y)
+    s_by = math.cross(r_b, perp_y)
+    s_az = math.cross(math.add(r_a, d), perp_z)
+    s_bz = math.cross(r_b, perp_z)
+    kyy = m_a + m_b + math.dot(s_ay, math.mul_mv(i_a, s_ay)) + math.dot(s_by, math.mul_mv(i_b, s_by))
+    kyz = math.dot(s_ay, math.mul_mv(i_a, s_az)) + math.dot(s_by, math.mul_mv(i_b, s_bz))
+    kzz = m_a + m_b + math.dot(s_az, math.mul_mv(i_a, s_az)) + math.dot(s_bz, math.mul_mv(i_b, s_bz))
+    k2 = Matrix2 { cx: Vec2 { x: kyy, y: kyz }, cy: Vec2 { x: kyz, y: kzz } }
+    old_perp = j.perp_impulse
+    sol = math.solve2(k2, math.add2(cdot2, bias2))
+    delta2 = math.sub2(math.mul_sv2(0.0 - mass_scale2, sol), math.mul_sv2(impulse_scale2, old_perp))
+    j.perp_impulse = math.add2(old_perp, delta2)
+    p = math.blend2(delta2.x, perp_y, delta2.y, perp_z)
+    v_a = math.mul_sub(v_a, m_a, p)
+    w_a = math.sub(w_a, math.mul_mv(i_a, math.blend2(delta2.x, s_ay, delta2.y, s_az)))
+    v_b = math.mul_add(v_b, m_b, p)
+    w_b = math.add(w_b, math.mul_mv(i_b, math.blend2(delta2.x, s_by, delta2.y, s_bz)))
+    store_velocities(state_a, v_a, w_a, state_b, v_b, w_b)
+}
+
+get_prismatic_joint_force(w: *World, base: *JointSim) -> Vec3 {
+    xf_a = dynamics.get_body_transform(w, base.body_id_a)
+    j = dynamics.prismatic_joint_of(base)
+    impulse = math.vec3(j.perp_impulse.x, j.perp_impulse.y, j.motor_impulse + j.lower_impulse + j.upper_impulse + j.spring_impulse)
+    force = math.rotate_vector(base.local_frame_a.q, math.mul_sv(w.inv_h, impulse))
+    return math.rotate_vector(xf_a.q, force)
+}
+get_prismatic_joint_torque(w: *World, base: *JointSim) -> Vec3 {
+    xf_a = dynamics.get_body_transform(w, base.body_id_a)
+    j = dynamics.prismatic_joint_of(base)
+    torque = math.rotate_vector(base.local_frame_a.q, math.mul_sv(w.inv_h, j.angular_impulse))
+    return math.rotate_vector(xf_a.q, torque)
+}
+
+prismatic_joint_enable_spring(id: JointId, flag: bool) {
+    base = sim_of(id, dynamics.JOINT_PRISMATIC)
+    if base == null { return }
+    j = dynamics.prismatic_joint_of(base)
+    if flag != j.enable_spring { j.spring_impulse = 0.0 }
+    j.enable_spring = flag
+}
+prismatic_joint_is_spring_enabled(id: JointId) -> bool { return dynamics.prismatic_joint_of(sim_of(id, dynamics.JOINT_PRISMATIC)).enable_spring }
+prismatic_joint_set_spring_hertz(id: JointId, value: float) {
+    base = sim_of(id, dynamics.JOINT_PRISMATIC)
+    if base != null { dynamics.prismatic_joint_of(base).hertz = value }
+}
+prismatic_joint_get_spring_hertz(id: JointId) -> float { return dynamics.prismatic_joint_of(sim_of(id, dynamics.JOINT_PRISMATIC)).hertz }
+prismatic_joint_set_spring_damping_ratio(id: JointId, value: float) {
+    base = sim_of(id, dynamics.JOINT_PRISMATIC)
+    if base != null { dynamics.prismatic_joint_of(base).damping_ratio = value }
+}
+prismatic_joint_get_spring_damping_ratio(id: JointId) -> float { return dynamics.prismatic_joint_of(sim_of(id, dynamics.JOINT_PRISMATIC)).damping_ratio }
+prismatic_joint_set_target_translation(id: JointId, value: float) {
+    base = sim_of(id, dynamics.JOINT_PRISMATIC)
+    if base != null { dynamics.prismatic_joint_of(base).target_translation = value }
+}
+prismatic_joint_get_target_translation(id: JointId) -> float { return dynamics.prismatic_joint_of(sim_of(id, dynamics.JOINT_PRISMATIC)).target_translation }
+prismatic_joint_enable_limit(id: JointId, flag: bool) {
+    base = sim_of(id, dynamics.JOINT_PRISMATIC)
+    if base == null { return }
+    j = dynamics.prismatic_joint_of(base)
+    if flag != j.enable_limit {
+        j.lower_impulse = 0.0
+        j.upper_impulse = 0.0
+    }
+    j.enable_limit = flag
+}
+prismatic_joint_is_limit_enabled(id: JointId) -> bool { return dynamics.prismatic_joint_of(sim_of(id, dynamics.JOINT_PRISMATIC)).enable_limit }
+prismatic_joint_get_lower_limit(id: JointId) -> float { return dynamics.prismatic_joint_of(sim_of(id, dynamics.JOINT_PRISMATIC)).lower_translation }
+prismatic_joint_get_upper_limit(id: JointId) -> float { return dynamics.prismatic_joint_of(sim_of(id, dynamics.JOINT_PRISMATIC)).upper_translation }
+prismatic_joint_set_limits(id: JointId, lower: float, upper: float) {
+    base = sim_of(id, dynamics.JOINT_PRISMATIC)
+    if base == null { return }
+    j = dynamics.prismatic_joint_of(base)
+    j.lower_translation = math.min_float(lower, upper)
+    j.upper_translation = math.max_float(lower, upper)
+}
+prismatic_joint_get_translation(id: JointId) -> float {
+    base = sim_of(id, dynamics.JOINT_PRISMATIC)
+    if base == null { return 0.0 }
+    w = dynamics.get_world(id.world0)
+    xf_a = dynamics.get_body_transform(w, base.body_id_a)
+    xf_b = dynamics.get_body_transform(w, base.body_id_b)
+    axis = math.rotate_vector(xf_a.q, math.rotate_vector(base.local_frame_a.q, math.vec3_axis_x()))
+    anchor_a = math.rotate_vector(xf_a.q, base.local_frame_a.p)
+    anchor_b = math.rotate_vector(xf_b.q, base.local_frame_b.p)
+    d = math.add(math.sub(xf_b.p, xf_a.p), math.sub(anchor_b, anchor_a))
+    return math.dot(d, axis)
+}
+prismatic_joint_enable_motor(id: JointId, flag: bool) {
+    base = sim_of(id, dynamics.JOINT_PRISMATIC)
+    if base == null { return }
+    j = dynamics.prismatic_joint_of(base)
+    if flag != j.enable_motor { j.motor_impulse = 0.0 }
+    j.enable_motor = flag
+}
+prismatic_joint_is_motor_enabled(id: JointId) -> bool { return dynamics.prismatic_joint_of(sim_of(id, dynamics.JOINT_PRISMATIC)).enable_motor }
+prismatic_joint_set_motor_speed(id: JointId, value: float) {
+    base = sim_of(id, dynamics.JOINT_PRISMATIC)
+    if base != null { dynamics.prismatic_joint_of(base).motor_speed = value }
+}
+prismatic_joint_get_motor_speed(id: JointId) -> float { return dynamics.prismatic_joint_of(sim_of(id, dynamics.JOINT_PRISMATIC)).motor_speed }
+prismatic_joint_set_max_motor_force(id: JointId, value: float) {
+    base = sim_of(id, dynamics.JOINT_PRISMATIC)
+    if base != null { dynamics.prismatic_joint_of(base).max_motor_force = value }
+}
+prismatic_joint_get_max_motor_force(id: JointId) -> float { return dynamics.prismatic_joint_of(sim_of(id, dynamics.JOINT_PRISMATIC)).max_motor_force }
+prismatic_joint_get_motor_force(id: JointId) -> float {
+    base = sim_of(id, dynamics.JOINT_PRISMATIC)
+    if base == null { return 0.0 }
+    return dynamics.get_world(id.world0).inv_h * dynamics.prismatic_joint_of(base).motor_impulse
+}
+// The speed along the axis, the axis moving with body A.
+prismatic_joint_get_speed(id: JointId) -> float {
+    base = sim_of(id, dynamics.JOINT_PRISMATIC)
+    if base == null { return 0.0 }
+    w = dynamics.get_world(id.world0)
+    body_a = dynamics.body_at(w, base.body_id_a)
+    body_b = dynamics.body_at(w, base.body_id_b)
+    sim_a = dynamics.get_body_sim(w, body_a)
+    sim_b = dynamics.get_body_sim(w, body_b)
+    state_a = dynamics.get_body_state(w, body_a)
+    state_b = dynamics.get_body_state(w, body_b)
+    axis_a = math.rotate_vector(sim_a.transform.q, math.rotate_vector(base.local_frame_a.q, math.vec3_axis_x()))
+    r_a = math.rotate_vector(sim_a.transform.q, math.sub(base.local_frame_a.p, sim_a.local_center))
+    r_b = math.rotate_vector(sim_b.transform.q, math.sub(base.local_frame_b.p, sim_b.local_center))
+    d = math.add(math.sub(sim_b.center, sim_a.center), math.sub(r_b, r_a))
+    v_a = math.vec3_zero()
+    w_a = math.vec3_zero()
+    if state_a != null {
+        v_a = state_a.linear_velocity
+        w_a = state_a.angular_velocity
+    }
+    v_b = math.vec3_zero()
+    w_b = math.vec3_zero()
+    if state_b != null {
+        v_b = state_b.linear_velocity
+        w_b = state_b.angular_velocity
+    }
+    v_rel = math.sub(math.add(v_b, math.cross(w_b, r_b)), math.add(v_a, math.cross(w_a, r_a)))
+    return math.dot(d, math.cross(w_a, axis_a)) + math.dot(axis_a, v_rel)
+}
+
+// --- revolute joint -----------------------------------------------------------------------------------------------
+
+prepare_revolute_joint(base: *JointSim, ctx: *StepContext) {
+    bodies = prepare_base(base, ctx)
+    j = dynamics.revolute_joint_of(base)
+    j.index_a = bodies.index_a
+    j.index_b = bodies.index_b
+    j.frame_a = world_frame(bodies.sim_a, base.local_frame_a)
+    j.frame_b = world_frame(bodies.sim_b, base.local_frame_b)
+    j.delta_center = math.sub(bodies.sim_b.center, bodies.sim_a.center)
+    inertia_sum = math.add_mm(base.inv_inertia_a, base.inv_inertia_b)
+    axis_z = math.rotate_vector(j.frame_a.q, math.vec3_axis_z())
+    k = math.dot(axis_z, math.mul_mv(inertia_sum, axis_z))
+    j.axial_mass = 0.0
+    if k > 0.0 { j.axial_mass = 1.0 / k }
+    j.rotation_axis_z = axis_z
+    rel_q = math.inv_mul_quat(j.frame_a.q, j.frame_b.q)
+    j.perp_axis_x = perp_axis(j.frame_a.q, rel_q, math.vec3_axis_x())
+    j.perp_axis_y = perp_axis(j.frame_a.q, rel_q, math.vec3_axis_y())
+    j.spring_softness = dynamics.make_soft(j.hertz, j.damping_ratio, ctx.h)
+    if ctx.enable_warm_starting == false {
+        j.linear_impulse = math.vec3_zero()
+        j.perp_impulse = Vec2 { x: 0.0, y: 0.0 }
+        j.motor_impulse = 0.0
+        j.spring_impulse = 0.0
+        j.lower_impulse = 0.0
+        j.upper_impulse = 0.0
+    }
+}
+
+warm_start_revolute_joint(base: *JointSim, ctx: *StepContext) {
+    j = dynamics.revolute_joint_of(base)
+    state_a = state_of(ctx, j.index_a)
+    state_b = state_of(ctx, j.index_b)
+    r_a = math.rotate_vector(state_a.delta_rotation, j.frame_a.p)
+    r_b = math.rotate_vector(state_b.delta_rotation, j.frame_b.p)
+    axial = j.spring_impulse + j.motor_impulse + j.lower_impulse - j.upper_impulse
+    angular = math.blend2(j.perp_impulse.x, j.perp_axis_x, j.perp_impulse.y, j.perp_axis_y)
+    angular = math.mul_add(angular, axial, j.rotation_axis_z)
+    v_a = math.mul_sub(state_a.linear_velocity, base.inv_mass_a, j.linear_impulse)
+    w_a = math.sub(state_a.angular_velocity, math.mul_mv(base.inv_inertia_a, math.add(math.cross(r_a, j.linear_impulse), angular)))
+    v_b = math.mul_add(state_b.linear_velocity, base.inv_mass_b, j.linear_impulse)
+    w_b = math.add(state_b.angular_velocity, math.mul_mv(base.inv_inertia_b, math.add(math.cross(r_b, j.linear_impulse), angular)))
+    store_velocities(state_a, v_a, w_a, state_b, v_b, w_b)
+}
+
+// About frame A's z axis: the spring to the target angle, the motor,
+// the angle limits; the other two axes locked by a two-row constraint
+// on the perpendicular axes; the point-to-point by three rows.
+solve_revolute_joint(base: *JointSim, ctx: *StepContext, use_bias: bool) {
+    m_a = base.inv_mass_a
+    m_b = base.inv_mass_b
+    i_a = base.inv_inertia_a
+    i_b = base.inv_inertia_b
+    j = dynamics.revolute_joint_of(base)
+    state_a = state_of(ctx, j.index_a)
+    state_b = state_of(ctx, j.index_b)
+    v_a = state_a.linear_velocity
+    w_a = state_a.angular_velocity
+    v_b = state_b.linear_velocity
+    w_b = state_b.angular_velocity
+    fixed_rotation = base.fixed_rotation
+    quat_a = math.mul_quat(state_a.delta_rotation, j.frame_a.q)
+    quat_b = math.mul_quat(state_b.delta_rotation, j.frame_b.q)
+    if math.dot_quat(quat_a, quat_b) < 0.0 { quat_b = math.negate_quat(quat_b) }
+    rel_q = math.inv_mul_quat(quat_a, quat_b)
+    axis = j.rotation_axis_z
+    if j.enable_spring && fixed_rotation == false {
+        c = math.get_twist_angle(rel_q) - j.target_angle
+        bias = j.spring_softness.bias_rate * c
+        cdot = math.dot(math.sub(w_b, w_a), axis)
+        delta = 0.0 - j.spring_softness.mass_scale * j.axial_mass * (cdot + bias) - j.spring_softness.impulse_scale * j.spring_impulse
+        j.spring_impulse = j.spring_impulse + delta
+        w_a = math.mul_sub(w_a, delta, math.mul_mv(i_a, axis))
+        w_b = math.mul_add(w_b, delta, math.mul_mv(i_b, axis))
+    }
+    if j.enable_motor && fixed_rotation == false {
+        cdot = math.dot(math.sub(w_b, w_a), axis) - j.motor_speed
+        delta = 0.0 - j.axial_mass * cdot
+        max_impulse = j.max_motor_torque * ctx.h
+        new_impulse = math.clamp_float(j.motor_impulse + delta, 0.0 - max_impulse, max_impulse)
+        delta = new_impulse - j.motor_impulse
+        j.motor_impulse = new_impulse
+        w_a = math.mul_sub(w_a, delta, math.mul_mv(i_a, axis))
+        w_b = math.mul_add(w_b, delta, math.mul_mv(i_b, axis))
+    }
+    if j.enable_limit && fixed_rotation == false {
+        angle = math.get_twist_angle(rel_q)
+        // Lower.
+        scales = limit_scales(base, ctx, angle - j.lower_angle, use_bias)
+        cdot = math.dot(math.sub(w_b, w_a), axis)
+        old_impulse = j.lower_impulse
+        delta = 0.0 - scales.mass_scale * j.axial_mass * (cdot + scales.bias) - scales.impulse_scale * old_impulse
+        j.lower_impulse = math.max_float(old_impulse + delta, 0.0)
+        delta = j.lower_impulse - old_impulse
+        w_a = math.mul_sub(w_a, delta, math.mul_mv(i_a, axis))
+        w_b = math.mul_add(w_b, delta, math.mul_mv(i_b, axis))
+        // Upper, the signs flipped.
+        scales = limit_scales(base, ctx, j.upper_angle - angle, use_bias)
+        cdot = math.dot(math.sub(w_a, w_b), axis)
+        old_impulse = j.upper_impulse
+        delta = 0.0 - scales.mass_scale * j.axial_mass * (cdot + scales.bias) - scales.impulse_scale * old_impulse
+        j.upper_impulse = math.max_float(old_impulse + delta, 0.0)
+        delta = j.upper_impulse - old_impulse
+        w_a = math.mul_add(w_a, delta, math.mul_mv(i_a, axis))
+        w_b = math.mul_sub(w_b, delta, math.mul_mv(i_b, axis))
+    }
+    if fixed_rotation == false {
+        bias2 = Vec2 { x: 0.0, y: 0.0 }
+        mass_scale = 1.0
+        impulse_scale = 0.0
+        if use_bias {
+            bias2 = math.mul_sv2(base.constraint_softness.bias_rate, Vec2 { x: rel_q.v.x, y: rel_q.v.y })
+            mass_scale = base.constraint_softness.mass_scale
+            impulse_scale = base.constraint_softness.impulse_scale
+        }
+        perp_x = perp_axis(quat_a, rel_q, math.vec3_axis_x())
+        perp_y = perp_axis(quat_a, rel_q, math.vec3_axis_y())
+        j.perp_axis_x = perp_x
+        j.perp_axis_y = perp_y
+        inertia_sum = math.add_mm(i_a, i_b)
+        kxx = math.dot(perp_x, math.mul_mv(inertia_sum, perp_x))
+        kyy = math.dot(perp_y, math.mul_mv(inertia_sum, perp_y))
+        kxy = math.dot(perp_x, math.mul_mv(inertia_sum, perp_y))
+        k2 = Matrix2 { cx: Vec2 { x: kxx, y: kxy }, cy: Vec2 { x: kxy, y: kyy } }
+        w_rel = math.sub(w_b, w_a)
+        cdot2 = Vec2 { x: math.dot(w_rel, perp_x), y: math.dot(w_rel, perp_y) }
+        old_perp = j.perp_impulse
+        sol = math.solve2(k2, math.add2(cdot2, bias2))
+        delta2 = math.sub2(math.mul_sv2(0.0 - mass_scale, sol), math.mul_sv2(impulse_scale, old_perp))
+        j.perp_impulse = math.add2(j.perp_impulse, delta2)
+        angular = math.blend2(delta2.x, perp_x, delta2.y, perp_y)
+        w_a = math.sub(w_a, math.mul_mv(i_a, angular))
+        w_b = math.add(w_b, math.mul_mv(i_b, angular))
+    }
+    // The point.
+    r_a = math.rotate_vector(state_a.delta_rotation, j.frame_a.p)
+    r_b = math.rotate_vector(state_b.delta_rotation, j.frame_b.p)
+    cdot3 = math.sub(math.sub(math.add(v_b, math.cross(w_b, r_b)), v_a), math.cross(w_a, r_a))
+    bias3 = math.vec3_zero()
+    mass_scale3 = 1.0
+    impulse_scale3 = 0.0
+    if use_bias {
+        separation = math.add(math.add(math.sub(state_b.delta_position, state_a.delta_position), math.sub(r_b, r_a)), j.delta_center)
+        bias3 = math.mul_sv(base.constraint_softness.bias_rate, separation)
+        mass_scale3 = base.constraint_softness.mass_scale
+        impulse_scale3 = base.constraint_softness.impulse_scale
+    }
+    k3 = point_mass_matrix(m_a, i_a, r_a, m_b, i_b, r_b)
+    b = math.solve3(k3, math.add(cdot3, bias3))
+    impulse3 = math.sub(math.mul_sv(0.0 - mass_scale3, b), math.mul_sv(impulse_scale3, j.linear_impulse))
+    j.linear_impulse = math.add(j.linear_impulse, impulse3)
+    v_a = math.mul_sub(v_a, m_a, impulse3)
+    w_a = math.sub(w_a, math.mul_mv(i_a, math.cross(r_a, impulse3)))
+    v_b = math.mul_add(v_b, m_b, impulse3)
+    w_b = math.add(w_b, math.mul_mv(i_b, math.cross(r_b, impulse3)))
+    store_velocities(state_a, v_a, w_a, state_b, v_b, w_b)
+}
+
+get_revolute_joint_force(w: *World, base: *JointSim) -> Vec3 { return math.mul_sv(w.inv_h, dynamics.revolute_joint_of(base).linear_impulse) }
+get_revolute_joint_torque(w: *World, base: *JointSim) -> Vec3 {
+    xf_a = dynamics.get_body_transform(w, base.body_id_a)
+    j = dynamics.revolute_joint_of(base)
+    axis = math.rotate_vector(xf_a.q, math.rotate_vector(base.local_frame_a.q, math.vec3_axis_z()))
+    rel_q = math.inv_mul_quat(j.frame_a.q, j.frame_b.q)
+    j.perp_axis_x = perp_axis(j.frame_a.q, rel_q, math.vec3_axis_x())
+    j.perp_axis_y = perp_axis(j.frame_a.q, rel_q, math.vec3_axis_y())
+    axial = j.spring_impulse + j.motor_impulse + j.lower_impulse - j.upper_impulse
+    angular = math.blend2(j.perp_impulse.x, j.perp_axis_x, j.perp_impulse.y, j.perp_axis_y)
+    angular = math.mul_add(angular, axial, j.rotation_axis_z)
+    impulse = math.mul_add(angular, axial, axis)
+    return math.mul_sv(w.inv_h, impulse)
+}
+
+revolute_joint_enable_limit(id: JointId, flag: bool) {
+    base = sim_of(id, dynamics.JOINT_REVOLUTE)
+    if base == null { return }
+    j = dynamics.revolute_joint_of(base)
+    if flag != j.enable_limit {
+        j.lower_impulse = 0.0
+        j.upper_impulse = 0.0
+    }
+    j.enable_limit = flag
+}
+revolute_joint_is_limit_enabled(id: JointId) -> bool { return dynamics.revolute_joint_of(sim_of(id, dynamics.JOINT_REVOLUTE)).enable_limit }
+revolute_joint_get_lower_limit(id: JointId) -> float { return dynamics.revolute_joint_of(sim_of(id, dynamics.JOINT_REVOLUTE)).lower_angle }
+revolute_joint_get_upper_limit(id: JointId) -> float { return dynamics.revolute_joint_of(sim_of(id, dynamics.JOINT_REVOLUTE)).upper_angle }
+revolute_joint_set_limits(id: JointId, lower: float, upper: float) {
+    base = sim_of(id, dynamics.JOINT_REVOLUTE)
+    if base == null { return }
+    j = dynamics.revolute_joint_of(base)
+    pi = math.PI
+    j.lower_angle = math.clamp_float(math.min_float(lower, upper), 0.0 - 0.99 * pi, 0.99 * pi)
+    j.upper_angle = math.clamp_float(math.max_float(lower, upper), 0.0 - 0.99 * pi, 0.99 * pi)
+}
+// The angle of B relative to A about the axis, in [-pi, pi].
+revolute_joint_get_angle(id: JointId) -> float {
+    base = sim_of(id, dynamics.JOINT_REVOLUTE)
+    if base == null { return 0.0 }
+    w = dynamics.get_world(id.world0)
+    xf_a = dynamics.get_body_transform(w, base.body_id_a)
+    xf_b = dynamics.get_body_transform(w, base.body_id_b)
+    quat_a = math.mul_quat(xf_a.q, base.local_frame_a.q)
+    quat_b = math.mul_quat(xf_b.q, base.local_frame_b.q)
+    if math.dot_quat(quat_a, quat_b) < 0.0 { quat_b = math.negate_quat(quat_b) }
+    return math.get_twist_angle(math.inv_mul_quat(quat_a, quat_b))
+}
+revolute_joint_enable_spring(id: JointId, flag: bool) {
+    base = sim_of(id, dynamics.JOINT_REVOLUTE)
+    if base == null { return }
+    j = dynamics.revolute_joint_of(base)
+    if flag != j.enable_spring { j.spring_impulse = 0.0 }
+    j.enable_spring = flag
+}
+revolute_joint_is_spring_enabled(id: JointId) -> bool { return dynamics.revolute_joint_of(sim_of(id, dynamics.JOINT_REVOLUTE)).enable_spring }
+revolute_joint_set_target_angle(id: JointId, value: float) {
+    base = sim_of(id, dynamics.JOINT_REVOLUTE)
+    if base != null { dynamics.revolute_joint_of(base).target_angle = value }
+}
+revolute_joint_get_target_angle(id: JointId) -> float { return dynamics.revolute_joint_of(sim_of(id, dynamics.JOINT_REVOLUTE)).target_angle }
+revolute_joint_set_spring_hertz(id: JointId, value: float) {
+    base = sim_of(id, dynamics.JOINT_REVOLUTE)
+    if base != null { dynamics.revolute_joint_of(base).hertz = value }
+}
+revolute_joint_get_spring_hertz(id: JointId) -> float { return dynamics.revolute_joint_of(sim_of(id, dynamics.JOINT_REVOLUTE)).hertz }
+revolute_joint_set_spring_damping_ratio(id: JointId, value: float) {
+    base = sim_of(id, dynamics.JOINT_REVOLUTE)
+    if base != null { dynamics.revolute_joint_of(base).damping_ratio = value }
+}
+revolute_joint_get_spring_damping_ratio(id: JointId) -> float { return dynamics.revolute_joint_of(sim_of(id, dynamics.JOINT_REVOLUTE)).damping_ratio }
+revolute_joint_enable_motor(id: JointId, flag: bool) {
+    base = sim_of(id, dynamics.JOINT_REVOLUTE)
+    if base == null { return }
+    j = dynamics.revolute_joint_of(base)
+    if flag != j.enable_motor { j.motor_impulse = 0.0 }
+    j.enable_motor = flag
+}
+revolute_joint_is_motor_enabled(id: JointId) -> bool { return dynamics.revolute_joint_of(sim_of(id, dynamics.JOINT_REVOLUTE)).enable_motor }
+revolute_joint_set_motor_speed(id: JointId, value: float) {
+    base = sim_of(id, dynamics.JOINT_REVOLUTE)
+    if base != null { dynamics.revolute_joint_of(base).motor_speed = value }
+}
+revolute_joint_get_motor_speed(id: JointId) -> float { return dynamics.revolute_joint_of(sim_of(id, dynamics.JOINT_REVOLUTE)).motor_speed }
+revolute_joint_set_max_motor_torque(id: JointId, value: float) {
+    base = sim_of(id, dynamics.JOINT_REVOLUTE)
+    if base != null { dynamics.revolute_joint_of(base).max_motor_torque = value }
+}
+revolute_joint_get_max_motor_torque(id: JointId) -> float { return dynamics.revolute_joint_of(sim_of(id, dynamics.JOINT_REVOLUTE)).max_motor_torque }
+revolute_joint_get_motor_torque(id: JointId) -> float {
+    base = sim_of(id, dynamics.JOINT_REVOLUTE)
+    if base == null { return 0.0 }
+    return dynamics.get_world(id.world0).inv_h * dynamics.revolute_joint_of(base).motor_impulse
+}
+
+// --- spherical joint ------------------------------------------------------------------------------------------------
+
+prepare_spherical_joint(base: *JointSim, ctx: *StepContext) {
+    bodies = prepare_base(base, ctx)
+    j = dynamics.spherical_joint_of(base)
+    j.index_a = bodies.index_a
+    j.index_b = bodies.index_b
+    j.frame_a = world_frame(bodies.sim_a, base.local_frame_a)
+    j.frame_b = world_frame(bodies.sim_b, base.local_frame_b)
+    j.delta_center = math.sub(bodies.sim_b.center, bodies.sim_a.center)
+    inertia_sum = math.add_mm(base.inv_inertia_a, base.inv_inertia_b)
+    cone_axis = math.rotate_vector(j.frame_a.q, math.vec3_axis_z())
+    twist_axis = math.rotate_vector(j.frame_b.q, math.vec3_axis_z())
+    if j.enable_cone_limit {
+        swing_axis = math.normalize(math.cross(cone_axis, twist_axis))
+        k = math.dot(swing_axis, math.mul_mv(inertia_sum, swing_axis))
+        j.swing_mass = 0.0
+        if k > 0.0 { j.swing_mass = 1.0 / k }
+        j.swing_axis = swing_axis
+    }
+    if j.enable_twist_limit {
+        rel_q = math.inv_mul_quat(j.frame_a.q, j.frame_b.q)
+        tan_half = sqrt((rel_q.v.x * rel_q.v.x + rel_q.v.y * rel_q.v.y) / (rel_q.v.z * rel_q.v.z + rel_q.s * rel_q.s))
+        swing_axis = math.normalize(math.cross(cone_axis, twist_axis))
+        perp = math.cross(swing_axis, cone_axis)
+        jacobian = math.mul_add(cone_axis, tan_half, perp)
+        k = math.dot(jacobian, math.mul_mv(inertia_sum, jacobian))
+        j.twist_mass = 0.0
+        if k > 0.0 { j.twist_mass = 1.0 / k }
+        j.twist_jacobian = jacobian
+    }
+    if base.fixed_rotation == false { j.rotation_mass = math.invert_matrix(inertia_sum) } else { j.rotation_mass = math.mat3_zero() }
+    j.spring_softness = dynamics.make_soft(j.hertz, j.damping_ratio, ctx.h)
+    if ctx.enable_warm_starting == false {
+        j.linear_impulse = math.vec3_zero()
+        j.motor_impulse = math.vec3_zero()
+        j.spring_impulse = math.vec3_zero()
+        j.swing_impulse = 0.0
+        j.lower_twist_impulse = 0.0
+        j.upper_twist_impulse = 0.0
+    }
+}
+
+warm_start_spherical_joint(base: *JointSim, ctx: *StepContext) {
+    j = dynamics.spherical_joint_of(base)
+    state_a = state_of(ctx, j.index_a)
+    state_b = state_of(ctx, j.index_b)
+    r_a = math.rotate_vector(state_a.delta_rotation, j.frame_a.p)
+    r_b = math.rotate_vector(state_b.delta_rotation, j.frame_b.p)
+    angular = math.add(j.spring_impulse, j.motor_impulse)
+    angular = math.mul_sub(angular, j.swing_impulse, j.swing_axis)
+    angular = math.mul_add(angular, j.lower_twist_impulse - j.upper_twist_impulse, j.twist_jacobian)
+    v_a = math.mul_sub(state_a.linear_velocity, base.inv_mass_a, j.linear_impulse)
+    w_a = math.sub(state_a.angular_velocity, math.mul_mv(base.inv_inertia_a, math.add(math.cross(r_a, j.linear_impulse), angular)))
+    v_b = math.mul_add(state_b.linear_velocity, base.inv_mass_b, j.linear_impulse)
+    w_b = math.add(state_b.angular_velocity, math.mul_mv(base.inv_inertia_b, math.add(math.cross(r_b, j.linear_impulse), angular)))
+    store_velocities(state_a, v_a, w_a, state_b, v_b, w_b)
+}
+
+// The rotational spring to the target rotation, the motor to the
+// target angular velocity, the twist limits about frame B's z axis,
+// the cone limit about frame A's, and the point-to-point.
+solve_spherical_joint(base: *JointSim, ctx: *StepContext, use_bias: bool) {
+    m_a = base.inv_mass_a
+    m_b = base.inv_mass_b
+    i_a = base.inv_inertia_a
+    i_b = base.inv_inertia_b
+    j = dynamics.spherical_joint_of(base)
+    state_a = state_of(ctx, j.index_a)
+    state_b = state_of(ctx, j.index_b)
+    v_a = state_a.linear_velocity
+    w_a = state_a.angular_velocity
+    v_b = state_b.linear_velocity
+    w_b = state_b.angular_velocity
+    fixed_rotation = base.fixed_rotation
+    quat_a = math.mul_quat(state_a.delta_rotation, j.frame_a.q)
+    quat_b = math.mul_quat(state_b.delta_rotation, j.frame_b.q)
+    rel_q = math.inv_mul_quat(quat_a, quat_b)
+    if j.enable_spring && fixed_rotation == false {
+        delta_rotation = math.delta_quat_to_rotation(rel_q, j.target_rotation)
+        c = math.neg(math.rotate_vector(quat_a, delta_rotation))
+        bias = math.mul_sv(j.spring_softness.bias_rate, c)
+        cdot = math.sub(w_b, w_a)
+        impulse = math.mul_sub(math.mul_sv(0.0 - j.spring_softness.mass_scale, math.mul_mv(j.rotation_mass, math.add(cdot, bias))), j.spring_softness.impulse_scale, j.spring_impulse)
+        j.spring_impulse = math.add(j.spring_impulse, impulse)
+        w_a = math.sub(w_a, math.mul_mv(i_a, impulse))
+        w_b = math.add(w_b, math.mul_mv(i_b, impulse))
+    }
+    if j.enable_motor && fixed_rotation == false {
+        cdot = math.sub(w_b, w_a)
+        lambda = math.neg(math.mul_mv(j.rotation_mass, math.sub(cdot, j.motor_velocity)))
+        new_impulse = math.add(j.motor_impulse, lambda)
+        len = math.length(new_impulse)
+        max_impulse = j.max_motor_torque * ctx.h
+        if len > max_impulse { new_impulse = math.mul_sv(max_impulse / len, new_impulse) }
+        lambda = math.sub(new_impulse, j.motor_impulse)
+        j.motor_impulse = new_impulse
+        w_a = math.sub(w_a, math.mul_mv(i_a, lambda))
+        w_b = math.add(w_b, math.mul_mv(i_b, lambda))
+    }
+    if j.enable_twist_limit && fixed_rotation == false {
+        twist = math.get_twist_angle(rel_q)
+        jacobian = j.twist_jacobian
+        // Lower.
+        scales = limit_scales(base, ctx, twist - j.lower_twist_angle, use_bias)
+        cdot = math.dot(math.sub(w_b, w_a), jacobian)
+        old_impulse = j.lower_twist_impulse
+        delta = 0.0 - scales.mass_scale * j.twist_mass * (cdot + scales.bias) - scales.impulse_scale * old_impulse
+        j.lower_twist_impulse = math.max_float(old_impulse + delta, 0.0)
+        delta = j.lower_twist_impulse - old_impulse
+        w_a = math.mul_sub(w_a, delta, math.mul_mv(i_a, jacobian))
+        w_b = math.mul_add(w_b, delta, math.mul_mv(i_b, jacobian))
+        // Upper, the signs flipped.
+        scales = limit_scales(base, ctx, j.upper_twist_angle - twist, use_bias)
+        cdot = math.dot(math.sub(w_a, w_b), jacobian)
+        old_impulse = j.upper_twist_impulse
+        delta = 0.0 - scales.mass_scale * j.twist_mass * (cdot + scales.bias) - scales.impulse_scale * old_impulse
+        j.upper_twist_impulse = math.max_float(old_impulse + delta, 0.0)
+        delta = j.upper_twist_impulse - old_impulse
+        w_a = math.mul_add(w_a, delta, math.mul_mv(i_a, jacobian))
+        w_b = math.mul_sub(w_b, delta, math.mul_mv(i_b, jacobian))
+    }
+    if j.enable_cone_limit && fixed_rotation == false {
+        swing = math.get_swing_angle(rel_q)
+        swing_axis = j.swing_axis
+        scales = limit_scales(base, ctx, j.cone_angle - swing, use_bias)
+        cdot = math.dot(math.sub(w_a, w_b), swing_axis)
+        old_impulse = j.swing_impulse
+        delta = 0.0 - scales.mass_scale * j.swing_mass * (cdot + scales.bias) - scales.impulse_scale * old_impulse
+        j.swing_impulse = math.max_float(old_impulse + delta, 0.0)
+        delta = j.swing_impulse - old_impulse
+        w_a = math.mul_add(w_a, delta, math.mul_mv(i_a, swing_axis))
+        w_b = math.mul_sub(w_b, delta, math.mul_mv(i_b, swing_axis))
+    }
+    // The point.
+    r_a = math.rotate_vector(state_a.delta_rotation, j.frame_a.p)
+    r_b = math.rotate_vector(state_b.delta_rotation, j.frame_b.p)
+    cdot3 = math.sub(math.sub(math.add(v_b, math.cross(w_b, r_b)), v_a), math.cross(w_a, r_a))
+    bias3 = math.vec3_zero()
+    mass_scale3 = 1.0
+    impulse_scale3 = 0.0
+    if use_bias {
+        separation = math.add(math.add(math.sub(state_b.delta_position, state_a.delta_position), math.sub(r_b, r_a)), j.delta_center)
+        bias3 = math.mul_sv(base.constraint_softness.bias_rate, separation)
+        mass_scale3 = base.constraint_softness.mass_scale
+        impulse_scale3 = base.constraint_softness.impulse_scale
+    }
+    k3 = point_mass_matrix(m_a, i_a, r_a, m_b, i_b, r_b)
+    b = math.solve3(k3, math.add(cdot3, bias3))
+    impulse3 = math.mul_sub(math.mul_sv(0.0 - mass_scale3, b), impulse_scale3, j.linear_impulse)
+    j.linear_impulse = math.add(j.linear_impulse, impulse3)
+    v_a = math.mul_sub(v_a, m_a, impulse3)
+    w_a = math.sub(w_a, math.mul_mv(i_a, math.cross(r_a, impulse3)))
+    v_b = math.mul_add(v_b, m_b, impulse3)
+    w_b = math.add(w_b, math.mul_mv(i_b, math.cross(r_b, impulse3)))
+    store_velocities(state_a, v_a, w_a, state_b, v_b, w_b)
+}
+
+get_spherical_joint_force(w: *World, base: *JointSim) -> Vec3 { return math.mul_sv(w.inv_h, dynamics.spherical_joint_of(base).linear_impulse) }
+get_spherical_joint_torque(w: *World, base: *JointSim) -> Vec3 {
+    xf_a = dynamics.get_body_transform(w, base.body_id_a)
+    xf_b = dynamics.get_body_transform(w, base.body_id_b)
+    q_a = math.mul_quat(xf_a.q, base.local_frame_a.q)
+    q_b = math.mul_quat(xf_b.q, base.local_frame_b.q)
+    cone_axis = math.rotate_vector(q_a, math.vec3_axis_z())
+    twist_axis = math.rotate_vector(q_b, math.vec3_axis_z())
+    swing_axis = math.normalize(math.cross(cone_axis, twist_axis))
+    j = dynamics.spherical_joint_of(base)
+    impulse = math.add(j.spring_impulse, j.motor_impulse)
+    impulse = math.mul_add(impulse, j.lower_twist_impulse - j.upper_twist_impulse, twist_axis)
+    impulse = math.mul_add(impulse, j.swing_impulse, swing_axis)
+    return math.mul_sv(w.inv_h, impulse)
+}
+
+// The relative rotation of the frames, B's polarity matched to A's.
+spherical_relative_rotation(id: JointId, base: *JointSim) -> Quat {
+    w = dynamics.get_world(id.world0)
+    xf_a = dynamics.get_body_transform(w, base.body_id_a)
+    xf_b = dynamics.get_body_transform(w, base.body_id_b)
+    quat_a = math.mul_quat(xf_a.q, base.local_frame_a.q)
+    quat_b = math.mul_quat(xf_b.q, base.local_frame_b.q)
+    if math.dot_quat(quat_a, quat_b) < 0.0 { quat_b = math.negate_quat(quat_b) }
+    return math.inv_mul_quat(quat_a, quat_b)
+}
+
+spherical_joint_enable_cone_limit(id: JointId, flag: bool) {
+    base = sim_of(id, dynamics.JOINT_SPHERICAL)
+    if base == null { return }
+    j = dynamics.spherical_joint_of(base)
+    if flag != j.enable_cone_limit { j.swing_impulse = 0.0 }
+    j.enable_cone_limit = flag
+}
+spherical_joint_is_cone_limit_enabled(id: JointId) -> bool { return dynamics.spherical_joint_of(sim_of(id, dynamics.JOINT_SPHERICAL)).enable_cone_limit }
+spherical_joint_get_cone_limit(id: JointId) -> float { return dynamics.spherical_joint_of(sim_of(id, dynamics.JOINT_SPHERICAL)).cone_angle }
+spherical_joint_set_cone_limit(id: JointId, angle: float) {
+    base = sim_of(id, dynamics.JOINT_SPHERICAL)
+    if base != null { dynamics.spherical_joint_of(base).cone_angle = angle }
+}
+spherical_joint_get_cone_angle(id: JointId) -> float {
+    base = sim_of(id, dynamics.JOINT_SPHERICAL)
+    if base == null { return 0.0 }
+    return math.get_swing_angle(spherical_relative_rotation(id, base))
+}
+spherical_joint_enable_twist_limit(id: JointId, flag: bool) {
+    base = sim_of(id, dynamics.JOINT_SPHERICAL)
+    if base == null { return }
+    j = dynamics.spherical_joint_of(base)
+    if flag != j.enable_twist_limit {
+        j.lower_twist_impulse = 0.0
+        j.upper_twist_impulse = 0.0
+    }
+    j.enable_twist_limit = flag
+}
+spherical_joint_is_twist_limit_enabled(id: JointId) -> bool { return dynamics.spherical_joint_of(sim_of(id, dynamics.JOINT_SPHERICAL)).enable_twist_limit }
+spherical_joint_get_lower_twist_limit(id: JointId) -> float { return dynamics.spherical_joint_of(sim_of(id, dynamics.JOINT_SPHERICAL)).lower_twist_angle }
+spherical_joint_get_upper_twist_limit(id: JointId) -> float { return dynamics.spherical_joint_of(sim_of(id, dynamics.JOINT_SPHERICAL)).upper_twist_angle }
+spherical_joint_set_twist_limits(id: JointId, lower: float, upper: float) {
+    base = sim_of(id, dynamics.JOINT_SPHERICAL)
+    if base == null { return }
+    j = dynamics.spherical_joint_of(base)
+    pi = math.PI
+    j.lower_twist_angle = math.clamp_float(math.min_float(lower, upper), 0.0 - 0.99 * pi, 0.99 * pi)
+    j.upper_twist_angle = math.clamp_float(math.max_float(lower, upper), 0.0 - 0.99 * pi, 0.99 * pi)
+}
+spherical_joint_get_twist_angle(id: JointId) -> float {
+    base = sim_of(id, dynamics.JOINT_SPHERICAL)
+    if base == null { return 0.0 }
+    return math.get_twist_angle(spherical_relative_rotation(id, base))
+}
+spherical_joint_enable_spring(id: JointId, flag: bool) {
+    base = sim_of(id, dynamics.JOINT_SPHERICAL)
+    if base == null { return }
+    j = dynamics.spherical_joint_of(base)
+    if flag != j.enable_spring { j.spring_impulse = math.vec3_zero() }
+    j.enable_spring = flag
+}
+spherical_joint_is_spring_enabled(id: JointId) -> bool { return dynamics.spherical_joint_of(sim_of(id, dynamics.JOINT_SPHERICAL)).enable_spring }
+spherical_joint_set_target_rotation(id: JointId, q: Quat) {
+    base = sim_of(id, dynamics.JOINT_SPHERICAL)
+    if base != null { dynamics.spherical_joint_of(base).target_rotation = q }
+}
+spherical_joint_get_target_rotation(id: JointId) -> Quat { return dynamics.spherical_joint_of(sim_of(id, dynamics.JOINT_SPHERICAL)).target_rotation }
+spherical_joint_set_spring_hertz(id: JointId, value: float) {
+    base = sim_of(id, dynamics.JOINT_SPHERICAL)
+    if base != null { dynamics.spherical_joint_of(base).hertz = value }
+}
+spherical_joint_get_spring_hertz(id: JointId) -> float { return dynamics.spherical_joint_of(sim_of(id, dynamics.JOINT_SPHERICAL)).hertz }
+spherical_joint_set_spring_damping_ratio(id: JointId, value: float) {
+    base = sim_of(id, dynamics.JOINT_SPHERICAL)
+    if base != null { dynamics.spherical_joint_of(base).damping_ratio = value }
+}
+spherical_joint_get_spring_damping_ratio(id: JointId) -> float { return dynamics.spherical_joint_of(sim_of(id, dynamics.JOINT_SPHERICAL)).damping_ratio }
+spherical_joint_enable_motor(id: JointId, flag: bool) {
+    base = sim_of(id, dynamics.JOINT_SPHERICAL)
+    if base == null { return }
+    j = dynamics.spherical_joint_of(base)
+    if flag != j.enable_motor { j.motor_impulse = math.vec3_zero() }
+    j.enable_motor = flag
+}
+spherical_joint_is_motor_enabled(id: JointId) -> bool { return dynamics.spherical_joint_of(sim_of(id, dynamics.JOINT_SPHERICAL)).enable_motor }
+spherical_joint_set_motor_velocity(id: JointId, v: Vec3) {
+    base = sim_of(id, dynamics.JOINT_SPHERICAL)
+    if base != null { dynamics.spherical_joint_of(base).motor_velocity = v }
+}
+spherical_joint_get_motor_velocity(id: JointId) -> Vec3 { return dynamics.spherical_joint_of(sim_of(id, dynamics.JOINT_SPHERICAL)).motor_velocity }
+spherical_joint_set_max_motor_torque(id: JointId, value: float) {
+    base = sim_of(id, dynamics.JOINT_SPHERICAL)
+    if base != null { dynamics.spherical_joint_of(base).max_motor_torque = value }
+}
+spherical_joint_get_max_motor_torque(id: JointId) -> float { return dynamics.spherical_joint_of(sim_of(id, dynamics.JOINT_SPHERICAL)).max_motor_torque }
+spherical_joint_get_motor_torque(id: JointId) -> Vec3 {
+    base = sim_of(id, dynamics.JOINT_SPHERICAL)
+    if base == null { return math.vec3_zero() }
+    return math.mul_sv(dynamics.get_world(id.world0).inv_h, dynamics.spherical_joint_of(base).motor_impulse)
+}
+
+// --- weld joint -----------------------------------------------------------------------------------------------------
+
+prepare_weld_joint(base: *JointSim, ctx: *StepContext) {
+    bodies = prepare_base(base, ctx)
+    j = dynamics.weld_joint_of(base)
+    j.index_a = bodies.index_a
+    j.index_b = bodies.index_b
+    j.frame_a = world_frame(bodies.sim_a, base.local_frame_a)
+    j.frame_b = world_frame(bodies.sim_b, base.local_frame_b)
+    j.delta_center = math.sub(bodies.sim_b.center, bodies.sim_a.center)
+    j.angular_mass = math.invert_matrix(math.add_mm(base.inv_inertia_a, base.inv_inertia_b))
+    if j.linear_hertz == 0.0 { j.linear_spring = base.constraint_softness } else { j.linear_spring = dynamics.make_soft(j.linear_hertz, j.linear_damping_ratio, ctx.h) }
+    if j.angular_hertz == 0.0 { j.angular_spring = base.constraint_softness } else { j.angular_spring = dynamics.make_soft(j.angular_hertz, j.angular_damping_ratio, ctx.h) }
+    if ctx.enable_warm_starting == false {
+        j.linear_impulse = math.vec3_zero()
+        j.angular_impulse = math.vec3_zero()
+    }
+}
+
+warm_start_weld_joint(base: *JointSim, ctx: *StepContext) {
+    j = dynamics.weld_joint_of(base)
+    state_a = state_of(ctx, j.index_a)
+    state_b = state_of(ctx, j.index_b)
+    r_a = math.rotate_vector(state_a.delta_rotation, j.frame_a.p)
+    r_b = math.rotate_vector(state_b.delta_rotation, j.frame_b.p)
+    v_a = math.mul_sub(state_a.linear_velocity, base.inv_mass_a, j.linear_impulse)
+    w_a = math.sub(state_a.angular_velocity, math.mul_mv(base.inv_inertia_a, math.add(math.cross(r_a, j.linear_impulse), j.angular_impulse)))
+    v_b = math.mul_add(state_b.linear_velocity, base.inv_mass_b, j.linear_impulse)
+    w_b = math.add(state_b.angular_velocity, math.mul_mv(base.inv_inertia_b, math.add(math.cross(r_b, j.linear_impulse), j.angular_impulse)))
+    store_velocities(state_a, v_a, w_a, state_b, v_b, w_b)
+}
+
+// The rotation held (a spring when a hertz is given, else the
+// constraint's softness) and the point held likewise.
+solve_weld_joint(base: *JointSim, ctx: *StepContext, use_bias: bool) {
+    m_a = base.inv_mass_a
+    m_b = base.inv_mass_b
+    i_a = base.inv_inertia_a
+    i_b = base.inv_inertia_b
+    j = dynamics.weld_joint_of(base)
+    state_a = state_of(ctx, j.index_a)
+    state_b = state_of(ctx, j.index_b)
+    v_a = state_a.linear_velocity
+    w_a = state_a.angular_velocity
+    v_b = state_b.linear_velocity
+    w_b = state_b.angular_velocity
+    quat_a = math.mul_quat(state_a.delta_rotation, j.frame_a.q)
+    quat_b = math.mul_quat(state_b.delta_rotation, j.frame_b.q)
+    if math.dot_quat(quat_a, quat_b) < 0.0 { quat_b = math.negate_quat(quat_b) }
+    rel_q = math.inv_mul_quat(quat_a, quat_b)
+    if base.fixed_rotation == false {
+        bias = math.vec3_zero()
+        mass_scale = 1.0
+        impulse_scale = 0.0
+        if use_bias || j.angular_hertz > 0.0 {
+            delta_rotation = math.delta_quat_to_rotation(rel_q, math.quat_identity())
+            bias = math.mul_sv(j.angular_spring.bias_rate, math.neg(math.rotate_vector(quat_a, delta_rotation)))
+            mass_scale = j.angular_spring.mass_scale
+            impulse_scale = j.angular_spring.impulse_scale
+        }
+        cdot = math.sub(w_b, w_a)
+        impulse = math.mul_sub(math.mul_sv(0.0 - mass_scale, math.mul_mv(j.angular_mass, math.add(cdot, bias))), impulse_scale, j.angular_impulse)
+        j.angular_impulse = math.add(j.angular_impulse, impulse)
+        w_a = math.sub(w_a, math.mul_mv(i_a, impulse))
+        w_b = math.add(w_b, math.mul_mv(i_b, impulse))
+    }
+    r_a = math.rotate_vector(state_a.delta_rotation, j.frame_a.p)
+    r_b = math.rotate_vector(state_b.delta_rotation, j.frame_b.p)
+    cdot3 = math.sub(math.add(v_b, math.cross(w_b, r_b)), math.add(v_a, math.cross(w_a, r_a)))
+    bias3 = math.vec3_zero()
+    mass_scale3 = 1.0
+    impulse_scale3 = 0.0
+    if use_bias || j.linear_hertz > 0.0 {
+        separation = math.add(math.add(math.sub(state_b.delta_position, state_a.delta_position), math.sub(r_b, r_a)), j.delta_center)
+        bias3 = math.mul_sv(j.linear_spring.bias_rate, separation)
+        mass_scale3 = j.linear_spring.mass_scale
+        impulse_scale3 = j.linear_spring.impulse_scale
+    }
+    k3 = point_mass_matrix(m_a, i_a, r_a, m_b, i_b, r_b)
+    b = math.solve3(k3, math.add(cdot3, bias3))
+    impulse3 = math.mul_sub(math.mul_sv(0.0 - mass_scale3, b), impulse_scale3, j.linear_impulse)
+    j.linear_impulse = math.add(j.linear_impulse, impulse3)
+    v_a = math.mul_sub(v_a, m_a, impulse3)
+    w_a = math.sub(w_a, math.mul_mv(i_a, math.cross(r_a, impulse3)))
+    v_b = math.mul_add(v_b, m_b, impulse3)
+    w_b = math.add(w_b, math.mul_mv(i_b, math.cross(r_b, impulse3)))
+    store_velocities(state_a, v_a, w_a, state_b, v_b, w_b)
+}
+
+get_weld_joint_force(w: *World, base: *JointSim) -> Vec3 { return math.mul_sv(w.inv_h, dynamics.weld_joint_of(base).linear_impulse) }
+get_weld_joint_torque(w: *World, base: *JointSim) -> Vec3 { return math.mul_sv(w.inv_h, dynamics.weld_joint_of(base).angular_impulse) }
+
+weld_joint_set_linear_hertz(id: JointId, value: float) {
+    base = sim_of(id, dynamics.JOINT_WELD)
+    if base != null { dynamics.weld_joint_of(base).linear_hertz = value }
+}
+weld_joint_get_linear_hertz(id: JointId) -> float { return dynamics.weld_joint_of(sim_of(id, dynamics.JOINT_WELD)).linear_hertz }
+weld_joint_set_linear_damping_ratio(id: JointId, value: float) {
+    base = sim_of(id, dynamics.JOINT_WELD)
+    if base != null { dynamics.weld_joint_of(base).linear_damping_ratio = value }
+}
+weld_joint_get_linear_damping_ratio(id: JointId) -> float { return dynamics.weld_joint_of(sim_of(id, dynamics.JOINT_WELD)).linear_damping_ratio }
+weld_joint_set_angular_hertz(id: JointId, value: float) {
+    base = sim_of(id, dynamics.JOINT_WELD)
+    if base != null { dynamics.weld_joint_of(base).angular_hertz = value }
+}
+weld_joint_get_angular_hertz(id: JointId) -> float { return dynamics.weld_joint_of(sim_of(id, dynamics.JOINT_WELD)).angular_hertz }
+weld_joint_set_angular_damping_ratio(id: JointId, value: float) {
+    base = sim_of(id, dynamics.JOINT_WELD)
+    if base != null { dynamics.weld_joint_of(base).angular_damping_ratio = value }
+}
+weld_joint_get_angular_damping_ratio(id: JointId) -> float { return dynamics.weld_joint_of(sim_of(id, dynamics.JOINT_WELD)).angular_damping_ratio }
+
+// --- wheel joint ----------------------------------------------------------------------------------------------------
+
+// The steering axis of the wheel: the twist of B's z axis about A's x axis.
+steering_axis(matrix_a: Matrix3, matrix_b: Matrix3) -> Vec3 {
+    cs = math.dot(matrix_b.cz, matrix_a.cz)
+    ss = 0.0 - math.dot(matrix_b.cz, matrix_a.cy)
+    den = cs * cs + ss * ss
+    if den > 0.0 { den = 1.0 / den } else { den = 0.0 }
+    return math.mul_sv(den, math.cross(matrix_b.cz, math.sub(math.mul_sv(0.0 - cs, matrix_a.cy), math.mul_sv(ss, matrix_a.cz))))
+}
+
+prepare_wheel_joint(base: *JointSim, ctx: *StepContext) {
+    bodies = prepare_base(base, ctx)
+    j = dynamics.wheel_joint_of(base)
+    j.index_a = bodies.index_a
+    j.index_b = bodies.index_b
+    j.frame_a = world_frame(bodies.sim_a, base.local_frame_a)
+    j.frame_b = world_frame(bodies.sim_b, base.local_frame_b)
+    j.delta_center = math.sub(bodies.sim_b.center, bodies.sim_a.center)
+    inertia_sum = math.add_mm(base.inv_inertia_a, base.inv_inertia_b)
+    r_a = j.frame_a.p
+    r_b = j.frame_b.p
+    matrix_a = math.make_matrix_from_quat(j.frame_a.q)
+    matrix_b = math.make_matrix_from_quat(j.frame_b.q)
+    suspension_axis = matrix_a.cx
+    r_an = math.cross(r_a, suspension_axis)
+    r_bn = math.cross(r_b, suspension_axis)
+    k = base.inv_mass_a + base.inv_mass_b + math.dot(r_an, math.mul_mv(base.inv_inertia_a, r_an)) + math.dot(r_bn, math.mul_mv(base.inv_inertia_b, r_bn))
+    j.suspension_mass = 0.0
+    if k > 0.0 { j.suspension_mass = 1.0 / k }
+    j.suspension_softness = dynamics.make_soft(j.suspension_hertz, j.suspension_damping_ratio, ctx.h)
+    j.steering_softness = dynamics.make_soft(j.steering_hertz, j.steering_damping_ratio, ctx.h)
+    spin_axis = matrix_b.cz
+    k = math.dot(spin_axis, math.mul_mv(inertia_sum, spin_axis))
+    j.spin_mass = 0.0
+    if k > 0.0 { j.spin_mass = 1.0 / k }
+    steer = steering_axis(matrix_a, matrix_b)
+    k = math.dot(steer, math.mul_mv(inertia_sum, steer))
+    j.steering_mass = 0.0
+    if k > 0.0 { j.steering_mass = 1.0 / k }
+    if ctx.enable_warm_starting == false {
+        j.linear_impulse = Vec2 { x: 0.0, y: 0.0 }
+        j.angular_impulse = Vec2 { x: 0.0, y: 0.0 }
+        j.spin_impulse = 0.0
+        j.suspension_spring_impulse = 0.0
+        j.lower_suspension_impulse = 0.0
+        j.upper_suspension_impulse = 0.0
+        j.steering_spring_impulse = 0.0
+        j.lower_steering_impulse = 0.0
+        j.upper_steering_impulse = 0.0
+    }
+}
+
+warm_start_wheel_joint(base: *JointSim, ctx: *StepContext) {
+    j = dynamics.wheel_joint_of(base)
+    state_a = state_of(ctx, j.index_a)
+    state_b = state_of(ctx, j.index_b)
+    r_a = math.rotate_vector(state_a.delta_rotation, j.frame_a.p)
+    r_b = math.rotate_vector(state_b.delta_rotation, j.frame_b.p)
+    d = math.add(math.add(math.sub(state_b.delta_position, state_a.delta_position), j.delta_center), math.sub(r_b, r_a))
+    quat_a = math.mul_quat(state_a.delta_rotation, j.frame_a.q)
+    quat_b = math.mul_quat(state_b.delta_rotation, j.frame_b.q)
+    if math.dot_quat(quat_a, quat_b) < 0.0 { quat_b = math.negate_quat(quat_b) }
+    matrix_a = math.make_matrix_from_quat(quat_a)
+    matrix_b = math.make_matrix_from_quat(quat_b)
+    s_ax = math.cross(math.add(d, r_a), matrix_a.cx)
+    s_bx = math.cross(r_b, matrix_a.cx)
+    s_ay = math.cross(math.add(d, r_a), matrix_a.cy)
+    s_by = math.cross(r_b, matrix_a.cy)
+    s_az = math.cross(math.add(d, r_a), matrix_a.cz)
+    s_bz = math.cross(r_b, matrix_a.cz)
+    suspension = j.suspension_spring_impulse + j.lower_suspension_impulse - j.upper_suspension_impulse
+    linear = math.blend3(suspension, matrix_a.cx, j.linear_impulse.x, matrix_a.cy, j.linear_impulse.y, matrix_a.cz)
+    angular_a = math.blend3(suspension, s_ax, j.linear_impulse.x, s_ay, j.linear_impulse.y, s_az)
+    angular_b = math.blend3(suspension, s_bx, j.linear_impulse.x, s_by, j.linear_impulse.y, s_bz)
+    angular = math.mul_sv(j.spin_impulse, matrix_a.cz)
+    spin_axis = matrix_b.cz
+    if j.enable_steering {
+        steer = steering_axis(matrix_a, matrix_b)
+        perp = math.cross(spin_axis, matrix_a.cx)
+        steering = j.steering_spring_impulse + j.lower_steering_impulse - j.upper_steering_impulse
+        angular = math.blend3(j.angular_impulse.x, perp, j.spin_impulse, spin_axis, steering, steer)
+    } else {
+        rel_q = math.inv_mul_quat(quat_a, quat_b)
+        perp_x = perp_axis(quat_a, rel_q, math.vec3_axis_x())
+        perp_y = perp_axis(quat_a, rel_q, math.vec3_axis_y())
+        angular = math.add(angular, math.blend3(j.angular_impulse.x, perp_x, j.angular_impulse.y, perp_y, j.spin_impulse, spin_axis))
+    }
+    if (state_a.flags & dynamics.DYNAMIC_FLAG) != 0 {
+        state_a.linear_velocity = math.mul_sub(state_a.linear_velocity, base.inv_mass_a, linear)
+        state_a.angular_velocity = math.sub(state_a.angular_velocity, math.mul_mv(base.inv_inertia_a, math.add(angular_a, angular)))
+    }
+    if (state_b.flags & dynamics.DYNAMIC_FLAG) != 0 {
+        state_b.linear_velocity = math.mul_add(state_b.linear_velocity, base.inv_mass_b, linear)
+        state_b.angular_velocity = math.add(state_b.angular_velocity, math.mul_mv(base.inv_inertia_b, math.add(angular_b, angular)))
+    }
+}
+
+// The spin motor about B's z axis, the suspension spring along A's x
+// axis (a real spring, applied in the relax too), the steering spring
+// and limits about A's x axis, the suspension limits, the collinearity
+// of the wheel's axle with the chassis (one row when steering, two
+// otherwise), and the point kept on the suspension line.
+solve_wheel_joint(base: *JointSim, ctx: *StepContext, use_bias: bool) {
+    m_a = base.inv_mass_a
+    m_b = base.inv_mass_b
+    i_a = base.inv_inertia_a
+    i_b = base.inv_inertia_b
+    j = dynamics.wheel_joint_of(base)
+    state_a = state_of(ctx, j.index_a)
+    state_b = state_of(ctx, j.index_b)
+    v_a = state_a.linear_velocity
+    w_a = state_a.angular_velocity
+    v_b = state_b.linear_velocity
+    w_b = state_b.angular_velocity
+    fixed_rotation = base.fixed_rotation
+    r_a = math.rotate_vector(state_a.delta_rotation, j.frame_a.p)
+    r_b = math.rotate_vector(state_b.delta_rotation, j.frame_b.p)
+    quat_a = math.mul_quat(state_a.delta_rotation, j.frame_a.q)
+    quat_b = math.mul_quat(state_b.delta_rotation, j.frame_b.q)
+    if math.dot_quat(quat_a, quat_b) < 0.0 { quat_b = math.negate_quat(quat_b) }
+    rel_q = math.inv_mul_quat(quat_a, quat_b)
+    matrix_a = math.make_matrix_from_quat(quat_a)
+    matrix_b = math.make_matrix_from_quat(quat_b)
+    d = math.add(math.add(math.sub(state_b.delta_position, state_a.delta_position), j.delta_center), math.sub(r_b, r_a))
+    s_ax = math.cross(math.add(d, r_a), matrix_a.cx)
+    s_bx = math.cross(r_b, matrix_a.cx)
+    s_ay = math.cross(math.add(d, r_a), matrix_a.cy)
+    s_by = math.cross(r_b, matrix_a.cy)
+    s_az = math.cross(math.add(d, r_a), matrix_a.cz)
+    s_bz = math.cross(r_b, matrix_a.cz)
+    translation = math.dot(matrix_a.cx, d)
+    cs = math.dot(matrix_b.cz, matrix_a.cz)
+    ss = 0.0 - math.dot(matrix_b.cz, matrix_a.cy)
+    steer = steering_axis(matrix_a, matrix_b)
+    if j.enable_spin_motor && fixed_rotation == false {
+        spin_axis = matrix_b.cz
+        cdot = math.dot(math.sub(w_b, w_a), spin_axis) - j.spin_speed
+        impulse = 0.0 - j.spin_mass * cdot
+        old_impulse = j.spin_impulse
+        max_impulse = ctx.h * j.max_spin_torque
+        j.spin_impulse = math.clamp_float(j.spin_impulse + impulse, 0.0 - max_impulse, max_impulse)
+        impulse = j.spin_impulse - old_impulse
+        w_a = math.sub(w_a, math.mul_mv(i_a, math.mul_sv(impulse, spin_axis)))
+        w_b = math.add(w_b, math.mul_mv(i_b, math.mul_sv(impulse, spin_axis)))
+    }
+    if j.enable_suspension_spring {
+        bias = j.suspension_softness.bias_rate * translation
+        cdot = math.dot(matrix_a.cx, math.sub(v_b, v_a)) + math.dot(s_bx, w_b) - math.dot(s_ax, w_a)
+        impulse = 0.0 - j.suspension_softness.mass_scale * j.suspension_mass * (cdot + bias) - j.suspension_softness.impulse_scale * j.suspension_spring_impulse
+        j.suspension_spring_impulse = j.suspension_spring_impulse + impulse
+        v_a = math.mul_sub(v_a, m_a, math.mul_sv(impulse, matrix_a.cx))
+        w_a = math.sub(w_a, math.mul_mv(i_a, math.mul_sv(impulse, s_ax)))
+        v_b = math.mul_add(v_b, m_b, math.mul_sv(impulse, matrix_a.cx))
+        w_b = math.add(w_b, math.mul_mv(i_b, math.mul_sv(impulse, s_bx)))
+    }
+    if j.enable_steering && fixed_rotation == false {
+        steering_angle = math.atan2_approx(ss, cs)
+        c = steering_angle - j.target_steering_angle
+        bias = j.steering_softness.bias_rate * c
+        cdot = math.dot(steer, math.sub(w_b, w_a))
+        old_impulse = j.steering_spring_impulse
+        impulse = 0.0 - j.steering_softness.mass_scale * j.steering_mass * (cdot + bias) - j.steering_softness.impulse_scale * old_impulse
+        max_impulse = ctx.h * j.max_steering_torque
+        j.steering_spring_impulse = math.clamp_float(old_impulse + impulse, 0.0 - max_impulse, max_impulse)
+        impulse = j.steering_spring_impulse - old_impulse
+        w_a = math.sub(w_a, math.mul_mv(i_a, math.mul_sv(impulse, steer)))
+        w_b = math.add(w_b, math.mul_mv(i_b, math.mul_sv(impulse, steer)))
+        if j.enable_steering_limit {
+            // Lower.
+            scales = limit_scales(base, ctx, steering_angle - j.lower_steering_limit, use_bias)
+            cdot = math.dot(steer, math.sub(w_b, w_a))
+            old_impulse = j.lower_steering_impulse
+            impulse = 0.0 - scales.mass_scale * j.steering_mass * (cdot + scales.bias) - scales.impulse_scale * old_impulse
+            j.lower_steering_impulse = math.max_float(old_impulse + impulse, 0.0)
+            impulse = j.lower_steering_impulse - old_impulse
+            w_a = math.sub(w_a, math.mul_mv(i_a, math.mul_sv(impulse, steer)))
+            w_b = math.add(w_b, math.mul_mv(i_b, math.mul_sv(impulse, steer)))
+            // Upper, the signs flipped.
+            scales = limit_scales(base, ctx, j.upper_steering_limit - steering_angle, use_bias)
+            cdot = math.dot(steer, math.sub(w_a, w_b))
+            old_impulse = j.upper_steering_impulse
+            impulse = 0.0 - scales.mass_scale * j.steering_mass * (cdot + scales.bias) - scales.impulse_scale * old_impulse
+            j.upper_steering_impulse = math.max_float(old_impulse + impulse, 0.0)
+            impulse = j.upper_steering_impulse - old_impulse
+            w_a = math.add(w_a, math.mul_mv(i_a, math.mul_sv(impulse, steer)))
+            w_b = math.sub(w_b, math.mul_mv(i_b, math.mul_sv(impulse, steer)))
+        }
+    }
+    if j.enable_suspension_limit {
+        // Lower.
+        scales = limit_scales(base, ctx, translation - j.lower_suspension_limit, use_bias)
+        cdot = math.dot(matrix_a.cx, math.sub(v_b, v_a)) + math.dot(s_bx, w_b) - math.dot(s_ax, w_a)
+        old_impulse = j.lower_suspension_impulse
+        impulse = 0.0 - scales.mass_scale * j.suspension_mass * (cdot + scales.bias) - scales.impulse_scale * old_impulse
+        j.lower_suspension_impulse = math.max_float(old_impulse + impulse, 0.0)
+        impulse = j.lower_suspension_impulse - old_impulse
+        v_a = math.mul_sub(v_a, m_a, math.mul_sv(impulse, matrix_a.cx))
+        w_a = math.sub(w_a, math.mul_mv(i_a, math.mul_sv(impulse, s_ax)))
+        v_b = math.mul_add(v_b, m_b, math.mul_sv(impulse, matrix_a.cx))
+        w_b = math.add(w_b, math.mul_mv(i_b, math.mul_sv(impulse, s_bx)))
+        // Upper, the signs flipped.
+        scales = limit_scales(base, ctx, j.upper_suspension_limit - translation, use_bias)
+        cdot = math.dot(matrix_a.cx, math.sub(v_a, v_b)) + math.dot(s_ax, w_a) - math.dot(s_bx, w_b)
+        old_impulse = j.upper_suspension_impulse
+        impulse = 0.0 - scales.mass_scale * j.suspension_mass * (cdot + scales.bias) - scales.impulse_scale * old_impulse
+        j.upper_suspension_impulse = math.max_float(old_impulse + impulse, 0.0)
+        impulse = j.upper_suspension_impulse - old_impulse
+        v_a = math.mul_add(v_a, m_a, math.mul_sv(impulse, matrix_a.cx))
+        w_a = math.add(w_a, math.mul_mv(i_a, math.mul_sv(impulse, s_ax)))
+        v_b = math.mul_sub(v_b, m_b, math.mul_sv(impulse, matrix_a.cx))
+        w_b = math.sub(w_b, math.mul_mv(i_b, math.mul_sv(impulse, s_bx)))
+    }
+    if fixed_rotation == false {
+        if j.enable_steering {
+            bias = 0.0
+            mass_scale = 1.0
+            impulse_scale = 0.0
+            if use_bias {
+                bias = base.constraint_softness.bias_rate * math.dot(matrix_a.cx, matrix_b.cz)
+                mass_scale = base.constraint_softness.mass_scale
+                impulse_scale = base.constraint_softness.impulse_scale
+            }
+            u = math.cross(matrix_b.cz, matrix_a.cx)
+            cdot = math.dot(math.sub(w_b, w_a), u)
+            k = math.dot(u, math.mul_mv(math.add_mm(i_a, i_b), u))
+            perp_mass = 0.0
+            if k > 0.0 { perp_mass = 1.0 / k }
+            delta = 0.0 - mass_scale * perp_mass * (cdot + bias) - impulse_scale * j.angular_impulse.x
+            j.angular_impulse.x = j.angular_impulse.x + delta
+            w_a = math.mul_sub(w_a, delta, math.mul_mv(i_a, u))
+            w_b = math.mul_add(w_b, delta, math.mul_mv(i_b, u))
+        } else {
+            bias2 = Vec2 { x: 0.0, y: 0.0 }
+            mass_scale2 = 1.0
+            impulse_scale2 = 0.0
+            if use_bias {
+                bias2 = math.mul_sv2(base.constraint_softness.bias_rate, Vec2 { x: rel_q.v.x, y: rel_q.v.y })
+                mass_scale2 = base.constraint_softness.mass_scale
+                impulse_scale2 = base.constraint_softness.impulse_scale
+            }
+            perp_x = perp_axis(quat_a, rel_q, math.vec3_axis_x())
+            perp_y = perp_axis(quat_a, rel_q, math.vec3_axis_y())
+            inertia_sum = math.add_mm(i_a, i_b)
+            kxx = math.dot(perp_x, math.mul_mv(inertia_sum, perp_x))
+            kyy = math.dot(perp_y, math.mul_mv(inertia_sum, perp_y))
+            kxy = math.dot(perp_x, math.mul_mv(inertia_sum, perp_y))
+            k2 = Matrix2 { cx: Vec2 { x: kxx, y: kxy }, cy: Vec2 { x: kxy, y: kyy } }
+            w_rel = math.sub(w_b, w_a)
+            cdot2 = Vec2 { x: math.dot(w_rel, perp_x), y: math.dot(w_rel, perp_y) }
+            old_angular = j.angular_impulse
+            sol = math.solve2(k2, math.add2(cdot2, bias2))
+            delta2 = Vec2 { x: 0.0 - mass_scale2 * sol.x - impulse_scale2 * old_angular.x, y: 0.0 - mass_scale2 * sol.y - impulse_scale2 * old_angular.y }
+            j.angular_impulse = math.add2(old_angular, delta2)
+            angular = math.blend2(delta2.x, perp_x, delta2.y, perp_y)
+            w_a = math.sub(w_a, math.mul_mv(i_a, angular))
+            w_b = math.add(w_b, math.mul_mv(i_b, angular))
+        }
+    }
+    // The point on the line.
+    perp_y2 = matrix_a.cy
+    perp_z2 = matrix_a.cz
+    bias3 = Vec2 { x: 0.0, y: 0.0 }
+    mass_scale3 = 1.0
+    impulse_scale3 = 0.0
+    if use_bias {
+        bias3 = math.mul_sv2(base.constraint_softness.bias_rate, Vec2 { x: math.dot(perp_y2, d), y: math.dot(perp_z2, d) })
+        mass_scale3 = base.constraint_softness.mass_scale
+        impulse_scale3 = base.constraint_softness.impulse_scale
+    }
+    v_rel = math.sub(math.sub(math.add(v_b, math.cross(w_b, r_b)), v_a), math.cross(w_a, math.add(r_a, d)))
+    cdot3 = Vec2 { x: math.dot(perp_y2, v_rel), y: math.dot(perp_z2, v_rel) }
+    kyy3 = m_a + m_b + math.dot(s_ay, math.mul_mv(i_a, s_ay)) + math.dot(s_by, math.mul_mv(i_b, s_by))
+    kyz3 = math.dot(s_ay, math.mul_mv(i_a, s_az)) + math.dot(s_by, math.mul_mv(i_b, s_bz))
+    kzz3 = m_a + m_b + math.dot(s_az, math.mul_mv(i_a, s_az)) + math.dot(s_bz, math.mul_mv(i_b, s_bz))
+    k3 = Matrix2 { cx: Vec2 { x: kyy3, y: kyz3 }, cy: Vec2 { x: kyz3, y: kzz3 } }
+    old_linear = j.linear_impulse
+    sol3 = math.solve2(k3, math.add2(cdot3, bias3))
+    delta3 = Vec2 { x: 0.0 - mass_scale3 * sol3.x - impulse_scale3 * old_linear.x, y: 0.0 - mass_scale3 * sol3.y - impulse_scale3 * old_linear.y }
+    j.linear_impulse = math.add2(old_linear, delta3)
+    linear = math.blend2(delta3.x, perp_y2, delta3.y, perp_z2)
+    v_a = math.mul_sub(v_a, m_a, linear)
+    w_a = math.sub(w_a, math.mul_mv(i_a, math.blend2(delta3.x, s_ay, delta3.y, s_az)))
+    v_b = math.mul_add(v_b, m_b, linear)
+    w_b = math.add(w_b, math.mul_mv(i_b, math.blend2(delta3.x, s_by, delta3.y, s_bz)))
+    store_velocities(state_a, v_a, w_a, state_b, v_b, w_b)
+}
+
+get_wheel_joint_force(w: *World, base: *JointSim) -> Vec3 {
+    xf_a = dynamics.get_body_transform(w, base.body_id_a)
+    j = dynamics.wheel_joint_of(base)
+    // The reference sums the lower suspension limit here (its todo); kept as written.
+    impulse = math.vec3(j.linear_impulse.x, j.linear_impulse.y, j.lower_suspension_limit + j.upper_suspension_impulse + j.suspension_spring_impulse)
+    force = math.rotate_vector(base.local_frame_a.q, math.mul_sv(w.inv_h, impulse))
+    return math.rotate_vector(xf_a.q, force)
+}
+get_wheel_joint_torque(w: *World, base: *JointSim) -> Vec3 {
+    sim_a = dynamics.get_body_sim(w, dynamics.body_at(w, base.body_id_a))
+    matrix_a = math.make_matrix_from_quat(math.mul_quat(sim_a.transform.q, base.local_frame_a.q))
+    return math.mul_sv(w.inv_h * dynamics.wheel_joint_of(base).spin_impulse, matrix_a.cz)
+}
+
+wheel_joint_enable_suspension(id: JointId, flag: bool) {
+    base = sim_of(id, dynamics.JOINT_WHEEL)
+    if base == null { return }
+    j = dynamics.wheel_joint_of(base)
+    if flag != j.enable_suspension_spring {
+        j.enable_suspension_spring = flag
+        j.suspension_spring_impulse = 0.0
+    }
+}
+wheel_joint_is_suspension_enabled(id: JointId) -> bool { return dynamics.wheel_joint_of(sim_of(id, dynamics.JOINT_WHEEL)).enable_suspension_spring }
+wheel_joint_set_suspension_hertz(id: JointId, value: float) {
+    base = sim_of(id, dynamics.JOINT_WHEEL)
+    if base != null { dynamics.wheel_joint_of(base).suspension_hertz = value }
+}
+wheel_joint_get_suspension_hertz(id: JointId) -> float { return dynamics.wheel_joint_of(sim_of(id, dynamics.JOINT_WHEEL)).suspension_hertz }
+wheel_joint_set_suspension_damping_ratio(id: JointId, value: float) {
+    base = sim_of(id, dynamics.JOINT_WHEEL)
+    if base != null { dynamics.wheel_joint_of(base).suspension_damping_ratio = value }
+}
+wheel_joint_get_suspension_damping_ratio(id: JointId) -> float { return dynamics.wheel_joint_of(sim_of(id, dynamics.JOINT_WHEEL)).suspension_damping_ratio }
+wheel_joint_enable_suspension_limit(id: JointId, flag: bool) {
+    base = sim_of(id, dynamics.JOINT_WHEEL)
+    if base == null { return }
+    j = dynamics.wheel_joint_of(base)
+    if flag != j.enable_suspension_limit {
+        j.lower_suspension_impulse = 0.0
+        j.upper_suspension_impulse = 0.0
+        j.enable_suspension_limit = flag
+    }
+}
+wheel_joint_is_suspension_limit_enabled(id: JointId) -> bool { return dynamics.wheel_joint_of(sim_of(id, dynamics.JOINT_WHEEL)).enable_suspension_limit }
+wheel_joint_get_lower_suspension_limit(id: JointId) -> float { return dynamics.wheel_joint_of(sim_of(id, dynamics.JOINT_WHEEL)).lower_suspension_limit }
+wheel_joint_get_upper_suspension_limit(id: JointId) -> float { return dynamics.wheel_joint_of(sim_of(id, dynamics.JOINT_WHEEL)).upper_suspension_limit }
+wheel_joint_set_suspension_limits(id: JointId, lower: float, upper: float) {
+    base = sim_of(id, dynamics.JOINT_WHEEL)
+    if base == null { return }
+    j = dynamics.wheel_joint_of(base)
+    if lower != j.lower_suspension_limit || upper != j.upper_suspension_limit {
+        j.lower_suspension_limit = math.min_float(lower, upper)
+        j.upper_suspension_limit = math.max_float(lower, upper)
+        j.lower_suspension_impulse = 0.0
+        j.upper_suspension_impulse = 0.0
+    }
+}
+wheel_joint_enable_spin_motor(id: JointId, flag: bool) {
+    base = sim_of(id, dynamics.JOINT_WHEEL)
+    if base == null { return }
+    j = dynamics.wheel_joint_of(base)
+    if flag != j.enable_spin_motor {
+        j.spin_impulse = 0.0
+        j.enable_spin_motor = flag
+    }
+}
+wheel_joint_is_spin_motor_enabled(id: JointId) -> bool { return dynamics.wheel_joint_of(sim_of(id, dynamics.JOINT_WHEEL)).enable_spin_motor }
+wheel_joint_set_spin_motor_speed(id: JointId, value: float) {
+    base = sim_of(id, dynamics.JOINT_WHEEL)
+    if base != null { dynamics.wheel_joint_of(base).spin_speed = value }
+}
+wheel_joint_get_spin_motor_speed(id: JointId) -> float { return dynamics.wheel_joint_of(sim_of(id, dynamics.JOINT_WHEEL)).spin_speed }
+wheel_joint_set_max_spin_torque(id: JointId, value: float) {
+    base = sim_of(id, dynamics.JOINT_WHEEL)
+    if base != null { dynamics.wheel_joint_of(base).max_spin_torque = value }
+}
+wheel_joint_get_max_spin_torque(id: JointId) -> float { return dynamics.wheel_joint_of(sim_of(id, dynamics.JOINT_WHEEL)).max_spin_torque }
+wheel_joint_enable_steering(id: JointId, flag: bool) {
+    base = sim_of(id, dynamics.JOINT_WHEEL)
+    if base == null { return }
+    j = dynamics.wheel_joint_of(base)
+    if j.enable_steering != flag {
+        j.angular_impulse = Vec2 { x: 0.0, y: 0.0 }
+        j.enable_steering = flag
+    }
+}
+wheel_joint_is_steering_enabled(id: JointId) -> bool { return dynamics.wheel_joint_of(sim_of(id, dynamics.JOINT_WHEEL)).enable_steering }
+wheel_joint_set_steering_hertz(id: JointId, value: float) {
+    base = sim_of(id, dynamics.JOINT_WHEEL)
+    if base != null { dynamics.wheel_joint_of(base).steering_hertz = value }
+}
+wheel_joint_get_steering_hertz(id: JointId) -> float { return dynamics.wheel_joint_of(sim_of(id, dynamics.JOINT_WHEEL)).steering_hertz }
+wheel_joint_set_steering_damping_ratio(id: JointId, value: float) {
+    base = sim_of(id, dynamics.JOINT_WHEEL)
+    if base != null { dynamics.wheel_joint_of(base).steering_damping_ratio = value }
+}
+wheel_joint_get_steering_damping_ratio(id: JointId) -> float { return dynamics.wheel_joint_of(sim_of(id, dynamics.JOINT_WHEEL)).steering_damping_ratio }
+wheel_joint_set_max_steering_torque(id: JointId, value: float) {
+    base = sim_of(id, dynamics.JOINT_WHEEL)
+    if base != null { dynamics.wheel_joint_of(base).max_steering_torque = value }
+}
+wheel_joint_get_max_steering_torque(id: JointId) -> float { return dynamics.wheel_joint_of(sim_of(id, dynamics.JOINT_WHEEL)).max_steering_torque }
+wheel_joint_enable_steering_limit(id: JointId, flag: bool) {
+    base = sim_of(id, dynamics.JOINT_WHEEL)
+    if base == null { return }
+    j = dynamics.wheel_joint_of(base)
+    if j.enable_steering_limit != flag {
+        j.lower_steering_impulse = 0.0
+        j.upper_steering_impulse = 0.0
+        j.enable_steering_limit = flag
+    }
+}
+wheel_joint_is_steering_limit_enabled(id: JointId) -> bool { return dynamics.wheel_joint_of(sim_of(id, dynamics.JOINT_WHEEL)).enable_steering_limit }
+wheel_joint_get_lower_steering_limit(id: JointId) -> float { return dynamics.wheel_joint_of(sim_of(id, dynamics.JOINT_WHEEL)).lower_steering_limit }
+wheel_joint_get_upper_steering_limit(id: JointId) -> float { return dynamics.wheel_joint_of(sim_of(id, dynamics.JOINT_WHEEL)).upper_steering_limit }
+wheel_joint_set_steering_limits(id: JointId, lower: float, upper: float) {
+    base = sim_of(id, dynamics.JOINT_WHEEL)
+    if base == null { return }
+    j = dynamics.wheel_joint_of(base)
+    j.lower_steering_limit = lower
+    j.upper_steering_limit = upper
+}
+wheel_joint_set_target_steering_angle(id: JointId, value: float) {
+    base = sim_of(id, dynamics.JOINT_WHEEL)
+    if base != null { dynamics.wheel_joint_of(base).target_steering_angle = value }
+}
+wheel_joint_get_target_steering_angle(id: JointId) -> float { return dynamics.wheel_joint_of(sim_of(id, dynamics.JOINT_WHEEL)).target_steering_angle }
+wheel_joint_get_spin_speed(id: JointId) -> float {
+    base = sim_of(id, dynamics.JOINT_WHEEL)
+    if base == null { return 0.0 }
+    w = dynamics.get_world(id.world0)
+    body_a = dynamics.body_at(w, base.body_id_a)
+    body_b = dynamics.body_at(w, base.body_id_b)
+    sim_b = dynamics.get_body_sim(w, body_b)
+    spin_axis = math.rotate_vector(math.mul_quat(sim_b.transform.q, base.local_frame_b.q), math.vec3_axis_z())
+    w_a = math.vec3_zero()
+    state_a = dynamics.get_body_state(w, body_a)
+    if state_a != null { w_a = state_a.angular_velocity }
+    w_b = math.vec3_zero()
+    state_b = dynamics.get_body_state(w, body_b)
+    if state_b != null { w_b = state_b.angular_velocity }
+    return math.dot(math.sub(w_b, w_a), spin_axis)
+}
+wheel_joint_get_spin_torque(id: JointId) -> float {
+    base = sim_of(id, dynamics.JOINT_WHEEL)
+    if base == null { return 0.0 }
+    return dynamics.get_world(id.world0).inv_h * dynamics.wheel_joint_of(base).spin_impulse
+}
+wheel_joint_get_steering_angle(id: JointId) -> float {
+    base = sim_of(id, dynamics.JOINT_WHEEL)
+    if base == null { return 0.0 }
+    w = dynamics.get_world(id.world0)
+    sim_a = dynamics.get_body_sim(w, dynamics.body_at(w, base.body_id_a))
+    sim_b = dynamics.get_body_sim(w, dynamics.body_at(w, base.body_id_b))
+    matrix_a = math.make_matrix_from_quat(math.mul_quat(sim_a.transform.q, base.local_frame_a.q))
+    matrix_b = math.make_matrix_from_quat(math.mul_quat(sim_b.transform.q, base.local_frame_b.q))
+    cs = math.dot(matrix_b.cz, matrix_a.cz)
+    ss = 0.0 - math.dot(matrix_b.cz, matrix_a.cy)
+    return math.atan2_approx(ss, cs)
+}
+wheel_joint_get_steering_torque(id: JointId) -> float {
+    base = sim_of(id, dynamics.JOINT_WHEEL)
+    if base == null { return 0.0 }
+    return dynamics.get_world(id.world0).inv_h * dynamics.wheel_joint_of(base).steering_spring_impulse
+}
+
+// --- the dispatch (joint.c) ------------------------------------------------------------------------------------------
+
+// Every joint's prepare: the constraint hertz clamped to a quarter of
+// the sub-step rate (against jitter), its softness made, then the kind's.
+prepare_joint(base: *JointSim, ctx: *StepContext) {
+    hertz = math.min_float(base.constraint_hertz, 0.25 * ctx.inv_h)
+    base.constraint_softness = dynamics.make_soft(hertz, base.constraint_damping_ratio, ctx.h)
+    kind = base.kind
+    if kind == dynamics.JOINT_PARALLEL { prepare_parallel_joint(base, ctx) }
+    else if kind == dynamics.JOINT_DISTANCE { prepare_distance_joint(base, ctx) }
+    else if kind == dynamics.JOINT_MOTOR { prepare_motor_joint(base, ctx) }
+    else if kind == dynamics.JOINT_PRISMATIC { prepare_prismatic_joint(base, ctx) }
+    else if kind == dynamics.JOINT_REVOLUTE { prepare_revolute_joint(base, ctx) }
+    else if kind == dynamics.JOINT_SPHERICAL { prepare_spherical_joint(base, ctx) }
+    else if kind == dynamics.JOINT_WELD { prepare_weld_joint(base, ctx) }
+    else if kind == dynamics.JOINT_WHEEL { prepare_wheel_joint(base, ctx) }
+}
+
+warm_start_joint(base: *JointSim, ctx: *StepContext) {
+    kind = base.kind
+    if kind == dynamics.JOINT_PARALLEL { warm_start_parallel_joint(base, ctx) }
+    else if kind == dynamics.JOINT_DISTANCE { warm_start_distance_joint(base, ctx) }
+    else if kind == dynamics.JOINT_MOTOR { warm_start_motor_joint(base, ctx) }
+    else if kind == dynamics.JOINT_PRISMATIC { warm_start_prismatic_joint(base, ctx) }
+    else if kind == dynamics.JOINT_REVOLUTE { warm_start_revolute_joint(base, ctx) }
+    else if kind == dynamics.JOINT_SPHERICAL { warm_start_spherical_joint(base, ctx) }
+    else if kind == dynamics.JOINT_WELD { warm_start_weld_joint(base, ctx) }
+    else if kind == dynamics.JOINT_WHEEL { warm_start_wheel_joint(base, ctx) }
+}
+
+solve_joint(base: *JointSim, ctx: *StepContext, use_bias: bool) {
+    kind = base.kind
+    if kind == dynamics.JOINT_PARALLEL { solve_parallel_joint(base, ctx) }
+    else if kind == dynamics.JOINT_DISTANCE { solve_distance_joint(base, ctx, use_bias) }
+    else if kind == dynamics.JOINT_MOTOR { solve_motor_joint(base, ctx) }
+    else if kind == dynamics.JOINT_PRISMATIC { solve_prismatic_joint(base, ctx, use_bias) }
+    else if kind == dynamics.JOINT_REVOLUTE { solve_revolute_joint(base, ctx, use_bias) }
+    else if kind == dynamics.JOINT_SPHERICAL { solve_spherical_joint(base, ctx, use_bias) }
+    else if kind == dynamics.JOINT_WELD { solve_weld_joint(base, ctx, use_bias) }
+    else if kind == dynamics.JOINT_WHEEL { solve_wheel_joint(base, ctx, use_bias) }
+}
+
+// A colour's joints (the overflow's included), in order.
+prepare_joints(ctx: *StepContext, color: *GraphColor) {
+    i = 0
+    while i < color.joint_sims.count {
+        prepare_joint(dynamics.joint_sim_at(&color.joint_sims, i), ctx)
+        i = i + 1
+    }
+}
+
+warm_start_joints(ctx: *StepContext, color: *GraphColor) {
+    i = 0
+    while i < color.joint_sims.count {
+        warm_start_joint(dynamics.joint_sim_at(&color.joint_sims, i), ctx)
+        i = i + 1
+    }
+}
+
+solve_joints(ctx: *StepContext, color: *GraphColor, use_bias: bool) {
+    i = 0
+    while i < color.joint_sims.count {
+        solve_joint(dynamics.joint_sim_at(&color.joint_sims, i), ctx, use_bias)
+        i = i + 1
+    }
+}
+
+// The force and torque a joint applies, from its last impulses (b3Joint_GetConstraintForce/Torque).
+get_joint_constraint_force(w: *World, j: *Joint) -> Vec3 {
+    base = dynamics.get_joint_sim(w, j)
+    kind = j.kind
+    if kind == dynamics.JOINT_DISTANCE { return get_distance_joint_force(w, base) }
+    if kind == dynamics.JOINT_MOTOR { return get_motor_joint_force(w, base) }
+    if kind == dynamics.JOINT_PRISMATIC { return get_prismatic_joint_force(w, base) }
+    if kind == dynamics.JOINT_REVOLUTE { return get_revolute_joint_force(w, base) }
+    if kind == dynamics.JOINT_SPHERICAL { return get_spherical_joint_force(w, base) }
+    if kind == dynamics.JOINT_WELD { return get_weld_joint_force(w, base) }
+    if kind == dynamics.JOINT_WHEEL { return get_wheel_joint_force(w, base) }
+    return math.vec3_zero()
+}
+
+get_joint_constraint_torque(w: *World, j: *Joint) -> Vec3 {
+    base = dynamics.get_joint_sim(w, j)
+    kind = j.kind
+    if kind == dynamics.JOINT_PARALLEL { return get_parallel_joint_torque(w, base) }
+    if kind == dynamics.JOINT_MOTOR { return get_motor_joint_torque(w, base) }
+    if kind == dynamics.JOINT_PRISMATIC { return get_prismatic_joint_torque(w, base) }
+    if kind == dynamics.JOINT_REVOLUTE { return get_revolute_joint_torque(w, base) }
+    if kind == dynamics.JOINT_SPHERICAL { return get_spherical_joint_torque(w, base) }
+    if kind == dynamics.JOINT_WELD { return get_weld_joint_torque(w, base) }
+    if kind == dynamics.JOINT_WHEEL { return get_wheel_joint_torque(w, base) }
+    return math.vec3_zero()
+}
+
+joint_get_constraint_force(id: JointId) -> Vec3 {
+    if dynamics.joint_is_valid(id) == false { return math.vec3_zero() }
+    w = dynamics.get_world(id.world0)
+    return get_joint_constraint_force(w, dynamics.get_joint_full_id(w, id))
+}
+
+joint_get_constraint_torque(id: JointId) -> Vec3 {
+    if dynamics.joint_is_valid(id) == false { return math.vec3_zero() }
+    w = dynamics.get_world(id.world0)
+    return get_joint_constraint_torque(w, dynamics.get_joint_full_id(w, id))
+}

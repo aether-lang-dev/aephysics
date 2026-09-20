@@ -1,0 +1,618 @@
+// aephysics.joint_solver: each kind's accessors as test_joint.c
+// exercises them, then each kind solved by hand between a static
+// ground and a unit cube (mass 1, inertia 1/6) with the step's numbers
+// (four sub-steps of 1/60, the constraint hertz clamped to 60): the
+// velocities a rigid joint removes and leaves, the springs' pull, the
+// limits' hold and the speculative gap they leave, the motors' speed,
+// the constraint forces from the impulses, and the warm start.
+import std.string
+import aephysics.math
+import aephysics.core
+import aephysics.hull
+import aephysics.manifold
+import aephysics.shape
+import aephysics.broad_phase
+import aephysics.dynamics
+import aephysics.contact_solver
+import aephysics.joint_solver
+
+extern exit(code: int)
+
+var failures = 0
+var checks = 0
+
+ensure(name: string, ok: bool) {
+    checks = checks + 1
+    if !ok {
+        println("joint_solver: FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+small(name: string, value: float, tolerance: float) {
+    ensure("${name} (${value})", math.abs_float(value) < tolerance)
+}
+
+// A static ground body and a dynamic unit cube at (0, 4, 0), no gravity,
+// with the step context of four sub-steps of 1/60 and no contacts.
+struct Fixture {
+    world_id: WorldId
+    w: *World
+    ground_id: BodyId
+    cube_id: BodyId
+    ctx: StepContext
+}
+
+var g_cube: ptr = null
+
+fixture() -> Fixture {
+    if g_cube == null { g_cube = hull.make_box_hull(0.5, 0.5, 0.5) as ptr }
+    wdef = dynamics.default_world_def()
+    wdef.gravity = math.vec3_zero()
+    world_id = dynamics.create_world(&wdef)
+    w = dynamics.get_world(world_id.index1 - 1)
+    gdef = dynamics.default_body_def()
+    ground_id = dynamics.create_body(world_id, &gdef)
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.position = math.vec3(0.0, 4.0, 0.0)
+    cube_id = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    sdef.density = 1.0
+    dynamics.create_hull_shape(cube_id, &sdef, g_cube as *HullData)
+    ctx = contact_solver.default_step_context(w)
+    ctx.dt = 1.0 / 60.0
+    ctx.inv_dt = 60.0
+    ctx.sub_step_count = 4
+    ctx.h = ctx.dt / 4.0
+    ctx.inv_h = 240.0
+    w.inv_h = 240.0
+    awake = dynamics.get_solver_set(w, dynamics.AWAKE_SET)
+    ctx.states = awake.body_states.data
+    ctx.sims = awake.body_sims.data
+    return Fixture { world_id: world_id, w: w, ground_id: ground_id, cube_id: cube_id, ctx: ctx }
+}
+
+cube_state(f: *Fixture) -> *BodyState { return dynamics.get_body_state(f.w, dynamics.get_body_full_id(f.w, f.cube_id)) }
+sim(f: *Fixture, id: JointId) -> *JointSim { return dynamics.get_joint_sim(f.w, dynamics.get_joint_full_id(f.w, id)) }
+
+// The frames at the cube: A's at (0, 4, 0) on the ground, B's at the cube's origin.
+common_frames(f: *Fixture, base: *JointDef) {
+    base.body_id_a = f.ground_id
+    base.body_id_b = f.cube_id
+    base.local_frame_a.p = math.vec3(0.0, 4.0, 0.0)
+    base.local_frame_b.p = math.vec3_zero()
+}
+
+// A step's solve as the solver runs it: prepare, warm start, four
+// biased sub-steps, four relaxes; the states are not integrated, so
+// the position errors stay what the transforms made them.
+solve_step(f: *Fixture, id: JointId) {
+    base = sim(f, id)
+    joint_solver.prepare_joint(base, &f.ctx)
+    joint_solver.warm_start_joint(base, &f.ctx)
+    i = 0
+    while i < 4 { joint_solver.solve_joint(base, &f.ctx, true); i = i + 1 }
+    i = 0
+    while i < 4 { joint_solver.solve_joint(base, &f.ctx, false); i = i + 1 }
+}
+
+// The biased half alone: what a limit or a position error does before
+// the positions move (the relax pass undoes a limit's push, as it should
+// once the bodies have moved).
+solve_biased(f: *Fixture, id: JointId) {
+    base = sim(f, id)
+    joint_solver.prepare_joint(base, &f.ctx)
+    joint_solver.warm_start_joint(base, &f.ctx)
+    i = 0
+    while i < 4 { joint_solver.solve_joint(base, &f.ctx, true); i = i + 1 }
+}
+
+set_velocity(f: *Fixture, v: Vec3, w: Vec3) {
+    state = cube_state(f)
+    state.linear_velocity = v
+    state.angular_velocity = w
+}
+
+// --- accessors (test_joint.c's per-kind checks) -------------------------------------------------------------------
+
+test_accessors() {
+    f = fixture()
+    pdef = dynamics.default_parallel_joint_def()
+    common_frames(&f, &pdef.base)
+    pid = dynamics.create_parallel_joint(f.world_id, &pdef)
+    joint_solver.parallel_joint_set_spring_hertz(pid, 5.0)
+    ensure("parallel hertz", joint_solver.parallel_joint_get_spring_hertz(pid) == 5.0)
+    joint_solver.parallel_joint_set_spring_damping_ratio(pid, 0.7)
+    ensure("parallel damping", joint_solver.parallel_joint_get_spring_damping_ratio(pid) == 0.7)
+    joint_solver.parallel_joint_set_max_torque(pid, 250.0)
+    ensure("parallel max torque", joint_solver.parallel_joint_get_max_torque(pid) == 250.0)
+    dynamics.destroy_joint(pid, true)
+
+    ddef = dynamics.default_distance_joint_def()
+    common_frames(&f, &ddef.base)
+    ddef.length = 2.0
+    did = dynamics.create_distance_joint(f.world_id, &ddef)
+    joint_solver.distance_joint_set_length(did, 3.0)
+    ensure("distance length", joint_solver.distance_joint_get_length(did) == 3.0)
+    joint_solver.distance_joint_enable_spring(did, true)
+    ensure("distance spring", joint_solver.distance_joint_is_spring_enabled(did))
+    joint_solver.distance_joint_set_spring_force_range(did, 0.0 - 50.0, 75.0)
+    ensure("distance force range", joint_solver.distance_joint_get_lower_spring_force(did) == 0.0 - 50.0 && joint_solver.distance_joint_get_upper_spring_force(did) == 75.0)
+    joint_solver.distance_joint_set_spring_hertz(did, 4.0)
+    ensure("distance hertz", joint_solver.distance_joint_get_spring_hertz(did) == 4.0)
+    joint_solver.distance_joint_set_spring_damping_ratio(did, 0.6)
+    ensure("distance damping", joint_solver.distance_joint_get_spring_damping_ratio(did) == 0.6)
+    joint_solver.distance_joint_enable_limit(did, true)
+    ensure("distance limit", joint_solver.distance_joint_is_limit_enabled(did))
+    joint_solver.distance_joint_set_length_range(did, 5.0, 1.0)
+    ensure("distance range ordered", joint_solver.distance_joint_get_min_length(did) == 1.0 && joint_solver.distance_joint_get_max_length(did) == 5.0)
+    small("distance current length (the anchors coincide)", joint_solver.distance_joint_get_current_length(did), 0.000001)
+    joint_solver.distance_joint_enable_motor(did, true)
+    ensure("distance motor", joint_solver.distance_joint_is_motor_enabled(did))
+    joint_solver.distance_joint_set_motor_speed(did, 1.5)
+    ensure("distance motor speed", joint_solver.distance_joint_get_motor_speed(did) == 1.5)
+    joint_solver.distance_joint_set_max_motor_force(did, 25.0)
+    ensure("distance max motor force", joint_solver.distance_joint_get_max_motor_force(did) == 25.0)
+    ensure("distance motor force before solving", joint_solver.distance_joint_get_motor_force(did) == 0.0)
+    dynamics.destroy_joint(did, true)
+
+    mdef = dynamics.default_motor_joint_def()
+    common_frames(&f, &mdef.base)
+    mid = dynamics.create_motor_joint(f.world_id, &mdef)
+    joint_solver.motor_joint_set_linear_velocity(mid, math.vec3(1.0, 2.0, 3.0))
+    got = joint_solver.motor_joint_get_linear_velocity(mid)
+    ensure("motor linear velocity", got.x == 1.0 && got.y == 2.0 && got.z == 3.0)
+    joint_solver.motor_joint_set_angular_velocity(mid, math.vec3(0.1, 0.2, 0.3))
+    got = joint_solver.motor_joint_get_angular_velocity(mid)
+    ensure("motor angular velocity", got.x == 0.1 && got.y == 0.2 && got.z == 0.3)
+    joint_solver.motor_joint_set_max_velocity_force(mid, 500.0)
+    ensure("motor max velocity force", joint_solver.motor_joint_get_max_velocity_force(mid) == 500.0)
+    joint_solver.motor_joint_set_max_velocity_torque(mid, 600.0)
+    ensure("motor max velocity torque", joint_solver.motor_joint_get_max_velocity_torque(mid) == 600.0)
+    joint_solver.motor_joint_set_linear_hertz(mid, 3.0)
+    ensure("motor linear hertz", joint_solver.motor_joint_get_linear_hertz(mid) == 3.0)
+    joint_solver.motor_joint_set_linear_damping_ratio(mid, 0.8)
+    ensure("motor linear damping", joint_solver.motor_joint_get_linear_damping_ratio(mid) == 0.8)
+    joint_solver.motor_joint_set_angular_hertz(mid, 4.0)
+    ensure("motor angular hertz", joint_solver.motor_joint_get_angular_hertz(mid) == 4.0)
+    joint_solver.motor_joint_set_angular_damping_ratio(mid, 0.9)
+    ensure("motor angular damping", joint_solver.motor_joint_get_angular_damping_ratio(mid) == 0.9)
+    joint_solver.motor_joint_set_max_spring_force(mid, 700.0)
+    ensure("motor max spring force", joint_solver.motor_joint_get_max_spring_force(mid) == 700.0)
+    joint_solver.motor_joint_set_max_spring_torque(mid, 800.0)
+    ensure("motor max spring torque", joint_solver.motor_joint_get_max_spring_torque(mid) == 800.0)
+    dynamics.destroy_joint(mid, true)
+
+    prdef = dynamics.default_prismatic_joint_def()
+    common_frames(&f, &prdef.base)
+    prid = dynamics.create_prismatic_joint(f.world_id, &prdef)
+    joint_solver.prismatic_joint_enable_spring(prid, true)
+    ensure("prismatic spring", joint_solver.prismatic_joint_is_spring_enabled(prid))
+    joint_solver.prismatic_joint_set_spring_hertz(prid, 5.0)
+    ensure("prismatic hertz", joint_solver.prismatic_joint_get_spring_hertz(prid) == 5.0)
+    joint_solver.prismatic_joint_set_spring_damping_ratio(prid, 0.5)
+    ensure("prismatic damping", joint_solver.prismatic_joint_get_spring_damping_ratio(prid) == 0.5)
+    joint_solver.prismatic_joint_set_target_translation(prid, 1.0)
+    ensure("prismatic target", joint_solver.prismatic_joint_get_target_translation(prid) == 1.0)
+    joint_solver.prismatic_joint_enable_limit(prid, true)
+    ensure("prismatic limit", joint_solver.prismatic_joint_is_limit_enabled(prid))
+    joint_solver.prismatic_joint_set_limits(prid, 2.0, 0.0 - 2.0)
+    ensure("prismatic limits ordered", joint_solver.prismatic_joint_get_lower_limit(prid) == 0.0 - 2.0 && joint_solver.prismatic_joint_get_upper_limit(prid) == 2.0)
+    joint_solver.prismatic_joint_enable_motor(prid, true)
+    ensure("prismatic motor", joint_solver.prismatic_joint_is_motor_enabled(prid))
+    joint_solver.prismatic_joint_set_motor_speed(prid, 1.5)
+    ensure("prismatic motor speed", joint_solver.prismatic_joint_get_motor_speed(prid) == 1.5)
+    joint_solver.prismatic_joint_set_max_motor_force(prid, 30.0)
+    ensure("prismatic max motor force", joint_solver.prismatic_joint_get_max_motor_force(prid) == 30.0)
+    small("prismatic translation at rest", joint_solver.prismatic_joint_get_translation(prid), 0.000001)
+    small("prismatic speed at rest", joint_solver.prismatic_joint_get_speed(prid), 0.000001)
+    ensure("prismatic motor force at rest", joint_solver.prismatic_joint_get_motor_force(prid) == 0.0)
+    dynamics.destroy_joint(prid, true)
+
+    rdef = dynamics.default_revolute_joint_def()
+    common_frames(&f, &rdef.base)
+    rid = dynamics.create_revolute_joint(f.world_id, &rdef)
+    joint_solver.revolute_joint_enable_spring(rid, true)
+    ensure("revolute spring", joint_solver.revolute_joint_is_spring_enabled(rid))
+    joint_solver.revolute_joint_set_spring_hertz(rid, 5.0)
+    ensure("revolute hertz", joint_solver.revolute_joint_get_spring_hertz(rid) == 5.0)
+    joint_solver.revolute_joint_set_spring_damping_ratio(rid, 0.5)
+    ensure("revolute damping", joint_solver.revolute_joint_get_spring_damping_ratio(rid) == 0.5)
+    joint_solver.revolute_joint_set_target_angle(rid, 0.5)
+    ensure("revolute target", joint_solver.revolute_joint_get_target_angle(rid) == 0.5)
+    small("revolute angle at rest", joint_solver.revolute_joint_get_angle(rid), 0.000001)
+    joint_solver.revolute_joint_enable_limit(rid, true)
+    ensure("revolute limit", joint_solver.revolute_joint_is_limit_enabled(rid))
+    joint_solver.revolute_joint_set_limits(rid, 1.0, 0.0 - 1.0)
+    ensure("revolute limits ordered", joint_solver.revolute_joint_get_lower_limit(rid) == 0.0 - 1.0 && joint_solver.revolute_joint_get_upper_limit(rid) == 1.0)
+    joint_solver.revolute_joint_enable_motor(rid, true)
+    ensure("revolute motor", joint_solver.revolute_joint_is_motor_enabled(rid))
+    joint_solver.revolute_joint_set_motor_speed(rid, 2.0)
+    ensure("revolute motor speed", joint_solver.revolute_joint_get_motor_speed(rid) == 2.0)
+    joint_solver.revolute_joint_set_max_motor_torque(rid, 40.0)
+    ensure("revolute max motor torque", joint_solver.revolute_joint_get_max_motor_torque(rid) == 40.0)
+    ensure("revolute motor torque at rest", joint_solver.revolute_joint_get_motor_torque(rid) == 0.0)
+    dynamics.destroy_joint(rid, true)
+
+    sdef = dynamics.default_spherical_joint_def()
+    common_frames(&f, &sdef.base)
+    sid = dynamics.create_spherical_joint(f.world_id, &sdef)
+    joint_solver.spherical_joint_enable_cone_limit(sid, true)
+    ensure("spherical cone", joint_solver.spherical_joint_is_cone_limit_enabled(sid))
+    joint_solver.spherical_joint_set_cone_limit(sid, 0.5)
+    ensure("spherical cone limit", joint_solver.spherical_joint_get_cone_limit(sid) == 0.5)
+    small("spherical cone angle at rest", joint_solver.spherical_joint_get_cone_angle(sid), 0.000001)
+    joint_solver.spherical_joint_enable_twist_limit(sid, true)
+    ensure("spherical twist", joint_solver.spherical_joint_is_twist_limit_enabled(sid))
+    joint_solver.spherical_joint_set_twist_limits(sid, 0.5, 0.0 - 0.5)
+    ensure("spherical twist limits ordered", joint_solver.spherical_joint_get_lower_twist_limit(sid) == 0.0 - 0.5 && joint_solver.spherical_joint_get_upper_twist_limit(sid) == 0.5)
+    small("spherical twist angle at rest", joint_solver.spherical_joint_get_twist_angle(sid), 0.000001)
+    joint_solver.spherical_joint_enable_spring(sid, true)
+    ensure("spherical spring", joint_solver.spherical_joint_is_spring_enabled(sid))
+    joint_solver.spherical_joint_set_spring_hertz(sid, 5.0)
+    ensure("spherical hertz", joint_solver.spherical_joint_get_spring_hertz(sid) == 5.0)
+    joint_solver.spherical_joint_set_spring_damping_ratio(sid, 0.5)
+    ensure("spherical damping", joint_solver.spherical_joint_get_spring_damping_ratio(sid) == 0.5)
+    target = math.make_quat_from_axis_angle(math.vec3_axis_z(), 0.25)
+    joint_solver.spherical_joint_set_target_rotation(sid, target)
+    got_q = joint_solver.spherical_joint_get_target_rotation(sid)
+    small("spherical target rotation", math.abs_float(got_q.v.z - target.v.z) + math.abs_float(got_q.s - target.s), 0.00001)
+    joint_solver.spherical_joint_enable_motor(sid, true)
+    ensure("spherical motor", joint_solver.spherical_joint_is_motor_enabled(sid))
+    joint_solver.spherical_joint_set_motor_velocity(sid, math.vec3(0.1, 0.2, 0.3))
+    got = joint_solver.spherical_joint_get_motor_velocity(sid)
+    ensure("spherical motor velocity", got.x == 0.1 && got.y == 0.2 && got.z == 0.3)
+    joint_solver.spherical_joint_set_max_motor_torque(sid, 50.0)
+    ensure("spherical max motor torque", joint_solver.spherical_joint_get_max_motor_torque(sid) == 50.0)
+    ensure("spherical motor torque at rest", math.length(joint_solver.spherical_joint_get_motor_torque(sid)) == 0.0)
+    dynamics.destroy_joint(sid, true)
+
+    wdef = dynamics.default_weld_joint_def()
+    common_frames(&f, &wdef.base)
+    wid = dynamics.create_weld_joint(f.world_id, &wdef)
+    joint_solver.weld_joint_set_linear_hertz(wid, 3.0)
+    ensure("weld linear hertz", joint_solver.weld_joint_get_linear_hertz(wid) == 3.0)
+    joint_solver.weld_joint_set_linear_damping_ratio(wid, 0.5)
+    ensure("weld linear damping", joint_solver.weld_joint_get_linear_damping_ratio(wid) == 0.5)
+    joint_solver.weld_joint_set_angular_hertz(wid, 4.0)
+    ensure("weld angular hertz", joint_solver.weld_joint_get_angular_hertz(wid) == 4.0)
+    joint_solver.weld_joint_set_angular_damping_ratio(wid, 0.7)
+    ensure("weld angular damping", joint_solver.weld_joint_get_angular_damping_ratio(wid) == 0.7)
+    dynamics.destroy_joint(wid, true)
+
+    whdef = dynamics.default_wheel_joint_def()
+    common_frames(&f, &whdef.base)
+    whid = dynamics.create_wheel_joint(f.world_id, &whdef)
+    joint_solver.wheel_joint_enable_suspension(whid, true)
+    ensure("wheel suspension", joint_solver.wheel_joint_is_suspension_enabled(whid))
+    joint_solver.wheel_joint_set_suspension_hertz(whid, 5.0)
+    ensure("wheel suspension hertz", joint_solver.wheel_joint_get_suspension_hertz(whid) == 5.0)
+    joint_solver.wheel_joint_set_suspension_damping_ratio(whid, 0.5)
+    ensure("wheel suspension damping", joint_solver.wheel_joint_get_suspension_damping_ratio(whid) == 0.5)
+    joint_solver.wheel_joint_enable_suspension_limit(whid, true)
+    ensure("wheel suspension limit", joint_solver.wheel_joint_is_suspension_limit_enabled(whid))
+    joint_solver.wheel_joint_set_suspension_limits(whid, 0.0 - 1.0, 1.0)
+    ensure("wheel suspension limits", joint_solver.wheel_joint_get_lower_suspension_limit(whid) == 0.0 - 1.0 && joint_solver.wheel_joint_get_upper_suspension_limit(whid) == 1.0)
+    joint_solver.wheel_joint_enable_spin_motor(whid, true)
+    ensure("wheel spin motor", joint_solver.wheel_joint_is_spin_motor_enabled(whid))
+    joint_solver.wheel_joint_set_spin_motor_speed(whid, 6.0)
+    ensure("wheel spin speed", joint_solver.wheel_joint_get_spin_motor_speed(whid) == 6.0)
+    joint_solver.wheel_joint_set_max_spin_torque(whid, 35.0)
+    ensure("wheel max spin torque", joint_solver.wheel_joint_get_max_spin_torque(whid) == 35.0)
+    small("wheel spin speed at rest", joint_solver.wheel_joint_get_spin_speed(whid), 0.000001)
+    ensure("wheel spin torque at rest", joint_solver.wheel_joint_get_spin_torque(whid) == 0.0)
+    joint_solver.wheel_joint_enable_steering(whid, true)
+    ensure("wheel steering", joint_solver.wheel_joint_is_steering_enabled(whid))
+    joint_solver.wheel_joint_set_steering_hertz(whid, 7.0)
+    ensure("wheel steering hertz", joint_solver.wheel_joint_get_steering_hertz(whid) == 7.0)
+    joint_solver.wheel_joint_set_steering_damping_ratio(whid, 0.8)
+    ensure("wheel steering damping", joint_solver.wheel_joint_get_steering_damping_ratio(whid) == 0.8)
+    joint_solver.wheel_joint_set_max_steering_torque(whid, 45.0)
+    ensure("wheel max steering torque", joint_solver.wheel_joint_get_max_steering_torque(whid) == 45.0)
+    joint_solver.wheel_joint_enable_steering_limit(whid, true)
+    ensure("wheel steering limit", joint_solver.wheel_joint_is_steering_limit_enabled(whid))
+    joint_solver.wheel_joint_set_steering_limits(whid, 0.0 - 0.6, 0.6)
+    ensure("wheel steering limits", joint_solver.wheel_joint_get_lower_steering_limit(whid) == 0.0 - 0.6 && joint_solver.wheel_joint_get_upper_steering_limit(whid) == 0.6)
+    joint_solver.wheel_joint_set_target_steering_angle(whid, 0.25)
+    ensure("wheel target steering", joint_solver.wheel_joint_get_target_steering_angle(whid) == 0.25)
+    small("wheel steering angle at rest", joint_solver.wheel_joint_get_steering_angle(whid), 0.000001)
+    ensure("wheel steering torque at rest", joint_solver.wheel_joint_get_steering_torque(whid) == 0.0)
+    dynamics.destroy_joint(whid, true)
+    ensure("all destroyed", dynamics.world_joint_count(f.w) == 0 && dynamics.validate_joints(f.w))
+    dynamics.destroy_world(f.world_id)
+}
+
+// --- the solves ---------------------------------------------------------------------------------------------------
+
+test_distance() {
+    // A rigid rod of 2 from (0, 2, 0) on the ground to the cube: the
+    // outward velocity is removed, the sideways one kept.
+    f = fixture()
+    ddef = dynamics.default_distance_joint_def()
+    common_frames(&f, &ddef.base)
+    ddef.base.local_frame_a.p = math.vec3(0.0, 2.0, 0.0)
+    ddef.length = 2.0
+    id = dynamics.create_distance_joint(f.world_id, &ddef)
+    set_velocity(&f, math.vec3(1.0, 1.0, 0.0), math.vec3_zero())
+    solve_step(&f, id)
+    state = cube_state(&f)
+    small("rod: outward velocity removed", state.linear_velocity.y, 0.000001)
+    small("rod: sideways velocity kept", state.linear_velocity.x - 1.0, 0.000001)
+    d = dynamics.distance_joint_of(sim(&f, id))
+    small("rod: the impulse is the momentum", d.impulse + 1.0, 0.000001)
+    small("rod: the axial mass of a lone cube", d.axial_mass - 1.0, 0.000001)
+    force = joint_solver.joint_get_constraint_force(id)
+    small("rod: the force from the impulse (-1 * 240)", force.y + 240.0, 0.001)
+    ensure("rod: the constraint hertz clamped to 60", sim(&f, id).constraint_softness.mass_scale > 0.0 && sim(&f, id).constraint_softness.mass_scale < 1.0)
+    // Warm starting: the next prepare keeps the impulse and the warm start reapplies it.
+    set_velocity(&f, math.vec3_zero(), math.vec3_zero())
+    joint_solver.prepare_joint(sim(&f, id), &f.ctx)
+    joint_solver.warm_start_joint(sim(&f, id), &f.ctx)
+    small("rod: warm started (-1)", state.linear_velocity.y + 1.0, 0.000001)
+    f.ctx.enable_warm_starting = false
+    joint_solver.prepare_joint(sim(&f, id), &f.ctx)
+    ensure("rod: no warm start when disabled", d.impulse == 0.0)
+    f.ctx.enable_warm_starting = true
+    // A spring of 2 Hz with the rest length at 3: the biased solve pulls outward.
+    joint_solver.distance_joint_enable_spring(id, true)
+    joint_solver.distance_joint_set_spring_hertz(id, 2.0)
+    joint_solver.distance_joint_set_spring_damping_ratio(id, 0.5)
+    joint_solver.distance_joint_set_length(id, 3.0)
+    set_velocity(&f, math.vec3_zero(), math.vec3_zero())
+    solve_step(&f, id)
+    ensure("spring: pulled outward (${state.linear_velocity.y})", state.linear_velocity.y > 0.05 && state.linear_velocity.y < 2.0)
+    // The limits with the spring on: at the maximum length, outward is stopped, inward passes.
+    joint_solver.distance_joint_set_length(id, 2.0)
+    joint_solver.distance_joint_set_spring_hertz(id, 0.0)
+    joint_solver.distance_joint_enable_limit(id, true)
+    joint_solver.distance_joint_set_length_range(id, 1.0, 2.0)
+    set_velocity(&f, math.vec3(0.0, 1.0, 0.0), math.vec3_zero())
+    solve_step(&f, id)
+    small("limit: outward stopped at the maximum", state.linear_velocity.y, 0.000001)
+    set_velocity(&f, math.vec3(0.0, 0.0 - 1.0, 0.0), math.vec3_zero())
+    solve_step(&f, id)
+    small("limit: inward passes (a metre of room)", state.linear_velocity.y + 1.0, 0.000001)
+    // The motor: pulls in at its speed within its force.
+    joint_solver.distance_joint_enable_limit(id, false)
+    joint_solver.distance_joint_enable_motor(id, true)
+    joint_solver.distance_joint_set_motor_speed(id, 0.0 - 0.5)
+    joint_solver.distance_joint_set_max_motor_force(id, 1000.0)
+    set_velocity(&f, math.vec3_zero(), math.vec3_zero())
+    solve_step(&f, id)
+    small("motor: at its speed", state.linear_velocity.y + 0.5, 0.000001)
+    small("motor: its force", joint_solver.distance_joint_get_motor_force(id) + 0.5 * 240.0, 0.001)
+    joint_solver.distance_joint_set_max_motor_force(id, 24.0)
+    set_velocity(&f, math.vec3_zero(), math.vec3_zero())
+    solve_step(&f, id)
+    small("motor: bounded by its force (0.1 per sub-step... the accumulated impulse)", state.linear_velocity.y + 0.1, 0.000001)
+    dynamics.destroy_world(f.world_id)
+}
+
+test_revolute() {
+    // A hinge about z at the cube: the point is held, the spin about z is free, the others are removed.
+    f = fixture()
+    rdef = dynamics.default_revolute_joint_def()
+    common_frames(&f, &rdef.base)
+    id = dynamics.create_revolute_joint(f.world_id, &rdef)
+    set_velocity(&f, math.vec3(1.0, 2.0, 3.0), math.vec3(1.0, 2.0, 3.0))
+    solve_step(&f, id)
+    state = cube_state(&f)
+    small("hinge: linear velocity removed", math.length(state.linear_velocity), 0.000001)
+    small("hinge: spin about z kept", state.angular_velocity.z - 3.0, 0.000001)
+    small("hinge: the other spins removed", math.abs_float(state.angular_velocity.x) + math.abs_float(state.angular_velocity.y), 0.000001)
+    r = dynamics.revolute_joint_of(sim(&f, id))
+    small("hinge: the linear impulse is the momentum", math.length(r.linear_impulse) - math.length(math.vec3(1.0, 2.0, 3.0)), 0.000001)
+    small("hinge: the axial mass 1/6", r.axial_mass - 1.0 / 6.0, 0.000001)
+    torque = joint_solver.joint_get_constraint_torque(id)
+    ensure("hinge: a torque about x and y only", math.abs_float(torque.z) < 0.001 && math.length(torque) > 1.0)
+    // The motor: spins at its speed.
+    joint_solver.revolute_joint_enable_motor(id, true)
+    joint_solver.revolute_joint_set_motor_speed(id, 2.0)
+    joint_solver.revolute_joint_set_max_motor_torque(id, 1000.0)
+    set_velocity(&f, math.vec3_zero(), math.vec3_zero())
+    solve_step(&f, id)
+    small("hinge motor: at its speed", state.angular_velocity.z - 2.0, 0.000001)
+    small("hinge motor: its torque (2/6 * 240)", joint_solver.revolute_joint_get_motor_torque(id) - 80.0, 0.001)
+    joint_solver.revolute_joint_enable_motor(id, false)
+    // The limit: within it a spin is speculative and free; the cube turned past it is pushed back.
+    joint_solver.revolute_joint_enable_limit(id, true)
+    joint_solver.revolute_joint_set_limits(id, 0.0 - 0.5, 0.5)
+    set_velocity(&f, math.vec3_zero(), math.vec3(0.0, 0.0, 10.0))
+    solve_step(&f, id)
+    small("hinge limit: inside, the spin is free", state.angular_velocity.z - 10.0, 0.000001)
+    dynamics.body_set_transform(f.cube_id, math.vec3(0.0, 4.0, 0.0), math.make_quat_from_axis_angle(math.vec3_axis_z(), 0.6))
+    small("hinge limit: the angle read (the approximate atan2)", joint_solver.revolute_joint_get_angle(id) - 0.6, 0.01)
+    set_velocity(&f, math.vec3_zero(), math.vec3_zero())
+    solve_biased(&f, id)
+    ensure("hinge limit: pushed back under the upper limit (${state.angular_velocity.z})", state.angular_velocity.z < 0.0 - 0.1)
+    ensure("hinge limit: the upper impulse", r.upper_impulse > 0.0 && r.lower_impulse == 0.0)
+    i = 0
+    while i < 4 { joint_solver.solve_joint(sim(&f, id), &f.ctx, false); i = i + 1 }
+    small("hinge limit: the relax undoes the push (the bodies did not move)", state.angular_velocity.z, 0.000001)
+    joint_solver.revolute_joint_enable_limit(id, false)
+    // The spring towards a target angle.
+    joint_solver.revolute_joint_enable_spring(id, true)
+    joint_solver.revolute_joint_set_spring_hertz(id, 2.0)
+    joint_solver.revolute_joint_set_target_angle(id, 0.0)
+    set_velocity(&f, math.vec3_zero(), math.vec3_zero())
+    solve_step(&f, id)
+    ensure("hinge spring: turns back towards the target (${state.angular_velocity.z})", state.angular_velocity.z < 0.0)
+    dynamics.destroy_world(f.world_id)
+}
+
+test_weld() {
+    f = fixture()
+    wdef = dynamics.default_weld_joint_def()
+    common_frames(&f, &wdef.base)
+    id = dynamics.create_weld_joint(f.world_id, &wdef)
+    set_velocity(&f, math.vec3(1.0, 2.0, 3.0), math.vec3(1.0, 2.0, 3.0))
+    solve_step(&f, id)
+    state = cube_state(&f)
+    small("weld: linear velocity removed", math.length(state.linear_velocity), 0.000001)
+    small("weld: angular velocity removed", math.length(state.angular_velocity), 0.000001)
+    force = joint_solver.joint_get_constraint_force(id)
+    torque = joint_solver.joint_get_constraint_torque(id)
+    small("weld: the force from the linear impulse", math.length(force) - 240.0 * math.length(math.vec3(1.0, 2.0, 3.0)), 0.001)
+    small("weld: the torque from the angular impulse (1/6 of the spin)", math.length(torque) - 40.0 * math.length(math.vec3(1.0, 2.0, 3.0)), 0.001)
+    // Soft: with a linear hertz the cube is slowed, not stopped.
+    joint_solver.weld_joint_set_linear_hertz(id, 2.0)
+    joint_solver.weld_joint_set_linear_damping_ratio(id, 0.5)
+    set_velocity(&f, math.vec3(1.0, 0.0, 0.0), math.vec3_zero())
+    solve_step(&f, id)
+    ensure("soft weld: slowed, not stopped (${state.linear_velocity.x})", state.linear_velocity.x > 0.1 && state.linear_velocity.x < 1.0)
+    dynamics.destroy_world(f.world_id)
+}
+
+test_prismatic() {
+    // Sliding along x: v_x kept, the rest removed; the motor drives; the limit holds.
+    f = fixture()
+    pdef = dynamics.default_prismatic_joint_def()
+    common_frames(&f, &pdef.base)
+    id = dynamics.create_prismatic_joint(f.world_id, &pdef)
+    set_velocity(&f, math.vec3(1.0, 2.0, 3.0), math.vec3(1.0, 2.0, 3.0))
+    solve_step(&f, id)
+    state = cube_state(&f)
+    small("slider: along the axis kept", state.linear_velocity.x - 1.0, 0.000001)
+    small("slider: across removed", math.abs_float(state.linear_velocity.y) + math.abs_float(state.linear_velocity.z), 0.000001)
+    small("slider: rotation removed", math.length(state.angular_velocity), 0.000001)
+    joint_solver.prismatic_joint_enable_motor(id, true)
+    joint_solver.prismatic_joint_set_motor_speed(id, 1.5)
+    joint_solver.prismatic_joint_set_max_motor_force(id, 1000.0)
+    set_velocity(&f, math.vec3_zero(), math.vec3_zero())
+    solve_step(&f, id)
+    small("slider motor: at its speed", state.linear_velocity.x - 1.5, 0.000001)
+    small("slider motor: the speed read", joint_solver.prismatic_joint_get_speed(id) - 1.5, 0.000001)
+    small("slider motor: its force", joint_solver.prismatic_joint_get_motor_force(id) - 1.5 * 240.0, 0.001)
+    joint_solver.prismatic_joint_enable_motor(id, false)
+    joint_solver.prismatic_joint_enable_limit(id, true)
+    joint_solver.prismatic_joint_set_limits(id, 0.0 - 1.0, 1.0)
+    dynamics.body_set_transform(f.cube_id, math.vec3(1.2, 4.0, 0.0), math.quat_identity())
+    small("slider limit: the translation read", joint_solver.prismatic_joint_get_translation(id) - 1.2, 0.000001)
+    set_velocity(&f, math.vec3_zero(), math.vec3_zero())
+    solve_biased(&f, id)
+    ensure("slider limit: pushed back (${state.linear_velocity.x})", state.linear_velocity.x < 0.0 - 0.1)
+    // Sideways from the line, the biased solve pulls it back onto it.
+    dynamics.body_set_transform(f.cube_id, math.vec3(0.0, 4.2, 0.0), math.quat_identity())
+    set_velocity(&f, math.vec3_zero(), math.vec3_zero())
+    solve_biased(&f, id)
+    ensure("slider: pulled back onto the line (${state.linear_velocity.y})", state.linear_velocity.y < 0.0 - 0.1)
+    dynamics.destroy_world(f.world_id)
+}
+
+test_spherical() {
+    f = fixture()
+    sdef = dynamics.default_spherical_joint_def()
+    common_frames(&f, &sdef.base)
+    id = dynamics.create_spherical_joint(f.world_id, &sdef)
+    set_velocity(&f, math.vec3(1.0, 2.0, 3.0), math.vec3(1.0, 2.0, 3.0))
+    solve_step(&f, id)
+    state = cube_state(&f)
+    small("ball: linear velocity removed", math.length(state.linear_velocity), 0.000001)
+    small("ball: rotation free", math.length(math.sub(state.angular_velocity, math.vec3(1.0, 2.0, 3.0))), 0.000001)
+    joint_solver.spherical_joint_enable_motor(id, true)
+    joint_solver.spherical_joint_set_motor_velocity(id, math.vec3(0.5, 0.0, 0.0 - 0.5))
+    joint_solver.spherical_joint_set_max_motor_torque(id, 1000.0)
+    set_velocity(&f, math.vec3_zero(), math.vec3_zero())
+    solve_step(&f, id)
+    small("ball motor: at its velocity", math.length(math.sub(state.angular_velocity, math.vec3(0.5, 0.0, 0.0 - 0.5))), 0.000001)
+    joint_solver.spherical_joint_enable_motor(id, false)
+    // The cone limit: the cube tilted past it about x is pushed back.
+    joint_solver.spherical_joint_enable_cone_limit(id, true)
+    joint_solver.spherical_joint_set_cone_limit(id, 0.3)
+    dynamics.body_set_transform(f.cube_id, math.vec3(0.0, 4.0, 0.0), math.make_quat_from_axis_angle(math.vec3_axis_x(), 0.5))
+    small("cone: the angle read", joint_solver.spherical_joint_get_cone_angle(id) - 0.5, 0.01)
+    set_velocity(&f, math.vec3_zero(), math.vec3_zero())
+    solve_biased(&f, id)
+    ensure("cone: pushed back (${state.angular_velocity.x})", state.angular_velocity.x < 0.0 - 0.1)
+    ensure("cone: the swing impulse", dynamics.spherical_joint_of(sim(&f, id)).swing_impulse > 0.0)
+    joint_solver.spherical_joint_enable_cone_limit(id, false)
+    // The twist limit about z.
+    joint_solver.spherical_joint_enable_twist_limit(id, true)
+    joint_solver.spherical_joint_set_twist_limits(id, 0.0 - 0.3, 0.3)
+    dynamics.body_set_transform(f.cube_id, math.vec3(0.0, 4.0, 0.0), math.make_quat_from_axis_angle(math.vec3_axis_z(), 0.5))
+    small("twist: the angle read", joint_solver.spherical_joint_get_twist_angle(id) - 0.5, 0.01)
+    set_velocity(&f, math.vec3_zero(), math.vec3_zero())
+    solve_biased(&f, id)
+    ensure("twist: pushed back (${state.angular_velocity.z})", state.angular_velocity.z < 0.0 - 0.1)
+    dynamics.destroy_world(f.world_id)
+}
+
+test_parallel_motor_wheel() {
+    // Parallel: the cube tilted about x turns back with a spring of 2 Hz; a spin about z is untouched.
+    f = fixture()
+    pdef = dynamics.default_parallel_joint_def()
+    common_frames(&f, &pdef.base)
+    pdef.hertz = 2.0
+    pdef.damping_ratio = 0.5
+    pid = dynamics.create_parallel_joint(f.world_id, &pdef)
+    dynamics.body_set_transform(f.cube_id, math.vec3(0.0, 4.0, 0.0), math.make_quat_from_axis_angle(math.vec3_axis_x(), 0.3))
+    set_velocity(&f, math.vec3_zero(), math.vec3(0.0, 0.0, 1.0))
+    solve_step(&f, pid)
+    state = cube_state(&f)
+    ensure("parallel: turns back about x (${state.angular_velocity.x})", state.angular_velocity.x < 0.0 - 0.01)
+    small("parallel: the spin about z untouched", state.angular_velocity.z - 1.0, 0.01)
+    ensure("parallel: a torque", math.length(joint_solver.joint_get_constraint_torque(pid)) > 0.0)
+    dynamics.destroy_joint(pid, true)
+    // Motor: the linear velocity target within its force; the angular target.
+    mdef = dynamics.default_motor_joint_def()
+    common_frames(&f, &mdef.base)
+    mdef.linear_velocity = math.vec3(2.0, 0.0, 0.0)
+    mdef.max_velocity_force = 1000.0
+    mdef.angular_velocity = math.vec3(0.0, 3.0, 0.0)
+    mdef.max_velocity_torque = 1000.0
+    mid = dynamics.create_motor_joint(f.world_id, &mdef)
+    dynamics.body_set_transform(f.cube_id, math.vec3(0.0, 4.0, 0.0), math.quat_identity())
+    set_velocity(&f, math.vec3_zero(), math.vec3_zero())
+    solve_step(&f, mid)
+    small("motor: the linear target", state.linear_velocity.x - 2.0, 0.000001)
+    small("motor: the angular target", state.angular_velocity.y - 3.0, 0.000001)
+    small("motor: the force", joint_solver.joint_get_constraint_force(mid).x - 2.0 * 240.0, 0.001)
+    joint_solver.motor_joint_set_max_velocity_force(mid, 24.0)
+    set_velocity(&f, math.vec3_zero(), math.vec3_zero())
+    solve_step(&f, mid)
+    small("motor: bounded by its force", state.linear_velocity.x - 0.1, 0.000001)
+    dynamics.destroy_joint(mid, true)
+    // Wheel: the spin motor about B's z axis at its speed; the point kept on the suspension line.
+    whdef = dynamics.default_wheel_joint_def()
+    common_frames(&f, &whdef.base)
+    whdef.enable_spin_motor = true
+    whdef.spin_speed = 6.0
+    whdef.max_spin_torque = 1000.0
+    whid = dynamics.create_wheel_joint(f.world_id, &whdef)
+    set_velocity(&f, math.vec3(0.0, 1.0, 1.0), math.vec3_zero())
+    solve_step(&f, whid)
+    small("wheel: spins at the motor's speed", state.angular_velocity.z - 6.0, 0.000001)
+    small("wheel: the spin speed read", joint_solver.wheel_joint_get_spin_speed(whid) - 6.0, 0.000001)
+    small("wheel: off the line removed", math.abs_float(state.linear_velocity.y) + math.abs_float(state.linear_velocity.z), 0.000001)
+    small("wheel: the spin torque (6/6 * 240)", joint_solver.wheel_joint_get_spin_torque(whid) - 240.0, 0.001)
+    // Steering to a target angle turns the wheel about the suspension axis.
+    joint_solver.wheel_joint_enable_steering(whid, true)
+    joint_solver.wheel_joint_set_target_steering_angle(whid, 0.3)
+    joint_solver.wheel_joint_set_max_steering_torque(whid, 1000.0)
+    set_velocity(&f, math.vec3_zero(), math.vec3_zero())
+    solve_step(&f, whid)
+    ensure("wheel steering: turns about x (${state.angular_velocity.x})", math.abs_float(state.angular_velocity.x) > 0.01)
+    dynamics.destroy_world(f.world_id)
+}
+
+main() {
+    before = core.alloc_count()
+    test_accessors()
+    test_distance()
+    test_revolute()
+    test_weld()
+    test_prismatic()
+    test_spherical()
+    test_parallel_motor_wheel()
+    hull.destroy_hull(g_cube as *HullData)
+    // The scratch stays allocated: the worlds' block, the masses, the dummy state.
+    ensure("every other counted allocation was freed (${core.alloc_count() - before})", core.alloc_count() == before + 3)
+    println("joint_solver: ${checks} checks")
+    if failures == 0 {
+        println("joint_solver: all checks passed")
+    } else {
+        println("joint_solver: ${failures} failure(s)")
+        exit(1)
+    }
+}
