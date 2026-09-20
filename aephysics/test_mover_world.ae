@@ -1,0 +1,325 @@
+// The mover through a world, against the reference's (Box3D's)
+// test_mover.c world parts: which material a contact plane came from
+// (a mesh reports the triangle's material, a compound remaps its
+// child's through its own table, a convex shape reports 0, a mesh with
+// only the base material clamps to it), and the body-level mover query
+// that takes convex shapes only. The plane solver and the shapes' mover
+// collisions without a world are in test_mover.ae.
+import std.string
+import aephysics.math
+import aephysics.core
+import aephysics.hull
+import aephysics.distance
+import aephysics.manifold
+import aephysics.mesh
+import aephysics.material
+import aephysics.compound
+import aephysics.shape
+import aephysics.dynamics
+import aephysics.physics_world
+
+extern calloc(count: int, size: int) -> ptr
+extern exit(code: int)
+extern free(p: ptr)
+
+var failures = 0
+var checks = 0
+
+ensure(name: string, ok: bool) {
+    checks = checks + 1
+    if !ok {
+        println("mover_world: FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+small(name: string, value: float, tolerance: float) {
+    ensure("${name} (${value})", math.abs_float(value) < tolerance)
+}
+
+make_material(friction: float, user_id: long) -> SurfaceMaterial {
+    m = material.default_surface_material()
+    m.friction = friction
+    m.user_material_id = user_id
+    return m
+}
+
+// Two separated upward facing triangles on the y = 0 plane, one per
+// material. The bake may reorder triangles but keeps each with its
+// material index.
+two_material_mesh() -> *MeshData {
+    vertices = calloc(6, sizeof(Vec3))
+    v = vertices as Vec3[]
+    v[0] = math.vec3(0.0 - 3.0, 0.0, 0.0 - 1.0)
+    v[1] = math.vec3(0.0 - 2.0, 0.0, 1.0)
+    v[2] = math.vec3(0.0 - 1.0, 0.0, 0.0 - 1.0)
+    v[3] = math.vec3(1.0, 0.0, 0.0 - 1.0)
+    v[4] = math.vec3(2.0, 0.0, 1.0)
+    v[5] = math.vec3(3.0, 0.0, 0.0 - 1.0)
+    indices = calloc(6, 4)
+    ix = indices as int[]
+    i = 0
+    while i < 6 { ix[i] = i; i = i + 1 }
+    materials = calloc(2, 4)
+    mi = materials as int[]
+    mi[0] = 0
+    mi[1] = 1
+    def = mesh.mesh_def()
+    def.vertices = vertices
+    def.stride = sizeof(Vec3)
+    def.indices = indices
+    def.material_indices = materials
+    def.vertex_count = 6
+    def.triangle_count = 2
+    m = mesh.create_mesh(&def, null, 0)
+    free(vertices)
+    free(indices)
+    free(materials)
+    return m
+}
+
+// The planes a world mover query reports, kept for the checks.
+struct PlaneCapture {
+    planes: ptr                    // PlaneResult[16]
+    count: int
+}
+
+capture_planes(shape_id: ShapeId, planes: PlaneResult[], count: int, context: ptr) -> bool {
+    capture = context as *PlaneCapture
+    kept = capture.planes as PlaneResult[]
+    i = 0
+    while i < count && capture.count < 16 {
+        kept[capture.count] = planes[i]
+        capture.count = capture.count + 1
+        i = i + 1
+    }
+    return true
+}
+
+capsule_at(x: float, y0: float, y1: float, radius: float) -> Capsule {
+    return Capsule { center1: math.vec3(x, y0, 0.0), center2: math.vec3(x, y1, 0.0), radius: radius }
+}
+
+test_world_mesh_materials() {
+    wdef = dynamics.default_world_def()
+    world_id = dynamics.create_world(&wdef)
+    bdef = dynamics.default_body_def()
+    body_id = dynamics.create_body(world_id, &bdef)
+    m = two_material_mesh()
+    ensure("mesh materials: built with two materials", m != null && m.material_count == 2)
+    materials = calloc(2, sizeof(SurfaceMaterial))
+    mats = materials as SurfaceMaterial[]
+    mats[0] = make_material(0.2, 1 as long)
+    mats[1] = make_material(0.8, 2 as long)
+    sdef = dynamics.default_shape_def()
+    sdef.materials = materials
+    sdef.material_count = 2
+    dynamics.create_mesh_shape(body_id, &sdef, m, math.vec3_one())
+    physics_world.step(world_id, 1.0 / 60.0, 1)
+    baked = mesh.mesh_material_indices(m)
+    filter = shape.default_query_filter()
+    // A mover hanging just above the first triangle, its radius reaching 0.05 into the surface.
+    kept = calloc(16, sizeof(PlaneResult))
+    capture = PlaneCapture { planes: kept, count: 0 }
+    physics_world.collide_mover(world_id, math.vec3_zero(), capsule_at(0.0 - 2.0, 0.15, 0.35, 0.2), filter, capture_planes, (&capture) as ptr)
+    planes = kept as PlaneResult[]
+    ensure("mesh materials: one plane over the first triangle (${capture.count})", capture.count == 1)
+    if capture.count == 1 {
+        ensure("mesh materials: it faces up", planes[0].plane.normal.y > 0.99)
+        small("mesh materials: offset 0.05", planes[0].plane.offset - 0.05, 0.0001)
+        small("mesh materials: point on the surface", planes[0].point.y, 0.0001)
+        ensure("mesh materials: material 0", planes[0].material_index == 0)
+        ensure("mesh materials: a triangle of the mesh", planes[0].triangle_index >= 0 && planes[0].triangle_index < m.triangle_count)
+        ensure("mesh materials: the baked triangle carries material 0", baked[planes[0].triangle_index] == 0)
+    }
+    // The same mover over the second triangle.
+    capture.count = 0
+    physics_world.collide_mover(world_id, math.vec3_zero(), capsule_at(2.0, 0.15, 0.35, 0.2), filter, capture_planes, (&capture) as ptr)
+    ensure("mesh materials: one plane over the second triangle (${capture.count})", capture.count == 1)
+    if capture.count == 1 {
+        ensure("mesh materials: it faces up too", planes[0].plane.normal.y > 0.99)
+        ensure("mesh materials: material 1", planes[0].material_index == 1)
+        ensure("mesh materials: the baked triangle carries material 1", baked[planes[0].triangle_index] == 1)
+    }
+    free(kept)
+    free(materials)
+    dynamics.destroy_world(world_id)
+    mesh.destroy_mesh(m)
+}
+
+test_world_compound_mesh_materials() {
+    wdef = dynamics.default_world_def()
+    world_id = dynamics.create_world(&wdef)
+    bdef = dynamics.default_body_def()
+    body_id = dynamics.create_body(world_id, &bdef)
+    m = two_material_mesh()
+    // The hull material and the two mesh materials are distinct, so the
+    // compound's table gets one slot per material; children bake hull
+    // then mesh.
+    mesh_materials = calloc(2, sizeof(SurfaceMaterial))
+    mm = mesh_materials as SurfaceMaterial[]
+    mm[0] = make_material(0.3, 101 as long)
+    mm[1] = make_material(0.6, 202 as long)
+    box = hull.make_box_hull(0.5, 0.5, 0.5)
+    hulls = calloc(1, sizeof(CompoundHullDef))
+    hd = hulls as CompoundHullDef[]
+    hd[0] = compound.compound_hull_def(box, Transform { p: math.vec3(0.0 - 8.0, 0.0, 0.0), q: math.quat_identity() }, make_material(0.9, 303 as long))
+    meshes = calloc(1, sizeof(CompoundMeshDef))
+    md = meshes as CompoundMeshDef[]
+    md[0] = compound.compound_mesh_def(m, math.transform_identity(), math.vec3_one(), mesh_materials, 2)
+    cdef = compound.compound_def()
+    cdef.hulls = hulls
+    cdef.hull_count = 1
+    cdef.meshes = meshes
+    cdef.mesh_count = 1
+    c = compound.create_compound(&cdef)
+    ensure("compound materials: built with three materials", c != null && c.material_count == 3)
+    baked = compound.get_compound_materials(c)
+    ensure("compound materials: hull then mesh materials", baked[0].user_material_id == (303 as long) && baked[1].user_material_id == (101 as long) && baked[2].user_material_id == (202 as long))
+    sdef = dynamics.default_shape_def()
+    dynamics.create_compound_shape(body_id, &sdef, c)
+    physics_world.step(world_id, 1.0 / 60.0, 1)
+    filter = shape.default_query_filter()
+    kept = calloc(16, sizeof(PlaneResult))
+    planes = kept as PlaneResult[]
+    capture = PlaneCapture { planes: kept, count: 0 }
+    // On top of the hull child's face at y = 0.5.
+    physics_world.collide_mover(world_id, math.vec3_zero(), capsule_at(0.0 - 8.0, 0.65, 0.85, 0.2), filter, capture_planes, (&capture) as ptr)
+    ensure("compound materials: one plane on the hull child (${capture.count})", capture.count == 1)
+    if capture.count == 1 {
+        ensure("compound materials: the hull plane faces up", planes[0].plane.normal.y > 0.99)
+        ensure("compound materials: child 0, material 0", planes[0].child_index == 0 && planes[0].material_index == 0)
+        ensure("compound materials: the hull's material", baked[planes[0].material_index].user_material_id == (303 as long))
+    }
+    // Over the second mesh triangle: the mesh's material 1 remapped
+    // through the child table to the slot of mesh_materials[1].
+    capture.count = 0
+    physics_world.collide_mover(world_id, math.vec3_zero(), capsule_at(2.0, 0.15, 0.35, 0.2), filter, capture_planes, (&capture) as ptr)
+    ensure("compound materials: one plane on the mesh child (${capture.count})", capture.count == 1)
+    if capture.count == 1 {
+        ensure("compound materials: the mesh plane faces up", planes[0].plane.normal.y > 0.99)
+        ensure("compound materials: child 1, material 2 (${planes[0].child_index}, ${planes[0].material_index})", planes[0].child_index == 1 && planes[0].material_index == 2)
+        ensure("compound materials: the second mesh material", baked[planes[0].material_index].user_material_id == (202 as long))
+    }
+    free(kept)
+    free(hulls)
+    free(meshes)
+    free(mesh_materials)
+    dynamics.destroy_world(world_id)
+    compound.destroy_compound(c)
+    mesh.destroy_mesh(m)
+    hull.destroy_hull(box)
+}
+
+test_body_material_indices() {
+    wdef = dynamics.default_world_def()
+    world_id = dynamics.create_world(&wdef)
+    bdef = dynamics.default_body_def()
+    body_id = dynamics.create_body(world_id, &bdef)
+    // One shape of each convex kind, spaced along x.
+    sdef = dynamics.default_shape_def()
+    dynamics.create_sphere_shape(body_id, &sdef, manifold.sphere(math.vec3(0.0, 0.5, 0.0), 0.5))
+    box = hull.make_transformed_box_hull(0.5, 0.5, 0.5, Transform { p: math.vec3(5.0, 0.0, 0.0), q: math.quat_identity() })
+    dynamics.create_hull_shape(body_id, &sdef, box)
+    dynamics.create_capsule_shape(body_id, &sdef, manifold.capsule(math.vec3(9.0, 0.0, 0.0), math.vec3(11.0, 0.0, 0.0), 0.3))
+    filter = shape.default_query_filter()
+    planes_block = calloc(4, sizeof(BodyPlaneResult))
+    planes = planes_block as BodyPlaneResult[]
+    // Convex shapes report the base material as index 0.
+    i = 0
+    while i < 3 {
+        mover = capsule_at(0.0, 1.15, 1.35, 0.2)
+        if i == 1 { mover = capsule_at(5.0, 0.65, 0.85, 0.2) }
+        if i == 2 { mover = capsule_at(10.0, 0.45, 0.65, 0.2) }
+        count = physics_world.body_collide_mover(body_id, planes, 4, math.vec3_zero(), mover, filter, math.transform_identity())
+        ensure("body materials: shape ${i} gives one plane (${count})", count == 1)
+        if count == 1 {
+            ensure("body materials: shape ${i}'s plane is a valid shape's, facing up", dynamics.shape_is_valid(planes[0].shape_id) && planes[0].result.plane.normal.y > 0.99)
+            ensure("body materials: shape ${i} reports material 0, child 0", planes[0].result.material_index == 0 && planes[0].result.child_index == 0)
+        }
+        i = i + 1
+    }
+    free(planes_block)
+    dynamics.destroy_world(world_id)
+    hull.destroy_hull(box)
+}
+
+// The body-level query handles convex shapes only: a mesh and a
+// compound on the body are skipped, their materials only reachable
+// through the world's query.
+test_body_skips_mesh_and_compound() {
+    wdef = dynamics.default_world_def()
+    world_id = dynamics.create_world(&wdef)
+    bdef = dynamics.default_body_def()
+    body_id = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    m = two_material_mesh()
+    dynamics.create_mesh_shape(body_id, &sdef, m, math.vec3_one())
+    box = hull.make_box_hull(0.5, 0.5, 0.5)
+    hulls = calloc(1, sizeof(CompoundHullDef))
+    hd = hulls as CompoundHullDef[]
+    hd[0] = compound.compound_hull_def(box, Transform { p: math.vec3(10.0, 0.0, 0.0), q: math.quat_identity() }, material.default_surface_material())
+    cdef = compound.compound_def()
+    cdef.hulls = hulls
+    cdef.hull_count = 1
+    c = compound.create_compound(&cdef)
+    ensure("body skips: compound built", c != null)
+    dynamics.create_compound_shape(body_id, &sdef, c)
+    filter = shape.default_query_filter()
+    planes_block = calloc(4, sizeof(BodyPlaneResult))
+    planes = planes_block as BodyPlaneResult[]
+    count = physics_world.body_collide_mover(body_id, planes, 4, math.vec3_zero(), capsule_at(0.0 - 2.0, 0.15, 0.35, 0.2), filter, math.transform_identity())
+    ensure("body skips: nothing over the mesh (${count})", count == 0)
+    count = physics_world.body_collide_mover(body_id, planes, 4, math.vec3_zero(), capsule_at(10.0, 0.65, 0.85, 0.2), filter, math.transform_identity())
+    ensure("body skips: nothing over the compound (${count})", count == 0)
+    free(planes_block)
+    free(hulls)
+    dynamics.destroy_world(world_id)
+    compound.destroy_compound(c)
+    mesh.destroy_mesh(m)
+    hull.destroy_hull(box)
+}
+
+// A mesh with two baked materials on a shape with only the base
+// material: the plane's material index clamps to the shape's last.
+test_world_mesh_material_clamp() {
+    wdef = dynamics.default_world_def()
+    world_id = dynamics.create_world(&wdef)
+    bdef = dynamics.default_body_def()
+    body_id = dynamics.create_body(world_id, &bdef)
+    m = two_material_mesh()
+    ensure("clamp: the mesh has two materials", m.material_count == 2)
+    sdef = dynamics.default_shape_def()
+    shape_id = dynamics.create_mesh_shape(body_id, &sdef, m, math.vec3_one())
+    shape_material_count = dynamics.shape_get_material_count(shape_id)
+    ensure("clamp: the shape has one (${shape_material_count})", shape_material_count == 1)
+    physics_world.step(world_id, 1.0 / 60.0, 1)
+    filter = shape.default_query_filter()
+    kept = calloc(16, sizeof(PlaneResult))
+    planes = kept as PlaneResult[]
+    capture = PlaneCapture { planes: kept, count: 0 }
+    // Over the triangle baked with material 1.
+    physics_world.collide_mover(world_id, math.vec3_zero(), capsule_at(2.0, 0.15, 0.35, 0.2), filter, capture_planes, (&capture) as ptr)
+    ensure("clamp: one plane (${capture.count})", capture.count == 1)
+    if capture.count == 1 {
+        ensure("clamp: the material index clamps to the shape's last (${planes[0].material_index})", planes[0].material_index == shape_material_count - 1)
+    }
+    free(kept)
+    dynamics.destroy_world(world_id)
+    mesh.destroy_mesh(m)
+}
+
+main() {
+    test_world_mesh_materials()
+    test_world_compound_mesh_materials()
+    test_body_material_indices()
+    test_body_skips_mesh_and_compound()
+    test_world_mesh_material_clamp()
+    println("mover_world: ${checks} checks")
+    if failures == 0 {
+        println("mover_world: all checks passed")
+    } else {
+        println("mover_world: ${failures} failure(s)")
+        exit(1)
+    }
+}

@@ -1,0 +1,292 @@
+// The reference's (Box3D's) test_large_world.c: a world far from the
+// origin behaves as one at it. A short stack dropped at x = 0 and at
+// x = 1e7 settles on the same step in the same relative geometry; a
+// bullet at 200 m/s is caught by a thin wall at both; the origin
+// relative queries (a shape cast, an overlap, a mover cast, the
+// mover's planes, the world's closest ray, a shape's own ray) hit the
+// same relative geometry at both. The reference runs the far half in
+// its double precision build only; this engine is in doubles
+// throughout, so the far half always runs.
+import std.string
+import aephysics.math
+import aephysics.core
+import aephysics.hull
+import aephysics.distance
+import aephysics.manifold
+import aephysics.mesh
+import aephysics.shape
+import aephysics.dynamics
+import aephysics.physics_world
+
+extern calloc(count: int, size: int) -> ptr
+extern exit(code: int)
+extern free(p: ptr)
+
+var failures = 0
+var checks = 0
+
+ensure(name: string, ok: bool) {
+    checks = checks + 1
+    if !ok {
+        println("large_world: FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+small(name: string, value: float, tolerance: float) {
+    ensure("${name} (${value})", math.abs_float(value) < tolerance)
+}
+
+const STACK_COUNT = 6
+const MAX_STEPS = 400
+const FAR_AWAY = 10000000.0
+
+// --- the stack -----------------------------------------------------------------------------------------------
+
+struct FarStackResult {
+    relative: ptr                  // Vec3[STACK_COUNT], the final positions relative to the base
+    sleep_step: int                // the first step the top body slept on, -1 if it never settled
+}
+
+// A short stack of boxes dropped onto a ground box centred at base_x.
+run_stack(base_x: float) -> FarStackResult {
+    base = math.vec3(base_x, 0.0, 0.0)
+    wdef = dynamics.default_world_def()
+    world_id = dynamics.create_world(&wdef)
+    gdef = dynamics.default_body_def()
+    gdef.position = base
+    ground = dynamics.create_body(world_id, &gdef)
+    ground_box = hull.make_box_hull(10.0, 1.0, 10.0)
+    gsdef = dynamics.default_shape_def()
+    dynamics.create_hull_shape(ground, &gsdef, ground_box)
+    cube = hull.make_cube_hull(0.5)
+    bodies_block = calloc(STACK_COUNT, sizeof(BodyId))
+    bodies = bodies_block as BodyId[]
+    i = 0
+    while i < STACK_COUNT {
+        bdef = dynamics.default_body_def()
+        bdef.kind = dynamics.BODY_DYNAMIC
+        bdef.position = math.add(base, math.vec3(0.0, 2.0 + 1.05 * (i as float), 0.0))
+        bodies[i] = dynamics.create_body(world_id, &bdef)
+        sdef = dynamics.default_shape_def()
+        sdef.density = 1.0
+        dynamics.create_hull_shape(bodies[i], &sdef, cube)
+        i = i + 1
+    }
+    result = FarStackResult { relative: calloc(STACK_COUNT, sizeof(Vec3)), sleep_step: 0 - 1 }
+    step = 0
+    while step < MAX_STEPS {
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        if result.sleep_step < 0 && dynamics.body_is_awake(bodies[STACK_COUNT - 1]) == false { result.sleep_step = step }
+        step = step + 1
+    }
+    relative = result.relative as Vec3[]
+    i = 0
+    while i < STACK_COUNT {
+        relative[i] = math.sub(dynamics.body_get_position(bodies[i]), base)
+        i = i + 1
+    }
+    free(bodies_block)
+    dynamics.destroy_world(world_id)
+    hull.destroy_hull(cube)
+    hull.destroy_hull(ground_box)
+    return result
+}
+
+test_stack() {
+    origin = run_stack(0.0)
+    ensure("stack: settles at the origin (step ${origin.sleep_step})", origin.sleep_step >= 0)
+    far = run_stack(FAR_AWAY)
+    ensure("stack: settles far away (step ${far.sleep_step})", far.sleep_step >= 0)
+    ensure("stack: on the same step", far.sleep_step == origin.sleep_step)
+    a = origin.relative as Vec3[]
+    b = far.relative as Vec3[]
+    i = 0
+    while i < STACK_COUNT {
+        small("stack: body ${i} x", b[i].x - a[i].x, 0.001)
+        small("stack: body ${i} y", b[i].y - a[i].y, 0.001)
+        small("stack: body ${i} z", b[i].z - a[i].z, 0.001)
+        i = i + 1
+    }
+    free(origin.relative)
+    free(far.relative)
+}
+
+// --- the bullet ----------------------------------------------------------------------------------------------
+
+// A fast bullet at a thin wall: its final x relative to the base. With
+// continuous collision it stops at the wall instead of tunnelling.
+run_bullet(base_x: float) -> float {
+    base = math.vec3(base_x, 0.0, 0.0)
+    wdef = dynamics.default_world_def()
+    world_id = dynamics.create_world(&wdef)
+    // A thin static wall at x = base + 5 spanning y and z.
+    wall_def = dynamics.default_body_def()
+    wall_def.position = math.add(base, math.vec3(5.0, 0.0, 0.0))
+    wall = dynamics.create_body(world_id, &wall_def)
+    wall_box = hull.make_box_hull(0.05, 5.0, 5.0)
+    wsdef = dynamics.default_shape_def()
+    dynamics.create_hull_shape(wall, &wsdef, wall_box)
+    // A small fast bullet aimed at it, no gravity.
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.is_bullet = true
+    bdef.gravity_scale = 0.0
+    bdef.position = base
+    bdef.linear_velocity = math.vec3(200.0, 0.0, 0.0)
+    bullet = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    sdef.density = 1.0
+    dynamics.create_sphere_shape(bullet, &sdef, manifold.sphere(math.vec3_zero(), 0.1))
+    step = 0
+    while step < 30 {
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        step = step + 1
+    }
+    relative_x = math.sub(dynamics.body_get_position(bullet), base).x
+    dynamics.destroy_world(world_id)
+    hull.destroy_hull(wall_box)
+    return relative_x
+}
+
+test_bullet() {
+    // The wall's front face is at x = 4.95 and the bullet's radius 0.1, so
+    // a caught bullet stays short of the wall's centre.
+    origin_x = run_bullet(0.0)
+    ensure("bullet: caught at the origin (${origin_x})", origin_x < 5.0)
+    far_x = run_bullet(FAR_AWAY)
+    ensure("bullet: caught far away (${far_x})", far_x < 5.0)
+}
+
+// --- the queries ---------------------------------------------------------------------------------------------
+
+struct FarQueryResult {
+    cast_hit: bool
+    cast_rel_x: float              // the shape cast's hit point x relative to the base
+    overlap_hit: bool
+    mover_fraction: float
+    plane_count: int
+    ray_hit: bool
+    ray_rel_x: float               // the world's closest ray hit x relative to the base
+    shape_ray_hit: bool
+    shape_ray_rel_x: float         // the shape's own ray cast hit x relative to the base
+}
+
+struct FarCastContext {
+    base: Vec3
+    hit: bool
+    rel_x: float
+}
+
+query_cast_visitor(shape_id: ShapeId, point: Vec3, normal: Vec3, fraction: float, user_material_id: long, triangle_index: int, child_index: int, context: ptr) -> float {
+    ctx = context as *FarCastContext
+    ctx.hit = true
+    ctx.rel_x = math.sub(point, ctx.base).x
+    return fraction
+}
+
+query_overlap_visitor(shape_id: ShapeId, context: ptr) -> bool {
+    flags = context as int[]
+    flags[0] = 1
+    return true
+}
+
+query_plane_visitor(shape_id: ShapeId, planes: PlaneResult[], count: int, context: ptr) -> bool {
+    counts = context as int[]
+    counts[0] = counts[0] + count
+    return true
+}
+
+no_filter(shape_id: ShapeId, context: ptr) -> bool { return true }
+
+// The origin relative queries against a static box centred at the base:
+// their inputs are relative to the base, so the base as the origin
+// keeps them precise far out.
+run_queries(base_x: float) -> FarQueryResult {
+    base = math.vec3(base_x, 0.0, 0.0)
+    wdef = dynamics.default_world_def()
+    world_id = dynamics.create_world(&wdef)
+    bdef = dynamics.default_body_def()
+    bdef.position = base
+    body_id = dynamics.create_body(world_id, &bdef)
+    box = hull.make_box_hull(1.0, 1.0, 1.0)
+    sdef = dynamics.default_shape_def()
+    shape_id = dynamics.create_hull_shape(body_id, &sdef, box)
+    physics_world.step(world_id, 1.0 / 60.0, 1)
+    filter = shape.default_query_filter()
+    result = FarQueryResult { cast_hit: false, cast_rel_x: 0.0, overlap_hit: false, mover_fraction: 1.0, plane_count: 0,
+                           ray_hit: false, ray_rel_x: 0.0, shape_ray_hit: false, shape_ray_rel_x: 0.0 }
+    // A sphere proxy swept from the left into the box, hitting the left face at relative x = -1.
+    cast_point = math.vec3(0.0 - 5.0, 0.0, 0.0)
+    cast_proxy = distance.shape_proxy((&cast_point) as ptr, 1, 0.25)
+    cast_ctx = FarCastContext { base: base, hit: false, rel_x: 0.0 }
+    physics_world.cast_shape(world_id, base, cast_proxy, math.vec3(10.0, 0.0, 0.0), filter, query_cast_visitor, (&cast_ctx) as ptr)
+    result.cast_hit = cast_ctx.hit
+    result.cast_rel_x = cast_ctx.rel_x
+    // A sphere proxy sitting at the box's centre.
+    overlap_point = math.vec3_zero()
+    overlap_proxy = distance.shape_proxy((&overlap_point) as ptr, 1, 0.5)
+    flag_block = calloc(1, 4)
+    physics_world.overlap_shape(world_id, base, overlap_proxy, filter, query_overlap_visitor, flag_block)
+    result.overlap_hit = (flag_block as int[])[0] == 1
+    free(flag_block)
+    // A capsule swept from the left into the box.
+    mover_cast = Capsule { center1: math.vec3(0.0 - 5.0, 0.0 - 0.3, 0.0), center2: math.vec3(0.0 - 5.0, 0.3, 0.0), radius: 0.25 }
+    result.mover_fraction = physics_world.cast_mover(world_id, base, mover_cast, math.vec3(10.0, 0.0, 0.0), filter, false, no_filter, null)
+    // A capsule overlapping the left face reports a contact plane.
+    mover_collide = Capsule { center1: math.vec3(0.0 - 1.1, 0.0 - 0.3, 0.0), center2: math.vec3(0.0 - 1.1, 0.3, 0.0), radius: 0.3 }
+    count_block = calloc(1, 4)
+    physics_world.collide_mover(world_id, base, mover_collide, filter, query_plane_visitor, count_block)
+    result.plane_count = (count_block as int[])[0]
+    free(count_block)
+    // The world's ray from the left into the box, hitting the left face at relative x = -1.
+    ray_origin = math.add(base, math.vec3(0.0 - 5.0, 0.0, 0.0))
+    ray = physics_world.cast_ray_closest(world_id, ray_origin, math.vec3(10.0, 0.0, 0.0), filter)
+    result.ray_hit = ray.hit
+    if ray.hit { result.ray_rel_x = math.sub(ray.point, base).x }
+    // The shape's own ray cast against the same box.
+    shape_ray = physics_world.shape_ray_cast(shape_id, ray_origin, math.vec3(10.0, 0.0, 0.0))
+    result.shape_ray_hit = shape_ray.hit
+    if shape_ray.hit { result.shape_ray_rel_x = math.sub(shape_ray.point, base).x }
+    dynamics.destroy_world(world_id)
+    hull.destroy_hull(box)
+    return result
+}
+
+test_queries() {
+    origin = run_queries(0.0)
+    ensure("queries: the shape cast hits", origin.cast_hit)
+    ensure("queries: the overlap hits", origin.overlap_hit)
+    ensure("queries: the mover cast stops short (${origin.mover_fraction})", origin.mover_fraction < 1.0)
+    ensure("queries: the mover has planes (${origin.plane_count})", origin.plane_count > 0)
+    small("queries: the shape cast hits the left face", origin.cast_rel_x + 1.0, 0.05)
+    ensure("queries: the ray hits", origin.ray_hit)
+    small("queries: the ray hits the left face", origin.ray_rel_x + 1.0, 0.05)
+    ensure("queries: the shape's ray hits", origin.shape_ray_hit)
+    small("queries: the shape's ray hits the left face", origin.shape_ray_rel_x + 1.0, 0.05)
+    far = run_queries(FAR_AWAY)
+    ensure("queries far: the shape cast hits", far.cast_hit)
+    ensure("queries far: the overlap hits", far.overlap_hit)
+    ensure("queries far: the mover cast stops short", far.mover_fraction < 1.0)
+    ensure("queries far: the mover has planes", far.plane_count > 0)
+    ensure("queries far: the ray hits", far.ray_hit)
+    ensure("queries far: the shape's ray hits", far.shape_ray_hit)
+    small("queries far: the same shape cast hit", far.cast_rel_x - origin.cast_rel_x, 0.001)
+    small("queries far: the same mover fraction", far.mover_fraction - origin.mover_fraction, 0.001)
+    ensure("queries far: the same plane count", far.plane_count == origin.plane_count)
+    small("queries far: the same ray hit", far.ray_rel_x - origin.ray_rel_x, 0.001)
+    small("queries far: the same shape ray hit", far.shape_ray_rel_x - origin.shape_ray_rel_x, 0.001)
+}
+
+main() {
+    test_stack()
+    test_bullet()
+    test_queries()
+    println("large_world: ${checks} checks")
+    if failures == 0 {
+        println("large_world: all checks passed")
+    } else {
+        println("large_world: ${failures} failure(s)")
+        exit(1)
+    }
+}

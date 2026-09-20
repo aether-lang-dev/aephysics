@@ -39,7 +39,7 @@ exports (
     set_gravity, get_gravity, set_user_data, get_user_data, set_friction_callback, set_restitution_callback,
     set_custom_filter_callback, set_pre_solve_callback, get_awake_body_count, get_counters, get_bounds, rebuild_static_tree,
     overlap_aabb, overlap_shape, collide_mover, cast_ray, cast_ray_closest, cast_shape, cast_mover,
-    body_cast_ray, body_cast_shape, body_overlap_shape, body_collide_mover, body_time_of_impact_mover,
+    body_cast_ray, body_cast_shape, body_overlap_shape, body_collide_mover, body_time_of_impact_mover, shape_ray_cast,
     default_explosion_def, explode
 )
 
@@ -697,6 +697,19 @@ body_cast_ray(id: BodyId, origin: Vec3, translation: Vec3, filter: QueryFilter, 
         fraction_left = output.fraction
     }
     return result
+}
+
+// A ray against one shape (b3Shape_RayCast), re-centred on the origin
+// so the cast runs close to it however far the world's origin is; the
+// hit point lifted back.
+shape_ray_cast(id: ShapeId, origin: Vec3, translation: Vec3) -> CastOutput {
+    w = dynamics.get_world(id.world0)
+    s = dynamics.get_shape_full_id(w, id)
+    body_transform = dynamics.get_body_transform(w, s.body_id)
+    t = Transform { p: math.sub(body_transform.p, origin), q: body_transform.q }
+    output = shape.ray_cast_shape(&s.geometry, t, math.vec3_zero(), translation, 1.0)
+    output.point = math.add(origin, output.point)
+    return output
 }
 
 body_cast_shape(id: BodyId, origin: Vec3, proxy: ShapeProxy, translation: Vec3, filter: QueryFilter, max_fraction: float, can_encroach: bool, body_transform: Transform) -> BodyCastResult {
