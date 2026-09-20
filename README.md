@@ -83,6 +83,17 @@ scripts do. `contact_solver_wide.set_native_lanes(false)` runs the
 same lanes in Aether instead, and `solver.set_wide_contacts(false)`
 the scalar solve ([what each buys](bench/RESULTS.md#solver)).
 
+Beyond the modules' own tests, the reference's scene tests run on the
+world as a whole: `test_mover_world.ae` (the mover through a world:
+which material a plane came from, for meshes, compounds and convex
+shapes; 38 checks), `test_determinism.ae` (the reference's wave pile,
+query spawn and mesh drop with its own random numbers, each run to
+sleep twice and compared bit for bit; the query spawn sleeps on the
+reference's step 242 with its 59 query hits, the mesh drop a step
+apart; 9 checks) and `test_large_world.ae` (a stack, a bullet and the
+origin-relative queries at x = 0 and at x = 1e7 agree, the whole
+engine being in doubles; 43 checks).
+
 ## Where it is going
 
 [`design.md`](design.md): the order of the layers, what each is measured

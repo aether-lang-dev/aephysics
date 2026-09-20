@@ -1,0 +1,405 @@
+// The reference's (Box3D's) test_determinism.c scenes as repeatability:
+// its shared/determinism.c wave pile (a hundred spheres, capsules, boxes
+// and rocks dropped on a wave height field), query spawn (fifty bodies
+// spawned where ray, overlap and shape-cast queries say, no gravity) and
+// mesh drop (four hundred slats on a wave mesh, each colliding with the
+// mesh only), each run to sleep twice and compared bit for bit: the
+// sleep step, the resting transforms and the queries' answers. The
+// reference pins these to golden hashes per platform; this engine
+// computes in doubles and its own operation order, so the goldens do
+// not carry over, and the same scene twice is the check (its
+// cross-platform check runs on CI's Linux against this Windows run by
+// the printed values). The random numbers are the reference's
+// xorshift32 with its seeds. The falling ragdolls wait on the human
+// (shared/human.c).
+import std.string
+import aephysics.math
+import aephysics.core
+import aephysics.hull
+import aephysics.distance
+import aephysics.manifold
+import aephysics.mesh
+import aephysics.height_field
+import aephysics.shape
+import aephysics.dynamics
+import aephysics.physics_world
+
+extern calloc(count: int, size: int) -> ptr
+extern exit(code: int)
+extern free(p: ptr)
+extern sqrt(x: float) -> float
+
+var failures = 0
+var checks = 0
+
+ensure(name: string, ok: bool) {
+    checks = checks + 1
+    if !ok {
+        println("determinism: FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+// --- the reference's random numbers (shared/utils.h) ------------------------------------------------------
+
+const RAND_LIMIT = 32767
+const MASK32: long = 4294967295
+
+var g_random_seed: long = 1
+
+random_int() -> int {
+    x = g_random_seed
+    x = (x ^ (x << 13)) & MASK32
+    x = x ^ (x >> 17)
+    x = (x ^ (x << 5)) & MASK32
+    g_random_seed = x
+    return (x % ((RAND_LIMIT + 1) as long)) as int
+}
+
+random_float_range(lo: float, hi: float) -> float {
+    r = (random_int() & RAND_LIMIT) as float
+    r = r / (RAND_LIMIT as float)
+    return (hi - lo) * r + lo
+}
+
+random_vec3(lo: Vec3, hi: Vec3) -> Vec3 {
+    x = random_float_range(lo.x, hi.x)
+    y = random_float_range(lo.y, hi.y)
+    z = random_float_range(lo.z, hi.z)
+    return math.vec3(x, y, z)
+}
+
+random_vec3_uniform(lo: float, hi: float) -> Vec3 {
+    x = random_float_range(lo, hi)
+    y = random_float_range(lo, hi)
+    z = random_float_range(lo, hi)
+    return math.vec3(x, y, z)
+}
+
+// Shoemake's uniform random rotations, and its first three components as a direction.
+random_unit_vector() -> Vec3 {
+    u1 = random_float_range(0.0, 1.0)
+    u2 = random_float_range(0.0, 2.0 * math.PI)
+    u3 = random_float_range(0.0, 2.0 * math.PI)
+    sqrt1_minus_u1 = sqrt(1.0 - u1)
+    sqrt_u1 = sqrt(u1)
+    cs2 = math.compute_cos_sin(u2)
+    cs3 = math.compute_cos_sin(u3)
+    return math.vec3(sqrt1_minus_u1 * cs2.sine, sqrt1_minus_u1 * cs2.cosine, sqrt_u1 * cs3.sine)
+}
+
+random_quat() -> Quat {
+    u1 = random_float_range(0.0, 1.0)
+    u2 = random_float_range(0.0, 2.0 * math.PI)
+    u3 = random_float_range(0.0, 2.0 * math.PI)
+    sqrt1_minus_u1 = sqrt(1.0 - u1)
+    sqrt_u1 = sqrt(u1)
+    cs2 = math.compute_cos_sin(u2)
+    cs3 = math.compute_cos_sin(u3)
+    return Quat { v: math.vec3(sqrt1_minus_u1 * cs2.sine, sqrt1_minus_u1 * cs2.cosine, sqrt_u1 * cs3.sine), s: sqrt_u1 * cs3.cosine }
+}
+
+// --- the outcome of a scene ------------------------------------------------------------------------------
+
+// The step the scene fell asleep on, a checksum of the resting
+// transforms (a weighted sum in doubles: equal runs give equal sums),
+// and the queries' hit count and checksum where the scene queries.
+struct Outcome {
+    sleep_step: int
+    hash: float
+    query_hits: int
+    query_hash: float
+}
+
+// The transform folded into the checksum: every component with its own weight.
+fold_transform(hash: float, xf: Transform) -> float {
+    return hash + xf.p.x * 1.0 + xf.p.y * 0.001 + xf.p.z * 1000.0 + xf.q.v.x * 7.0 + xf.q.v.y * 0.07 + xf.q.v.z * 700.0 + xf.q.s * 0.0007
+}
+
+// The bodies' resting transforms once every body sleeps: the step and the checksum.
+settle(world_id: WorldId, bodies: BodyId[], count: int, max_steps: int) -> Outcome {
+    outcome = Outcome { sleep_step: 0 - 1, hash: 0.0, query_hits: 0, query_hash: 0.0 }
+    step = 0
+    while step < max_steps {
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        step = step + 1
+        if physics_world.get_awake_body_count(world_id) == 0 {
+            outcome.sleep_step = step
+            i = 0
+            while i < count {
+                outcome.hash = fold_transform(outcome.hash, dynamics.body_get_transform(bodies[i]))
+                i = i + 1
+            }
+            break
+        }
+    }
+    return outcome
+}
+
+same_outcome(a: Outcome, b: Outcome) -> bool {
+    return a.sleep_step == b.sleep_step && a.hash == b.hash && a.query_hits == b.query_hits && a.query_hash == b.query_hash
+}
+
+// --- the wave pile (shared/determinism.c) -----------------------------------------------------------------
+
+const WAVE_PILE_GRID = 5
+const WAVE_PILE_LAYERS = 4
+const WAVE_PILE_BODY_COUNT = 100
+
+wave_pile() -> Outcome {
+    wdef = dynamics.default_world_def()
+    world_id = dynamics.create_world(&wdef)
+    g_random_seed = 52977 as long
+    // Height fields grow from a corner: the body offset centres the patch.
+    field_count = 21
+    field_scale = math.vec3(1.0, 0.6, 1.0)
+    field = height_field.create_wave(field_count, field_count, field_scale, 0.08, 0.06, false)
+    extent = field_scale.x * ((field_count - 1) as float)
+    gdef = dynamics.default_body_def()
+    gdef.position = math.vec3(0.0 - 0.5 * extent, 0.0, 0.0 - 0.5 * extent)
+    ground = dynamics.create_body(world_id, &gdef)
+    gsdef = dynamics.default_shape_def()
+    dynamics.create_height_field_shape(ground, &gsdef, field)
+    rock = hull.create_rock(0.55)
+    box = hull.make_box_hull(0.45, 0.3, 0.55)
+    sphere = manifold.sphere(math.vec3_zero(), 0.5)
+    capsule = manifold.capsule(math.vec3(0.0, 0.0 - 0.3, 0.0), math.vec3(0.0, 0.3, 0.0), 0.35)
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    // Rolling resistance so the pile sleeps quickly.
+    sdef = dynamics.default_shape_def()
+    sdef.base_material.rolling_resistance = 0.3
+    bodies_block = calloc(WAVE_PILE_BODY_COUNT, sizeof(BodyId))
+    bodies = bodies_block as BodyId[]
+    spacing = 1.7
+    index = 0
+    layer = 0
+    while layer < WAVE_PILE_LAYERS {
+        i = 0
+        while i < WAVE_PILE_GRID {
+            j = 0
+            while j < WAVE_PILE_GRID {
+                jitter = random_vec3_uniform(0.0 - 0.3, 0.3)
+                bdef.position = math.vec3(spacing * ((i as float) - 0.5 * ((WAVE_PILE_GRID - 1) as float)) + jitter.x,
+                                          2.5 + 1.6 * (layer as float) + 0.3 * jitter.y,
+                                          spacing * ((j as float) - 0.5 * ((WAVE_PILE_GRID - 1) as float)) + jitter.z)
+                bdef.rotation = random_quat()
+                body_id = dynamics.create_body(world_id, &bdef)
+                bodies[index] = body_id
+                kind = index % 4
+                if kind == 0 { dynamics.create_sphere_shape(body_id, &sdef, sphere) }
+                else if kind == 1 { dynamics.create_capsule_shape(body_id, &sdef, capsule) }
+                else if kind == 2 { dynamics.create_hull_shape(body_id, &sdef, box) }
+                else { dynamics.create_hull_shape(body_id, &sdef, rock) }
+                index = index + 1
+                j = j + 1
+            }
+            i = i + 1
+        }
+        layer = layer + 1
+    }
+    ensure("wave pile: ${WAVE_PILE_BODY_COUNT} bodies", index == WAVE_PILE_BODY_COUNT)
+    outcome = settle(world_id, bodies, WAVE_PILE_BODY_COUNT, 2000)
+    free(bodies_block)
+    dynamics.destroy_world(world_id)
+    hull.destroy_hull(rock)
+    hull.destroy_hull(box)
+    height_field.destroy_height_field(field)
+    return outcome
+}
+
+// --- query spawn (shared/determinism.c) -------------------------------------------------------------------
+
+const QUERY_SPAWN_COUNT = 50
+const QUERY_SPAWN_CAST_RADIUS = 0.5
+
+struct SpawnState {
+    outcome: Outcome
+    overlap_count: int
+}
+
+spawn_overlap_visitor(shape_id: ShapeId, context: ptr) -> bool {
+    state = context as *SpawnState
+    state.overlap_count = state.overlap_count + 1
+    state.outcome.query_hits = state.outcome.query_hits + 1
+    state.outcome.query_hash = state.outcome.query_hash + (shape_id.index1 as float) * 3.0
+    return true
+}
+
+spawn_cast_visitor(shape_id: ShapeId, point: Vec3, normal: Vec3, fraction: float, user_material_id: long, triangle_index: int, child_index: int, context: ptr) -> float {
+    closest = context as float[]
+    closest[0] = fraction
+    return fraction
+}
+
+// One spawn: the ray decides the position (a miss seeds the cloud near
+// the origin), the overlap count the shape, the sphere cast the size.
+one_spawn(world_id: WorldId, state: *SpawnState, bodies: BodyId[], spawn_count: int, box_block: ptr) {
+    filter = shape.default_query_filter()
+    ray_origin = random_vec3(math.vec3(0.0 - 12.0, 0.0 - 12.0, 0.0 - 12.0), math.vec3(12.0, 12.0, 12.0))
+    ray_translation = math.mul_sv(30.0, random_unit_vector())
+    ray = physics_world.cast_ray_closest(world_id, ray_origin, ray_translation, filter)
+    spawn_position = math.vec3_zero()
+    if ray.hit {
+        state.outcome.query_hits = state.outcome.query_hits + 1
+        state.outcome.query_hash = state.outcome.query_hash + ray.fraction * 11.0 + ray.normal.x + ray.normal.y * 0.01 + ray.normal.z * 100.0
+        spawn_position = math.mul_add(ray.point, 1.2, ray.normal)
+    } else {
+        spawn_position = random_vec3(math.vec3(0.0 - 6.0, 0.0 - 6.0, 0.0 - 6.0), math.vec3(6.0, 6.0, 6.0))
+    }
+    center = random_vec3_uniform(0.0 - 10.0, 10.0)
+    extent = random_float_range(1.0, 4.0)
+    box = AABB { lower: math.sub(center, math.vec3(extent, extent, extent)), upper: math.add(center, math.vec3(extent, extent, extent)) }
+    state.overlap_count = 0
+    physics_world.overlap_aabb(world_id, box, filter, spawn_overlap_visitor, state as ptr)
+    fraction_block = calloc(1, 8)
+    fractions = fraction_block as float[]
+    fractions[0] = 1.0
+    proxy_point = math.vec3_zero()
+    proxy = distance.shape_proxy((&proxy_point) as ptr, 1, QUERY_SPAWN_CAST_RADIUS)
+    physics_world.cast_shape(world_id, ray_origin, proxy, ray_translation, filter, spawn_cast_visitor, fraction_block)
+    fraction = fractions[0]
+    free(fraction_block)
+    if fraction < 1.0 {
+        state.outcome.query_hits = state.outcome.query_hits + 1
+        state.outcome.query_hash = state.outcome.query_hash + fraction * 13.0
+    }
+    size = 0.3 + 0.2 * fraction
+    // Damping guarantees everything comes to rest.
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.position = spawn_position
+    bdef.rotation = random_quat()
+    bdef.linear_velocity = random_vec3_uniform(0.0 - 0.2, 0.2)
+    bdef.angular_velocity = random_vec3_uniform(0.0 - 0.5, 0.5)
+    bdef.linear_damping = 1.0
+    bdef.angular_damping = 1.0
+    body_id = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    sdef.base_material.rolling_resistance = 0.2
+    kind = (spawn_count + state.overlap_count) % 3
+    if kind == 0 {
+        dynamics.create_sphere_shape(body_id, &sdef, manifold.sphere(math.vec3_zero(), size))
+    } else if kind == 1 {
+        dynamics.create_capsule_shape(body_id, &sdef, manifold.capsule(math.vec3(0.0, 0.0 - size, 0.0), math.vec3(0.0, size, 0.0), 0.7 * size))
+    } else {
+        boxes = box_block as ptr[]
+        boxes[spawn_count] = hull.make_box_hull(size, 0.7 * size, 0.5 * size) as ptr
+        dynamics.create_hull_shape(body_id, &sdef, boxes[spawn_count] as *HullData)
+    }
+    bodies[spawn_count] = body_id
+}
+
+query_spawn() -> Outcome {
+    wdef = dynamics.default_world_def()
+    world_id = dynamics.create_world(&wdef)
+    g_random_seed = 71689 as long
+    // Empty space: motion comes only from the spawn velocities and the overlap pushes.
+    physics_world.set_gravity(world_id, math.vec3_zero())
+    state = SpawnState { outcome: Outcome { sleep_step: 0 - 1, hash: 0.0, query_hits: 0, query_hash: 0.0 }, overlap_count: 0 }
+    bodies_block = calloc(QUERY_SPAWN_COUNT, sizeof(BodyId))
+    bodies = bodies_block as BodyId[]
+    box_block = calloc(QUERY_SPAWN_COUNT, 8)
+    boxes = box_block as ptr[]
+    state_ptr = &state
+    spawn_count = 0
+    step = 0
+    while spawn_count < QUERY_SPAWN_COUNT {
+        one_spawn(world_id, state_ptr, bodies, spawn_count, box_block)
+        spawn_count = spawn_count + 1
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        step = step + 1
+    }
+    settled = settle(world_id, bodies, QUERY_SPAWN_COUNT, 2000)
+    outcome = state.outcome
+    outcome.sleep_step = settled.sleep_step + step
+    if settled.sleep_step < 0 { outcome.sleep_step = 0 - 1 }
+    outcome.hash = settled.hash
+    dynamics.destroy_world(world_id)
+    i = 0
+    while i < QUERY_SPAWN_COUNT {
+        if boxes[i] != null { hull.destroy_hull(boxes[i] as *HullData) }
+        i = i + 1
+    }
+    free(box_block)
+    free(bodies_block)
+    return outcome
+}
+
+// --- mesh drop (shared/stability.c) -----------------------------------------------------------------------
+
+const MESH_DROP_GRID_COUNT = 20
+
+mesh_drop() -> Outcome {
+    wdef = dynamics.default_world_def()
+    world_id = dynamics.create_world(&wdef)
+    gdef = dynamics.default_body_def()
+    ground = dynamics.create_body(world_id, &gdef)
+    wave = mesh.create_wave_mesh(40, 40, 1.0, 0.5, 0.1, 0.2)
+    gsdef = dynamics.default_shape_def()
+    gsdef.filter.category_bits = 1 as long
+    dynamics.create_mesh_shape(ground, &gsdef, wave, math.vec3_one())
+    slat = hull.make_box_hull(0.02, 0.2, 0.04)
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    sdef = dynamics.default_shape_def()
+    sdef.base_material.rolling_resistance = 0.1
+    // The slats collide with the mesh only.
+    sdef.filter.category_bits = 2 as long
+    sdef.filter.mask_bits = 1 as long
+    g_random_seed = 3963634789 as long
+    count = MESH_DROP_GRID_COUNT * MESH_DROP_GRID_COUNT
+    bodies_block = calloc(count, sizeof(BodyId))
+    bodies = bodies_block as BodyId[]
+    i = 0
+    while i < MESH_DROP_GRID_COUNT {
+        j = 0
+        while j < MESH_DROP_GRID_COUNT {
+            linear = random_vec3_uniform(0.0 - 1.0, 1.0)
+            angular = random_vec3_uniform(0.0 - 5.0, 5.0)
+            bdef.position = math.vec3(0.5 * ((i as float) - 0.5 * (MESH_DROP_GRID_COUNT as float)), 5.0, 0.5 * ((j as float) - 0.5 * (MESH_DROP_GRID_COUNT as float)))
+            bdef.linear_velocity = linear
+            bdef.angular_velocity = angular
+            body_id = dynamics.create_body(world_id, &bdef)
+            bodies[i * MESH_DROP_GRID_COUNT + j] = body_id
+            dynamics.create_hull_shape(body_id, &sdef, slat)
+            j = j + 1
+        }
+        i = i + 1
+    }
+    outcome = settle(world_id, bodies, count, 2000)
+    free(bodies_block)
+    dynamics.destroy_world(world_id)
+    hull.destroy_hull(slat)
+    mesh.destroy_mesh(wave)
+    return outcome
+}
+
+main() {
+    first = wave_pile()
+    second = wave_pile()
+    println("determinism: wave pile slept at step ${first.sleep_step}, checksum ${first.hash}")
+    ensure("wave pile: it slept", first.sleep_step > 0)
+    ensure("wave pile: the same scene twice, bit for bit", same_outcome(first, second))
+
+    first = query_spawn()
+    second = query_spawn()
+    println("determinism: query spawn slept at step ${first.sleep_step}, checksum ${first.hash}, ${first.query_hits} query hits, query checksum ${first.query_hash}")
+    ensure("query spawn: it slept", first.sleep_step > 0)
+    ensure("query spawn: the queries hit (${first.query_hits})", first.query_hits > 20)
+    ensure("query spawn: the same scene twice, bit for bit", same_outcome(first, second))
+
+    first = mesh_drop()
+    second = mesh_drop()
+    println("determinism: mesh drop slept at step ${first.sleep_step}, checksum ${first.hash}")
+    ensure("mesh drop: it slept", first.sleep_step > 0)
+    ensure("mesh drop: the same scene twice, bit for bit", same_outcome(first, second))
+
+    println("determinism: ${checks} checks")
+    if failures == 0 {
+        println("determinism: all checks passed")
+    } else {
+        println("determinism: ${failures} failure(s)")
+        exit(1)
+    }
+}

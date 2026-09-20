@@ -310,12 +310,22 @@ started until its tests pass.
      module calls inside reaches C undeclared, as constants did. The
      pair on the reference's own benchmark scenes matches its checksums
      (heights, contacts, joints) at 1.8-2.4x.
-     Still to port from the reference's tests: the world parts of
-     test_mover.c, test_determinism.c's ragdoll, wave pile, query spawn
-     and mesh drop scenes (their golden hashes are single precision;
-     ours are doubles, so repeatability is the check), test_large_world.c,
-     and test_world.c's compound hit events, overflow colour pile and
-     hull database (not ported).
+     PR #26 ported the rest of the reference's scene tests: the world
+     parts of test_mover.c (test_mover_world.ae, 38 checks), the
+     determinism scenes (test_determinism.ae: the reference's wave pile,
+     query spawn and mesh drop with its xorshift random numbers and
+     seeds, each run twice and compared bit for bit since its golden
+     hashes are single precision and ours is doubles; the query spawn
+     sleeps on the reference's own step with its 59 query hits, the
+     mesh drop one step apart), and test_large_world.c
+     (test_large_world.ae: a stack, a bullet and the origin-relative
+     queries at x = 0 and 1e7 agree, which the reference only asks of
+     its double precision build; b3Shape_RayCast came with it as
+     shape_ray_cast). Found on the way: a function named spawn_* loses
+     its arguments in the emitted C (aether#2126). Still to port: the
+     falling ragdolls (they need the human of shared/human.c, the
+     ground of the Euphoria work), test_world.c's compound hit events,
+     overflow colour pile and hull database.
 14. **parallel**: `parallel_for` and the scheduler over Aether's actors;
    the benchmarks by thread count as the original records them.
 15. **recording and replay**, `world_snapshot`: last, since they are the
