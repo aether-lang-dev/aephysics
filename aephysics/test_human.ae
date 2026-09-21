@@ -240,6 +240,44 @@ test_anchors() {
     ensure("parallel anchors let it fall (${parallel})", parallel > 0.3)
 }
 
+// The anchors driven: every anchor's target moved two metres along x
+// over two seconds, and the figure walks there behind them, the pelvis
+// within a hand of its target and the shape kept.
+test_driven_anchors() {
+    world_id = world_with_ground()
+    h = Human { bones: null, filter_joints: null, filter_joint_count: 0, friction_torque: 0.0, is_spawned: false }
+    human.create_human(&h, world_id, math.vec3(0.0, 1.0, 0.0), 5.0, 0.0, 0.7, 1, null)
+    ensure("driven: no anchors before they are made", human.human_has_anchors(&h) == false)
+    human.human_create_motor_anchors(&h, world_id)
+    ensure("driven: anchors made", human.human_has_anchors(&h))
+    rest = positions(&h)
+    at_rest = rest as Vec3[]
+    step = 1.0 / 60.0
+    k = 1
+    while k <= 120 {
+        along = 2.0 * (k as float) / 120.0
+        i = 0
+        while i < human.BONE_COUNT {
+            target = Transform { p: math.add(at_rest[i], math.vec3(along, 0.0, 0.0)), q: dynamics.body_get_rotation(human.bone_at(&h, i).anchor_id) }
+            human.human_set_anchor_target(&h, i, target, step)
+            i = i + 1
+        }
+        physics_world.step(world_id, step, 4)
+        k = k + 1
+    }
+    pelvis = dynamics.body_get_position(human.bone_at(&h, human.BONE_PELVIS).body_id)
+    ensure("driven: the pelvis followed its anchor two metres along (${pelvis.x})", math.abs_float(pelvis.x - 2.0) < 0.15 && math.abs_float(pelvis.y - at_rest[human.BONE_PELVIS].y) < 0.15)
+    neck = dynamics.body_get_position(human.bone_at(&h, human.BONE_NECK).body_id)
+    ensure("driven: the neck came along above it (${neck.y})", neck.y > pelvis.y + 0.3 && math.abs_float(neck.x - 2.0) < 0.3)
+    human.human_set_anchor_target(&h, human.BONE_NECK, Transform { p: math.vec3(0.0, 0.0, 0.0), q: math.quat_identity() }, step)
+    free(rest)
+    human.human_destroy_anchors(&h)
+    ensure("driven: let go, no anchors", human.human_has_anchors(&h) == false)
+    human.human_set_anchor_target(&h, human.BONE_NECK, Transform { p: math.vec3(0.0, 0.0, 0.0), q: math.quat_identity() }, step)
+    human.destroy_human(&h)
+    dynamics.destroy_world(world_id)
+}
+
 // The same figure dropped in two worlds lands bit for bit alike.
 drop_alone() -> ptr {
     world_id = world_with_ground()
@@ -275,6 +313,7 @@ main() {
     test_build_and_fall()
     test_align_spring()
     test_anchors()
+    test_driven_anchors()
     test_alike()
     hull.destroy_hull(g_slab as *HullData)
     println("human: ${checks} checks")

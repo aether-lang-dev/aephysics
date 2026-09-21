@@ -31,7 +31,7 @@ exports (
     HumanBone, Human, bone_at, filter_joint_at,
     create_human, destroy_human, human_set_velocity, human_apply_angular_impulse, human_set_joint_friction_torque,
     human_set_joint_spring_hertz, human_set_joint_damping_ratio, human_align_spring, human_create_motor_anchors,
-    human_create_parallel_anchors, human_destroy_anchors, human_set_bullet
+    human_create_parallel_anchors, human_destroy_anchors, human_has_anchors, human_set_anchor_target, human_set_bullet
 )
 
 extern calloc(count: int, size: int) -> ptr
@@ -457,6 +457,23 @@ human_create_parallel_anchors(h: *Human, world_id: WorldId) {
         bone.anchor_joint_id = dynamics.create_parallel_joint(world_id, &pdef)
         i = i + 1
     }
+}
+
+// Whether the figure is held by anchors of either kind.
+human_has_anchors(h: *Human) -> bool {
+    return dynamics.body_is_valid(bone_at(h, BONE_PELVIS).anchor_id)
+}
+
+// A bone's anchor driven to a pose over the step: the kinematic anchor
+// moves there at the velocity that gets it there in one step, and the
+// bone follows through its joint's springs. The pose drive of an active
+// ragdoll: an animation sets the anchors every step and the figure walks
+// as the animation does, colliding as the ragdoll it is. Nothing happens
+// for a bone without an anchor.
+human_set_anchor_target(h: *Human, index: int, target: Transform, time_step: float) {
+    bone = bone_at(h, index)
+    if dynamics.body_is_valid(bone.anchor_id) == false { return }
+    dynamics.body_set_target_transform(bone.anchor_id, target, time_step, true)
 }
 
 // The anchors let go, leaving the figure a ragdoll: every anchor joint
