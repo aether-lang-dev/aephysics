@@ -238,14 +238,15 @@ var g_for_handles: ptr = null      // *Task[MAX_WORKERS]
 
 // [0, item_count) in blocks of at least min_range, over the scheduler's
 // workers; the caller works as worker 0 and returns when every block is
-// done. Blocks stay at min_range until there would be more than 32 a
-// worker, then grow so the count stays bounded.
-parallel_for(s: *Scheduler, body: fn(int, int, int, ptr) -> void, item_count: int, min_range: int, context: ptr) {
-    if item_count <= 0 { return }
+// done, with how many blocks there were. Blocks stay at min_range until
+// there would be more than 32 a worker, then grow so the count stays
+// bounded; one worker runs the range as one block.
+parallel_for(s: *Scheduler, body: fn(int, int, int, ptr) -> void, item_count: int, min_range: int, context: ptr) -> int {
+    if item_count <= 0 { return 0 }
     worker_count = s.worker_count
     if worker_count <= 1 {
         body(0, item_count, 0, context)
-        return
+        return 1
     }
     if g_for_tasks == null {
         g_for_tasks = calloc(MAX_WORKERS, sizeof(ForTask))
@@ -277,4 +278,5 @@ parallel_for(s: *Scheduler, body: fn(int, int, int, ptr) -> void, item_count: in
         finish(s, handles[i] as *Task)
         i = i + 1
     }
+    return block_count
 }

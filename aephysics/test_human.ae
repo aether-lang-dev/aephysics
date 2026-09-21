@@ -222,6 +222,10 @@ drift_on_anchors(parallel: bool) -> float {
     free(before)
     free(after)
     ensure("anchors: an anchor and its joint per bone", dynamics.body_is_valid(human.bone_at(&h, human.BONE_NECK).anchor_id) && dynamics.joint_is_valid(human.bone_at(&h, human.BONE_NECK).anchor_joint_id))
+    // Let go: the anchors are gone, the figure falls.
+    human.human_destroy_anchors(&h)
+    ensure("anchors: let go, none is left on a bone", dynamics.body_is_valid(human.bone_at(&h, human.BONE_NECK).anchor_id) == false && dynamics.joint_is_valid(human.bone_at(&h, human.BONE_NECK).anchor_joint_id) == false)
+    ensure("anchors: let go, the world holds the figure and the ground alone", physics_world.get_counters(world_id).body_count == 1 + human.BONE_COUNT)
     human.destroy_human(&h)
     ensure("anchors: destroyed with the figure", physics_world.get_counters(world_id).body_count == 1)
     dynamics.destroy_world(world_id)

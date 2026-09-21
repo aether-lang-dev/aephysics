@@ -31,7 +31,7 @@ exports (
     HumanBone, Human, bone_at, filter_joint_at,
     create_human, destroy_human, human_set_velocity, human_apply_angular_impulse, human_set_joint_friction_torque,
     human_set_joint_spring_hertz, human_set_joint_damping_ratio, human_align_spring, human_create_motor_anchors,
-    human_create_parallel_anchors, human_set_bullet
+    human_create_parallel_anchors, human_destroy_anchors, human_set_bullet
 )
 
 extern calloc(count: int, size: int) -> ptr
@@ -455,6 +455,20 @@ human_create_parallel_anchors(h: *Human, world_id: WorldId) {
         pdef.base.local_frame_a.q = frame_q
         pdef.base.local_frame_b.q = frame_q
         bone.anchor_joint_id = dynamics.create_parallel_joint(world_id, &pdef)
+        i = i + 1
+    }
+}
+
+// The anchors let go, leaving the figure a ragdoll: every anchor joint
+// and body destroyed, the bones' slots cleared.
+human_destroy_anchors(h: *Human) {
+    i = 0
+    while i < BONE_COUNT {
+        bone = bone_at(h, i)
+        if dynamics.joint_is_valid(bone.anchor_joint_id) { dynamics.destroy_joint(bone.anchor_joint_id, true) }
+        if dynamics.body_is_valid(bone.anchor_id) { dynamics.destroy_body(bone.anchor_id) }
+        bone.anchor_joint_id = dynamics.null_joint_id()
+        bone.anchor_id = dynamics.null_body_id()
         i = i + 1
     }
 }
