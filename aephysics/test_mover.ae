@@ -10,7 +10,7 @@
 
 import std.string
 import aephysics.math
-import aephysics.core
+import aephysics.base
 import aephysics.hull
 import aephysics.distance
 import aephysics.manifold
@@ -229,11 +229,11 @@ test_shape_movers() {
 }
 
 main() {
-    before = core.alloc_count()
+    before = base.alloc_count()
     test_solver()
     test_shape_movers()
     // The scratch stays allocated: mesh's three blocks, the height field's three, sphere's length.
-    ensure("every other counted allocation was freed (${core.alloc_count() - before})", core.alloc_count() == before + 7)
+    ensure("every other counted allocation was freed (${base.alloc_count() - before})", base.alloc_count() == before + 7)
 
     println("mover: ${checks} checks")
     if failures == 0 {

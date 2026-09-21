@@ -21,7 +21,7 @@
 // one; and the hull hash is this engine's own, not the reference's.
 import std.string
 import aephysics.math
-import aephysics.core
+import aephysics.base
 import aephysics.distance
 
 exports (
@@ -569,12 +569,12 @@ compute_tolerance(b: *HullBuilder, count: int, points: Vec3[]) {
 const FLOAT_EPSILON = 0.00000011920929
 
 build_initial_hull(b: *HullBuilder, count: int, points: Vec3[]) -> bool {
-    pair_block = core.alloc(8)
+    pair_block = base.alloc(8)
     pair = pair_block as int[]
     find_farthest_points_along_cardinal_axes(pair, b.tolerance, count, points)
     index1 = pair[0]
     index2 = pair[1]
-    core.free_bytes(pair_block, 8)
+    base.free_bytes(pair_block, 8)
     if index1 < 0 || index2 < 0 { return false }
     index3 = find_farthest_point_from_line(index1, index2, b.tolerance, count, points)
     if index3 < 0 { return false }
@@ -1178,17 +1178,17 @@ builder_create(count: int, clamped_max: int) -> HullBuilder {
         final_vertex_count: 0, final_half_edge_count: 0, final_face_count: 0
     }
     vertex_slots = b.vertex_capacity + 2 + b.face_capacity
-    b.vertices = core.alloc(vertex_slots * sizeof(QHVertex))
+    b.vertices = base.alloc(vertex_slots * sizeof(QHVertex))
     b.vertex_list_head = b.vertex_capacity
     b.orphaned_head = b.vertex_capacity + 1
     b.conflict_head_base = b.vertex_capacity + 2
-    b.edges = core.alloc(b.edge_capacity * sizeof(QHHalfEdge))
-    b.faces = core.alloc((b.face_capacity + 1) * sizeof(QHFace))
+    b.edges = base.alloc(b.edge_capacity * sizeof(QHHalfEdge))
+    b.faces = base.alloc((b.face_capacity + 1) * sizeof(QHFace))
     b.face_list_head = b.face_capacity
-    b.horizon = core.alloc(b.horizon_capacity * 4)
-    b.cone = core.alloc(b.cone_capacity * 4)
-    b.merged_faces = core.alloc(b.merged_capacity * 4)
-    b.horizon_stack = core.alloc(b.horizon_stack_capacity * FRAME_INTS * 4)
+    b.horizon = base.alloc(b.horizon_capacity * 4)
+    b.cone = base.alloc(b.cone_capacity * 4)
+    b.merged_faces = base.alloc(b.merged_capacity * 4)
+    b.horizon_stack = base.alloc(b.horizon_stack_capacity * FRAME_INTS * 4)
     vertices = b.vertices as QHVertex[]
     vlist_init(vertices, b.vertex_list_head)
     vlist_init(vertices, b.orphaned_head)
@@ -1198,13 +1198,13 @@ builder_create(count: int, clamped_max: int) -> HullBuilder {
 }
 
 builder_destroy(b: *HullBuilder) {
-    core.free_bytes(b.vertices, (b.vertex_capacity + 2 + b.face_capacity) * sizeof(QHVertex))
-    core.free_bytes(b.edges, b.edge_capacity * sizeof(QHHalfEdge))
-    core.free_bytes(b.faces, (b.face_capacity + 1) * sizeof(QHFace))
-    core.free_bytes(b.horizon, b.horizon_capacity * 4)
-    core.free_bytes(b.cone, b.cone_capacity * 4)
-    core.free_bytes(b.merged_faces, b.merged_capacity * 4)
-    core.free_bytes(b.horizon_stack, b.horizon_stack_capacity * FRAME_INTS * 4)
+    base.free_bytes(b.vertices, (b.vertex_capacity + 2 + b.face_capacity) * sizeof(QHVertex))
+    base.free_bytes(b.edges, b.edge_capacity * sizeof(QHHalfEdge))
+    base.free_bytes(b.faces, (b.face_capacity + 1) * sizeof(QHFace))
+    base.free_bytes(b.horizon, b.horizon_capacity * 4)
+    base.free_bytes(b.cone, b.cone_capacity * 4)
+    base.free_bytes(b.merged_faces, b.merged_capacity * 4)
+    base.free_bytes(b.horizon_stack, b.horizon_stack_capacity * FRAME_INTS * 4)
 }
 
 // --- the hull -------------------------------------------------------------------
@@ -1372,7 +1372,7 @@ update_hull_bulk_properties(h: *HullData) -> bool {
 
 stamp_hash(h: *HullData) {
     h.hash = 0 as long
-    h.hash = core.hash_bytes(h as ptr, h.byte_count)
+    h.hash = base.hash_bytes(h as ptr, h.byte_count)
 }
 
 hash_hull_data(h: *HullData) -> long { return h.hash }
@@ -1396,7 +1396,7 @@ allocate_hull(vertex_count: int, edge_count: int, face_count: int) -> *HullData 
     byte_count = byte_count + align8(face_count * sizeof(Plane))
     face_offset = byte_count
     byte_count = byte_count + align8(face_count * 4)
-    h = core.alloc(byte_count) as *HullData
+    h = base.alloc(byte_count) as *HullData
     h.version = HULL_VERSION
     h.vertex_offset = vertex_offset
     h.point_offset = point_offset
@@ -1419,10 +1419,10 @@ create_hull(points: Vec3[], count: int, max_vertex_count: int) -> *HullData {
     origin = points[0]
     clamped_max = math.clamp_int(max_vertex_count, 4, MAX_HULL_VERTICES)
     b = builder_create(count, clamped_max)
-    shifted_block = core.alloc(count * sizeof(Vec3))
+    shifted_block = base.alloc(count * sizeof(Vec3))
     shifted = shifted_block as Vec3[]
     ok = construct(&b, points, count, clamped_max, origin, shifted)
-    core.free_bytes(shifted_block, count * sizeof(Vec3))
+    base.free_bytes(shifted_block, count * sizeof(Vec3))
     if ok == false {
         builder_destroy(&b)
         return null
@@ -1438,7 +1438,7 @@ create_hull(points: Vec3[], count: int, max_vertex_count: int) -> *HullData {
 
     // Walk the lists into temp arrays, stamping the final index on each
     // node so the resolution below is linear.
-    temp_vertices_block = core.alloc(HULL_MAX_COUNT * 4)
+    temp_vertices_block = base.alloc(HULL_MAX_COUNT * 4)
     temp_vertices = temp_vertices_block as int[]
     vertex_count = 0
     v = vertices[b.vertex_list_head].next
@@ -1450,9 +1450,9 @@ create_hull(points: Vec3[], count: int, max_vertex_count: int) -> *HullData {
     }
 
     // Edges in twin-paired order (i, i + 1).
-    temp_faces_block = core.alloc(HULL_MAX_COUNT * 4)
+    temp_faces_block = base.alloc(HULL_MAX_COUNT * 4)
     temp_faces = temp_faces_block as int[]
-    temp_edges_block = core.alloc(HULL_MAX_COUNT * 4)
+    temp_edges_block = base.alloc(HULL_MAX_COUNT * 4)
     temp_edges = temp_edges_block as int[]
     face_count = 0
     edge_count = 0
@@ -1508,9 +1508,9 @@ create_hull(points: Vec3[], count: int, max_vertex_count: int) -> *HullData {
         i = i + 1
     }
 
-    core.free_bytes(temp_vertices_block, HULL_MAX_COUNT * 4)
-    core.free_bytes(temp_faces_block, HULL_MAX_COUNT * 4)
-    core.free_bytes(temp_edges_block, HULL_MAX_COUNT * 4)
+    base.free_bytes(temp_vertices_block, HULL_MAX_COUNT * 4)
+    base.free_bytes(temp_faces_block, HULL_MAX_COUNT * 4)
+    base.free_bytes(temp_edges_block, HULL_MAX_COUNT * 4)
     builder_destroy(&b)
 
     update_hull_bounds(h)
@@ -1526,11 +1526,11 @@ create_hull(points: Vec3[], count: int, max_vertex_count: int) -> *HullData {
     return h
 }
 
-destroy_hull(h: *HullData) { core.free_bytes(h as ptr, h.byte_count) }
+destroy_hull(h: *HullData) { base.free_bytes(h as ptr, h.byte_count) }
 
 clone_hull(h: *HullData) -> *HullData {
     if h == null || is_valid_hull(h) == false { return null }
-    clone = core.alloc(h.byte_count)
+    clone = base.alloc(h.byte_count)
     memcpy(clone, h as ptr, h.byte_count)
     return clone as *HullData
 }
@@ -1638,7 +1638,7 @@ clone_and_transform_hull(original: *HullData, t: Transform, scale: Vec3) -> *Hul
 // A cylinder of `sides` sides along y, from y_offset up by height.
 create_cylinder(height: float, radius: float, y_offset: float, sides: int) -> *HullData {
     count = 2 * sides
-    block = core.alloc(count * sizeof(Vec3))
+    block = base.alloc(count * sizeof(Vec3))
     points = block as Vec3[]
     alpha = 0.0
     delta = 2.0 * math.PI / (sides as float)
@@ -1651,14 +1651,14 @@ create_cylinder(height: float, radius: float, y_offset: float, sides: int) -> *H
         i = i + 1
     }
     h = create_hull(points, count, count)
-    core.free_bytes(block, count * sizeof(Vec3))
+    base.free_bytes(block, count * sizeof(Vec3))
     return h
 }
 
 // A truncated cone along y: radius1 at the bottom, radius2 at height.
 create_cone(height: float, radius1: float, radius2: float, slices: int) -> *HullData {
     count = 2 * slices
-    block = core.alloc(count * sizeof(Vec3))
+    block = base.alloc(count * sizeof(Vec3))
     points = block as Vec3[]
     alpha = 0.0
     delta = 2.0 * math.PI / (slices as float)
@@ -1671,14 +1671,14 @@ create_cone(height: float, radius1: float, radius2: float, slices: int) -> *Hull
         i = i + 1
     }
     h = create_hull(points, count, count)
-    core.free_bytes(block, count * sizeof(Vec3))
+    base.free_bytes(block, count * sizeof(Vec3))
     return h
 }
 
 // Ten points of a Fibonacci lattice on a sphere: a rock.
 create_rock(radius: float) -> *HullData {
     count = 10
-    block = core.alloc(count * sizeof(Vec3))
+    block = base.alloc(count * sizeof(Vec3))
     points = block as Vec3[]
     phi = (1.0 + sqrt(5.0)) / 2.0
     theta = 2.0 * math.PI / phi
@@ -1697,7 +1697,7 @@ create_rock(radius: float) -> *HullData {
         i = i + 1
     }
     h = create_hull(points, count, count)
-    core.free_bytes(block, count * sizeof(Vec3))
+    base.free_bytes(block, count * sizeof(Vec3))
     return h
 }
 
@@ -1833,7 +1833,7 @@ scale_box(half_widths: float[], t: *Transform, post_scale: Vec3, min_half_width:
 }
 
 make_scaled_box_hull(half_widths: Vec3, t: Transform, post_scale: Vec3) -> *HullData {
-    block = core.alloc(24)
+    block = base.alloc(24)
     h = block as float[]
     h[0] = half_widths.x
     h[1] = half_widths.y
@@ -1841,7 +1841,7 @@ make_scaled_box_hull(half_widths: Vec3, t: Transform, post_scale: Vec3) -> *Hull
     xf = t
     scale_box(h, &xf, post_scale, 4.0 * math.LINEAR_SLOP)
     box = make_transformed_box_hull(h[0], h[1], h[2], xf)
-    core.free_bytes(block, 24)
+    base.free_bytes(block, 24)
     return box
 }
 

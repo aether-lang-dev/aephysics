@@ -8,7 +8,7 @@
 
 import std.string
 import aephysics.math
-import aephysics.core
+import aephysics.base
 import aephysics.distance
 import aephysics.hull
 
@@ -293,13 +293,13 @@ test_hull_queries() {
 }
 
 main() {
-    before = core.alloc_count()
+    before = base.alloc_count()
     test_reference()
     test_rounded()
     test_sweep_and_cache()
     test_toi_rotating()
     test_hull_queries()
-    ensure("every counted allocation was freed", core.alloc_count() == before && core.bytes_in_use() == 0)
+    ensure("every counted allocation was freed", base.alloc_count() == before && base.bytes_in_use() == 0)
 
     println("distance: ${checks} checks")
     if failures == 0 {

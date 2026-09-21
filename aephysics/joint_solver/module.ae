@@ -19,7 +19,7 @@
 // context is the contact solver's.
 import std.string
 import aephysics.math
-import aephysics.core
+import aephysics.base
 import aephysics.dynamics
 import aephysics.contact_solver
 
@@ -94,7 +94,7 @@ var g_dummy: ptr = null   // BodyState: a static body's, identity, never written
 
 dummy_state() -> *BodyState {
     if g_dummy == null {
-        g_dummy = core.alloc(sizeof(BodyState))
+        g_dummy = base.alloc(sizeof(BodyState))
         d = g_dummy as *BodyState
         d.delta_rotation = math.quat_identity()
     }

@@ -21,7 +21,7 @@
 // scalar here; the hash is this engine's own.
 import std.string
 import aephysics.math
-import aephysics.core
+import aephysics.base
 import aephysics.distance
 import aephysics.manifold
 import aephysics.triangle_manifold
@@ -162,9 +162,9 @@ var g_local: ptr = null       // Vec3[MAX_SHAPE_CAST_POINTS], a proxy brought in
 
 scratch_ready() {
     if g_stack == null {
-        g_stack = core.alloc(MESH_STACK_SIZE * 4)
-        g_triangle = core.alloc(3 * sizeof(Vec3))
-        g_local = core.alloc(MAX_SHAPE_CAST_POINTS * sizeof(Vec3))
+        g_stack = base.alloc(MESH_STACK_SIZE * 4)
+        g_triangle = base.alloc(3 * sizeof(Vec3))
+        g_local = base.alloc(MAX_SHAPE_CAST_POINTS * sizeof(Vec3))
     }
 }
 
@@ -254,9 +254,9 @@ struct SpatialHash {
 cell_key(x: int, y: int, z: int) -> long {
     key = 0 as long
     golden = 0x9E3779B9 as long
-    key = key ^ ((x as long) + golden + (key << 6) + core.lsr(key, 2))
-    key = key ^ ((y as long) + golden + (key << 6) + core.lsr(key, 2))
-    key = key ^ ((z as long) + golden + (key << 6) + core.lsr(key, 2))
+    key = key ^ ((x as long) + golden + (key << 6) + base.lsr(key, 2))
+    key = key ^ ((y as long) + golden + (key << 6) + base.lsr(key, 2))
+    key = key ^ ((z as long) + golden + (key << 6) + base.lsr(key, 2))
     // Zero is the map's empty mark.
     if key == (0 as long) { return 1 as long }
     return key
@@ -279,7 +279,7 @@ find_duplicate(h: *SpatialHash, current: int) -> int {
             dz = 0 - 1
             while dz <= 1 {
                 key = cell_key(base_x + dx, base_y + dy, base_z + dz)
-                node = core.map_get(&h.cells, key, NULL_INDEX)
+                node = base.map_get(&h.cells, key, NULL_INDEX)
                 while node != NULL_INDEX {
                     existing = nodes[2 * node]
                     other = strided_vertex(h.vertices, existing, h.stride)
@@ -296,10 +296,10 @@ find_duplicate(h: *SpatialHash, current: int) -> int {
         dx = dx + 1
     }
     key = cell_key(base_x, base_y, base_z)
-    head = core.map_get(&h.cells, key, NULL_INDEX)
+    head = base.map_get(&h.cells, key, NULL_INDEX)
     nodes[2 * h.node_count] = current
     nodes[2 * h.node_count + 1] = head
-    core.map_set(&h.cells, key, h.node_count)
+    base.map_set(&h.cells, key, h.node_count)
     h.node_count = h.node_count + 1
     return NULL_INDEX
 }
@@ -308,10 +308,10 @@ find_duplicate(h: *SpatialHash, current: int) -> int {
 // dst_indices; returns the unique count.
 weld_vertices(src_vertices: ptr, stride: int, vertex_count: int, src_indices: int[], index_count: int,
               dst_vertices: Vec3[], dst_indices: int[], tolerance: float) -> int {
-    h = SpatialHash { nodes: core.alloc(2 * vertex_count * 4), node_count: 0, vertices: src_vertices,
-                      vertex_count: vertex_count, stride: stride, cells: core.map_create(vertex_count),
+    h = SpatialHash { nodes: base.alloc(2 * vertex_count * 4), node_count: 0, vertices: src_vertices,
+                      vertex_count: vertex_count, stride: stride, cells: base.map_create(vertex_count),
                       cell_size: 2.0 * tolerance, tolerance: tolerance }
-    mapping_block = core.alloc(vertex_count * 4)
+    mapping_block = base.alloc(vertex_count * 4)
     mapping = mapping_block as int[]
     unique_count = 0
     i = 0
@@ -331,9 +331,9 @@ weld_vertices(src_vertices: ptr, stride: int, vertex_count: int, src_indices: in
         dst_indices[i] = mapping[src_indices[i]]
         i = i + 1
     }
-    core.map_destroy(&h.cells)
-    core.free_bytes(h.nodes, 2 * vertex_count * 4)
-    core.free_bytes(mapping_block, vertex_count * 4)
+    base.map_destroy(&h.cells)
+    base.free_bytes(h.nodes, 2 * vertex_count * 4)
+    base.free_bytes(mapping_block, vertex_count * 4)
     return unique_count
 }
 
@@ -370,9 +370,9 @@ split_binned_sah(primitives: Primitive[], first: int, count: int) -> Split {
     best_cost = math.MAX_FLOAT
     best_factor = 0.0
     // The bins: a count and a box each, for one axis at a time.
-    bin_counts_block = core.alloc(BIN_COUNT * 4)
+    bin_counts_block = base.alloc(BIN_COUNT * 4)
     bin_counts = bin_counts_block as int[]
-    bin_bounds_block = core.alloc(BIN_COUNT * sizeof(AABB))
+    bin_bounds_block = base.alloc(BIN_COUNT * sizeof(AABB))
     bin_bounds = bin_bounds_block as AABB[]
     axis = 0
     while axis < 3 {
@@ -427,8 +427,8 @@ split_binned_sah(primitives: Primitive[], first: int, count: int) -> Split {
         }
         axis = axis + 1
     }
-    core.free_bytes(bin_counts_block, BIN_COUNT * 4)
-    core.free_bytes(bin_bounds_block, BIN_COUNT * sizeof(AABB))
+    base.free_bytes(bin_counts_block, BIN_COUNT * 4)
+    base.free_bytes(bin_bounds_block, BIN_COUNT * sizeof(AABB))
 
     if best_bucket >= 0 {
         axis = split.axis
@@ -552,15 +552,15 @@ build_recursive(nodes: MeshNode[], node_count: int[], primitives: Primitive[], f
         }
         index = node_count[0]
         node_count[0] = index + 1
-        left_height_block = core.alloc(4)
-        right_height_block = core.alloc(4)
+        left_height_block = base.alloc(4)
+        right_height_block = base.alloc(4)
         left_height = left_height_block as int[]
         right_height = right_height_block as int[]
         build_recursive(nodes, node_count, primitives, first, split.index, use_median_split, left_height)
         right_index = build_recursive(nodes, node_count, primitives, first + split.index, count - split.index, use_median_split, right_height)
         height_out[0] = math.max_int(left_height[0], right_height[0]) + 1
-        core.free_bytes(left_height_block, 4)
-        core.free_bytes(right_height_block, 4)
+        base.free_bytes(left_height_block, 4)
+        base.free_bytes(right_height_block, 4)
         bounds = math.aabb_union(split.left_bounds, split.right_bounds)
         nodes[index] = MeshNode { lower: bounds.lower, axis: split.axis, count_or_offset: right_index - index, upper: bounds.upper,
                                   triangle_offset: 0 }
@@ -579,9 +579,9 @@ sort_mesh_triangles(m: *MeshData) -> bool {
     nodes = mesh_nodes(m)
     triangles = mesh_triangles(m)
     materials = mesh_material_indices(m)
-    temp_triangles_block = core.alloc(m.triangle_count * sizeof(MeshTriangle))
+    temp_triangles_block = base.alloc(m.triangle_count * sizeof(MeshTriangle))
     temp_triangles = temp_triangles_block as MeshTriangle[]
-    temp_materials_block = core.alloc(m.triangle_count * 4)
+    temp_materials_block = base.alloc(m.triangle_count * 4)
     temp_materials = temp_materials_block as int[]
     scratch_ready()
     stack = g_stack as int[]
@@ -616,8 +616,8 @@ sort_mesh_triangles(m: *MeshData) -> bool {
         memcpy((m as ptr) + m.triangle_offset, temp_triangles_block, m.triangle_count * sizeof(MeshTriangle))
         memcpy((m as ptr) + m.material_offset, temp_materials_block, m.triangle_count * 4)
     }
-    core.free_bytes(temp_triangles_block, m.triangle_count * sizeof(MeshTriangle))
-    core.free_bytes(temp_materials_block, m.triangle_count * 4)
+    base.free_bytes(temp_triangles_block, m.triangle_count * sizeof(MeshTriangle))
+    base.free_bytes(temp_materials_block, m.triangle_count * 4)
     return ok
 }
 
@@ -643,9 +643,9 @@ identify_edges(m: *MeshData) {
     flags = mesh_flags(m)
     triangle_count = m.triangle_count
     edge_count = 3 * triangle_count
-    edges_block = core.alloc(edge_count * EDGE_INTS * 4)
+    edges_block = base.alloc(edge_count * EDGE_INTS * 4)
     edges = edges_block as int[]
-    normals_block = core.alloc(triangle_count * sizeof(Vec3))
+    normals_block = base.alloc(triangle_count * sizeof(Vec3))
     normals = normals_block as Vec3[]
     i = 0
     while i < triangle_count {
@@ -675,15 +675,15 @@ identify_edges(m: *MeshData) {
         i = i + 1
     }
 
-    map = core.map_create(edge_count)
+    map = base.map_create(edge_count)
     i = 0
     while i < edge_count {
         e = i * EDGE_INTS
         key = ((edges[e] as long) << 32) | (edges[e + 1] as long)
         if key == (0 as long) { key = (1 as long) << 62 }
-        other = core.map_get(&map, key, NULL_INDEX)
+        other = base.map_get(&map, key, NULL_INDEX)
         if other == NULL_INDEX {
-            core.map_set(&map, key, i)
+            base.map_set(&map, key, i)
         } else {
             o = other * EDGE_INTS
             if edges[o + 6] == 1 {
@@ -694,7 +694,7 @@ identify_edges(m: *MeshData) {
         }
         i = i + 1
     }
-    core.map_destroy(&map)
+    base.map_destroy(&map)
 
     cos_5_deg = 0.9962
     i = 0
@@ -723,8 +723,8 @@ identify_edges(m: *MeshData) {
         }
         i = i + 1
     }
-    core.free_bytes(normals_block, triangle_count * sizeof(Vec3))
-    core.free_bytes(edges_block, edge_count * EDGE_INTS * 4)
+    base.free_bytes(normals_block, triangle_count * sizeof(Vec3))
+    base.free_bytes(edges_block, edge_count * EDGE_INTS * 4)
 }
 
 // --- creation ------------------------------------------------------------------------
@@ -743,9 +743,9 @@ create_mesh(def: *MeshDef, degenerate_indices: ptr, degenerate_capacity: int) ->
     src_indices = def.indices as int[]
 
     // Copies of the vertices and indices, welded or not.
-    indices_block = core.alloc(3 * triangle_count * 4)
+    indices_block = base.alloc(3 * triangle_count * 4)
     indices = indices_block as int[]
-    vertices_block = core.alloc(vertex_count * sizeof(Vec3))
+    vertices_block = base.alloc(vertex_count * sizeof(Vec3))
     vertices = vertices_block as Vec3[]
     if def.weld_vertices && def.weld_tolerance > 0.0 {
         vertex_count = weld_vertices(def.vertices, stride, vertex_count, src_indices, 3 * triangle_count, vertices, indices, def.weld_tolerance)
@@ -758,7 +758,7 @@ create_mesh(def: *MeshDef, degenerate_indices: ptr, degenerate_capacity: int) ->
         memcpy(indices_block, def.indices, 3 * triangle_count * 4)
     }
 
-    primitives_block = core.alloc(triangle_count * sizeof(Primitive))
+    primitives_block = base.alloc(triangle_count * sizeof(Primitive))
     primitives = primitives_block as Primitive[]
     primitive_count = 0
     degenerate_count = 0
@@ -794,26 +794,26 @@ create_mesh(def: *MeshDef, degenerate_indices: ptr, degenerate_capacity: int) ->
     }
     triangle_count = primitive_count
     if math.is_sane_aabb(mesh_bounds) == false || triangle_count == 0 {
-        core.free_bytes(primitives_block, def.triangle_count * sizeof(Primitive))
-        core.free_bytes(indices_block, 3 * def.triangle_count * 4)
-        core.free_bytes(vertices_block, def.vertex_count * sizeof(Vec3))
+        base.free_bytes(primitives_block, def.triangle_count * sizeof(Primitive))
+        base.free_bytes(indices_block, 3 * def.triangle_count * 4)
+        base.free_bytes(vertices_block, def.vertex_count * sizeof(Vec3))
         return null
     }
 
     // The tree, which reorders the primitives.
     node_capacity = 2 * triangle_count - 1
-    temp_nodes_block = core.alloc(node_capacity * sizeof(MeshNode))
+    temp_nodes_block = base.alloc(node_capacity * sizeof(MeshNode))
     temp_nodes = temp_nodes_block as MeshNode[]
-    counters_block = core.alloc(8)
+    counters_block = base.alloc(8)
     counters = counters_block as int[]
     counters[0] = 0
-    height_block = core.alloc(4)
+    height_block = base.alloc(4)
     height = height_block as int[]
     build_recursive(temp_nodes, counters, primitives, 0, triangle_count, def.use_median_split, height)
     node_count = counters[0]
     tree_height = height[0]
-    core.free_bytes(counters_block, 8)
-    core.free_bytes(height_block, 4)
+    base.free_bytes(counters_block, 8)
+    base.free_bytes(height_block, 4)
 
     // The block.
     byte_count = align8(sizeof(MeshData))
@@ -827,7 +827,7 @@ create_mesh(def: *MeshDef, degenerate_indices: ptr, degenerate_capacity: int) ->
     byte_count = byte_count + align8(triangle_count * 4)
     flags_offset = byte_count
     byte_count = byte_count + align8(triangle_count * 4)
-    m = core.alloc(byte_count) as *MeshData
+    m = base.alloc(byte_count) as *MeshData
     m.version = MESH_VERSION
     m.byte_count = byte_count
     m.bounds = mesh_bounds
@@ -867,21 +867,21 @@ create_mesh(def: *MeshDef, degenerate_indices: ptr, degenerate_capacity: int) ->
     }
 
     ok = sort_mesh_triangles(m)
-    core.free_bytes(temp_nodes_block, node_capacity * sizeof(MeshNode))
-    core.free_bytes(primitives_block, def.triangle_count * sizeof(Primitive))
-    core.free_bytes(indices_block, 3 * def.triangle_count * 4)
-    core.free_bytes(vertices_block, def.vertex_count * sizeof(Vec3))
+    base.free_bytes(temp_nodes_block, node_capacity * sizeof(MeshNode))
+    base.free_bytes(primitives_block, def.triangle_count * sizeof(Primitive))
+    base.free_bytes(indices_block, 3 * def.triangle_count * 4)
+    base.free_bytes(vertices_block, def.vertex_count * sizeof(Vec3))
     if ok == false {
-        core.free_bytes(m as ptr, byte_count)
+        base.free_bytes(m as ptr, byte_count)
         return null
     }
     if def.identify_edges { identify_edges(m) }
     m.hash = 0 as long
-    m.hash = core.hash_bytes(m as ptr, m.byte_count)
+    m.hash = base.hash_bytes(m as ptr, m.byte_count)
     return m
 }
 
-destroy_mesh(m: *MeshData) { core.free_bytes(m as ptr, m.byte_count) }
+destroy_mesh(m: *MeshData) { base.free_bytes(m as ptr, m.byte_count) }
 
 // --- the built-in meshes ------------------------------------------------------------------
 
@@ -912,7 +912,7 @@ grid_indices(x_count: int, z_count: int, indices: int[]) {
 // materials cycling through material_count when it is positive.
 create_grid_mesh(x_count: int, z_count: int, cell_width: float, material_count: int, identify: bool) -> *MeshData {
     vertex_count = (x_count + 1) * (z_count + 1)
-    vertices_block = core.alloc(vertex_count * sizeof(Vec3))
+    vertices_block = base.alloc(vertex_count * sizeof(Vec3))
     vertices = vertices_block as Vec3[]
     index = 0
     x = 0.0 - 0.5 * cell_width * (x_count as float)
@@ -930,9 +930,9 @@ create_grid_mesh(x_count: int, z_count: int, cell_width: float, material_count: 
         ix = ix + 1
     }
     triangle_count = 2 * x_count * z_count
-    indices_block = core.alloc(3 * triangle_count * 4)
+    indices_block = base.alloc(3 * triangle_count * 4)
     grid_indices(x_count, z_count, indices_block as int[])
-    materials_block = core.alloc(triangle_count * 4)
+    materials_block = base.alloc(triangle_count * 4)
     materials = materials_block as int[]
     i = 0
     while i < x_count * z_count {
@@ -951,16 +951,16 @@ create_grid_mesh(x_count: int, z_count: int, cell_width: float, material_count: 
     def.use_median_split = true
     def.identify_edges = identify
     m = create_mesh(&def, null, 0)
-    core.free_bytes(materials_block, triangle_count * 4)
-    core.free_bytes(indices_block, 3 * triangle_count * 4)
-    core.free_bytes(vertices_block, vertex_count * sizeof(Vec3))
+    base.free_bytes(materials_block, triangle_count * 4)
+    base.free_bytes(indices_block, 3 * triangle_count * 4)
+    base.free_bytes(vertices_block, vertex_count * sizeof(Vec3))
     return m
 }
 
 // A grid rippled by the product of two sines.
 create_wave_mesh(x_count: int, z_count: int, cell_width: float, amplitude: float, row_frequency: float, column_frequency: float) -> *MeshData {
     vertex_count = (x_count + 1) * (z_count + 1)
-    vertices_block = core.alloc(vertex_count * sizeof(Vec3))
+    vertices_block = base.alloc(vertex_count * sizeof(Vec3))
     vertices = vertices_block as Vec3[]
     omega_z = 2.0 * math.PI * row_frequency * cell_width
     omega_x = 2.0 * math.PI * column_frequency * cell_width
@@ -982,7 +982,7 @@ create_wave_mesh(x_count: int, z_count: int, cell_width: float, amplitude: float
         ix = ix + 1
     }
     triangle_count = 2 * x_count * z_count
-    indices_block = core.alloc(3 * triangle_count * 4)
+    indices_block = base.alloc(3 * triangle_count * 4)
     grid_indices(x_count, z_count, indices_block as int[])
     def = mesh_def()
     def.vertices = vertices_block
@@ -992,14 +992,14 @@ create_wave_mesh(x_count: int, z_count: int, cell_width: float, amplitude: float
     def.use_median_split = true
     def.identify_edges = true
     m = create_mesh(&def, null, 0)
-    core.free_bytes(indices_block, 3 * triangle_count * 4)
-    core.free_bytes(vertices_block, vertex_count * sizeof(Vec3))
+    base.free_bytes(indices_block, 3 * triangle_count * 4)
+    base.free_bytes(vertices_block, vertex_count * sizeof(Vec3))
     return m
 }
 
 create_torus_mesh(radial_resolution: int, tubular_resolution: int, radius: float, thickness: float) -> *MeshData {
     vertex_count = radial_resolution * tubular_resolution
-    vertices_block = core.alloc(vertex_count * sizeof(Vec3))
+    vertices_block = base.alloc(vertex_count * sizeof(Vec3))
     vertices = vertices_block as Vec3[]
     index = 0
     r = 0
@@ -1016,7 +1016,7 @@ create_torus_mesh(radial_resolution: int, tubular_resolution: int, radius: float
         r = r + 1
     }
     triangle_count = 2 * vertex_count
-    indices_block = core.alloc(3 * triangle_count * 4)
+    indices_block = base.alloc(3 * triangle_count * 4)
     indices = indices_block as int[]
     index = 0
     r1 = 0
@@ -1047,8 +1047,8 @@ create_torus_mesh(radial_resolution: int, tubular_resolution: int, radius: float
     def.triangle_count = triangle_count
     def.identify_edges = true
     m = create_mesh(&def, null, 0)
-    core.free_bytes(indices_block, 3 * triangle_count * 4)
-    core.free_bytes(vertices_block, vertex_count * sizeof(Vec3))
+    base.free_bytes(indices_block, 3 * triangle_count * 4)
+    base.free_bytes(vertices_block, vertex_count * sizeof(Vec3))
     return m
 }
 
@@ -1072,7 +1072,7 @@ fill_indices(indices: int[], values: int[], count: int) {
 }
 
 box_mesh_from(vertices_block: ptr, indices: int[], use_median_split: bool, identify: bool) -> *MeshData {
-    indices_block = core.alloc(36 * 4)
+    indices_block = base.alloc(36 * 4)
     fill_indices(indices_block as int[], indices, 36)
     def = mesh_def()
     def.vertices = vertices_block
@@ -1082,14 +1082,14 @@ box_mesh_from(vertices_block: ptr, indices: int[], use_median_split: bool, ident
     def.use_median_split = use_median_split
     def.identify_edges = identify
     m = create_mesh(&def, null, 0)
-    core.free_bytes(indices_block, 36 * 4)
-    core.free_bytes(vertices_block, 8 * sizeof(Vec3))
+    base.free_bytes(indices_block, 36 * 4)
+    base.free_bytes(vertices_block, 8 * sizeof(Vec3))
     return m
 }
 
 // A box, its triangles facing out.
 create_box_mesh(center: Vec3, extent: Vec3, identify: bool) -> *MeshData {
-    vertices_block = core.alloc(8 * sizeof(Vec3))
+    vertices_block = base.alloc(8 * sizeof(Vec3))
     box_corners(center, extent.x, extent.y, extent.z, vertices_block as Vec3[])
     indices = [ 0, 1, 3, 1, 2, 3,  0, 4, 1, 1, 4, 5,  0, 3, 7, 4, 0, 7,  4, 7, 5, 6, 5, 7,  1, 5, 2, 6, 2, 5,  3, 2, 7, 6, 7, 2 ]
     return box_mesh_from(vertices_block, indices, false, identify)
@@ -1097,7 +1097,7 @@ create_box_mesh(center: Vec3, extent: Vec3, identify: bool) -> *MeshData {
 
 // A box, its triangles facing in: a room.
 create_hollow_box_mesh(center: Vec3, extent: Vec3) -> *MeshData {
-    vertices_block = core.alloc(8 * sizeof(Vec3))
+    vertices_block = base.alloc(8 * sizeof(Vec3))
     box_corners(center, extent.x, extent.y, extent.z, vertices_block as Vec3[])
     indices = [ 3, 1, 0, 3, 2, 1,  1, 4, 0, 5, 4, 1,  7, 3, 0, 7, 0, 4,  5, 7, 4, 7, 5, 6,  2, 5, 1, 5, 2, 6,  7, 2, 3, 2, 7, 6 ]
     return box_mesh_from(vertices_block, indices, false, true)
@@ -1108,7 +1108,7 @@ create_platform_mesh(center: Vec3, height: float, top_width: float, bottom_width
     hb = 0.5 * bottom_width
     ht = 0.5 * top_width
     hy = 0.5 * height
-    vertices_block = core.alloc(8 * sizeof(Vec3))
+    vertices_block = base.alloc(8 * sizeof(Vec3))
     vertices = vertices_block as Vec3[]
     vertices[0] = math.add(center, math.vec3(ht, hy, ht))
     vertices[1] = math.add(center, math.vec3(0.0 - ht, hy, ht))

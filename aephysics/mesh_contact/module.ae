@@ -28,7 +28,7 @@
 // live in the caller's arena from where this function started bumping.
 import std.string
 import aephysics.math
-import aephysics.core
+import aephysics.base
 import aephysics.hull
 import aephysics.distance
 import aephysics.manifold
@@ -121,7 +121,7 @@ mesh_contact_cache_create() -> MeshContactCache {
 }
 
 mesh_contact_cache_destroy(cache: *MeshContactCache) {
-    core.free_bytes(cache.triangles, cache.capacity * sizeof(TriangleCache))
+    base.free_bytes(cache.triangles, cache.capacity * sizeof(TriangleCache))
     cache.triangles = null
     cache.count = 0
     cache.capacity = 0
@@ -156,11 +156,11 @@ var g_triangle: ptr = null     // Vec3[3]
 
 scratch_ready() {
     if g_indices == null {
-        g_indices = core.alloc(MAX_MESH_CONTACT_TRIANGLES * 4)
-        g_matched = core.alloc(MAX_MESH_CONTACT_TRIANGLES * sizeof(TriangleCache))
-        g_edges = core.alloc(MAX_EDGE_COUNT * 8)
-        g_vertices = core.alloc(MAX_VERTEX_COUNT * 4)
-        g_triangle = core.alloc(3 * sizeof(Vec3))
+        g_indices = base.alloc(MAX_MESH_CONTACT_TRIANGLES * 4)
+        g_matched = base.alloc(MAX_MESH_CONTACT_TRIANGLES * sizeof(TriangleCache))
+        g_edges = base.alloc(MAX_EDGE_COUNT * 8)
+        g_vertices = base.alloc(MAX_VERTEX_COUNT * 4)
+        g_triangle = base.alloc(3 * sizeof(Vec3))
     }
 }
 
@@ -199,9 +199,9 @@ refresh_cache(cache: *MeshContactCache, mesh_shape: *Shape, xf_a: Transform, bou
         index1 = index1 + 1
     }
     if triangle_count > cache.capacity {
-        core.free_bytes(cache.triangles, cache.capacity * sizeof(TriangleCache))
+        base.free_bytes(cache.triangles, cache.capacity * sizeof(TriangleCache))
         cache.capacity = math.max_int(triangle_count, 8)
-        cache.triangles = core.alloc(cache.capacity * sizeof(TriangleCache))
+        cache.triangles = base.alloc(cache.capacity * sizeof(TriangleCache))
     }
     if triangle_count > 0 { memcpy(cache.triangles, g_matched, triangle_count * sizeof(TriangleCache)) }
     cache.count = triangle_count
@@ -286,7 +286,7 @@ var g_final: ptr = null    // Point2D[4]
 // area outside that triangle; ties to the deeper point. Returns how many.
 cull_points(points: Point2D[], count: int) -> int {
     if count <= 1 { return count }
-    if g_final == null { g_final = core.alloc(4 * sizeof(Point2D)) }
+    if g_final == null { g_final = base.alloc(4 * sizeof(Point2D)) }
     final = g_final as Point2D[]
     tol = 0.25 * math.LINEAR_SLOP
     tol_sqr = tol * tol
@@ -419,7 +419,7 @@ cull_points(points: Point2D[], count: int) -> int {
 // culled to four, and the survivors moved to the front. Returns how many.
 reduce_cluster(points: LocalManifoldPoint[], count: int, normal: Vec3, arena: *Arena) -> int {
     if count <= 1 { return count }
-    pts_block = core.arena_bump(arena, count * sizeof(Point2D))
+    pts_block = base.arena_bump(arena, count * sizeof(Point2D))
     pts = pts_block as Point2D[]
     u = math.perp(normal)
     v = math.cross(normal, u)
@@ -431,7 +431,7 @@ reduce_cluster(points: LocalManifoldPoint[], count: int, normal: Vec3, arena: *A
         i = i + 1
     }
     count2 = cull_points(pts, count)
-    final_block = core.arena_bump(arena, MAX_MANIFOLD_POINTS * sizeof(LocalManifoldPoint))
+    final_block = base.arena_bump(arena, MAX_MANIFOLD_POINTS * sizeof(LocalManifoldPoint))
     final = final_block as LocalManifoldPoint[]
     i = 0
     while i < count2 {
@@ -469,13 +469,13 @@ compute_mesh_manifolds(cache: *MeshContactCache, mesh_shape: *Shape, xf_a: Trans
     triangle_count = cache.count
     if triangle_count == 0 { return result }
 
-    accepted_block = core.arena_bump(arena, triangle_count * 4)
+    accepted_block = base.arena_bump(arena, triangle_count * 4)
     accepted = accepted_block as int[]          // manifold indices
     accepted_count = 0
-    tentative_block = core.arena_bump(arena, triangle_count * 4)
+    tentative_block = base.arena_bump(arena, triangle_count * 4)
     tentative = tentative_block as int[]
     tentative_count = 0
-    tentative_triangles_block = core.arena_bump(arena, triangle_count * sizeof(Tentative))
+    tentative_triangles_block = base.arena_bump(arena, triangle_count * sizeof(Tentative))
     tentative_triangles = tentative_triangles_block as Tentative[]
     found = Found { edge_count: 0, vertex_count: 0 }
 
@@ -485,9 +485,9 @@ compute_mesh_manifolds(cache: *MeshContactCache, mesh_shape: *Shape, xf_a: Trans
     linear_slop = math.LINEAR_SLOP
 
     point_capacity_total = MAX_POINTS_PER_TRIANGLE * triangle_count
-    point_buffer = core.arena_bump(arena, point_capacity_total * sizeof(LocalManifoldPoint))
+    point_buffer = base.arena_bump(arena, point_capacity_total * sizeof(LocalManifoldPoint))
     total_point_count = 0
-    manifold_buffer = core.arena_bump(arena, triangle_count * sizeof(LocalManifold))
+    manifold_buffer = base.arena_bump(arena, triangle_count * sizeof(LocalManifold))
     manifolds = manifold_buffer as LocalManifold[]
     manifold_count = 0
     kind_b = convex.kind
@@ -623,9 +623,9 @@ compute_mesh_manifolds(cache: *MeshContactCache, mesh_shape: *Shape, xf_a: Trans
 
     // Clusters by the manifold and triangle normals, within cos 5 degrees
     // (tighter than the warm start's matching); the first fit is taken.
-    clusters_block = core.arena_bump(arena, accepted_count * sizeof(Cluster))
+    clusters_block = base.arena_bump(arena, accepted_count * sizeof(Cluster))
     clusters = clusters_block as Cluster[]
-    memberships_block = core.arena_bump(arena, accepted_count * 4)
+    memberships_block = base.arena_bump(arena, accepted_count * 4)
     memberships = memberships_block as int[]
     cluster_threshold = 0.996
     cluster_count = 0
@@ -659,7 +659,7 @@ compute_mesh_manifolds(cache: *MeshContactCache, mesh_shape: *Shape, xf_a: Trans
     }
     if cluster_point_count == 0 { return result }
 
-    cluster_points = core.arena_bump(arena, cluster_point_count * sizeof(LocalManifoldPoint))
+    cluster_points = base.arena_bump(arena, cluster_point_count * sizeof(LocalManifoldPoint))
     point_offset = 0
     i = 0
     while i < cluster_count {

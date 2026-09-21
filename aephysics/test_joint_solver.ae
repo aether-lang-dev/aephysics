@@ -7,7 +7,7 @@
 // the constraint forces from the impulses, and the warm start.
 import std.string
 import aephysics.math
-import aephysics.core
+import aephysics.base
 import aephysics.hull
 import aephysics.manifold
 import aephysics.shape
@@ -597,7 +597,7 @@ test_parallel_motor_wheel() {
 }
 
 main() {
-    before = core.alloc_count()
+    before = base.alloc_count()
     test_accessors()
     test_distance()
     test_revolute()
@@ -607,7 +607,7 @@ main() {
     test_parallel_motor_wheel()
     hull.destroy_hull(g_cube as *HullData)
     // The scratch stays allocated: the worlds' block, the masses, the dummy state.
-    ensure("every other counted allocation was freed (${core.alloc_count() - before})", core.alloc_count() == before + 3)
+    ensure("every other counted allocation was freed (${base.alloc_count() - before})", base.alloc_count() == before + 3)
     println("joint_solver: ${checks} checks")
     if failures == 0 {
         println("joint_solver: all checks passed")
