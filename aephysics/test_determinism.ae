@@ -27,6 +27,7 @@ import aephysics.shape
 import aephysics.dynamics
 import aephysics.human
 import aephysics.physics_world
+import aephysics.parallel
 
 extern calloc(count: int, size: int) -> ptr
 extern exit(code: int)
@@ -243,9 +244,12 @@ const WAVE_PILE_GRID = 5
 const WAVE_PILE_LAYERS = 4
 const WAVE_PILE_BODY_COUNT = 100
 
+var g_host_scheduler: ptr = null   // a scheduler lent to the wave pile, as a host engine lends its own
+
 wave_pile(workers: int) -> Outcome {
     wdef = dynamics.default_world_def()
     wdef.worker_count = workers
+    wdef.scheduler = g_host_scheduler
     world_id = dynamics.create_world(&wdef)
     g_random_seed = 52977 as long
     // Height fields grow from a corner: the body offset centres the patch.
@@ -483,42 +487,48 @@ main() {
     first = falling_ragdolls(1)
     g_trace_run = false
     second = falling_ragdolls(1)
-    parallel = falling_ragdolls(4)
+    four = falling_ragdolls(4)
     println("determinism: falling ragdolls slept at step ${first.sleep_step}, checksum ${first.hash}")
     ensure("falling ragdolls: they slept", first.sleep_step > 0)
     ensure("falling ragdolls: the same scene twice, bit for bit", same_outcome(first, second))
-    ensure("falling ragdolls: the same over four workers, bit for bit", same_outcome(first, parallel))
+    ensure("falling ragdolls: the same over four workers, bit for bit", same_outcome(first, four))
 
     g_trace_run = true
     first = wave_pile(1)
     g_trace_run = false
     second = wave_pile(1)
-    parallel = wave_pile(4)
+    four = wave_pile(4)
+    // On a scheduler of the host's, as a game engine lends its own job system to its physics.
+    g_host_scheduler = parallel.create_scheduler(3) as ptr
+    lent = wave_pile(1)
+    parallel.destroy_scheduler(g_host_scheduler as *Scheduler)
+    g_host_scheduler = null
     println("determinism: wave pile slept at step ${first.sleep_step}, checksum ${first.hash}")
     ensure("wave pile: it slept", first.sleep_step > 0)
     ensure("wave pile: the same scene twice, bit for bit", same_outcome(first, second))
-    ensure("wave pile: the same over four workers, bit for bit", same_outcome(first, parallel))
+    ensure("wave pile: the same over four workers, bit for bit", same_outcome(first, four))
+    ensure("wave pile: the same on a scheduler the host lends, bit for bit", same_outcome(first, lent))
 
     g_trace_run = true
     first = query_spawn(1)
     g_trace_run = false
     second = query_spawn(1)
-    parallel = query_spawn(4)
+    four = query_spawn(4)
     println("determinism: query spawn slept at step ${first.sleep_step}, checksum ${first.hash}, ${first.query_hits} query hits, query checksum ${first.query_hash}")
     ensure("query spawn: it slept", first.sleep_step > 0)
     ensure("query spawn: the queries hit (${first.query_hits})", first.query_hits > 20)
     ensure("query spawn: the same scene twice, bit for bit", same_outcome(first, second))
-    ensure("query spawn: the same over four workers, bit for bit", same_outcome(first, parallel))
+    ensure("query spawn: the same over four workers, bit for bit", same_outcome(first, four))
 
     g_trace_run = true
     first = mesh_drop(1)
     g_trace_run = false
     second = mesh_drop(1)
-    parallel = mesh_drop(4)
+    four = mesh_drop(4)
     println("determinism: mesh drop slept at step ${first.sleep_step}, checksum ${first.hash}")
     ensure("mesh drop: it slept", first.sleep_step > 0)
     ensure("mesh drop: the same scene twice, bit for bit", same_outcome(first, second))
-    ensure("mesh drop: the same over four workers, bit for bit", same_outcome(first, parallel))
+    ensure("mesh drop: the same over four workers, bit for bit", same_outcome(first, four))
 
     println("determinism: ${checks} checks")
     if failures == 0 {
