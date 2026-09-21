@@ -241,6 +241,7 @@ struct WorldDef {
     dynamic_shape_count: int
     contact_count: int
     worker_count: int              // the threads a step runs over: 1 is the calling thread alone
+    scheduler: ptr                 // a *Scheduler of the host's to step on (its worker count then rules), or null for the world's own
     user_data: ptr
 }
 
@@ -320,7 +321,7 @@ default_world_def() -> WorldDef {
                       contact_hertz: 30.0, contact_damping_ratio: 10.0, maximum_linear_speed: 400.0,
                       friction_callback: default_friction, restitution_callback: default_restitution,
                       enable_sleep: true, enable_continuous: true, static_body_count: 0, dynamic_body_count: 0,
-                      static_shape_count: 0, dynamic_shape_count: 0, contact_count: 0, worker_count: 1, user_data: null }
+                      static_shape_count: 0, dynamic_shape_count: 0, contact_count: 0, worker_count: 1, scheduler: null, user_data: null }
 }
 
 default_body_def() -> BodyDef {
@@ -1091,6 +1092,7 @@ struct World {
     task_contexts: ptr             // TaskContext[worker_count]
     worker_count: int
     scheduler: ptr                 // *Scheduler (aephysics.parallel), the step's threads
+    owns_scheduler: bool           // made with the world, or the host's
     contact_state: BitSet          // the contacts whose touching changed this pass, every worker's merged
     contact_begin_events: Buffer   // ContactBeginTouchEvent
     contact_end_events0: Buffer    // ContactEndTouchEvent, double buffered
@@ -1268,10 +1270,20 @@ create_world(def: *WorldDef) -> WorldId {
     w.generation = generation
     w.in_use = true
     w.stack = basics.stack_create(2048)
-    w.worker_count = def.worker_count
-    if w.worker_count < 1 { w.worker_count = 1 }
-    if w.worker_count > native.MAX_WORKERS { w.worker_count = native.MAX_WORKERS }
-    w.scheduler = parallel.create_scheduler(w.worker_count) as ptr
+    // The threads: the host's scheduler when it lends one (the reference's
+    // task callbacks: a game runs its physics on its own job system), else
+    // the world's own, destroyed with it.
+    if def.scheduler != null {
+        w.scheduler = def.scheduler
+        w.owns_scheduler = false
+        w.worker_count = parallel.scheduler_worker_count(def.scheduler as *Scheduler)
+    } else {
+        w.worker_count = def.worker_count
+        if w.worker_count < 1 { w.worker_count = 1 }
+        if w.worker_count > native.MAX_WORKERS { w.worker_count = native.MAX_WORKERS }
+        w.scheduler = parallel.create_scheduler(w.worker_count) as ptr
+        w.owns_scheduler = true
+    }
     reserve_scratch()
     w.task_contexts = basics.alloc(w.worker_count * sizeof(TaskContext))
     i = 0
@@ -1431,7 +1443,7 @@ destroy_world(id: WorldId) {
         i = i + 1
     }
     basics.free_bytes(w.task_contexts, w.worker_count * sizeof(TaskContext))
-    parallel.destroy_scheduler(w.scheduler as *Scheduler)
+    if w.owns_scheduler { parallel.destroy_scheduler(w.scheduler as *Scheduler) }
     basics.bitset_destroy(&w.contact_state)
     basics.buffer_destroy(&w.contact_begin_events)
     basics.buffer_destroy(&w.contact_end_events0)

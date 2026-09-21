@@ -111,8 +111,12 @@ no two constraints move the same body, so a step is the same to the
 bit at one worker or twenty-four (`test_determinism.ae` runs each
 scene over four workers too). The worker threads are made when the
 world is and wait on a semaphore between steps; a world of one worker
-never makes a thread. [What the workers buy, against the reference's
-own scaling](bench/RESULTS.md#parallel).
+never makes a thread. A host with a job system of its own lends it
+instead (`WorldDef.scheduler`, an `aephysics.parallel` scheduler the
+host made and keeps; its worker count then rules), as the reference
+takes a game's task callbacks, so an engine runs its crowd, its
+weather and its physics on one pool. [What the workers buy, against
+the reference's own scaling](bench/RESULTS.md#parallel).
 
 Beyond the modules' own tests, the reference's scene tests run on the
 world as a whole: `test_mover_world.ae` (the mover through a world:
