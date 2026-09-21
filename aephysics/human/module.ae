@@ -18,7 +18,7 @@
 // muscle budget; design.md's research note says what comes next.
 import std.string
 import aephysics.math
-import aephysics.base
+import aephysics.basics
 import aephysics.manifold
 import aephysics.material
 import aephysics.shape

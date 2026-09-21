@@ -16,7 +16,7 @@
 
 import std.string
 import aephysics.math
-import aephysics.base
+import aephysics.basics
 import aephysics.dynamic_tree
 import aephysics.hull
 import aephysics.distance
@@ -642,7 +642,7 @@ test_contacts() {
     small("anchor on the cube's bottom", p.anchor_b.y + 0.5, 0.011)
     small("anchor on the slab's top", p.anchor_a.y - 0.5, 0.011)
     ensure("in a static colour", c.color_index >= dynamics.DYNAMIC_COLOR_COUNT && c.color_index < dynamics.OVERFLOW_INDEX)
-    ensure("in the convex array", base.ints_get(&dynamics.graph_color(w, c.color_index).convex_contacts, c.local_index) == c.contact_id)
+    ensure("in the convex array", basics.ints_get(&dynamics.graph_color(w, c.color_index).convex_contacts, c.local_index) == c.contact_id)
     cube_body = dynamics.get_body_full_id(w, cube_id)
     ensure("in the cube's island", c.island_id == cube_body.island_id && dynamics.island_at(w, c.island_id).contacts.count == 1)
     ensure("begin event", dynamics.world_contact_begin_event_count(w) == 1 && dynamics.contact_is_valid(dynamics.world_contact_begin_event(w, 0).contact_id))
@@ -878,10 +878,10 @@ exercise_joint_base(name: string, id: JointId, f: *JointFixture, kind: int) {
     ensure("${name}: collide connected on", dynamics.joint_get_collide_connected(id))
     dynamics.joint_set_collide_connected(id, false)
     ensure("${name}: collide connected off", dynamics.joint_get_collide_connected(id) == false)
-    marker = base.alloc(8)
+    marker = basics.alloc(8)
     dynamics.joint_set_user_data(id, marker)
     ensure("${name}: user data", dynamics.joint_get_user_data(id) == marker)
-    base.free_bytes(marker, 8)
+    basics.free_bytes(marker, 8)
     dynamics.joint_set_constraint_tuning(id, 90.0, 3.0)
     ensure("${name}: tuning", dynamics.joint_get_constraint_hertz(id) == 90.0 && dynamics.joint_get_constraint_damping_ratio(id) == 3.0)
     dynamics.joint_set_force_threshold(id, 100.0)
@@ -1327,7 +1327,7 @@ test_sensors() {
 }
 
 main() {
-    before = base.alloc_count()
+    before = basics.alloc_count()
     test_mass()
     test_set_mass_data()
     test_extents()
@@ -1342,7 +1342,7 @@ main() {
     hull.destroy_hull(g_slab as *HullData)
     // The scratch stays allocated: the worlds' block, the masses, the contact scratch (five),
     // the mesh's three, the mesh contact's six, the sphere's two, and the sensors' points.
-    ensure("every other counted allocation was freed (${base.alloc_count() - before})", base.alloc_count() == before + 19)
+    ensure("every other counted allocation was freed (${basics.alloc_count() - before})", basics.alloc_count() == before + 19)
 
     println("dynamics: ${checks} checks")
     if failures == 0 {

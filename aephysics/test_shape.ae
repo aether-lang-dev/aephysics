@@ -12,7 +12,7 @@
 
 import std.string
 import aephysics.math
-import aephysics.base
+import aephysics.basics
 import aephysics.hull
 import aephysics.distance
 import aephysics.manifold
@@ -815,7 +815,7 @@ test_filters() {
 }
 
 main() {
-    before = base.alloc_count()
+    before = basics.alloc_count()
     test_mass()
     test_aabb()
     test_ray_cast_sphere()
@@ -825,7 +825,7 @@ main() {
     test_dispatch()
     test_filters()
     // The scratch stays allocated: three blocks here, three in mesh, three in the height field.
-    ensure("every other counted allocation was freed (${base.alloc_count() - before})", base.alloc_count() == before + 9)
+    ensure("every other counted allocation was freed (${basics.alloc_count() - before})", basics.alloc_count() == before + 9)
 
     println("shape: ${checks} checks")
     if failures == 0 {

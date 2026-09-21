@@ -21,7 +21,7 @@
 // asserts, so a test can check it.
 import std.string
 import aephysics.math
-import aephysics.base
+import aephysics.basics
 
 exports (
     TreeNode, TreeProxy, TreeStats, DynamicTree, RayCastInput, BoxCastInput,
@@ -202,10 +202,10 @@ test_category(category_bits: long, mask_bits: long, require_all: bool) -> bool {
 
 // A zeroed block of the new size with the old contents at its start.
 grow_zero(block: ptr, old_bytes: int, new_bytes: int) -> ptr {
-    fresh = base.alloc(new_bytes)
+    fresh = basics.alloc(new_bytes)
     if block != null {
         memcpy(fresh, block, old_bytes)
-        base.free_bytes(block, old_bytes)
+        basics.free_bytes(block, old_bytes)
     }
     return fresh
 }
@@ -227,7 +227,7 @@ allocate_sibling_pair(t: *DynamicTree) -> int {
         t.parents = grow_zero(t.parents, old_capacity * 4, new_capacity * 4)
         t.node_capacity = new_capacity
         // The spare has to match; the rebuild allocates it again.
-        base.free_bytes(t.swap_nodes, old_capacity * sizeof(TreeNode))
+        basics.free_bytes(t.swap_nodes, old_capacity * sizeof(TreeNode))
         t.swap_nodes = null
     }
     pair = t.node_end
@@ -256,8 +256,8 @@ tree_create(proxy_capacity: int) -> DynamicTree {
         stack: null, stack_dist: null, copy_stack: null
     }
     // A tree of n proxies has 2n - 1 nodes plus the empty node beside the root.
-    t.nodes = base.alloc(t.node_capacity * sizeof(TreeNode))
-    t.parents = base.alloc(t.node_capacity * 4)
+    t.nodes = basics.alloc(t.node_capacity * sizeof(TreeNode))
+    t.parents = basics.alloc(t.node_capacity * 4)
     nodes = t.nodes as TreeNode[]
     parents = t.parents as int[]
     nodes[ROOT_NODE] = make_empty_node()
@@ -265,7 +265,7 @@ tree_create(proxy_capacity: int) -> DynamicTree {
     parents[ROOT_NODE] = NULL_INDEX
     parents[ROOT_NODE + 1] = NULL_INDEX
 
-    t.proxies = base.alloc(capacity * sizeof(TreeProxy))
+    t.proxies = basics.alloc(capacity * sizeof(TreeProxy))
     proxies = t.proxies as TreeProxy[]
     i = 0
     while i < capacity - 1 {
@@ -276,23 +276,23 @@ tree_create(proxy_capacity: int) -> DynamicTree {
     proxies[capacity - 1].node = NULL_INDEX
     proxies[capacity - 1].next = NULL_INDEX
 
-    t.stack = base.alloc(TREE_STACK_SIZE * REBUILD_ITEM_INTS * 4)
-    t.stack_dist = base.alloc(TREE_STACK_SIZE * 8)
-    t.copy_stack = base.alloc(TREE_STACK_SIZE * COPY_ITEM_INTS * 4)
+    t.stack = basics.alloc(TREE_STACK_SIZE * REBUILD_ITEM_INTS * 4)
+    t.stack_dist = basics.alloc(TREE_STACK_SIZE * 8)
+    t.copy_stack = basics.alloc(TREE_STACK_SIZE * COPY_ITEM_INTS * 4)
     return t
 }
 
 tree_destroy(t: *DynamicTree) {
-    base.free_bytes(t.nodes, t.node_capacity * sizeof(TreeNode))
-    base.free_bytes(t.parents, t.node_capacity * 4)
-    base.free_bytes(t.proxies, t.proxy_capacity * sizeof(TreeProxy))
-    base.free_bytes(t.swap_nodes, t.node_capacity * sizeof(TreeNode))
-    base.free_bytes(t.leaf_indices, t.rebuild_capacity * 4)
-    base.free_bytes(t.leaf_nodes, t.rebuild_capacity * sizeof(TreeNode))
-    base.free_bytes(t.leaf_centers, t.rebuild_capacity * sizeof(Vec3))
-    base.free_bytes(t.stack, TREE_STACK_SIZE * REBUILD_ITEM_INTS * 4)
-    base.free_bytes(t.stack_dist, TREE_STACK_SIZE * 8)
-    base.free_bytes(t.copy_stack, TREE_STACK_SIZE * COPY_ITEM_INTS * 4)
+    basics.free_bytes(t.nodes, t.node_capacity * sizeof(TreeNode))
+    basics.free_bytes(t.parents, t.node_capacity * 4)
+    basics.free_bytes(t.proxies, t.proxy_capacity * sizeof(TreeProxy))
+    basics.free_bytes(t.swap_nodes, t.node_capacity * sizeof(TreeNode))
+    basics.free_bytes(t.leaf_indices, t.rebuild_capacity * 4)
+    basics.free_bytes(t.leaf_nodes, t.rebuild_capacity * sizeof(TreeNode))
+    basics.free_bytes(t.leaf_centers, t.rebuild_capacity * sizeof(Vec3))
+    basics.free_bytes(t.stack, TREE_STACK_SIZE * REBUILD_ITEM_INTS * 4)
+    basics.free_bytes(t.stack_dist, TREE_STACK_SIZE * 8)
+    basics.free_bytes(t.copy_stack, TREE_STACK_SIZE * COPY_ITEM_INTS * 4)
     memset(t as ptr, 0, sizeof(DynamicTree))
     t.pair_free_list = NULL_INDEX
     t.proxy_free_list = NULL_INDEX
@@ -775,11 +775,11 @@ tree_validate(t: *DynamicTree) -> bool {
 
     if t.proxy_count == 0 { return is_empty_node(nodes[ROOT_NODE].flag_index) }
 
-    counter = base.alloc(4)
+    counter = basics.alloc(4)
     leaf_count = counter as int[]
     height = validate_subtree(t, ROOT_NODE, leaf_count)
     ok = height >= 0 && leaf_count[0] == t.proxy_count
-    base.free_bytes(counter, 4)
+    basics.free_bytes(counter, 4)
     return ok
 }
 
@@ -1327,17 +1327,17 @@ tree_rebuild(t: *DynamicTree, full_build: bool) -> int {
     // An unordered tree is rebuilt even when nothing moved: the sweep needs the order.
     if full_build == false && is_node_moved(root.flag_index) == false && t.dfs_ordered { return 0 }
 
-    if t.swap_nodes == null { t.swap_nodes = base.alloc(t.node_capacity * sizeof(TreeNode)) }
+    if t.swap_nodes == null { t.swap_nodes = basics.alloc(t.node_capacity * sizeof(TreeNode)) }
 
     if proxy_count > t.rebuild_capacity {
         old_capacity = t.rebuild_capacity
         new_capacity = proxy_count + proxy_count / 2
-        base.free_bytes(t.leaf_indices, old_capacity * 4)
-        t.leaf_indices = base.alloc(new_capacity * 4)
-        base.free_bytes(t.leaf_nodes, old_capacity * sizeof(TreeNode))
-        t.leaf_nodes = base.alloc(new_capacity * sizeof(TreeNode))
-        base.free_bytes(t.leaf_centers, old_capacity * sizeof(Vec3))
-        t.leaf_centers = base.alloc(new_capacity * sizeof(Vec3))
+        basics.free_bytes(t.leaf_indices, old_capacity * 4)
+        t.leaf_indices = basics.alloc(new_capacity * 4)
+        basics.free_bytes(t.leaf_nodes, old_capacity * sizeof(TreeNode))
+        t.leaf_nodes = basics.alloc(new_capacity * sizeof(TreeNode))
+        basics.free_bytes(t.leaf_centers, old_capacity * sizeof(Vec3))
+        t.leaf_centers = basics.alloc(new_capacity * sizeof(Vec3))
         t.rebuild_capacity = new_capacity
     }
 

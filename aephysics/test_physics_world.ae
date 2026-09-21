@@ -10,7 +10,7 @@
 // twice, with its sleep step as the checksum.
 import std.string
 import aephysics.math
-import aephysics.base
+import aephysics.basics
 import aephysics.hull
 import aephysics.manifold
 import aephysics.mesh
@@ -48,7 +48,7 @@ identity_at(x: float, y: float, z: float) -> Transform { return Transform { p: m
 var g_point: ptr = null   // Vec3[1]: a one-point proxy's point
 
 point_proxy(p: Vec3, radius: float) -> ShapeProxy {
-    if g_point == null { g_point = base.alloc(sizeof(Vec3)) }
+    if g_point == null { g_point = basics.alloc(sizeof(Vec3)) }
     points = g_point as Vec3[]
     points[0] = p
     return distance.shape_proxy(g_point, 1, radius)
@@ -610,7 +610,7 @@ test_determinism() {
 }
 
 main() {
-    before = base.alloc_count()
+    before = basics.alloc_count()
     test_hello_world()
     test_contact_events()
     test_hit_events()
@@ -621,7 +621,7 @@ main() {
     test_world_queries()
     test_determinism()
     // The scratch stays allocated: the worlds, the masses, the contact, sphere, sweep and query buffers, the solvers' dummies.
-    ensure("every other counted allocation was freed (${base.alloc_count() - before})", base.alloc_count() == before + 25)
+    ensure("every other counted allocation was freed (${basics.alloc_count() - before})", basics.alloc_count() == before + 25)
     println("physics_world: ${checks} checks")
     if failures == 0 {
         println("physics_world: all checks passed")

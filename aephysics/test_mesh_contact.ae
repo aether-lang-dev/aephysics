@@ -10,7 +10,7 @@
 
 import std.string
 import aephysics.math
-import aephysics.base
+import aephysics.basics
 import aephysics.hull
 import aephysics.distance
 import aephysics.manifold
@@ -49,7 +49,7 @@ arena() -> *Arena {
     if g_arena_block == null {
         g_arena_block = calloc(1, sizeof(Arena))
         a = g_arena_block as *Arena
-        made = base.arena_create(1 << 20)
+        made = basics.arena_create(1 << 20)
         a.memory = made.memory
         a.capacity = made.capacity
         a.index = 0
@@ -387,14 +387,14 @@ test_capsule_and_field() {
 }
 
 main() {
-    before = base.alloc_count()
+    before = basics.alloc_count()
     test_cull()
     test_box_on_grid()
     test_sphere_seams()
     test_capsule_and_field()
     // The scratch stays allocated: this module's six blocks, mesh's three, the height field's
     // three, triangle_manifold's three; the test's arena is not counted.
-    ensure("every other counted allocation was freed (${base.alloc_count() - before})", base.alloc_count() == before + 15)
+    ensure("every other counted allocation was freed (${basics.alloc_count() - before})", basics.alloc_count() == before + 15)
 
     println("mesh_contact: ${checks} checks")
     if failures == 0 {

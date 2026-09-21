@@ -35,7 +35,7 @@
 // hooks; a world's callbacks are plain function values.
 import std.string
 import aephysics.math
-import aephysics.base
+import aephysics.basics
 import aephysics.dynamic_tree
 import aephysics.hull
 import aephysics.distance
@@ -1115,7 +1115,7 @@ struct World {
 var g_worlds: ptr = null           // World[MAX_WORLDS]
 
 worlds_ready() {
-    if g_worlds == null { g_worlds = base.alloc(MAX_WORLDS * sizeof(World)) }
+    if g_worlds == null { g_worlds = basics.alloc(MAX_WORLDS * sizeof(World)) }
 }
 
 world_at(index: int) -> *World { return (g_worlds + index * sizeof(World)) as *World }
@@ -1132,8 +1132,8 @@ island_sim_at(set: *SolverSet, index: int) -> *IslandSim { return (set.island_si
 
 get_solver_set(w: *World, index: int) -> *SolverSet { return solver_set_at(w, index) }
 get_island(w: *World, id: int) -> *Island { return island_at(w, id) }
-world_island_count(w: *World) -> int { return base.idpool_count(&w.island_id_pool) }
-world_solver_set_count(w: *World) -> int { return base.idpool_count(&w.solver_set_id_pool) }
+world_island_count(w: *World) -> int { return basics.idpool_count(&w.island_id_pool) }
+world_solver_set_count(w: *World) -> int { return basics.idpool_count(&w.solver_set_id_pool) }
 
 // --- worlds --------------------------------------------------------------------------------------------
 
@@ -1155,16 +1155,16 @@ get_world_from_id(id: WorldId) -> *World {
 }
 
 empty_solver_set() -> SolverSet {
-    return SolverSet { body_sims: base.buffer_create(sizeof(BodySim), 0), body_states: base.buffer_create(sizeof(BodyState), 0),
-                       joint_sims: base.buffer_create(sizeof(JointSim), 0), contact_indices: base.ints_create(0),
-                       island_sims: base.buffer_create(sizeof(IslandSim), 0), set_index: NULL_INDEX }
+    return SolverSet { body_sims: basics.buffer_create(sizeof(BodySim), 0), body_states: basics.buffer_create(sizeof(BodyState), 0),
+                       joint_sims: basics.buffer_create(sizeof(JointSim), 0), contact_indices: basics.ints_create(0),
+                       island_sims: basics.buffer_create(sizeof(IslandSim), 0), set_index: NULL_INDEX }
 }
 
 // A new set at a free slot, reserved for the awake set's capacities.
 create_solver_set(w: *World) -> int {
-    set_id = base.idpool_alloc(&w.solver_set_id_pool)
+    set_id = basics.idpool_alloc(&w.solver_set_id_pool)
     if set_id == w.solver_sets.count {
-        index = base.buffer_push(&w.solver_sets)
+        index = basics.buffer_push(&w.solver_sets)
         s = solver_set_at(w, index)
         made = empty_solver_set()
         s.body_sims = made.body_sims
@@ -1180,12 +1180,12 @@ create_solver_set(w: *World) -> int {
 
 destroy_solver_set(w: *World, set_index: int) {
     s = solver_set_at(w, set_index)
-    base.buffer_destroy(&s.body_sims)
-    base.buffer_destroy(&s.body_states)
-    base.buffer_destroy(&s.joint_sims)
-    base.ints_destroy(&s.contact_indices)
-    base.buffer_destroy(&s.island_sims)
-    base.idpool_free(&w.solver_set_id_pool, set_index)
+    basics.buffer_destroy(&s.body_sims)
+    basics.buffer_destroy(&s.body_states)
+    basics.buffer_destroy(&s.joint_sims)
+    basics.ints_destroy(&s.contact_indices)
+    basics.buffer_destroy(&s.island_sims)
+    basics.idpool_free(&w.solver_set_id_pool, set_index)
     s.set_index = NULL_INDEX
 }
 
@@ -1206,49 +1206,49 @@ create_world(def: *WorldDef) -> WorldId {
     w.world_id = index
     w.generation = generation
     w.in_use = true
-    w.stack = base.stack_create(2048)
-    w.arena = base.arena_create(1 << 20)
-    w.contact_state = base.bitset_create(64)
-    w.contact_begin_events = base.buffer_create(sizeof(ContactBeginTouchEvent), 4)
-    w.contact_end_events0 = base.buffer_create(sizeof(ContactEndTouchEvent), 4)
-    w.contact_end_events1 = base.buffer_create(sizeof(ContactEndTouchEvent), 4)
+    w.stack = basics.stack_create(2048)
+    w.arena = basics.arena_create(1 << 20)
+    w.contact_state = basics.bitset_create(64)
+    w.contact_begin_events = basics.buffer_create(sizeof(ContactBeginTouchEvent), 4)
+    w.contact_end_events0 = basics.buffer_create(sizeof(ContactEndTouchEvent), 4)
+    w.contact_end_events1 = basics.buffer_create(sizeof(ContactEndTouchEvent), 4)
     w.end_event_index = 0
     create_graph(&w.constraint_graph, 16)
     broad_phase.create_broad_phase(&w.broad_phase, Capacity { static_shape_count: def.static_shape_count, dynamic_shape_count: def.dynamic_shape_count, contact_count: def.contact_count })
-    w.body_id_pool = base.idpool_create()
-    w.bodies = base.buffer_create(sizeof(Body), math.max_int(16, def.static_body_count + def.dynamic_body_count))
-    w.solver_set_id_pool = base.idpool_create()
-    w.solver_sets = base.buffer_create(sizeof(SolverSet), 8)
+    w.body_id_pool = basics.idpool_create()
+    w.bodies = basics.buffer_create(sizeof(Body), math.max_int(16, def.static_body_count + def.dynamic_body_count))
+    w.solver_set_id_pool = basics.idpool_create()
+    w.solver_sets = basics.buffer_create(sizeof(SolverSet), 8)
     static_set = create_solver_set(w)
     create_solver_set(w)
     awake_set = create_solver_set(w)
-    base.buffer_reserve(&solver_set_at(w, static_set).body_sims, math.max_int(16, def.static_body_count))
-    base.buffer_reserve(&solver_set_at(w, awake_set).body_sims, math.max_int(16, def.dynamic_body_count))
-    base.buffer_reserve(&solver_set_at(w, awake_set).body_states, math.max_int(16, def.dynamic_body_count))
-    w.shape_id_pool = base.idpool_create()
-    w.shapes = base.buffer_create(sizeof(WorldShape), math.max_int(16, def.static_shape_count + def.dynamic_shape_count))
-    w.sensors = base.buffer_create(sizeof(Sensor), 0)
-    w.sensor_begin_events = base.buffer_create(sizeof(SensorBeginTouchEvent), 4)
-    w.sensor_end_events0 = base.buffer_create(sizeof(SensorEndTouchEvent), 4)
-    w.sensor_end_events1 = base.buffer_create(sizeof(SensorEndTouchEvent), 4)
-    w.sensor_event_bits = base.bitset_create(64)
+    basics.buffer_reserve(&solver_set_at(w, static_set).body_sims, math.max_int(16, def.static_body_count))
+    basics.buffer_reserve(&solver_set_at(w, awake_set).body_sims, math.max_int(16, def.dynamic_body_count))
+    basics.buffer_reserve(&solver_set_at(w, awake_set).body_states, math.max_int(16, def.dynamic_body_count))
+    w.shape_id_pool = basics.idpool_create()
+    w.shapes = basics.buffer_create(sizeof(WorldShape), math.max_int(16, def.static_shape_count + def.dynamic_shape_count))
+    w.sensors = basics.buffer_create(sizeof(Sensor), 0)
+    w.sensor_begin_events = basics.buffer_create(sizeof(SensorBeginTouchEvent), 4)
+    w.sensor_end_events0 = basics.buffer_create(sizeof(SensorEndTouchEvent), 4)
+    w.sensor_end_events1 = basics.buffer_create(sizeof(SensorEndTouchEvent), 4)
+    w.sensor_event_bits = basics.bitset_create(64)
     w.has_custom_filter = false
     w.has_pre_solve = false
-    w.body_move_events = base.buffer_create(sizeof(BodyMoveEvent), math.max_int(16, def.dynamic_body_count))
-    w.contact_hit_events = base.buffer_create(sizeof(ContactHitEvent), 4)
-    w.joint_events = base.buffer_create(sizeof(JointEvent), 4)
-    w.joint_state_bits = base.bitset_create(64)
-    w.hit_event_bits = base.bitset_create(64)
-    w.awake_island_bits = base.bitset_create(64)
-    w.sensor_hits = base.buffer_create(sizeof(SensorHit), 4)
+    w.body_move_events = basics.buffer_create(sizeof(BodyMoveEvent), math.max_int(16, def.dynamic_body_count))
+    w.contact_hit_events = basics.buffer_create(sizeof(ContactHitEvent), 4)
+    w.joint_events = basics.buffer_create(sizeof(JointEvent), 4)
+    w.joint_state_bits = basics.bitset_create(64)
+    w.hit_event_bits = basics.bitset_create(64)
+    w.awake_island_bits = basics.bitset_create(64)
+    w.sensor_hits = basics.buffer_create(sizeof(SensorHit), 4)
     w.split_island_candidate = NULL_INDEX
     w.split_sleep_time = 0.0
-    w.contact_id_pool = base.idpool_create()
-    w.contacts = base.buffer_create(sizeof(Contact), math.max_int(16, def.contact_count))
-    w.joint_id_pool = base.idpool_create()
-    w.joints = base.buffer_create(sizeof(Joint), 16)
-    w.island_id_pool = base.idpool_create()
-    w.islands = base.buffer_create(sizeof(Island), math.max_int(16, def.dynamic_body_count))
+    w.contact_id_pool = basics.idpool_create()
+    w.contacts = basics.buffer_create(sizeof(Contact), math.max_int(16, def.contact_count))
+    w.joint_id_pool = basics.idpool_create()
+    w.joints = basics.buffer_create(sizeof(Joint), 16)
+    w.island_id_pool = basics.idpool_create()
+    w.islands = basics.buffer_create(sizeof(Island), math.max_int(16, def.dynamic_body_count))
     w.step_index = 0 as long
     w.split_island_id = NULL_INDEX
     w.gravity = def.gravity
@@ -1279,7 +1279,7 @@ destroy_world(id: WorldId) {
     while i < w.shapes.count {
         s = world_shape_at(w, i)
         if s.id != NULL_INDEX && s.materials != null {
-            base.free_bytes(s.materials, s.material_count * sizeof(SurfaceMaterial))
+            basics.free_bytes(s.materials, s.material_count * sizeof(SurfaceMaterial))
             s.materials = null
         }
         i = i + 1
@@ -1287,23 +1287,23 @@ destroy_world(id: WorldId) {
     i = 0
     while i < w.sensors.count {
         sensor = sensor_at(w, i)
-        base.buffer_destroy(&sensor.hits)
-        base.buffer_destroy(&sensor.overlaps1)
-        base.buffer_destroy(&sensor.overlaps2)
+        basics.buffer_destroy(&sensor.hits)
+        basics.buffer_destroy(&sensor.overlaps1)
+        basics.buffer_destroy(&sensor.overlaps2)
         i = i + 1
     }
-    base.buffer_destroy(&w.sensors)
-    base.buffer_destroy(&w.sensor_begin_events)
-    base.buffer_destroy(&w.sensor_end_events0)
-    base.buffer_destroy(&w.sensor_end_events1)
-    base.bitset_destroy(&w.sensor_event_bits)
-    base.buffer_destroy(&w.body_move_events)
-    base.buffer_destroy(&w.contact_hit_events)
-    base.buffer_destroy(&w.joint_events)
-    base.bitset_destroy(&w.joint_state_bits)
-    base.bitset_destroy(&w.hit_event_bits)
-    base.bitset_destroy(&w.awake_island_bits)
-    base.buffer_destroy(&w.sensor_hits)
+    basics.buffer_destroy(&w.sensors)
+    basics.buffer_destroy(&w.sensor_begin_events)
+    basics.buffer_destroy(&w.sensor_end_events0)
+    basics.buffer_destroy(&w.sensor_end_events1)
+    basics.bitset_destroy(&w.sensor_event_bits)
+    basics.buffer_destroy(&w.body_move_events)
+    basics.buffer_destroy(&w.contact_hit_events)
+    basics.buffer_destroy(&w.joint_events)
+    basics.bitset_destroy(&w.joint_state_bits)
+    basics.bitset_destroy(&w.hit_event_bits)
+    basics.bitset_destroy(&w.awake_island_bits)
+    basics.buffer_destroy(&w.sensor_hits)
     i = 0
     while i < w.contacts.count {
         c = contact_at(w, i)
@@ -1317,9 +1317,9 @@ destroy_world(id: WorldId) {
     while i < w.islands.count {
         island = island_at(w, i)
         if island.island_id != NULL_INDEX {
-            base.ints_destroy(&island.bodies)
-            base.buffer_destroy(&island.contacts)
-            base.buffer_destroy(&island.joints)
+            basics.ints_destroy(&island.bodies)
+            basics.buffer_destroy(&island.contacts)
+            basics.buffer_destroy(&island.joints)
         }
         i = i + 1
     }
@@ -1329,34 +1329,34 @@ destroy_world(id: WorldId) {
         if set.set_index != NULL_INDEX { destroy_solver_set(w, i) }
         i = i + 1
     }
-    base.buffer_destroy(&w.solver_sets)
-    base.idpool_destroy(&w.solver_set_id_pool)
-    base.buffer_destroy(&w.bodies)
-    base.idpool_destroy(&w.body_id_pool)
-    base.buffer_destroy(&w.shapes)
-    base.idpool_destroy(&w.shape_id_pool)
-    base.buffer_destroy(&w.contacts)
-    base.idpool_destroy(&w.contact_id_pool)
-    base.buffer_destroy(&w.joints)
-    base.idpool_destroy(&w.joint_id_pool)
-    base.buffer_destroy(&w.islands)
-    base.idpool_destroy(&w.island_id_pool)
+    basics.buffer_destroy(&w.solver_sets)
+    basics.idpool_destroy(&w.solver_set_id_pool)
+    basics.buffer_destroy(&w.bodies)
+    basics.idpool_destroy(&w.body_id_pool)
+    basics.buffer_destroy(&w.shapes)
+    basics.idpool_destroy(&w.shape_id_pool)
+    basics.buffer_destroy(&w.contacts)
+    basics.idpool_destroy(&w.contact_id_pool)
+    basics.buffer_destroy(&w.joints)
+    basics.idpool_destroy(&w.joint_id_pool)
+    basics.buffer_destroy(&w.islands)
+    basics.idpool_destroy(&w.island_id_pool)
     broad_phase.destroy_broad_phase(&w.broad_phase)
     destroy_graph(&w.constraint_graph)
-    base.arena_destroy(&w.arena)
-    base.bitset_destroy(&w.contact_state)
-    base.buffer_destroy(&w.contact_begin_events)
-    base.buffer_destroy(&w.contact_end_events0)
-    base.buffer_destroy(&w.contact_end_events1)
-    base.stack_destroy(&w.stack)
+    basics.arena_destroy(&w.arena)
+    basics.bitset_destroy(&w.contact_state)
+    basics.buffer_destroy(&w.contact_begin_events)
+    basics.buffer_destroy(&w.contact_end_events0)
+    basics.buffer_destroy(&w.contact_end_events1)
+    basics.stack_destroy(&w.stack)
     generation = w.generation
     memset(w as ptr, 0, sizeof(World))
     w.generation = generation + 1
     w.in_use = false
 }
 
-world_body_count(w: *World) -> int { return base.idpool_count(&w.body_id_pool) }
-world_shape_count(w: *World) -> int { return base.idpool_count(&w.shape_id_pool) }
+world_body_count(w: *World) -> int { return basics.idpool_count(&w.body_id_pool) }
+world_shape_count(w: *World) -> int { return basics.idpool_count(&w.shape_id_pool) }
 world_awake_body_count(w: *World) -> int { return solver_set_at(w, AWAKE_SET).body_sims.count }
 world_set_gravity(w: *World, gravity: Vec3) { w.gravity = gravity }
 world_get_gravity(w: *World) -> Vec3 { return w.gravity }
@@ -1365,9 +1365,9 @@ world_get_gravity(w: *World) -> Vec3 { return w.gravity }
 
 // A new island in a set (the awake one or a sleeping one).
 create_island(w: *World, set_index: int) -> *Island {
-    island_id = base.idpool_alloc(&w.island_id_pool)
+    island_id = basics.idpool_alloc(&w.island_id_pool)
     if island_id == w.islands.count {
-        index = base.buffer_push(&w.islands)
+        index = basics.buffer_push(&w.islands)
         fresh = island_at(w, index)
         fresh.island_id = NULL_INDEX
         fresh.set_index = NULL_INDEX
@@ -1377,11 +1377,11 @@ create_island(w: *World, set_index: int) -> *Island {
     island.set_index = set_index
     island.local_index = set.island_sims.count
     island.island_id = island_id
-    island.bodies = base.ints_create(0)
-    island.contacts = base.buffer_create(sizeof(ContactLink), 0)
-    island.joints = base.buffer_create(sizeof(JointLink), 0)
+    island.bodies = basics.ints_create(0)
+    island.contacts = basics.buffer_create(sizeof(ContactLink), 0)
+    island.joints = basics.buffer_create(sizeof(JointLink), 0)
     island.constraint_remove_count = 0
-    sim_index = base.buffer_push(&set.island_sims)
+    sim_index = basics.buffer_push(&set.island_sims)
     island_sim_at(set, sim_index).island_id = island_id
     return island
 }
@@ -1397,14 +1397,14 @@ destroy_island(w: *World, island_id: int) {
     island_sim_at(set, local_index).island_id = moved_island_id
     island_at(w, moved_island_id).local_index = local_index
     set.island_sims.count = set.island_sims.count - 1
-    base.ints_destroy(&island.bodies)
-    base.buffer_destroy(&island.contacts)
-    base.buffer_destroy(&island.joints)
+    basics.ints_destroy(&island.bodies)
+    basics.buffer_destroy(&island.contacts)
+    basics.buffer_destroy(&island.joints)
     island.constraint_remove_count = 0
     island.local_index = NULL_INDEX
     island.island_id = NULL_INDEX
     island.set_index = NULL_INDEX
-    base.idpool_free(&w.island_id_pool, island_id)
+    basics.idpool_free(&w.island_id_pool, island_id)
 }
 
 // The island's bodies point back at it, and its set holds it.
@@ -1416,7 +1416,7 @@ validate_island(w: *World, island_id: int) -> bool {
     if island_sim_at(set, island.local_index).island_id != island_id { return false }
     i = 0
     while i < island.bodies.count {
-        body_id = base.ints_get(&island.bodies, i)
+        body_id = basics.ints_get(&island.bodies, i)
         body = body_at(w, body_id)
         if body.island_id != island_id || body.island_index != i { return false }
         if body.set_index != island.set_index { return false }
@@ -1427,7 +1427,7 @@ validate_island(w: *World, island_id: int) -> bool {
 
 create_island_for_body(w: *World, set_index: int, body: *Body) {
     island = create_island(w, set_index)
-    base.ints_push(&island.bodies, body.id)
+    basics.ints_push(&island.bodies, body.id)
     body.island_id = island.island_id
     body.island_index = 0
 }
@@ -1437,8 +1437,8 @@ remove_body_from_island(w: *World, body: *Body) {
     island_id = body.island_id
     island = island_at(w, island_id)
     local_index = body.island_index
-    moved_body_id = base.ints_get(&island.bodies, island.bodies.count - 1)
-    base.ints_set(&island.bodies, local_index, moved_body_id)
+    moved_body_id = basics.ints_get(&island.bodies, island.bodies.count - 1)
+    basics.ints_set(&island.bodies, local_index, moved_body_id)
     body_at(w, moved_body_id).island_index = local_index
     island.bodies.count = island.bodies.count - 1
     if island.bodies.count == 0 { destroy_island(w, island.island_id) }
@@ -1494,7 +1494,7 @@ create_body(world_id: WorldId, def: *BodyDef) -> BodyId {
     else if is_awake { set_id = AWAKE_SET }
     else { set_id = create_solver_set(w) }
 
-    body_id = base.idpool_alloc(&w.body_id_pool)
+    body_id = basics.idpool_alloc(&w.body_id_pool)
     lock_flags = 0
     if def.motion_locks.linear_x { lock_flags = lock_flags | LOCK_LINEAR_X }
     if def.motion_locks.linear_y { lock_flags = lock_flags | LOCK_LINEAR_Y }
@@ -1504,7 +1504,7 @@ create_body(world_id: WorldId, def: *BodyDef) -> BodyId {
     if def.motion_locks.angular_z { lock_flags = lock_flags | LOCK_ANGULAR_Z }
 
     set = solver_set_at(w, set_id)
-    sim_index = base.buffer_push(&set.body_sims)
+    sim_index = basics.buffer_push(&set.body_sims)
     sim = body_sim_at(set, sim_index)
     sim.transform = Transform { p: def.position, q: def.rotation }
     sim.center = def.position
@@ -1530,7 +1530,7 @@ create_body(world_id: WorldId, def: *BodyDef) -> BodyId {
     if def.enable_contact_recycling { flags = flags | ENABLE_CONTACT_RECYCLING }
     sim.flags = flags
     if set_id == AWAKE_SET {
-        state_index = base.buffer_push(&set.body_states)
+        state_index = basics.buffer_push(&set.body_states)
         state = body_state_at(set, state_index)
         state.linear_velocity = def.linear_velocity
         state.angular_velocity = def.angular_velocity
@@ -1540,7 +1540,7 @@ create_body(world_id: WorldId, def: *BodyDef) -> BodyId {
     }
 
     if body_id == w.bodies.count {
-        index = base.buffer_push(&w.bodies)
+        index = basics.buffer_push(&w.bodies)
         fresh = body_at(w, index)
         fresh.generation = 0
     }
@@ -1609,27 +1609,27 @@ destroy_body(id: BodyId) {
             s.proxy_key = NULL_INDEX
         }
         if s.materials != null {
-            base.free_bytes(s.materials, s.material_count * sizeof(SurfaceMaterial))
+            basics.free_bytes(s.materials, s.material_count * sizeof(SurfaceMaterial))
             s.materials = null
             s.material_count = 0
         }
-        base.idpool_free(&w.shape_id_pool, shape_id)
+        basics.idpool_free(&w.shape_id_pool, shape_id)
         s.id = NULL_INDEX
         shape_id = s.next_shape_id
     }
     remove_body_from_island(w, body)
     set = solver_set_at(w, body.set_index)
-    moved_index = base.buffer_remove_swap(&set.body_sims, body.local_index)
+    moved_index = basics.buffer_remove_swap(&set.body_sims, body.local_index)
     if moved_index != NULL_INDEX && moved_index != body.local_index {
         moved_sim = body_sim_at(set, body.local_index)
         body_at(w, moved_sim.body_id).local_index = body.local_index
     }
     if body.set_index == AWAKE_SET {
-        base.buffer_remove_swap(&set.body_states, body.local_index)
+        basics.buffer_remove_swap(&set.body_states, body.local_index)
     } else if set.set_index >= FIRST_SLEEPING_SET && set.body_sims.count == 0 {
         destroy_solver_set(w, set.set_index)
     }
-    base.idpool_free(&w.body_id_pool, body.id)
+    basics.idpool_free(&w.body_id_pool, body.id)
     body.set_index = NULL_INDEX
     body.local_index = NULL_INDEX
     body.id = NULL_INDEX
@@ -1688,9 +1688,9 @@ create_shape(body_id: BodyId, def: *ShapeDef, geometry: Shape) -> ShapeId {
     if body.kind != BODY_STATIC && (kind == KIND_COMPOUND || kind == KIND_HEIGHT_FIELD) { return null_shape_id() }
     if kind == KIND_COMPOUND && def.is_sensor { return null_shape_id() }
     w.locked = true
-    shape_id = base.idpool_alloc(&w.shape_id_pool)
+    shape_id = basics.idpool_alloc(&w.shape_id_pool)
     if shape_id == w.shapes.count {
-        index = base.buffer_push(&w.shapes)
+        index = basics.buffer_push(&w.shapes)
         fresh = world_shape_at(w, index)
         fresh.generation = 0
     }
@@ -1722,12 +1722,12 @@ create_shape(body_id: BodyId, def: *ShapeDef, geometry: Shape) -> ShapeId {
         // A copy of the compound's materials, so every shape frees its array the same way.
         count = s.geometry.compound.material_count
         s.material_count = count
-        s.materials = base.alloc(count * sizeof(SurfaceMaterial))
+        s.materials = basics.alloc(count * sizeof(SurfaceMaterial))
         memcpy(s.materials, (s.geometry.compound as ptr) + s.geometry.compound.material_offset, count * sizeof(SurfaceMaterial))
         s.material = compound.get_compound_material(s.geometry.compound, 0)
     } else if def.material_count > 1 && def.materials != null {
         s.material_count = def.material_count
-        s.materials = base.alloc(def.material_count * sizeof(SurfaceMaterial))
+        s.materials = basics.alloc(def.material_count * sizeof(SurfaceMaterial))
         memcpy(s.materials, def.materials, def.material_count * sizeof(SurfaceMaterial))
         given = def.materials as SurfaceMaterial[]
         s.material = given[0]
@@ -1808,11 +1808,11 @@ destroy_shape(id: ShapeId, update_body_mass: bool) {
         s.proxy_key = NULL_INDEX
     }
     if s.materials != null {
-        base.free_bytes(s.materials, s.material_count * sizeof(SurfaceMaterial))
+        basics.free_bytes(s.materials, s.material_count * sizeof(SurfaceMaterial))
         s.materials = null
         s.material_count = 0
     }
-    base.idpool_free(&w.shape_id_pool, s.id)
+    basics.idpool_free(&w.shape_id_pool, s.id)
     s.id = NULL_INDEX
     if update_body_mass { update_body_mass_data(w, body) }
     w.locked = false
@@ -1895,9 +1895,9 @@ update_body_mass_data(w: *World, body: *Body) {
 
     shape_count = body.shape_count
     if shape_count > g_mass_capacity {
-        base.free_bytes(g_masses, g_mass_capacity * sizeof(MassData))
+        basics.free_bytes(g_masses, g_mass_capacity * sizeof(MassData))
         g_mass_capacity = math.max_int(shape_count, 8)
-        g_masses = base.alloc(g_mass_capacity * sizeof(MassData))
+        g_masses = basics.alloc(g_mass_capacity * sizeof(MassData))
     }
     masses = g_masses as MassData[]
     local_center = math.vec3_zero()
@@ -2355,7 +2355,7 @@ validate_solver_sets(w: *World) -> bool {
         }
         i = i + 1
     }
-    if body_count != base.idpool_count(&w.body_id_pool) { return false }
+    if body_count != basics.idpool_count(&w.body_id_pool) { return false }
     sim_count = 0
     i = 0
     while i < w.solver_sets.count {
@@ -2393,7 +2393,7 @@ joint_link_at(island: *Island, index: int) -> *JointLink { return (island.joints
 // A manifold's point, by index (the points are four named fields).
 manifold_point_at(m: *Manifold, index: int) -> *ManifoldPoint { return ((m as ptr) + index * sizeof(ManifoldPoint)) as *ManifoldPoint }
 
-world_contact_count(w: *World) -> int { return base.idpool_count(&w.contact_id_pool) }
+world_contact_count(w: *World) -> int { return basics.idpool_count(&w.contact_id_pool) }
 get_contact(w: *World, contact_id: int) -> *Contact { return contact_at(w, contact_id) }
 
 contact_is_valid(id: ContactId) -> bool {
@@ -2428,18 +2428,18 @@ world_contact_end_event(w: *World, index: int) -> ContactEndTouchEvent {
 // --- the constraint graph ------------------------------------------------------------------------------
 
 create_graph(g: *ConstraintGraph, body_capacity: int) {
-    g.colors = base.alloc(GRAPH_COLOR_COUNT * sizeof(GraphColor))
+    g.colors = basics.alloc(GRAPH_COLOR_COUNT * sizeof(GraphColor))
     capacity = math.max_int(body_capacity, 8)
     i = 0
     while i < GRAPH_COLOR_COUNT {
         color = (g.colors + i * sizeof(GraphColor)) as *GraphColor
         if i < OVERFLOW_INDEX {
-            color.body_set = base.bitset_create(capacity)
-            base.bitset_set_count_and_clear(&color.body_set, capacity)
+            color.body_set = basics.bitset_create(capacity)
+            basics.bitset_set_count_and_clear(&color.body_set, capacity)
         }
-        color.joint_sims = base.buffer_create(sizeof(JointSim), 0)
-        color.convex_contacts = base.ints_create(0)
-        color.contacts = base.buffer_create(sizeof(ContactSpec), 0)
+        color.joint_sims = basics.buffer_create(sizeof(JointSim), 0)
+        color.convex_contacts = basics.ints_create(0)
+        color.contacts = basics.buffer_create(sizeof(ContactSpec), 0)
         i = i + 1
     }
 }
@@ -2448,13 +2448,13 @@ destroy_graph(g: *ConstraintGraph) {
     i = 0
     while i < GRAPH_COLOR_COUNT {
         color = (g.colors + i * sizeof(GraphColor)) as *GraphColor
-        if i < OVERFLOW_INDEX { base.bitset_destroy(&color.body_set) }
-        base.buffer_destroy(&color.joint_sims)
-        base.ints_destroy(&color.convex_contacts)
-        base.buffer_destroy(&color.contacts)
+        if i < OVERFLOW_INDEX { basics.bitset_destroy(&color.body_set) }
+        basics.buffer_destroy(&color.joint_sims)
+        basics.ints_destroy(&color.convex_contacts)
+        basics.buffer_destroy(&color.contacts)
         i = i + 1
     }
-    base.free_bytes(g.colors, GRAPH_COLOR_COUNT * sizeof(GraphColor))
+    basics.free_bytes(g.colors, GRAPH_COLOR_COUNT * sizeof(GraphColor))
     g.colors = null
 }
 
@@ -2466,9 +2466,9 @@ assign_color(g: *ConstraintGraph, body_id_a: int, body_id_b: int, kind_a: int, k
         i = 0
         while i < DYNAMIC_COLOR_COUNT {
             color = (g.colors + i * sizeof(GraphColor)) as *GraphColor
-            if base.bitset_get(&color.body_set, body_id_a) == false && base.bitset_get(&color.body_set, body_id_b) == false {
-                base.bitset_set_grow(&color.body_set, body_id_a)
-                base.bitset_set_grow(&color.body_set, body_id_b)
+            if basics.bitset_get(&color.body_set, body_id_a) == false && basics.bitset_get(&color.body_set, body_id_b) == false {
+                basics.bitset_set_grow(&color.body_set, body_id_a)
+                basics.bitset_set_grow(&color.body_set, body_id_b)
                 return i
             }
             i = i + 1
@@ -2477,8 +2477,8 @@ assign_color(g: *ConstraintGraph, body_id_a: int, body_id_b: int, kind_a: int, k
         i = OVERFLOW_INDEX - 1
         while i >= 1 {
             color = (g.colors + i * sizeof(GraphColor)) as *GraphColor
-            if base.bitset_get(&color.body_set, body_id_a) == false {
-                base.bitset_set_grow(&color.body_set, body_id_a)
+            if basics.bitset_get(&color.body_set, body_id_a) == false {
+                basics.bitset_set_grow(&color.body_set, body_id_a)
                 return i
             }
             i = i - 1
@@ -2487,8 +2487,8 @@ assign_color(g: *ConstraintGraph, body_id_a: int, body_id_b: int, kind_a: int, k
         i = OVERFLOW_INDEX - 1
         while i >= 1 {
             color = (g.colors + i * sizeof(GraphColor)) as *GraphColor
-            if base.bitset_get(&color.body_set, body_id_b) == false {
-                base.bitset_set_grow(&color.body_set, body_id_b)
+            if basics.bitset_get(&color.body_set, body_id_b) == false {
+                basics.bitset_set_grow(&color.body_set, body_id_b)
                 return i
             }
             i = i - 1
@@ -2512,32 +2512,32 @@ add_contact_to_graph(w: *World, c: *Contact) {
     if body_b.kind == BODY_STATIC { c.body_sim_index_b = NULL_INDEX }
     if is_scalar {
         c.local_index = color.contacts.count
-        index = base.buffer_push(&color.contacts)
+        index = basics.buffer_push(&color.contacts)
         spec = contact_spec_at(color, index)
         spec.contact_id = c.contact_id
         spec.manifold_start = 0
         spec.manifold_count = c.manifold_count
     } else {
         c.local_index = color.convex_contacts.count
-        base.ints_push(&color.convex_contacts, c.contact_id)
+        basics.ints_push(&color.convex_contacts, c.contact_id)
     }
 }
 
 remove_contact_from_graph(w: *World, body_id_a: int, body_id_b: int, color_index: int, local_index: int, mesh_contact: bool) {
     color = graph_color(w, color_index)
     if color_index != OVERFLOW_INDEX {
-        base.bitset_clear(&color.body_set, body_id_a)
-        base.bitset_clear(&color.body_set, body_id_b)
+        basics.bitset_clear(&color.body_set, body_id_a)
+        basics.bitset_clear(&color.body_set, body_id_b)
     }
     if mesh_contact || color_index == OVERFLOW_INDEX {
-        moved = base.buffer_remove_swap(&color.contacts, local_index)
+        moved = basics.buffer_remove_swap(&color.contacts, local_index)
         if moved != NULL_INDEX && moved != local_index {
             contact_at(w, contact_spec_at(color, local_index).contact_id).local_index = local_index
         }
     } else {
-        moved = base.ints_remove_swap(&color.convex_contacts, local_index)
+        moved = basics.ints_remove_swap(&color.convex_contacts, local_index)
         if moved != NULL_INDEX && moved != local_index {
-            contact_at(w, base.ints_get(&color.convex_contacts, local_index)).local_index = local_index
+            contact_at(w, basics.ints_get(&color.convex_contacts, local_index)).local_index = local_index
         }
     }
 }
@@ -2575,9 +2575,9 @@ create_contact(w: *World, shape_a: *WorldShape, shape_b: *WorldShape, child_inde
     set_index = DISABLED_SET
     if body_a.set_index == AWAKE_SET || body_b.set_index == AWAKE_SET { set_index = AWAKE_SET }
     set = solver_set_at(w, set_index)
-    contact_id = base.idpool_alloc(&w.contact_id_pool)
+    contact_id = basics.idpool_alloc(&w.contact_id_pool)
     if contact_id == w.contacts.count {
-        index = base.buffer_push(&w.contacts)
+        index = basics.buffer_push(&w.contacts)
         contact_at(w, index).generation = 0
     }
     c = contact_at(w, contact_id)
@@ -2623,8 +2623,8 @@ create_contact(w: *World, shape_a: *WorldShape, shape_b: *WorldShape, child_inde
     if body_b.head_contact_key != NULL_INDEX { set_contact_edge_prev(w, body_b.head_contact_key, key_b) }
     body_b.head_contact_key = key_b
     body_b.contact_count = body_b.contact_count + 1
-    broad_phase.add_pair(&w.broad_phase, base.shape_pair_key(shape_a.id, shape_b.id, child_index))
-    base.ints_push(&set.contact_indices, contact_id)
+    broad_phase.add_pair(&w.broad_phase, basics.shape_pair_key(shape_a.id, shape_b.id, child_index))
+    basics.ints_push(&set.contact_indices, contact_id)
     // The rolling resistance, assumed not to change.
     radius_a = 0.0
     if kind_a == KIND_SPHERE { radius_a = shape_a.geometry.sphere.radius }
@@ -2653,7 +2653,7 @@ set_contact_edge_next(w: *World, key: int, next: int) {
 }
 
 free_manifolds(c: *Contact) {
-    if c.manifold_count > 0 { base.free_bytes(c.manifolds, c.manifold_count * sizeof(Manifold)) }
+    if c.manifold_count > 0 { basics.free_bytes(c.manifolds, c.manifold_count * sizeof(Manifold)) }
     c.manifolds = null
     c.manifold_count = 0
 }
@@ -2661,7 +2661,7 @@ free_manifolds(c: *Contact) {
 allocate_manifolds(c: *Contact, count: int) {
     free_manifolds(c)
     if count > 0 {
-        c.manifolds = base.alloc(count * sizeof(Manifold))
+        c.manifolds = basics.alloc(count * sizeof(Manifold))
         c.manifold_count = count
     }
 }
@@ -2669,7 +2669,7 @@ allocate_manifolds(c: *Contact, count: int) {
 // The contact out of the pair set, both bodies' lists, its island, its
 // colour or its set's indices; its bodies woken when asked and it was touching.
 destroy_contact(w: *World, c: *Contact, wake_bodies: bool) {
-    broad_phase.remove_pair(&w.broad_phase, base.shape_pair_key(c.shape_id_a, c.shape_id_b, c.child_index))
+    broad_phase.remove_pair(&w.broad_phase, basics.shape_pair_key(c.shape_id_a, c.shape_id_b, c.child_index))
     free_manifolds(c)
     body_id_a = c.edge_a.body_id
     body_id_b = c.edge_b.body_id
@@ -2698,16 +2698,16 @@ destroy_contact(w: *World, c: *Contact, wake_bodies: bool) {
     } else {
         set = solver_set_at(w, c.set_index)
         local_index = c.local_index
-        moved = base.ints_remove_swap(&set.contact_indices, local_index)
+        moved = basics.ints_remove_swap(&set.contact_indices, local_index)
         if moved != NULL_INDEX && moved != local_index {
-            contact_at(w, base.ints_get(&set.contact_indices, local_index)).local_index = local_index
+            contact_at(w, basics.ints_get(&set.contact_indices, local_index)).local_index = local_index
         }
     }
     c.contact_id = NULL_INDEX
     c.set_index = NULL_INDEX
     c.color_index = NULL_INDEX
     c.local_index = NULL_INDEX
-    base.idpool_free(&w.contact_id_pool, contact_id)
+    basics.idpool_free(&w.contact_id_pool, contact_id)
     if wake_bodies && touching {
         wake_body(w, body_a)
         wake_body(w, body_b)
@@ -2718,7 +2718,7 @@ push_end_event(w: *World, c: *Contact) {
     shape_a = world_shape_at(w, c.shape_id_a)
     shape_b = world_shape_at(w, c.shape_id_b)
     events = end_events(w)
-    index = base.buffer_push(events)
+    index = basics.buffer_push(events)
     target = (events.data + index * sizeof(ContactEndTouchEvent)) as *ContactEndTouchEvent
     target.shape_id_a = make_shape_id(w, shape_a)
     target.shape_id_b = make_shape_id(w, shape_b)
@@ -2728,7 +2728,7 @@ push_end_event(w: *World, c: *Contact) {
 push_begin_event(w: *World, c: *Contact) {
     shape_a = world_shape_at(w, c.shape_id_a)
     shape_b = world_shape_at(w, c.shape_id_b)
-    index = base.buffer_push(&w.contact_begin_events)
+    index = basics.buffer_push(&w.contact_begin_events)
     target = (w.contact_begin_events.data + index * sizeof(ContactBeginTouchEvent)) as *ContactBeginTouchEvent
     target.shape_id_a = make_shape_id(w, shape_a)
     target.shape_id_b = make_shape_id(w, shape_b)
@@ -2771,8 +2771,8 @@ var g_old_points: ptr = null     // ManifoldPoint[MAX_MANIFOLD_POINTS]
 
 contact_scratch_ready() {
     if g_local_points == null {
-        g_local_points = base.alloc(MAX_MANIFOLD_POINTS * sizeof(LocalManifoldPoint))
-        g_old_points = base.alloc(MAX_MANIFOLD_POINTS * sizeof(ManifoldPoint))
+        g_local_points = basics.alloc(MAX_MANIFOLD_POINTS * sizeof(LocalManifoldPoint))
+        g_old_points = basics.alloc(MAX_MANIFOLD_POINTS * sizeof(ManifoldPoint))
     }
 }
 
@@ -2928,7 +2928,7 @@ update_mesh_contact(w: *World, c: *Contact, mesh_geometry: *Shape, mesh_shape: *
     old_count = c.manifold_count
     old_block = null
     if old_count > 0 {
-        old_block = base.arena_bump(&w.arena, old_count * sizeof(Manifold))
+        old_block = basics.arena_bump(&w.arena, old_count * sizeof(Manifold))
         memcpy(old_block, c.manifolds, old_count * sizeof(Manifold))
     }
     if old_count != cluster_count {
@@ -2939,7 +2939,7 @@ update_mesh_contact(w: *World, c: *Contact, mesh_geometry: *Shape, mesh_shape: *
     consumed_block = null
     consumed = null as int[]
     if old_count > 0 {
-        consumed_block = base.arena_bump(&w.arena, old_count * 4)
+        consumed_block = basics.arena_bump(&w.arena, old_count * 4)
         memset(consumed_block, 0, old_count * 4)
         consumed = consumed_block as int[]
     }
@@ -3076,8 +3076,8 @@ var g_material_map: ptr = null     // int[4]
 update_contact(w: *World, c: *Contact, shape_a: *WorldShape, local_center_a: Vec3, xf_a: Transform, shape_b: *WorldShape,
                local_center_b: Vec3, xf_b: Transform, is_fast: bool) -> bool {
     if g_child_geometry == null {
-        g_child_geometry = base.alloc(sizeof(Shape))
-        g_material_map = base.alloc(4 * 4)
+        g_child_geometry = basics.alloc(sizeof(Shape))
+        g_material_map = basics.alloc(4 * 4)
     }
     touching = false
     kind_a = shape_a.geometry.kind
@@ -3198,11 +3198,11 @@ merge_islands(w: *World, island_id_a: int, island_id_b: int) -> int {
     big_id = big.island_id
     i = 0
     while i < small.bodies.count {
-        body_id = base.ints_get(&small.bodies, i)
+        body_id = basics.ints_get(&small.bodies, i)
         body = body_at(w, body_id)
         body.island_id = big_id
         body.island_index = big.bodies.count
-        base.ints_push(&big.bodies, body_id)
+        basics.ints_push(&big.bodies, body_id)
         i = i + 1
     }
     i = 0
@@ -3211,7 +3211,7 @@ merge_islands(w: *World, island_id_a: int, island_id_b: int) -> int {
         c = contact_at(w, link.contact_id)
         c.island_id = big_id
         c.island_index = big.contacts.count
-        index = base.buffer_push(&big.contacts)
+        index = basics.buffer_push(&big.contacts)
         target = contact_link_at(big, index)
         target.contact_id = link.contact_id
         target.body_id_a = link.body_id_a
@@ -3224,7 +3224,7 @@ merge_islands(w: *World, island_id_a: int, island_id_b: int) -> int {
         j = joint_at(w, jlink.joint_id)
         j.island_id = big_id
         j.island_index = big.joints.count
-        index = base.buffer_push(&big.joints)
+        index = basics.buffer_push(&big.joints)
         jtarget = joint_link_at(big, index)
         jtarget.joint_id = jlink.joint_id
         jtarget.body_id_a = jlink.body_id_a
@@ -3240,7 +3240,7 @@ add_contact_to_island(w: *World, island_id: int, c: *Contact) {
     island = island_at(w, island_id)
     c.island_id = island_id
     c.island_index = island.contacts.count
-    index = base.buffer_push(&island.contacts)
+    index = basics.buffer_push(&island.contacts)
     link = contact_link_at(island, index)
     link.contact_id = c.contact_id
     link.body_id_a = c.edge_a.body_id
@@ -3263,7 +3263,7 @@ unlink_contact(w: *World, c: *Contact) {
     island_id = c.island_id
     island = island_at(w, island_id)
     remove_index = c.island_index
-    moved = base.buffer_remove_swap(&island.contacts, remove_index)
+    moved = basics.buffer_remove_swap(&island.contacts, remove_index)
     if moved != NULL_INDEX && moved != remove_index {
         contact_at(w, contact_link_at(island, remove_index).contact_id).island_index = remove_index
     }
@@ -3276,7 +3276,7 @@ add_joint_to_island(w: *World, island_id: int, j: *Joint) {
     island = island_at(w, island_id)
     j.island_id = island_id
     j.island_index = island.joints.count
-    index = base.buffer_push(&island.joints)
+    index = basics.buffer_push(&island.joints)
     link = joint_link_at(island, index)
     link.joint_id = j.joint_id
     link.body_id_a = j.edge_a.body_id
@@ -3297,7 +3297,7 @@ unlink_joint(w: *World, j: *Joint) {
     island_id = j.island_id
     island = island_at(w, island_id)
     remove_index = j.island_index
-    moved = base.buffer_remove_swap(&island.joints, remove_index)
+    moved = basics.buffer_remove_swap(&island.joints, remove_index)
     if moved != NULL_INDEX && moved != remove_index {
         joint_at(w, joint_link_at(island, remove_index).joint_id).island_index = remove_index
     }
@@ -3339,8 +3339,8 @@ split_island(w: *World, base_id: int) -> int {
     base = island_at(w, base_id)
     body_count = base.bodies.count
     if body_count == 0 { return 1 }
-    parents_block = base.stack_alloc(&w.stack, body_count * 4)
-    ranks_block = base.stack_alloc(&w.stack, body_count * 4)
+    parents_block = basics.stack_alloc(&w.stack, body_count * 4)
+    ranks_block = basics.stack_alloc(&w.stack, body_count * 4)
     parents = parents_block as int[]
     ranks = ranks_block as int[]
     i = 0
@@ -3365,7 +3365,7 @@ split_island(w: *World, base_id: int) -> int {
         if index_a != NULL_INDEX && index_b != NULL_INDEX { island_union(parents, ranks, index_a, index_b) }
         i = i + 1
     }
-    base.stack_free(&w.stack, ranks_block)
+    basics.stack_free(&w.stack, ranks_block)
     component_count = 0
     i = 0
     while i < body_count {
@@ -3375,7 +3375,7 @@ split_island(w: *World, base_id: int) -> int {
     }
     if component_count == 1 {
         base.constraint_remove_count = 0
-        base.stack_free(&w.stack, parents_block)
+        basics.stack_free(&w.stack, parents_block)
         return 1
     }
     // The base island's arrays are detached and freed at the end; the
@@ -3383,17 +3383,17 @@ split_island(w: *World, base_id: int) -> int {
     base_bodies = base.bodies
     base_contacts = base.contacts
     base_joints = base.joints
-    base.bodies = base.ints_create(0)
-    base.contacts = base.buffer_create(sizeof(ContactLink), 0)
-    base.joints = base.buffer_create(sizeof(JointLink), 0)
-    root_map_block = base.stack_alloc(&w.stack, body_count * 4)
+    base.bodies = basics.ints_create(0)
+    base.contacts = basics.buffer_create(sizeof(ContactLink), 0)
+    base.joints = basics.buffer_create(sizeof(JointLink), 0)
+    root_map_block = basics.stack_alloc(&w.stack, body_count * 4)
     root_map = root_map_block as int[]
     i = 0
     while i < body_count {
         root_map[i] = NULL_INDEX
         i = i + 1
     }
-    island_ids_block = base.stack_alloc(&w.stack, component_count * 4)
+    island_ids_block = basics.stack_alloc(&w.stack, component_count * 4)
     island_ids = island_ids_block as int[]
     island_count = 0
     i = 0
@@ -3416,7 +3416,7 @@ split_island(w: *World, base_id: int) -> int {
         fresh = island_at(w, new_island_id)
         body.island_id = new_island_id
         body.island_index = fresh.bodies.count
-        base.ints_push(&fresh.bodies, body_id)
+        basics.ints_push(&fresh.bodies, body_id)
         i = i + 1
     }
     i = 0
@@ -3428,7 +3428,7 @@ split_island(w: *World, base_id: int) -> int {
         target = island_at(w, target_id)
         c.island_id = target_id
         c.island_index = target.contacts.count
-        index = base.buffer_push(&target.contacts)
+        index = basics.buffer_push(&target.contacts)
         moved = contact_link_at(target, index)
         moved.contact_id = link.contact_id
         moved.body_id_a = link.body_id_a
@@ -3444,7 +3444,7 @@ split_island(w: *World, base_id: int) -> int {
         target = island_at(w, target_id)
         j.island_id = target_id
         j.island_index = target.joints.count
-        index = base.buffer_push(&target.joints)
+        index = basics.buffer_push(&target.joints)
         jmoved = joint_link_at(target, index)
         jmoved.joint_id = jlink.joint_id
         jmoved.body_id_a = jlink.body_id_a
@@ -3452,12 +3452,12 @@ split_island(w: *World, base_id: int) -> int {
         i = i + 1
     }
     destroy_island(w, base_id)
-    base.ints_destroy(&base_bodies)
-    base.buffer_destroy(&base_contacts)
-    base.buffer_destroy(&base_joints)
-    base.stack_free(&w.stack, island_ids_block)
-    base.stack_free(&w.stack, root_map_block)
-    base.stack_free(&w.stack, parents_block)
+    basics.ints_destroy(&base_bodies)
+    basics.buffer_destroy(&base_contacts)
+    basics.buffer_destroy(&base_joints)
+    basics.stack_free(&w.stack, island_ids_block)
+    basics.stack_free(&w.stack, root_map_block)
+    basics.stack_free(&w.stack, parents_block)
     return island_count
 }
 
@@ -3475,9 +3475,9 @@ wake_solver_set(w: *World, set_index: int) {
     while i < set.body_sims.count {
         sim = body_sim_at(set, i)
         body = body_at(w, sim.body_id)
-        target = base.buffer_push(&awake.body_sims)
+        target = basics.buffer_push(&awake.body_sims)
         memcpy(awake.body_sims.data + target * sizeof(BodySim), sim as ptr, sizeof(BodySim))
-        state_index = base.buffer_push(&awake.body_states)
+        state_index = basics.buffer_push(&awake.body_states)
         state = body_state_at(awake, state_index)
         state.linear_velocity = math.vec3_zero()
         state.angular_velocity = math.vec3_zero()
@@ -3496,10 +3496,10 @@ wake_solver_set(w: *World, set_index: int) {
                 local_index = c.local_index
                 c.set_index = AWAKE_SET
                 c.local_index = awake.contact_indices.count
-                base.ints_push(&awake.contact_indices, c.contact_id)
-                moved = base.ints_remove_swap(&disabled.contact_indices, local_index)
+                basics.ints_push(&awake.contact_indices, c.contact_id)
+                moved = basics.ints_remove_swap(&disabled.contact_indices, local_index)
                 if moved != NULL_INDEX && moved != local_index {
-                    contact_at(w, base.ints_get(&disabled.contact_indices, local_index)).local_index = local_index
+                    contact_at(w, basics.ints_get(&disabled.contact_indices, local_index)).local_index = local_index
                 }
             }
         }
@@ -3507,7 +3507,7 @@ wake_solver_set(w: *World, set_index: int) {
     }
     i = 0
     while i < set.contact_indices.count {
-        c = contact_at(w, base.ints_get(&set.contact_indices, i))
+        c = contact_at(w, basics.ints_get(&set.contact_indices, i))
         add_contact_to_graph(w, c)
         c.set_index = AWAKE_SET
         i = i + 1
@@ -3526,7 +3526,7 @@ wake_solver_set(w: *World, set_index: int) {
         island = island_at(w, island_id)
         island.set_index = AWAKE_SET
         island.local_index = awake.island_sims.count
-        target = base.buffer_push(&awake.island_sims)
+        target = basics.buffer_push(&awake.island_sims)
         island_sim_at(awake, target).island_id = island_id
         i = i + 1
     }
@@ -3539,7 +3539,7 @@ add_joint_to_graph(w: *World, sim: *JointSim, j: *Joint) {
     body_b = body_at(w, j.edge_b.body_id)
     color_index = assign_color(&w.constraint_graph, body_a.id, body_b.id, body_a.kind, body_b.kind)
     color = graph_color(w, color_index)
-    index = base.buffer_push(&color.joint_sims)
+    index = basics.buffer_push(&color.joint_sims)
     memcpy(color.joint_sims.data + index * sizeof(JointSim), sim as ptr, sizeof(JointSim))
     j.color_index = color_index
     j.local_index = index
@@ -3548,10 +3548,10 @@ add_joint_to_graph(w: *World, sim: *JointSim, j: *Joint) {
 remove_joint_from_graph(w: *World, body_id_a: int, body_id_b: int, color_index: int, local_index: int) {
     color = graph_color(w, color_index)
     if color_index != OVERFLOW_INDEX {
-        base.bitset_clear(&color.body_set, body_id_a)
-        base.bitset_clear(&color.body_set, body_id_b)
+        basics.bitset_clear(&color.body_set, body_id_a)
+        basics.bitset_clear(&color.body_set, body_id_b)
     }
-    moved = base.buffer_remove_swap(&color.joint_sims, local_index)
+    moved = basics.buffer_remove_swap(&color.joint_sims, local_index)
     if moved != NULL_INDEX && moved != local_index {
         joint_at(w, joint_sim_at(&color.joint_sims, local_index).joint_id).local_index = local_index
     }
@@ -3570,19 +3570,19 @@ try_sleep_island(w: *World, island_id: int) -> bool {
     sleep_set = solver_set_at(w, sleep_set_id)
     awake = solver_set_at(w, AWAKE_SET)
     disabled = solver_set_at(w, DISABLED_SET)
-    base.buffer_reserve(&sleep_set.body_sims, island.bodies.count)
+    basics.buffer_reserve(&sleep_set.body_sims, island.bodies.count)
     i = 0
     while i < island.bodies.count {
-        body_id = base.ints_get(&island.bodies, i)
+        body_id = basics.ints_get(&island.bodies, i)
         body = body_at(w, body_id)
         awake_index = body.local_index
-        sleep_index = base.buffer_push(&sleep_set.body_sims)
+        sleep_index = basics.buffer_push(&sleep_set.body_sims)
         memcpy(sleep_set.body_sims.data + sleep_index * sizeof(BodySim), body_sim_at(awake, awake_index) as ptr, sizeof(BodySim))
-        moved = base.buffer_remove_swap(&awake.body_sims, awake_index)
+        moved = basics.buffer_remove_swap(&awake.body_sims, awake_index)
         if moved != NULL_INDEX && moved != awake_index {
             body_at(w, body_sim_at(awake, awake_index).body_id).local_index = awake_index
         }
-        base.buffer_remove_swap(&awake.body_states, awake_index)
+        basics.buffer_remove_swap(&awake.body_states, awake_index)
         body.set_index = sleep_set_id
         body.local_index = sleep_index
         body.body_move_index = NULL_INDEX
@@ -3600,10 +3600,10 @@ try_sleep_island(w: *World, island_id: int) -> bool {
             local_index = c.local_index
             c.set_index = DISABLED_SET
             c.local_index = disabled.contact_indices.count
-            base.ints_push(&disabled.contact_indices, c.contact_id)
-            moved_contact = base.ints_remove_swap(&awake.contact_indices, local_index)
+            basics.ints_push(&disabled.contact_indices, c.contact_id)
+            moved_contact = basics.ints_remove_swap(&awake.contact_indices, local_index)
             if moved_contact != NULL_INDEX && moved_contact != local_index {
-                contact_at(w, base.ints_get(&awake.contact_indices, local_index)).local_index = local_index
+                contact_at(w, basics.ints_get(&awake.contact_indices, local_index)).local_index = local_index
             }
         }
         i = i + 1
@@ -3614,21 +3614,21 @@ try_sleep_island(w: *World, island_id: int) -> bool {
         color_index = c.color_index
         color = graph_color(w, color_index)
         if color_index != OVERFLOW_INDEX {
-            base.bitset_clear(&color.body_set, c.edge_a.body_id)
-            base.bitset_clear(&color.body_set, c.edge_b.body_id)
+            basics.bitset_clear(&color.body_set, c.edge_a.body_id)
+            basics.bitset_clear(&color.body_set, c.edge_b.body_id)
         }
         sleep_contact_index = sleep_set.contact_indices.count
-        base.ints_push(&sleep_set.contact_indices, c.contact_id)
+        basics.ints_push(&sleep_set.contact_indices, c.contact_id)
         local_index = c.local_index
         if (c.flags & SIM_MESH_CONTACT) != 0 || color_index == OVERFLOW_INDEX {
-            moved = base.buffer_remove_swap(&color.contacts, local_index)
+            moved = basics.buffer_remove_swap(&color.contacts, local_index)
             if moved != NULL_INDEX && moved != local_index {
                 contact_at(w, contact_spec_at(color, local_index).contact_id).local_index = local_index
             }
         } else {
-            moved = base.ints_remove_swap(&color.convex_contacts, local_index)
+            moved = basics.ints_remove_swap(&color.convex_contacts, local_index)
             if moved != NULL_INDEX && moved != local_index {
-                contact_at(w, base.ints_get(&color.convex_contacts, local_index)).local_index = local_index
+                contact_at(w, basics.ints_get(&color.convex_contacts, local_index)).local_index = local_index
             }
         }
         c.set_index = sleep_set_id
@@ -3643,12 +3643,12 @@ try_sleep_island(w: *World, island_id: int) -> bool {
         local_index = j.local_index
         color = graph_color(w, color_index)
         if color_index != OVERFLOW_INDEX {
-            base.bitset_clear(&color.body_set, j.edge_a.body_id)
-            base.bitset_clear(&color.body_set, j.edge_b.body_id)
+            basics.bitset_clear(&color.body_set, j.edge_a.body_id)
+            basics.bitset_clear(&color.body_set, j.edge_b.body_id)
         }
-        sleep_joint_index = base.buffer_push(&sleep_set.joint_sims)
+        sleep_joint_index = basics.buffer_push(&sleep_set.joint_sims)
         memcpy(sleep_set.joint_sims.data + sleep_joint_index * sizeof(JointSim), joint_sim_at(&color.joint_sims, local_index) as ptr, sizeof(JointSim))
-        moved = base.buffer_remove_swap(&color.joint_sims, local_index)
+        moved = basics.buffer_remove_swap(&color.joint_sims, local_index)
         if moved != NULL_INDEX && moved != local_index {
             joint_at(w, joint_sim_at(&color.joint_sims, local_index).joint_id).local_index = local_index
         }
@@ -3658,9 +3658,9 @@ try_sleep_island(w: *World, island_id: int) -> bool {
         i = i + 1
     }
     island_index = island.local_index
-    sleep_island = base.buffer_push(&sleep_set.island_sims)
+    sleep_island = basics.buffer_push(&sleep_set.island_sims)
     island_sim_at(sleep_set, sleep_island).island_id = island_id
-    moved_island = base.buffer_remove_swap(&awake.island_sims, island_index)
+    moved_island = basics.buffer_remove_swap(&awake.island_sims, island_index)
     if moved_island != NULL_INDEX && moved_island != island_index {
         island_at(w, island_sim_at(awake, island_index).island_id).local_index = island_index
     }
@@ -3773,7 +3773,7 @@ collide_contact(w: *World, contact_id: int) {
     shape_b = world_shape_at(w, c.shape_id_b)
     if math.aabb_overlaps(shape_a.fat_aabb, shape_b.fat_aabb) == false {
         c.flags = (c.flags | SIM_DISJOINT) & (0 - 1 - SIM_TOUCHING)
-        base.bitset_set(&w.contact_state, contact_id)
+        basics.bitset_set(&w.contact_state, contact_id)
         return
     }
     body_a = body_at(w, shape_a.body_id)
@@ -3804,10 +3804,10 @@ collide_contact(w: *World, contact_id: int) {
     }
     if touching && was_touching == false {
         c.flags = c.flags | SIM_STARTED_TOUCHING
-        base.bitset_set(&w.contact_state, contact_id)
+        basics.bitset_set(&w.contact_state, contact_id)
     } else if touching == false && was_touching {
         c.flags = c.flags | SIM_STOPPED_TOUCHING
-        base.bitset_set(&w.contact_state, contact_id)
+        basics.bitset_set(&w.contact_state, contact_id)
     }
     i = 0
     while i < c.manifold_count {
@@ -3828,14 +3828,14 @@ add_non_touching_contact(w: *World, c: *Contact) {
     c.local_index = set.contact_indices.count
     c.body_sim_index_a = NULL_INDEX
     c.body_sim_index_b = NULL_INDEX
-    base.ints_push(&set.contact_indices, c.contact_id)
+    basics.ints_push(&set.contact_indices, c.contact_id)
 }
 
 remove_non_touching_contact(w: *World, set_index: int, local_index: int) {
     set = solver_set_at(w, set_index)
-    moved = base.ints_remove_swap(&set.contact_indices, local_index)
+    moved = basics.ints_remove_swap(&set.contact_indices, local_index)
     if moved != NULL_INDEX && moved != local_index {
-        contact_at(w, base.ints_get(&set.contact_indices, local_index)).local_index = local_index
+        contact_at(w, basics.ints_get(&set.contact_indices, local_index)).local_index = local_index
     }
 }
 
@@ -3846,7 +3846,7 @@ remove_non_touching_contact(w: *World, set_index: int, local_index: int) {
 // contacts that stopped unlinked and back among the non-touching (with
 // an end event). Returns how many contacts changed state.
 collide(w: *World) -> int {
-    base.buffer_clear(&w.contact_begin_events)
+    basics.buffer_clear(&w.contact_begin_events)
     touching_count = 0
     i = 0
     while i < GRAPH_COLOR_COUNT {
@@ -3857,7 +3857,7 @@ collide(w: *World) -> int {
     awake = solver_set_at(w, AWAKE_SET)
     contact_count = touching_count + awake.contact_indices.count
     if contact_count == 0 { return 0 }
-    indices_block = base.stack_alloc(&w.stack, contact_count * 4)
+    indices_block = basics.stack_alloc(&w.stack, contact_count * 4)
     indices = indices_block as int[]
     n = 0
     i = 0
@@ -3865,7 +3865,7 @@ collide(w: *World) -> int {
         color = graph_color(w, i)
         j = 0
         while j < color.convex_contacts.count {
-            indices[n] = base.ints_get(&color.convex_contacts, j)
+            indices[n] = basics.ints_get(&color.convex_contacts, j)
             n = n + 1
             j = j + 1
         }
@@ -3879,11 +3879,11 @@ collide(w: *World) -> int {
     }
     i = 0
     while i < awake.contact_indices.count {
-        indices[n] = base.ints_get(&awake.contact_indices, i)
+        indices[n] = basics.ints_get(&awake.contact_indices, i)
         n = n + 1
         i = i + 1
     }
-    base.bitset_set_count_and_clear(&w.contact_state, base.idpool_capacity(&w.contact_id_pool))
+    basics.bitset_set_count_and_clear(&w.contact_state, basics.idpool_capacity(&w.contact_id_pool))
     w.sat_call_count = 0
     w.sat_cache_hit_count = 0
     w.recycled_contact_count = 0
@@ -3892,8 +3892,8 @@ collide(w: *World) -> int {
         collide_contact(w, indices[i])
         i = i + 1
     }
-    base.stack_free(&w.stack, indices_block)
-    base.arena_sync(&w.arena)
+    basics.stack_free(&w.stack, indices_block)
+    basics.arena_sync(&w.arena)
     // The state changes, in id order.
     changed = 0
     bits = w.contact_state.bits as long[]
@@ -3901,7 +3901,7 @@ collide(w: *World) -> int {
     while k < w.contact_state.block_count {
         block = bits[k]
         while block != (0 as long) {
-            bit = base.ctz64(block)
+            bit = basics.ctz64(block)
             contact_id = 64 * k + bit
             c = contact_at(w, contact_id)
             flags = c.flags
@@ -3938,8 +3938,8 @@ collide(w: *World) -> int {
 // the next has begun; the step swaps them.
 swap_end_events(w: *World) {
     w.end_event_index = 1 - w.end_event_index
-    base.buffer_clear(end_events(w))
-    base.buffer_clear(sensor_end_events(w))
+    basics.buffer_clear(end_events(w))
+    basics.buffer_clear(sensor_end_events(w))
 }
 
 // --- contact validation --------------------------------------------------------------------------------------
@@ -3956,7 +3956,7 @@ validate_contacts(w: *World) -> bool {
         if c.contact_id != NULL_INDEX {
             live = live + 1
             if c.contact_id != i { return false }
-            if broad_phase.has_pair(&w.broad_phase, base.shape_pair_key(c.shape_id_a, c.shape_id_b, c.child_index)) == false { return false }
+            if broad_phase.has_pair(&w.broad_phase, basics.shape_pair_key(c.shape_id_a, c.shape_id_b, c.child_index)) == false { return false }
             touching = (c.flags & CONTACT_TOUCHING) != 0
             if c.color_index != NULL_INDEX {
                 if c.set_index != AWAKE_SET || touching == false { return false }
@@ -3964,12 +3964,12 @@ validate_contacts(w: *World) -> bool {
                 if (c.flags & SIM_MESH_CONTACT) != 0 || c.color_index == OVERFLOW_INDEX {
                     if c.local_index >= color.contacts.count || contact_spec_at(color, c.local_index).contact_id != i { return false }
                 } else {
-                    if c.local_index >= color.convex_contacts.count || base.ints_get(&color.convex_contacts, c.local_index) != i { return false }
+                    if c.local_index >= color.convex_contacts.count || basics.ints_get(&color.convex_contacts, c.local_index) != i { return false }
                 }
                 if c.island_id == NULL_INDEX { return false }
             } else {
                 set = solver_set_at(w, c.set_index)
-                if c.local_index >= set.contact_indices.count || base.ints_get(&set.contact_indices, c.local_index) != i { return false }
+                if c.local_index >= set.contact_indices.count || basics.ints_get(&set.contact_indices, c.local_index) != i { return false }
                 if c.set_index == AWAKE_SET && touching { return false }
                 if c.set_index >= FIRST_SLEEPING_SET && touching == false { return false }
                 if c.set_index == DISABLED_SET && (touching || c.island_id != NULL_INDEX) { return false }
@@ -3981,7 +3981,7 @@ validate_contacts(w: *World) -> bool {
         }
         i = i + 1
     }
-    if live != base.idpool_count(&w.contact_id_pool) { return false }
+    if live != basics.idpool_count(&w.contact_id_pool) { return false }
     if broad_phase.pair_count(&w.broad_phase) != live { return false }
     // The bodies' lists.
     i = 0
@@ -4150,7 +4150,7 @@ create_joint_in_graph(w: *World, j: *Joint) -> *JointSim {
     body_b = body_at(w, j.edge_b.body_id)
     color_index = assign_color(&w.constraint_graph, body_a.id, body_b.id, body_a.kind, body_b.kind)
     color = graph_color(w, color_index)
-    index = base.buffer_push(&color.joint_sims)
+    index = basics.buffer_push(&color.joint_sims)
     sim = joint_sim_at(&color.joint_sims, index)
     memset(sim as ptr, 0, sizeof(JointSim))
     j.color_index = color_index
@@ -4163,7 +4163,7 @@ create_joint_in_set(w: *World, set_index: int, j: *Joint) -> *JointSim {
     set = solver_set_at(w, set_index)
     j.set_index = set_index
     j.local_index = set.joint_sims.count
-    index = base.buffer_push(&set.joint_sims)
+    index = basics.buffer_push(&set.joint_sims)
     sim = joint_sim_at(&set.joint_sims, index)
     memset(sim as ptr, 0, sizeof(JointSim))
     return sim
@@ -4182,9 +4182,9 @@ create_joint(w: *World, def: *JointDef, kind: int) -> JointPair {
     body_id_a = body_a.id
     body_id_b = body_b.id
     max_set_index = math.max_int(body_a.set_index, body_b.set_index)
-    joint_id = base.idpool_alloc(&w.joint_id_pool)
+    joint_id = basics.idpool_alloc(&w.joint_id_pool)
     if joint_id == w.joints.count {
-        index = base.buffer_push(&w.joints)
+        index = basics.buffer_push(&w.joints)
         fresh = joint_at(w, index)
         memset(fresh as ptr, 0, sizeof(Joint))
     }
@@ -4486,7 +4486,7 @@ destroy_joint_internal(w: *World, j: *Joint, wake_bodies: bool) {
         remove_joint_from_graph(w, j.edge_a.body_id, j.edge_b.body_id, j.color_index, local_index)
     } else {
         set = solver_set_at(w, set_index)
-        moved = base.buffer_remove_swap(&set.joint_sims, local_index)
+        moved = basics.buffer_remove_swap(&set.joint_sims, local_index)
         if moved != NULL_INDEX && moved != local_index {
             joint_at(w, joint_sim_at(&set.joint_sims, local_index).joint_id).local_index = local_index
         }
@@ -4495,7 +4495,7 @@ destroy_joint_internal(w: *World, j: *Joint, wake_bodies: bool) {
     j.local_index = NULL_INDEX
     j.color_index = NULL_INDEX
     j.joint_id = NULL_INDEX
-    base.idpool_free(&w.joint_id_pool, joint_id)
+    basics.idpool_free(&w.joint_id_pool, joint_id)
     if wake_bodies {
         wake_body(w, body_a)
         wake_body(w, body_b)
@@ -4801,18 +4801,18 @@ world_clear_custom_filter(w: *World) { w.has_custom_filter = false }
 transfer_body(w: *World, target: *SolverSet, source: *SolverSet, body: *Body) {
     if target.set_index == source.set_index { return }
     source_index = body.local_index
-    target_index = base.buffer_push(&target.body_sims)
+    target_index = basics.buffer_push(&target.body_sims)
     memcpy(target.body_sims.data + target_index * sizeof(BodySim), body_sim_at(source, source_index) as ptr, sizeof(BodySim))
     target_sim = body_sim_at(target, target_index)
     target_sim.flags = target_sim.flags & (0 - 1 - (IS_FAST | IS_SPEED_CAPPED | HAD_TIME_OF_IMPACT))
-    moved = base.buffer_remove_swap(&source.body_sims, source_index)
+    moved = basics.buffer_remove_swap(&source.body_sims, source_index)
     if moved != NULL_INDEX && moved != source_index {
         body_at(w, body_sim_at(source, source_index).body_id).local_index = source_index
     }
     if source.set_index == AWAKE_SET {
-        base.buffer_remove_swap(&source.body_states, source_index)
+        basics.buffer_remove_swap(&source.body_states, source_index)
     } else if target.set_index == AWAKE_SET {
-        state_index = base.buffer_push(&target.body_states)
+        state_index = basics.buffer_push(&target.body_states)
         state = body_state_at(target, state_index)
         state.linear_velocity = math.vec3_zero()
         state.angular_velocity = math.vec3_zero()
@@ -4843,13 +4843,13 @@ transfer_joint(w: *World, target: *SolverSet, source: *SolverSet, j: *Joint) {
         j.set_index = target.set_index
         j.local_index = target.joint_sims.count
         j.color_index = NULL_INDEX
-        target_index = base.buffer_push(&target.joint_sims)
+        target_index = basics.buffer_push(&target.joint_sims)
         memcpy(target.joint_sims.data + target_index * sizeof(JointSim), source_sim as ptr, sizeof(JointSim))
     }
     if source.set_index == AWAKE_SET {
         remove_joint_from_graph(w, j.edge_a.body_id, j.edge_b.body_id, color_index, local_index)
     } else {
-        moved = base.buffer_remove_swap(&source.joint_sims, local_index)
+        moved = basics.buffer_remove_swap(&source.joint_sims, local_index)
         if moved != NULL_INDEX && moved != local_index {
             joint_at(w, joint_sim_at(&source.joint_sims, local_index).joint_id).local_index = local_index
         }
@@ -4873,17 +4873,17 @@ merge_solver_sets(w: *World, set_id1: int, set_id2: int) {
         body = body_at(w, src.body_id)
         body.set_index = id1
         body.local_index = set1.body_sims.count
-        index = base.buffer_push(&set1.body_sims)
+        index = basics.buffer_push(&set1.body_sims)
         memcpy(set1.body_sims.data + index * sizeof(BodySim), src as ptr, sizeof(BodySim))
         i = i + 1
     }
     i = 0
     while i < set2.contact_indices.count {
-        contact_index = base.ints_get(&set2.contact_indices, i)
+        contact_index = basics.ints_get(&set2.contact_indices, i)
         c = contact_at(w, contact_index)
         c.set_index = id1
         c.local_index = set1.contact_indices.count
-        base.ints_push(&set1.contact_indices, contact_index)
+        basics.ints_push(&set1.contact_indices, contact_index)
         i = i + 1
     }
     i = 0
@@ -4892,7 +4892,7 @@ merge_solver_sets(w: *World, set_id1: int, set_id2: int) {
         j = joint_at(w, jsrc.joint_id)
         j.set_index = id1
         j.local_index = set1.joint_sims.count
-        jindex = base.buffer_push(&set1.joint_sims)
+        jindex = basics.buffer_push(&set1.joint_sims)
         memcpy(set1.joint_sims.data + jindex * sizeof(JointSim), jsrc as ptr, sizeof(JointSim))
         i = i + 1
     }
@@ -4902,7 +4902,7 @@ merge_solver_sets(w: *World, set_id1: int, set_id2: int) {
         island = island_at(w, island_id)
         island.set_index = id1
         island.local_index = set1.island_sims.count
-        iindex = base.buffer_push(&set1.island_sims)
+        iindex = basics.buffer_push(&set1.island_sims)
         island_sim_at(set1, iindex).island_id = island_id
         i = i + 1
     }
@@ -5120,7 +5120,7 @@ body_get_joints(id: BodyId, joints: JointId[], capacity: int) -> int {
     return count
 }
 
-world_joint_count(w: *World) -> int { return base.idpool_count(&w.joint_id_pool) }
+world_joint_count(w: *World) -> int { return basics.idpool_count(&w.joint_id_pool) }
 
 // --- sensors -------------------------------------------------------------------------------------------------
 
@@ -5147,7 +5147,7 @@ world_sensor_end_event(w: *World, index: int) -> SensorEndTouchEvent {
 }
 
 push_sensor_begin_event(w: *World, sensor_id: ShapeId, visitor: long) {
-    index = base.buffer_push(&w.sensor_begin_events)
+    index = basics.buffer_push(&w.sensor_begin_events)
     events = w.sensor_begin_events.data as SensorBeginTouchEvent[]
     events[index] = SensorBeginTouchEvent { sensor_shape_id: sensor_id,
                                             visitor_shape_id: ShapeId { index1: visitor_shape_id(visitor) + 1, world0: w.world_id, generation: visitor_generation(visitor) } }
@@ -5155,7 +5155,7 @@ push_sensor_begin_event(w: *World, sensor_id: ShapeId, visitor: long) {
 
 push_sensor_end_event(w: *World, sensor_id: ShapeId, visitor: long) {
     b = sensor_end_events(w)
-    index = base.buffer_push(b)
+    index = basics.buffer_push(b)
     events = b.data as SensorEndTouchEvent[]
     events[index] = SensorEndTouchEvent { sensor_shape_id: sensor_id,
                                           visitor_shape_id: ShapeId { index1: visitor_shape_id(visitor) + 1, world0: w.world_id, generation: visitor_generation(visitor) } }
@@ -5164,11 +5164,11 @@ push_sensor_end_event(w: *World, sensor_id: ShapeId, visitor: long) {
 // A sensor for a shape: its overlap lists, its place among the world's.
 create_sensor(w: *World, s: *WorldShape) {
     s.sensor_index = w.sensors.count
-    index = base.buffer_push(&w.sensors)
+    index = basics.buffer_push(&w.sensors)
     sensor = sensor_at(w, index)
-    sensor.hits = base.buffer_create(8, 4)
-    sensor.overlaps1 = base.buffer_create(8, 16)
-    sensor.overlaps2 = base.buffer_create(8, 16)
+    sensor.hits = basics.buffer_create(8, 4)
+    sensor.overlaps1 = basics.buffer_create(8, 16)
+    sensor.overlaps2 = basics.buffer_create(8, 16)
     sensor.shape_id = s.id
 }
 
@@ -5182,10 +5182,10 @@ destroy_sensor(w: *World, s: *WorldShape) {
         push_sensor_end_event(w, sensor_id, overlaps[i])
         i = i + 1
     }
-    base.buffer_destroy(&sensor.hits)
-    base.buffer_destroy(&sensor.overlaps1)
-    base.buffer_destroy(&sensor.overlaps2)
-    moved = base.buffer_remove_swap(&w.sensors, s.sensor_index)
+    basics.buffer_destroy(&sensor.hits)
+    basics.buffer_destroy(&sensor.overlaps1)
+    basics.buffer_destroy(&sensor.overlaps2)
+    moved = basics.buffer_remove_swap(&w.sensors, s.sensor_index)
     if moved != NULL_INDEX && moved != s.sensor_index {
         world_shape_at(w, sensor_at(w, s.sensor_index).shape_id).sensor_index = s.sensor_index
     }
@@ -5231,7 +5231,7 @@ shape_get_contact_capacity(id: ShapeId) -> int {
 // A sensor hit found by the continuous pass, kept until the next overlap pass.
 add_sensor_hit(w: *World, sensor_shape: *WorldShape, visitor: *WorldShape) {
     sensor = sensor_at(w, sensor_shape.sensor_index)
-    index = base.buffer_push(&sensor.hits)
+    index = basics.buffer_push(&sensor.hits)
     hits = sensor.hits.data as long[]
     hits[index] = visitor_key(visitor.id, visitor.generation)
 }
@@ -5248,7 +5248,7 @@ var g_sensor_points: ptr = null   // Vec3[MAX_SHAPE_CAST_POINTS]: the visitor in
 // Whether a convex visitor overlaps the sensor's shape: the visitor's
 // proxy in the sensor's frame against the sensor's geometry.
 overlap_sensor(sensor_shape: *WorldShape, sensor_transform: Transform, visitor: *WorldShape, visitor_transform: Transform) -> bool {
-    if g_sensor_points == null { g_sensor_points = base.alloc(distance.MAX_SHAPE_CAST_POINTS * sizeof(Vec3)) }
+    if g_sensor_points == null { g_sensor_points = basics.alloc(distance.MAX_SHAPE_CAST_POINTS * sizeof(Vec3)) }
     proxy = shape.make_shape_proxy(&visitor.geometry)
     relative = math.inv_mul_transforms(sensor_transform, visitor_transform)
     count = math.min_int(proxy.count, distance.MAX_SHAPE_CAST_POINTS)
@@ -5282,7 +5282,7 @@ sensor_query_visitor(proxy_id: int, user_data: long, context: ptr) -> bool {
     other_transform = get_body_transform(w, other.body_id)
     if overlap_sensor(sensor_shape, qc.transform, other, other_transform) == false { return true }
     sensor = qc.sensor
-    index = base.buffer_push(&sensor.overlaps2)
+    index = basics.buffer_push(&sensor.overlaps2)
     overlaps = sensor.overlaps2.data as long[]
     overlaps[index] = visitor_key(shape_id, other.generation)
     return true
@@ -5294,10 +5294,10 @@ sensor_query_visitor(proxy_id: int, user_data: long, context: ptr) -> bool {
 // the lists differ, begin and end events in shape id order. A disabled
 // sensor drops all its overlaps.
 overlap_sensors(w: *World) {
-    base.buffer_clear(&w.sensor_begin_events)
+    basics.buffer_clear(&w.sensor_begin_events)
     sensor_count = w.sensors.count
     if sensor_count == 0 { return }
-    base.bitset_set_count_and_clear(&w.sensor_event_bits, sensor_count)
+    basics.bitset_set_count_and_clear(&w.sensor_event_bits, sensor_count)
     sensor_index = 0
     while sensor_index < sensor_count {
         sensor = sensor_at(w, sensor_index)
@@ -5305,19 +5305,19 @@ overlap_sensors(w: *World) {
         temp = sensor.overlaps1
         sensor.overlaps1 = sensor.overlaps2
         sensor.overlaps2 = temp
-        base.buffer_clear(&sensor.overlaps2)
+        basics.buffer_clear(&sensor.overlaps2)
         hits = sensor.hits.data as long[]
         i = 0
         while i < sensor.hits.count {
-            index = base.buffer_push(&sensor.overlaps2)
+            index = basics.buffer_push(&sensor.overlaps2)
             seeded = sensor.overlaps2.data as long[]
             seeded[index] = hits[i]
             i = i + 1
         }
-        base.buffer_clear(&sensor.hits)
+        basics.buffer_clear(&sensor.hits)
         body = body_at(w, sensor_shape.body_id)
         if body.set_index == DISABLED_SET || (sensor_shape.flags & SHAPE_ENABLE_SENSOR_EVENTS) == 0 {
-            if sensor.overlaps1.count != 0 { base.bitset_set(&w.sensor_event_bits, sensor_index) }
+            if sensor.overlaps1.count != 0 { basics.bitset_set(&w.sensor_event_bits, sensor_index) }
             sensor_index = sensor_index + 1
             continue
         }
@@ -5341,13 +5341,13 @@ overlap_sensors(w: *World) {
         sensor.overlaps2.count = unique
         count1 = sensor.overlaps1.count
         if count1 != unique {
-            base.bitset_set(&w.sensor_event_bits, sensor_index)
+            basics.bitset_set(&w.sensor_event_bits, sensor_index)
         } else {
             previous = sensor.overlaps1.data as long[]
             i = 0
             while i < count1 {
                 if previous[i] != overlaps[i] {
-                    base.bitset_set(&w.sensor_event_bits, sensor_index)
+                    basics.bitset_set(&w.sensor_event_bits, sensor_index)
                     i = count1
                 }
                 i = i + 1
@@ -5358,7 +5358,7 @@ overlap_sensors(w: *World) {
     // The events, in sensor order then shape id order.
     sensor_index = 0
     while sensor_index < sensor_count {
-        if base.bitset_get(&w.sensor_event_bits, sensor_index) {
+        if basics.bitset_get(&w.sensor_event_bits, sensor_index) {
             sensor = sensor_at(w, sensor_index)
             sensor_shape = world_shape_at(w, sensor.shape_id)
             sensor_id = make_shape_id(w, sensor_shape)
@@ -5500,8 +5500,8 @@ validate_joints(w: *World) -> bool {
                 color = graph_color(w, j.color_index)
                 if j.local_index >= color.joint_sims.count || joint_sim_at(&color.joint_sims, j.local_index).joint_id != i { return false }
                 if j.color_index != OVERFLOW_INDEX {
-                    if body_a.kind == BODY_DYNAMIC && base.bitset_get(&color.body_set, body_a.id) == false { return false }
-                    if body_b.kind == BODY_DYNAMIC && base.bitset_get(&color.body_set, body_b.id) == false { return false }
+                    if body_a.kind == BODY_DYNAMIC && basics.bitset_get(&color.body_set, body_a.id) == false { return false }
+                    if body_b.kind == BODY_DYNAMIC && basics.bitset_get(&color.body_set, body_b.id) == false { return false }
                 }
             } else {
                 if j.color_index != NULL_INDEX { return false }
@@ -5518,7 +5518,7 @@ validate_joints(w: *World) -> bool {
         }
         i = i + 1
     }
-    if live != base.idpool_count(&w.joint_id_pool) { return false }
+    if live != basics.idpool_count(&w.joint_id_pool) { return false }
     // The sets' and colours' sims.
     i = 0
     while i < w.solver_sets.count {

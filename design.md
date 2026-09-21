@@ -20,7 +20,7 @@ started until its tests pass.
 1. **math** (`math_functions`): done. 6 million checks including a million
    direction pairs, the deterministic atan2/cos/sin within the original's
    stated accuracy against libm.
-2. **core** (as `aephysics.base`, since a host engine has a `core` of its own and Aether binds modules by their last name): done. `bitset` over 64-bit longs, `id_pool`, `table` (the
+2. **core** (as `aephysics.basics`, since a host engine has a `core` of its own and Aether binds modules by their last name): done. `bitset` over 64-bit longs, `id_pool`, `table` (the
    hash set; the murmur finaliser with logical shifts written out),
    `container` as `IntArray` and a stride-typed `Buffer` (Aether has no
    generics: an array of structs is a block read through a typed cast),

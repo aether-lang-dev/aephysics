@@ -9,7 +9,7 @@
 // sensor swept through, and two worlds stepping bit for bit alike.
 import std.string
 import aephysics.math
-import aephysics.base
+import aephysics.basics
 import aephysics.hull
 import aephysics.manifold
 import aephysics.shape
@@ -65,7 +65,7 @@ step(w: *World, dt: float, sub_steps: int) {
     dynamics.collide(w)
     solver.solve(w, &ctx)
     dynamics.swap_end_events(w)
-    base.stack_grow(&w.stack)
+    basics.stack_grow(&w.stack)
 }
 
 steps(w: *World, count: int) {
@@ -359,7 +359,7 @@ test_determinism() {
 }
 
 main() {
-    before = base.alloc_count()
+    before = basics.alloc_count()
     test_free_fall()
     test_resting_and_sleep()
     test_bounce_and_events()
@@ -371,7 +371,7 @@ main() {
     hull.destroy_hull(g_slab as *HullData)
     // The scratch stays allocated: the worlds' block, the masses, the contact scratch, the sphere's, the sweeps'
     // buffers, the solvers' dummy states and the sensor hits.
-    ensure("every other counted allocation was freed (${base.alloc_count() - before})", base.alloc_count() == before + 17)
+    ensure("every other counted allocation was freed (${basics.alloc_count() - before})", basics.alloc_count() == before + 17)
     println("solver: ${checks} checks")
     if failures == 0 {
         println("solver: all checks passed")

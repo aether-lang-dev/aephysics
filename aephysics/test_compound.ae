@@ -12,7 +12,7 @@
 
 import std.string
 import aephysics.math
-import aephysics.base
+import aephysics.basics
 import aephysics.dynamic_tree
 import aephysics.hull
 import aephysics.distance
@@ -789,7 +789,7 @@ test_field() {
 }
 
 main() {
-    before = base.alloc_count()
+    before = basics.alloc_count()
     test_create()
     test_materials()
     test_sharing()
@@ -800,7 +800,7 @@ main() {
     test_through_shape()
     test_field()
     // The scratch stays allocated: compound's three blocks, mesh's three, sphere's two, shape's one.
-    ensure("every other counted allocation was freed (${base.alloc_count() - before})", base.alloc_count() == before + 9)
+    ensure("every other counted allocation was freed (${basics.alloc_count() - before})", basics.alloc_count() == before + 9)
 
     println("compound: ${checks} checks")
     if failures == 0 {

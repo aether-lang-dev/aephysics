@@ -12,7 +12,7 @@
 // with the hit event.
 import std.string
 import aephysics.math
-import aephysics.base
+import aephysics.basics
 import aephysics.hull
 import aephysics.manifold
 import aephysics.shape
@@ -90,8 +90,8 @@ scene(friction: float, restitution: float, events: bool) -> Scene {
     ctx.sims = awake.body_sims.data
     color = dynamics.graph_color(w, c.color_index)
     contact_solver.count_color_constraints(color, true)
-    constraints = base.alloc(color.contact_constraint_count * sizeof(ContactConstraint))
-    manifolds = base.alloc(color.manifold_constraint_count * sizeof(ManifoldConstraint))
+    constraints = basics.alloc(color.contact_constraint_count * sizeof(ContactConstraint))
+    manifolds = basics.alloc(color.manifold_constraint_count * sizeof(ManifoldConstraint))
     color.contact_constraints = constraints
     color.manifold_constraints = manifolds
     return Scene { world_id: world_id, w: w, cube_id: cube_id, contact: c, ctx: ctx, constraints: constraints, manifolds: manifolds }
@@ -99,8 +99,8 @@ scene(friction: float, restitution: float, events: bool) -> Scene {
 
 finish(s: *Scene) {
     color = dynamics.graph_color(s.w, s.contact.color_index)
-    base.free_bytes(s.constraints, color.contact_constraint_count * sizeof(ContactConstraint))
-    base.free_bytes(s.manifolds, color.manifold_constraint_count * sizeof(ManifoldConstraint))
+    basics.free_bytes(s.constraints, color.contact_constraint_count * sizeof(ContactConstraint))
+    basics.free_bytes(s.manifolds, color.manifold_constraint_count * sizeof(ManifoldConstraint))
     dynamics.destroy_world(s.world_id)
 }
 
@@ -282,14 +282,14 @@ test_restitution_and_store() {
     contact_solver.apply_restitution(&s.ctx, s.constraints, 1)
     small("bounces up at half the approach", state.linear_velocity.y - 1.0, 0.05)
     // Stored: the manifold carries the impulses and the approach velocity; a hit event is flagged.
-    bits = base.bitset_create(8)
+    bits = basics.bitset_create(8)
     hit = contact_solver.store_impulses(&s.ctx, s.constraints, 1, &bits)
     m = dynamics.manifold_at(s.contact, 0)
     p = dynamics.manifold_point_at(m, 0)
     ensure("stored impulses", p.normal_impulse > 0.0 && p.total_normal_impulse >= p.normal_impulse)
     small("stored approach velocity", p.normal_velocity + 2.0, 0.000001)
-    ensure("hit event flagged (2 m/s over the 1 m/s threshold)", hit && base.bitset_get(&bits, s.contact.contact_id))
-    base.bitset_destroy(&bits)
+    ensure("hit event flagged (2 m/s over the 1 m/s threshold)", hit && basics.bitset_get(&bits, s.contact.contact_id))
+    basics.bitset_destroy(&bits)
     // Warm start: the next prepare takes the stored impulses and applies them at once.
     state.linear_velocity = math.vec3_zero()
     state.angular_velocity = math.vec3_zero()
@@ -315,14 +315,14 @@ test_restitution_and_store() {
     solve(&s, false)
     contact_solver.apply_restitution(&s.ctx, s.constraints, 1)
     ensure("no bounce under the threshold", state.linear_velocity.y < 0.01)
-    bits = base.bitset_create(8)
+    bits = basics.bitset_create(8)
     ensure("no hit event under the threshold", contact_solver.store_impulses(&s.ctx, s.constraints, 1, &bits) == false)
-    base.bitset_destroy(&bits)
+    basics.bitset_destroy(&bits)
     finish(&s)
 }
 
 main() {
-    before = base.alloc_count()
+    before = basics.alloc_count()
     test_prepare()
     test_normal()
     test_friction()
@@ -330,7 +330,7 @@ main() {
     hull.destroy_hull(g_cube as *HullData)
     hull.destroy_hull(g_slab as *HullData)
     // The scratch stays allocated: the worlds' block, the masses, the contact and hull scratch (seven), the dummy state.
-    ensure("every other counted allocation was freed (${base.alloc_count() - before})", base.alloc_count() == before + 10)
+    ensure("every other counted allocation was freed (${basics.alloc_count() - before})", basics.alloc_count() == before + 10)
     println("contact_solver: ${checks} checks")
     if failures == 0 {
         println("contact_solver: all checks passed")

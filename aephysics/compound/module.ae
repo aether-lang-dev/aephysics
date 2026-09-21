@@ -21,7 +21,7 @@
 // byte comparison behind it.
 import std.string
 import aephysics.math
-import aephysics.base
+import aephysics.basics
 import aephysics.dynamic_tree
 import aephysics.hull
 import aephysics.distance
@@ -319,30 +319,30 @@ material_hash(scratch: ptr, m: SurfaceMaterial) -> long {
     ids = scratch as long[]
     ids[6] = m.user_material_id
     ids[7] = m.custom_color as long
-    return base.hash_bytes(scratch, 64)
+    return basics.hash_bytes(scratch, 64)
 }
 
 // The index of a material in the table, added if new.
 table_index(t: *MaterialTable, m: SurfaceMaterial) -> int {
     h = material_hash(t.scratch, m)
     materials = t.materials as SurfaceMaterial[]
-    found = base.map_get(&t.map, h, NULL_INDEX)
+    found = basics.map_get(&t.map, h, NULL_INDEX)
     if found != NULL_INDEX && material.same_material(materials[found], m) { return found }
     index = t.count
     materials[index] = m
     t.count = t.count + 1
-    if found == NULL_INDEX { base.map_set(&t.map, h, index) }
+    if found == NULL_INDEX { basics.map_set(&t.map, h, index) }
     return index
 }
 
 // A shared block (a hull or a mesh) by its hash, verified by its bytes;
 // the index of an equal one seen before, or the count (a new one).
 shared_index(map: *LongMap, hash: long, block: ptr, byte_count: int, blocks: ptr[], counts: int[], count: int) -> int {
-    found = base.map_get(map, hash, NULL_INDEX)
+    found = basics.map_get(map, hash, NULL_INDEX)
     if found != NULL_INDEX && counts[found] == byte_count && memcmp(blocks[found], block, byte_count) == 0 { return found }
     blocks[count] = block
     counts[count] = byte_count
-    if found == NULL_INDEX { base.map_set(map, hash, count) }
+    if found == NULL_INDEX { basics.map_set(map, hash, count) }
     return count
 }
 
@@ -368,13 +368,13 @@ create_compound(def: *CompoundDef) -> *CompoundData {
     mesh_defs = def.meshes as CompoundMeshDef[]
     sphere_defs = def.spheres as CompoundSphereDef[]
 
-    capsule_instances_block = base.alloc(math.max_int(capsule_count, 1) * sizeof(CompoundCapsule))
+    capsule_instances_block = basics.alloc(math.max_int(capsule_count, 1) * sizeof(CompoundCapsule))
     capsule_instances = capsule_instances_block as CompoundCapsule[]
-    hull_instances_block = base.alloc(math.max_int(hull_count, 1) * sizeof(HullInstance))
+    hull_instances_block = basics.alloc(math.max_int(hull_count, 1) * sizeof(HullInstance))
     hull_instances = hull_instances_block as HullInstance[]
-    mesh_instances_block = base.alloc(math.max_int(mesh_count, 1) * sizeof(MeshInstance))
+    mesh_instances_block = basics.alloc(math.max_int(mesh_count, 1) * sizeof(MeshInstance))
     mesh_instances = mesh_instances_block as MeshInstance[]
-    sphere_instances_block = base.alloc(math.max_int(sphere_count, 1) * sizeof(CompoundSphere))
+    sphere_instances_block = basics.alloc(math.max_int(sphere_count, 1) * sizeof(CompoundSphere))
     sphere_instances = sphere_instances_block as CompoundSphere[]
 
     material_capacity = convex_count
@@ -383,8 +383,8 @@ create_compound(def: *CompoundDef) -> *CompoundData {
         material_capacity = material_capacity + math.max_int(mesh_defs[i].material_count, 1)
         i = i + 1
     }
-    table = MaterialTable { materials: base.alloc(material_capacity * sizeof(SurfaceMaterial)), count: 0, capacity: material_capacity,
-                            map: base.map_create(2 * material_capacity), scratch: base.alloc(64) }
+    table = MaterialTable { materials: basics.alloc(material_capacity * sizeof(SurfaceMaterial)), count: 0, capacity: material_capacity,
+                            map: basics.map_create(2 * material_capacity), scratch: basics.alloc(64) }
 
     // Capsules.
     i = 0
@@ -397,14 +397,14 @@ create_compound(def: *CompoundDef) -> *CompoundData {
     }
 
     // Hulls: an instance each, the shared ones once.
-    shared_hulls_block = base.alloc(math.max_int(hull_count, 1) * 8)
+    shared_hulls_block = basics.alloc(math.max_int(hull_count, 1) * 8)
     shared_hulls = shared_hulls_block as ptr[]
-    shared_hull_sizes_block = base.alloc(math.max_int(hull_count, 1) * 4)
+    shared_hull_sizes_block = basics.alloc(math.max_int(hull_count, 1) * 4)
     shared_hull_sizes = shared_hull_sizes_block as int[]
-    shared_hull_offsets_block = base.alloc(math.max_int(hull_count, 1) * 4)
+    shared_hull_offsets_block = basics.alloc(math.max_int(hull_count, 1) * 4)
     shared_hull_offsets = shared_hull_offsets_block as int[]
     shared_hull_count = 0
-    hull_map = base.map_create(2 * math.max_int(hull_count, 1))
+    hull_map = basics.map_create(2 * math.max_int(hull_count, 1))
     i = 0
     while i < hull_count {
         h = hull_defs[i].hull
@@ -417,17 +417,17 @@ create_compound(def: *CompoundDef) -> *CompoundData {
         hull_instances[i] = HullInstance { transform: hull_defs[i].transform, hull_offset: shared, material_index: table_index(&table, hull_defs[i].material) }
         i = i + 1
     }
-    base.map_destroy(&hull_map)
+    basics.map_destroy(&hull_map)
 
     // Meshes.
-    shared_meshes_block = base.alloc(math.max_int(mesh_count, 1) * 8)
+    shared_meshes_block = basics.alloc(math.max_int(mesh_count, 1) * 8)
     shared_meshes = shared_meshes_block as ptr[]
-    shared_mesh_sizes_block = base.alloc(math.max_int(mesh_count, 1) * 4)
+    shared_mesh_sizes_block = basics.alloc(math.max_int(mesh_count, 1) * 4)
     shared_mesh_sizes = shared_mesh_sizes_block as int[]
-    shared_mesh_offsets_block = base.alloc(math.max_int(mesh_count, 1) * 4)
+    shared_mesh_offsets_block = basics.alloc(math.max_int(mesh_count, 1) * 4)
     shared_mesh_offsets = shared_mesh_offsets_block as int[]
     shared_mesh_count = 0
-    mesh_map = base.map_create(2 * math.max_int(mesh_count, 1))
+    mesh_map = basics.map_create(2 * math.max_int(mesh_count, 1))
     i = 0
     while i < mesh_count {
         md = mesh_defs[i].mesh_data
@@ -449,7 +449,7 @@ create_compound(def: *CompoundDef) -> *CompoundData {
         mesh_instances[i] = instance
         i = i + 1
     }
-    base.map_destroy(&mesh_map)
+    basics.map_destroy(&mesh_map)
 
     // Spheres.
     i = 0
@@ -494,7 +494,7 @@ create_compound(def: *CompoundDef) -> *CompoundData {
     sphere_offset = byte_count
     byte_count = byte_count + align8(sphere_count * sizeof(CompoundSphere))
 
-    block = base.alloc(byte_count)
+    block = basics.alloc(byte_count)
     memset(block, 0, byte_count)
     c = block as *CompoundData
     c.version = COMPOUND_VERSION
@@ -553,23 +553,23 @@ create_compound(def: *CompoundDef) -> *CompoundData {
     }
     if sphere_count > 0 { memcpy(block + sphere_offset, sphere_instances_block, sphere_count * sizeof(CompoundSphere)) }
 
-    base.map_destroy(&table.map)
-    base.free_bytes(table.scratch, 64)
-    base.free_bytes(table.materials, material_capacity * sizeof(SurfaceMaterial))
-    base.free_bytes(shared_hulls_block, math.max_int(hull_count, 1) * 8)
-    base.free_bytes(shared_hull_sizes_block, math.max_int(hull_count, 1) * 4)
-    base.free_bytes(shared_hull_offsets_block, math.max_int(hull_count, 1) * 4)
-    base.free_bytes(shared_meshes_block, math.max_int(mesh_count, 1) * 8)
-    base.free_bytes(shared_mesh_sizes_block, math.max_int(mesh_count, 1) * 4)
-    base.free_bytes(shared_mesh_offsets_block, math.max_int(mesh_count, 1) * 4)
-    base.free_bytes(capsule_instances_block, math.max_int(capsule_count, 1) * sizeof(CompoundCapsule))
-    base.free_bytes(hull_instances_block, math.max_int(hull_count, 1) * sizeof(HullInstance))
-    base.free_bytes(mesh_instances_block, math.max_int(mesh_count, 1) * sizeof(MeshInstance))
-    base.free_bytes(sphere_instances_block, math.max_int(sphere_count, 1) * sizeof(CompoundSphere))
+    basics.map_destroy(&table.map)
+    basics.free_bytes(table.scratch, 64)
+    basics.free_bytes(table.materials, material_capacity * sizeof(SurfaceMaterial))
+    basics.free_bytes(shared_hulls_block, math.max_int(hull_count, 1) * 8)
+    basics.free_bytes(shared_hull_sizes_block, math.max_int(hull_count, 1) * 4)
+    basics.free_bytes(shared_hull_offsets_block, math.max_int(hull_count, 1) * 4)
+    basics.free_bytes(shared_meshes_block, math.max_int(mesh_count, 1) * 8)
+    basics.free_bytes(shared_mesh_sizes_block, math.max_int(mesh_count, 1) * 4)
+    basics.free_bytes(shared_mesh_offsets_block, math.max_int(mesh_count, 1) * 4)
+    basics.free_bytes(capsule_instances_block, math.max_int(capsule_count, 1) * sizeof(CompoundCapsule))
+    basics.free_bytes(hull_instances_block, math.max_int(hull_count, 1) * sizeof(HullInstance))
+    basics.free_bytes(mesh_instances_block, math.max_int(mesh_count, 1) * sizeof(MeshInstance))
+    basics.free_bytes(sphere_instances_block, math.max_int(sphere_count, 1) * sizeof(CompoundSphere))
     return c
 }
 
-destroy_compound(c: *CompoundData) { base.free_bytes(c as ptr, c.byte_count) }
+destroy_compound(c: *CompoundData) { basics.free_bytes(c as ptr, c.byte_count) }
 
 // --- queries ---------------------------------------------------------------------------------------
 
@@ -604,8 +604,8 @@ var g_child: ptr = null    // Vec3[MAX_SHAPE_CAST_POINTS]: the proxy in a child'
 
 scratch_ready() {
     if g_local == null {
-        g_local = base.alloc(distance.MAX_SHAPE_CAST_POINTS * sizeof(Vec3))
-        g_child = base.alloc(distance.MAX_SHAPE_CAST_POINTS * sizeof(Vec3))
+        g_local = basics.alloc(distance.MAX_SHAPE_CAST_POINTS * sizeof(Vec3))
+        g_child = basics.alloc(distance.MAX_SHAPE_CAST_POINTS * sizeof(Vec3))
     }
 }
 
@@ -765,7 +765,7 @@ mover_visitor(proxy_id: int, user_data: long, context: ptr) -> bool {
 // child's frame with the child and the material.
 collide_mover_and_compound(planes: PlaneResult[], capacity: int, c: *CompoundData, mover: Capsule) -> int {
     if capacity == 0 { return 0 }
-    if g_planes == null { g_planes = base.alloc(MOVER_SCRATCH * sizeof(PlaneResult)) }
+    if g_planes == null { g_planes = basics.alloc(MOVER_SCRATCH * sizeof(PlaneResult)) }
     ctx = MoverContext { compound: c, planes: planes, capacity: capacity, count: 0, mover: mover }
     r = math.vec3(mover.radius, mover.radius, mover.radius)
     bounds = AABB { lower: math.sub(math.min_vec3(mover.center1, mover.center2), r), upper: math.add(math.max_vec3(mover.center1, mover.center2), r) }

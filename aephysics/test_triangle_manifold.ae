@@ -10,7 +10,7 @@
 
 import std.string
 import aephysics.math
-import aephysics.base
+import aephysics.basics
 import aephysics.distance
 import aephysics.hull
 import aephysics.manifold
@@ -431,13 +431,13 @@ test_resting_cube() {
 }
 
 main() {
-    before = base.alloc_count()
+    before = basics.alloc_count()
     test_sphere_and_closest()
     test_triangle_edge()
     test_triangle_capsule()
     test_resting_cube()
     // This module's scratch stays allocated: three blocks.
-    ensure("every other counted allocation was freed", base.alloc_count() == before + 3)
+    ensure("every other counted allocation was freed", basics.alloc_count() == before + 3)
 
     println("triangle_manifold: ${checks} checks")
     if failures == 0 {

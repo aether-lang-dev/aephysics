@@ -8,7 +8,7 @@
 
 import std.string
 import aephysics.math
-import aephysics.base
+import aephysics.basics
 import aephysics.dynamic_tree
 
 extern calloc(count: int, size: int) -> ptr
@@ -595,7 +595,7 @@ test_ray_cast_aabb() {
 }
 
 main() {
-    before = base.alloc_count()
+    before = basics.alloc_count()
     test_leaf_root()
     test_query_brute_force()
     test_category_filter()
@@ -604,7 +604,7 @@ main() {
     test_cast_brute_force()
     test_query_closest()
     test_ray_cast_aabb()
-    ensure("every counted allocation was freed", base.alloc_count() == before && base.bytes_in_use() == 0)
+    ensure("every counted allocation was freed", basics.alloc_count() == before && basics.bytes_in_use() == 0)
 
     println("dynamic_tree: ${checks} checks")
     if failures == 0 {

@@ -9,7 +9,7 @@
 import std.string
 import std.os
 import aephysics.math
-import aephysics.base
+import aephysics.basics
 import aephysics.hull
 import aephysics.manifold
 import aephysics.shape

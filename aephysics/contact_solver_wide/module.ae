@@ -19,7 +19,7 @@
 // overflow contacts stay with aephysics.contact_solver.
 import std.string
 import aephysics.math
-import aephysics.base
+import aephysics.basics
 import aephysics.dynamics
 import aephysics.contact_solver
 
@@ -521,7 +521,7 @@ prepare_wide_contacts(ctx: *StepContext, color: *GraphColor) {
     }
     i = 0
     while i < count {
-        c = dynamics.contact_at(w, base.ints_get(&color.convex_contacts, i))
+        c = dynamics.contact_at(w, basics.ints_get(&color.convex_contacts, i))
         prepare_lane(ctx, c, wide_constraint_at(base, i / WIDTH), i % WIDTH)
         i = i + 1
     }
@@ -773,13 +773,13 @@ store_wide_impulses(ctx: *StepContext, color: *GraphColor, hit_bits: *BitSet) ->
             mp.normal_velocity = lane(&cp.relative_velocity, l)
             point_index = point_index + 1
         }
-        contact = dynamics.contact_at(w, base.ints_get(&color.convex_contacts, i))
+        contact = dynamics.contact_at(w, basics.ints_get(&color.convex_contacts, i))
         if (contact.flags & dynamics.SIM_ENABLE_HIT_EVENT) != 0 {
             point_index = 0
             while point_index < point_count {
                 mp = dynamics.manifold_point_at(m, point_index)
                 if mp.normal_velocity < neg_threshold && mp.total_normal_impulse > 0.0 {
-                    base.bitset_set_grow(hit_bits, contact.contact_id)
+                    basics.bitset_set_grow(hit_bits, contact.contact_id)
                     has_hits = true
                     break
                 }

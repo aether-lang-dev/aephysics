@@ -8,7 +8,7 @@
 
 import std.string
 import aephysics.math
-import aephysics.base
+import aephysics.basics
 import aephysics.hull
 
 extern calloc(count: int, size: int) -> ptr
@@ -304,7 +304,7 @@ var xseed = 0
 
 xorshift() -> int {
     xseed = xseed ^ (xseed << 13)
-    xseed = xseed ^ base.lsr32(xseed, 17)
+    xseed = xseed ^ basics.lsr32(xseed, 17)
     xseed = xseed ^ (xseed << 5)
     return xseed
 }
@@ -705,7 +705,7 @@ test_hull_2d() {
 }
 
 main() {
-    before = base.alloc_count()
+    before = basics.alloc_count()
     test_cube()
     test_tetrahedron()
     test_determinism()
@@ -719,7 +719,7 @@ main() {
     test_degenerate()
     test_transformed_box()
     test_hull_2d()
-    ensure("every counted allocation was freed", base.alloc_count() == before && base.bytes_in_use() == 0)
+    ensure("every counted allocation was freed", basics.alloc_count() == before && basics.bytes_in_use() == 0)
 
     println("hull: ${checks} checks")
     if failures == 0 {
