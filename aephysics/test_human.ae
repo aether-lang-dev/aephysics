@@ -103,6 +103,18 @@ test_build_and_fall() {
     ensure("built: seven spherical and four revolute joints (${spherical}, ${revolute})", spherical == 7 && revolute == 4)
     ensure("built: the pelvis has no joint", dynamics.joint_is_valid(human.bone_at(&h, human.BONE_PELVIS).joint_id) == false)
     ensure("built: the joints start closed", worst_joint_separation(&h) < 0.001)
+    // The bones' capsules are readable back, the calf's shin and foot among them.
+    shapes_block = calloc(4, sizeof(ShapeId))
+    shapes = shapes_block as ShapeId[]
+    calf_shapes = dynamics.body_get_shapes(human.bone_at(&h, human.BONE_CALF_L).body_id, shapes, 4)
+    ensure("built: the calf carries two capsules (${calf_shapes})", calf_shapes == 2 && dynamics.shape_get_type(shapes[0]) == shape.SHAPE_CAPSULE && dynamics.shape_get_type(shapes[1]) == shape.SHAPE_CAPSULE)
+    if calf_shapes == 2 {
+        // The list runs newest first: the foot, then the shin.
+        foot = dynamics.shape_get_capsule(shapes[0])
+        shin = dynamics.shape_get_capsule(shapes[1])
+        ensure("built: the shin and foot capsules read back (${shin.radius}, ${foot.radius})", math.abs_float(shin.radius - 0.08) < 0.000001 && math.abs_float(foot.radius - 0.07) < 0.000001)
+    }
+    free(shapes_block)
     head_before = dynamics.body_get_position(human.bone_at(&h, human.BONE_NECK).body_id)
     ensure("built: the head is up (${head_before.y})", head_before.y > 2.3)
 

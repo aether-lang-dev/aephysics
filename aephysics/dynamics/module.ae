@@ -86,7 +86,7 @@ exports (
     create_compound_shape, destroy_shape, shape_is_valid, get_shape_full_id, get_shape, shape_get_body,
     shape_get_aabb, shape_get_type, shape_get_density, shape_set_density, shape_get_filter, shape_set_filter,
     shape_get_surface_material, shape_set_surface_material, shape_get_material_count, shape_is_sensor,
-    shape_set_user_data, shape_get_user_data, shape_get_flags,
+    shape_set_user_data, shape_get_user_data, shape_get_flags, shape_get_sphere, shape_get_capsule, shape_get_hull, shape_get_mesh_data,
     create_island, destroy_island, validate_island, create_solver_set, destroy_solver_set, wake_solver_set,
     validate_solver_sets, get_solver_set, get_island, world_island_count, world_solver_set_count,
     body_sim_at, body_state_at, island_sim_at, world_shape_at, island_at, solver_set_at, body_at,
@@ -1847,6 +1847,11 @@ shape_is_sensor(id: ShapeId) -> bool { return get_shape_full_id(world_at(id.worl
 shape_set_user_data(id: ShapeId, data: ptr) { get_shape_full_id(world_at(id.world0), id).user_data = data }
 shape_get_user_data(id: ShapeId) -> ptr { return get_shape_full_id(world_at(id.world0), id).user_data }
 shape_get_flags(id: ShapeId) -> int { return get_shape_full_id(world_at(id.world0), id).flags }
+// A shape's geometry, in the body's frame (b3Shape_GetSphere and its siblings; the wrong kind asserts in the reference).
+shape_get_sphere(id: ShapeId) -> Sphere { return get_shape_full_id(world_at(id.world0), id).geometry.sphere }
+shape_get_capsule(id: ShapeId) -> Capsule { return get_shape_full_id(world_at(id.world0), id).geometry.capsule }
+shape_get_hull(id: ShapeId) -> *HullData { return get_shape_full_id(world_at(id.world0), id).geometry.hull }
+shape_get_mesh_data(id: ShapeId) -> *MeshData { return get_shape_full_id(world_at(id.world0), id).geometry.mesh.data }
 
 // --- mass ---------------------------------------------------------------------------------------------------
 
