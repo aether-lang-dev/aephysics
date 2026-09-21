@@ -183,7 +183,7 @@ var g_sensor_fractions: ptr = null
 sensor_fractions() -> ptr { return native.scratch(g_sensor_fractions, MAX_CONTINUOUS_SENSOR_HITS * 8) }
 
 continuous_buffers_ready() {
-    if g_sensor_hits == null {
+    if g_sensor_hits == null || g_sensor_fractions == null {
         g_sensor_hits = basics.alloc(native.MAX_WORKERS * (MAX_CONTINUOUS_SENSOR_HITS * sizeof(SensorHit)))
         g_sensor_fractions = basics.alloc(native.MAX_WORKERS * (MAX_CONTINUOUS_SENSOR_HITS * 8))
     }

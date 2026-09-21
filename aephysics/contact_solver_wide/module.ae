@@ -49,7 +49,9 @@ extern aephysics_wide_unpack(constraints: ptr, count: int)
 
 var g_native_lanes = true
 
-set_native_lanes(enabled: bool) { g_native_lanes = enabled }
+set_native_lanes(enabled: bool) {
+    if g_native_lanes != enabled { g_native_lanes = enabled }
+}
 native_lanes_enabled() -> bool { return g_native_lanes }
 
 // The step's wide constraints, all colours' in one block, handed to the
