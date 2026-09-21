@@ -19,7 +19,7 @@
 // stack, as in aephysics.manifold.
 import std.string
 import aephysics.math
-import aephysics.core
+import aephysics.basics
 import aephysics.distance
 import aephysics.hull
 import aephysics.manifold
@@ -102,9 +102,9 @@ var g_triangle: ptr = null   // Vec3[3], the GJK proxy of the triangle
 
 scratch_ready() {
     if g_clip1 == null {
-        g_clip1 = core.alloc(2 * MAX_CLIP_POINTS * sizeof(ClipVertex))
-        g_clip2 = core.alloc(2 * MAX_CLIP_POINTS * sizeof(ClipVertex))
-        g_triangle = core.alloc(3 * sizeof(Vec3))
+        g_clip1 = basics.alloc(2 * MAX_CLIP_POINTS * sizeof(ClipVertex))
+        g_clip2 = basics.alloc(2 * MAX_CLIP_POINTS * sizeof(ClipVertex))
+        g_triangle = basics.alloc(3 * sizeof(Vec3))
     }
 }
 

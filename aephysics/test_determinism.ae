@@ -15,7 +15,7 @@
 import std.string
 import std.os
 import aephysics.math
-import aephysics.core
+import aephysics.basics
 import aephysics.hull
 import aephysics.distance
 import aephysics.manifold
@@ -127,7 +127,7 @@ random_quat() -> Quat {
     sqrt_u1 = sqrt(u1)
     cs2 = math.compute_cos_sin(u2)
     cs3 = math.compute_cos_sin(u3)
-    return Quat { v: math.vec3(sqrt1_minus_u1 * cs2.sine, sqrt1_minus_u1 * cs2.cosine, sqrt_u1 * cs3.sine), s: sqrt_u1 * cs3.cosine }
+    return math.quat_vs(math.vec3(sqrt1_minus_u1 * cs2.sine, sqrt1_minus_u1 * cs2.cosine, sqrt_u1 * cs3.sine), sqrt_u1 * cs3.cosine)
 }
 
 // --- the outcome of a scene ------------------------------------------------------------------------------
@@ -144,7 +144,7 @@ struct Outcome {
 
 // The transform folded into the checksum: every component with its own weight.
 fold_transform(hash: float, xf: Transform) -> float {
-    return hash + xf.p.x * 1.0 + xf.p.y * 0.001 + xf.p.z * 1000.0 + xf.q.v.x * 7.0 + xf.q.v.y * 0.07 + xf.q.v.z * 700.0 + xf.q.s * 0.0007
+    return hash + xf.p.x * 1.0 + xf.p.y * 0.001 + xf.p.z * 1000.0 + xf.q.x * 7.0 + xf.q.y * 0.07 + xf.q.z * 700.0 + xf.q.w * 0.0007
 }
 
 // The bodies' resting transforms once every body sleeps: the step and the checksum.

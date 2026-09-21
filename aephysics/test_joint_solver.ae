@@ -7,7 +7,7 @@
 // the constraint forces from the impulses, and the warm start.
 import std.string
 import aephysics.math
-import aephysics.core
+import aephysics.basics
 import aephysics.hull
 import aephysics.manifold
 import aephysics.shape
@@ -257,7 +257,7 @@ test_accessors() {
     target = math.make_quat_from_axis_angle(math.vec3_axis_z(), 0.25)
     joint_solver.spherical_joint_set_target_rotation(sid, target)
     got_q = joint_solver.spherical_joint_get_target_rotation(sid)
-    small("spherical target rotation", math.abs_float(got_q.v.z - target.v.z) + math.abs_float(got_q.s - target.s), 0.00001)
+    small("spherical target rotation", math.abs_float(got_q.z - target.z) + math.abs_float(got_q.w - target.w), 0.00001)
     joint_solver.spherical_joint_enable_motor(sid, true)
     ensure("spherical motor", joint_solver.spherical_joint_is_motor_enabled(sid))
     joint_solver.spherical_joint_set_motor_velocity(sid, math.vec3(0.1, 0.2, 0.3))
@@ -597,7 +597,7 @@ test_parallel_motor_wheel() {
 }
 
 main() {
-    before = core.alloc_count()
+    before = basics.alloc_count()
     test_accessors()
     test_distance()
     test_revolute()
@@ -607,7 +607,7 @@ main() {
     test_parallel_motor_wheel()
     hull.destroy_hull(g_cube as *HullData)
     // The scratch stays allocated: the worlds' block, the masses, the dummy state.
-    ensure("every other counted allocation was freed (${core.alloc_count() - before})", core.alloc_count() == before + 3)
+    ensure("every other counted allocation was freed (${basics.alloc_count() - before})", basics.alloc_count() == before + 3)
     println("joint_solver: ${checks} checks")
     if failures == 0 {
         println("joint_solver: all checks passed")

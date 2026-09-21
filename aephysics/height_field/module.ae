@@ -20,7 +20,7 @@
 // mesh module's scalar ones.
 import std.string
 import aephysics.math
-import aephysics.core
+import aephysics.basics
 import aephysics.distance
 import aephysics.manifold
 import aephysics.triangle_manifold
@@ -101,8 +101,8 @@ var g_local: ptr = null      // Vec3[128]
 
 scratch_ready() {
     if g_triangle == null {
-        g_triangle = core.alloc(3 * sizeof(Vec3))
-        g_local = core.alloc(128 * sizeof(Vec3))
+        g_triangle = basics.alloc(3 * sizeof(Vec3))
+        g_local = basics.alloc(128 * sizeof(Vec3))
     }
 }
 
@@ -144,7 +144,7 @@ create_height_field(def: *HeightFieldDef) -> *HeightFieldData {
     byte_count = byte_count + align8(cell_count * 4)
     flags_offset = byte_count
     byte_count = byte_count + align8(triangle_count * 4)
-    h = core.alloc(byte_count) as *HeightFieldData
+    h = basics.alloc(byte_count) as *HeightFieldData
     h.version = HEIGHT_FIELD_VERSION
     h.byte_count = byte_count
     h.scale = def.scale
@@ -176,7 +176,7 @@ create_height_field(def: *HeightFieldDef) -> *HeightFieldData {
         i = i + 1
     }
     // The decompressed heights give the flags their true convexity.
-    heights_block = core.alloc(height_count * 8)
+    heights_block = basics.alloc(height_count * 8)
     heights = heights_block as float[]
     i = 0
     while i < height_count {
@@ -266,20 +266,20 @@ create_height_field(def: *HeightFieldDef) -> *HeightFieldData {
         }
         row = row + 1
     }
-    core.free_bytes(heights_block, height_count * 8)
+    basics.free_bytes(heights_block, height_count * 8)
     h.hash = 0 as long
-    h.hash = core.hash_bytes(h as ptr, h.byte_count)
+    h.hash = basics.hash_bytes(h as ptr, h.byte_count)
     return h
 }
 
-destroy_height_field(h: *HeightFieldData) { core.free_bytes(h as ptr, h.byte_count) }
+destroy_height_field(h: *HeightFieldData) { basics.free_bytes(h as ptr, h.byte_count) }
 
 // A flat field, with a hole every sixteenth cell when asked.
 create_grid(row_count: int, column_count: int, scale: Vec3, make_holes: bool) -> *HeightFieldData {
     height_count = row_count * column_count
-    heights_block = core.alloc(height_count * 8)
+    heights_block = basics.alloc(height_count * 8)
     cell_count = (row_count - 1) * (column_count - 1)
-    materials_block = core.alloc(cell_count * 4)
+    materials_block = basics.alloc(cell_count * 4)
     materials = materials_block as int[]
     k = 0
     while k < cell_count {
@@ -289,15 +289,15 @@ create_grid(row_count: int, column_count: int, scale: Vec3, make_holes: bool) ->
     def = HeightFieldDef { heights: heights_block, material_indices: materials_block, scale: scale, count_x: column_count,
                            count_z: row_count, global_minimum_height: 0.0 - 256.0, global_maximum_height: 256.0, clockwise_winding: false }
     h = create_height_field(&def)
-    core.free_bytes(heights_block, height_count * 8)
-    core.free_bytes(materials_block, cell_count * 4)
+    basics.free_bytes(heights_block, height_count * 8)
+    basics.free_bytes(materials_block, cell_count * 4)
     return h
 }
 
 // A field rippled by the product of two sines.
 create_wave(row_count: int, column_count: int, scale: Vec3, row_frequency: float, column_frequency: float, make_holes: bool) -> *HeightFieldData {
     height_count = row_count * column_count
-    heights_block = core.alloc(height_count * 8)
+    heights_block = basics.alloc(height_count * 8)
     heights = heights_block as float[]
     omega_z = 2.0 * math.PI * row_frequency
     omega_x = 2.0 * math.PI * column_frequency
@@ -312,7 +312,7 @@ create_wave(row_count: int, column_count: int, scale: Vec3, row_frequency: float
         i = i + 1
     }
     cell_count = (row_count - 1) * (column_count - 1)
-    materials_block = core.alloc(cell_count * 4)
+    materials_block = basics.alloc(cell_count * 4)
     materials = materials_block as int[]
     k = 0
     while k < cell_count {
@@ -322,8 +322,8 @@ create_wave(row_count: int, column_count: int, scale: Vec3, row_frequency: float
     def = HeightFieldDef { heights: heights_block, material_indices: materials_block, scale: scale, count_x: column_count,
                            count_z: row_count, global_minimum_height: 0.0 - 256.0, global_maximum_height: 256.0, clockwise_winding: false }
     h = create_height_field(&def)
-    core.free_bytes(heights_block, height_count * 8)
-    core.free_bytes(materials_block, cell_count * 4)
+    basics.free_bytes(heights_block, height_count * 8)
+    basics.free_bytes(materials_block, cell_count * 4)
     return h
 }
 
@@ -344,7 +344,7 @@ cell_corners(h: *HeightFieldData, row: int, column: int, corners: Vec3[]) {
 var g_corners: ptr = null
 
 corners_ready() -> Vec3[] {
-    if g_corners == null { g_corners = core.alloc(4 * sizeof(Vec3)) }
+    if g_corners == null { g_corners = basics.alloc(4 * sizeof(Vec3)) }
     return g_corners as Vec3[]
 }
 
@@ -409,14 +409,14 @@ shape_cast_height_field(h: *HeightFieldData, proxy: ShapeProxy, translation: Vec
     shape_extents = math.aabb_extents(shape_bounds)
     margin = math.vec3(MAX_AABB_MARGIN, MAX_AABB_MARGIN, MAX_AABB_MARGIN)
     combined = AABB { lower: math.sub(math.sub(h.aabb.lower, shape_extents), margin), upper: math.add(math.add(h.aabb.upper, shape_extents), margin) }
-    fractions_block = core.alloc(16)
+    fractions_block = basics.alloc(16)
     fractions = fractions_block as float[]
     fractions[0] = 0.0
     fractions[1] = 1.0
     intersects = math.ray_cast_aabb(combined, shape_start, shape_end, fractions)
     min_fraction = fractions[0]
     max_fraction_clamped = fractions[1]
-    core.free_bytes(fractions_block, 16)
+    basics.free_bytes(fractions_block, 16)
     if intersects == false { return result }
 
     // The clamped sweep walks the grid; the triangle casts use the whole one.

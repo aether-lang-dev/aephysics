@@ -26,7 +26,7 @@ exports (
     Vec2, Vec3, CosSin, Quat, Transform, Matrix2, Matrix3, AABB, Plane, SegmentDistanceResult,
     PI, TWO_PI, PI_OVER_TWO, PI_OVER_FOUR, SQRT3, DEG_TO_RAD, RAD_TO_DEG, MIN_SCALE,
     EPSILON, TINY, MAX_FLOAT, HUGE,
-    vec2, vec3, quat, transform, matrix3, aabb, plane,
+    vec2, vec3, quat, quat_vs, qv, transform, matrix3, aabb, plane,
     vec3_zero, vec3_one, vec3_axis_x, vec3_axis_y, vec3_axis_z,
     quat_identity, transform_identity, mat3_zero, mat3_identity, aabb_empty,
     min_int, max_int, clamp_int, abs_float, min_float, max_float, clamp_float, lerp_float,
@@ -105,10 +105,14 @@ struct CosSin {
     sine: float
 }
 
-// A quaternion: the vector part and the scalar.
+// A quaternion: x, y, z the vector part and w the scalar, the layout every
+// engine shares (ae3d.core defines the same Quat); the maths reads it
+// through qv and quat_vs, the reference's {v, s}.
 struct Quat {
-    v: Vec3
-    s: float
+    x: float
+    y: float
+    z: float
+    w: float
 }
 
 // A rigid transform: a position and a rotation.
@@ -146,7 +150,11 @@ struct SegmentDistanceResult {
 
 vec2(x: float, y: float) -> Vec2 { return Vec2 { x: x, y: y } }
 vec3(x: float, y: float, z: float) -> Vec3 { return Vec3 { x: x, y: y, z: z } }
-quat(x: float, y: float, z: float, s: float) -> Quat { return Quat { v: Vec3 { x: x, y: y, z: z }, s: s } }
+quat(x: float, y: float, z: float, w: float) -> Quat { return Quat { x: x, y: y, z: z, w: w } }
+// A quaternion from its vector and scalar parts, and the vector part back:
+// the maths below is written in those terms (the reference's b3Quat {v, s}).
+quat_vs(v: Vec3, s: float) -> Quat { return Quat { x: v.x, y: v.y, z: v.z, w: s } }
+qv(q: Quat) -> Vec3 { return Vec3 { x: q.x, y: q.y, z: q.z } }
 transform(p: Vec3, q: Quat) -> Transform { return Transform { p: p, q: q } }
 matrix3(cx: Vec3, cy: Vec3, cz: Vec3) -> Matrix3 { return Matrix3 { cx: cx, cy: cy, cz: cz } }
 aabb(lower: Vec3, upper: Vec3) -> AABB { return AABB { lower: lower, upper: upper } }
@@ -157,7 +165,7 @@ vec3_one() -> Vec3 { return Vec3 { x: 1.0, y: 1.0, z: 1.0 } }
 vec3_axis_x() -> Vec3 { return Vec3 { x: 1.0, y: 0.0, z: 0.0 } }
 vec3_axis_y() -> Vec3 { return Vec3 { x: 0.0, y: 1.0, z: 0.0 } }
 vec3_axis_z() -> Vec3 { return Vec3 { x: 0.0, y: 0.0, z: 1.0 } }
-quat_identity() -> Quat { return Quat { v: Vec3 { x: 0.0, y: 0.0, z: 0.0 }, s: 1.0 } }
+quat_identity() -> Quat { return Quat { x: 0.0, y: 0.0, z: 0.0, w: 1.0 } }
 transform_identity() -> Transform { return Transform { p: vec3_zero(), q: quat_identity() } }
 mat3_zero() -> Matrix3 { return Matrix3 { cx: vec3_zero(), cy: vec3_zero(), cz: vec3_zero() } }
 mat3_identity() -> Matrix3 { return Matrix3 { cx: vec3_axis_x(), cy: vec3_axis_y(), cz: vec3_axis_z() } }
@@ -364,8 +372,8 @@ modified_cross(a: Vec3, b: Vec3) -> Vec3 {
 // The rotation advanced by a small rotation vector (a quaternion
 // derivative step, renormalised).
 integrate_rotation(q1: Quat, delta_rotation: Vec3) -> Quat {
-    qd = mul_quat(Quat { v: mul_sv(0.5, delta_rotation), s: 0.0 }, q1)
-    return normalize_quat(Quat { v: add(q1.v, qd.v), s: qd.s + q1.s })
+    qd = mul_quat(quat_vs(mul_sv(0.5, delta_rotation), 0.0), q1)
+    return normalize_quat(quat_vs(add(qv(q1), qv(qd)), qd.w + q1.w))
 }
 
 // The matrix of the cross product: skew(v) * a = cross(v, a).
@@ -379,9 +387,9 @@ skew(v: Vec3) -> Matrix3 {
 delta_quat_to_rotation(q: Quat, target: Quat) -> Vec3 {
     s = q
     if dot_quat(q, target) < 0.0 { s = negate_quat(q) }
-    diff = Quat { v: sub(target.v, s.v), s: target.s - s.s }
+    diff = quat_vs(sub(qv(target), qv(s)), target.w - s.w)
     product = mul_quat(diff, conjugate(s))
-    return mul_sv(2.0, product.v)
+    return mul_sv(2.0, qv(product))
 }
 
 abs_vec3(a: Vec3) -> Vec3 { return Vec3 { x: abs_float(a.x), y: abs_float(a.y), z: abs_float(a.z) } }
@@ -412,53 +420,53 @@ safe_scale(a: Vec3) -> Vec3 {
 // --- quaternions -----------------------------------------------------------
 
 is_normalized_quat(q: Quat) -> bool {
-    qq = q.v.x * q.v.x + q.v.y * q.v.y + q.v.z * q.v.z + q.s * q.s
+    qq = q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w
     return 1.0 - 20.0 * EPSILON < qq && qq < 1.0 + 20.0 * EPSILON
 }
 
-// v + 2 * cross(q.v, cross(q.v, v) + q.s * v)
+// v + 2 * cross(qv(q), cross(qv(q), v) + q.w * v)
 rotate_vector(q: Quat, v: Vec3) -> Vec3 {
-    t1 = cross(q.v, v)
-    t2 = mul_add(t1, q.s, v)
-    t3 = cross(q.v, t2)
+    t1 = cross(qv(q), v)
+    t2 = mul_add(t1, q.w, v)
+    t3 = cross(qv(q), t2)
     return mul_add(v, 2.0, t3)
 }
 
-// v + 2 * cross(q.v, cross(q.v, v) - q.s * v)
+// v + 2 * cross(qv(q), cross(qv(q), v) - q.w * v)
 inv_rotate_vector(q: Quat, v: Vec3) -> Vec3 {
-    t1 = cross(q.v, v)
-    t2 = mul_sub(t1, q.s, v)
-    t3 = cross(q.v, t2)
+    t1 = cross(qv(q), v)
+    t2 = mul_sub(t1, q.w, v)
+    t3 = cross(qv(q), t2)
     return mul_add(v, 2.0, t3)
 }
 
 // Useful for polarity tests.
-dot_quat(a: Quat, b: Quat) -> float { return a.v.x * b.v.x + a.v.y * b.v.y + a.v.z * b.v.z + a.s * b.s }
+dot_quat(a: Quat, b: Quat) -> float { return a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w }
 
 mul_quat(q1: Quat, q2: Quat) -> Quat {
-    t1 = cross(q1.v, q2.v)
-    t2 = mul_add(t1, q1.s, q2.v)
-    t3 = mul_add(t2, q2.s, q1.v)
-    return Quat { v: t3, s: q1.s * q2.s - dot(q1.v, q2.v) }
+    t1 = cross(qv(q1), qv(q2))
+    t2 = mul_add(t1, q1.w, qv(q2))
+    t3 = mul_add(t2, q2.w, qv(q1))
+    return quat_vs(t3, q1.w * q2.w - dot(qv(q1), qv(q2)))
 }
 
 // inv(q1) * q2
 inv_mul_quat(q1: Quat, q2: Quat) -> Quat {
-    t1 = cross(q2.v, q1.v)
-    t2 = mul_add(t1, q1.s, q2.v)
-    t3 = mul_sub(t2, q2.s, q1.v)
-    return Quat { v: t3, s: q1.s * q2.s + dot(q1.v, q2.v) }
+    t1 = cross(qv(q2), qv(q1))
+    t2 = mul_add(t1, q1.w, qv(q2))
+    t3 = mul_sub(t2, q2.w, qv(q1))
+    return quat_vs(t3, q1.w * q2.w + dot(qv(q1), qv(q2)))
 }
 
 // The cheap inverse.
-conjugate(q: Quat) -> Quat { return Quat { v: neg(q.v), s: q.s } }
-negate_quat(q: Quat) -> Quat { return Quat { v: neg(q.v), s: 0.0 - q.s } }
+conjugate(q: Quat) -> Quat { return quat_vs(neg(qv(q)), q.w) }
+negate_quat(q: Quat) -> Quat { return quat_vs(neg(qv(q)), 0.0 - q.w) }
 
 normalize_quat(q: Quat) -> Quat {
     ls = dot_quat(q, q)
     if ls > 1000.0 * TINY {
         s = 1.0 / sqrt(ls)
-        return Quat { v: Vec3 { x: s * q.v.x, y: s * q.v.y, z: s * q.v.z }, s: s * q.s }
+        return quat_vs(Vec3 { x: s * q.x, y: s * q.y, z: s * q.z }, s * q.w)
     }
     return quat_identity()
 }
@@ -466,24 +474,24 @@ normalize_quat(q: Quat) -> Quat {
 // The rotation about a unit axis by an angle.
 make_quat_from_axis_angle(axis: Vec3, radians: float) -> Quat {
     cs = compute_cos_sin(0.5 * radians)
-    return Quat { v: Vec3 { x: cs.sine * axis.x, y: cs.sine * axis.y, z: cs.sine * axis.z }, s: cs.cosine }
+    return quat_vs(Vec3 { x: cs.sine * axis.x, y: cs.sine * axis.y, z: cs.sine * axis.z }, cs.cosine)
 }
 
 // The axis of a unit quaternion, and in `radians_out[0]` its angle; a zero
 // axis for no rotation.
 get_axis_angle(radians_out: float[], q: Quat) -> Vec3 {
-    l = sqrt(q.v.x * q.v.x + q.v.y * q.v.y + q.v.z * q.v.z)
-    radians_out[0] = 2.0 * atan2_approx(l, q.s)
+    l = sqrt(q.x * q.x + q.y * q.y + q.z * q.z)
+    radians_out[0] = 2.0 * atan2_approx(l, q.w)
     if l > 0.0 {
         inv = 1.0 / l
-        return Vec3 { x: inv * q.v.x, y: inv * q.v.y, z: inv * q.v.z }
+        return Vec3 { x: inv * q.x, y: inv * q.y, z: inv * q.z }
     }
     return vec3_zero()
 }
 
 get_quat_angle(q: Quat) -> float {
-    l = sqrt(q.v.x * q.v.x + q.v.y * q.v.y + q.v.z * q.v.z)
-    return 2.0 * atan2_approx(l, q.s)
+    l = sqrt(q.x * q.x + q.y * q.y + q.z * q.z)
+    return 2.0 * atan2_approx(l, q.w)
 }
 
 // A quaternion from a rotation matrix, normalised at the end, which is
@@ -495,13 +503,13 @@ make_quat_from_matrix(m: Matrix3) -> Quat {
     trace = c1.x + c2.y + c3.z
     q = quat_identity()
     if trace >= 0.0 {
-        q = Quat { v: Vec3 { x: c2.z - c3.y, y: c3.x - c1.z, z: c1.y - c2.x }, s: trace + 1.0 }
+        q = quat_vs(Vec3 { x: c2.z - c3.y, y: c3.x - c1.z, z: c1.y - c2.x }, trace + 1.0)
     } else if c1.x > c2.y && c1.x > c3.z {
-        q = Quat { v: Vec3 { x: c1.x - c2.y - c3.z + 1.0, y: c2.x + c1.y, z: c3.x + c1.z }, s: c2.z - c3.y }
+        q = quat_vs(Vec3 { x: c1.x - c2.y - c3.z + 1.0, y: c2.x + c1.y, z: c3.x + c1.z }, c2.z - c3.y)
     } else if c2.y > c3.z {
-        q = Quat { v: Vec3 { x: c1.y + c2.x, y: c2.y - c3.z - c1.x + 1.0, z: c3.y + c2.z }, s: c3.x - c1.z }
+        q = quat_vs(Vec3 { x: c1.y + c2.x, y: c2.y - c3.z - c1.x + 1.0, z: c3.y + c2.z }, c3.x - c1.z)
     } else {
-        q = Quat { v: Vec3 { x: c1.z + c3.x, y: c2.z + c3.y, z: c3.z - c1.x - c2.y + 1.0 }, s: c1.y - c2.x }
+        q = quat_vs(Vec3 { x: c1.z + c3.x, y: c2.z + c3.y, z: c3.z - c1.x - c2.y + 1.0 }, c1.y - c2.x)
     }
     return normalize_quat(q)
 }
@@ -513,11 +521,11 @@ compute_quat_between_unit_vectors(v1: Vec3, v2: Vec3) -> Quat {
     tolerance = 100.0 * EPSILON
     out = quat_identity()
     if length_squared(m) > tolerance * tolerance {
-        out = Quat { v: cross(v1, m), s: dot(v1, m) }
+        out = quat_vs(cross(v1, m), dot(v1, m))
     } else if abs_float(v1.x) > 0.5 {
-        out = Quat { v: Vec3 { x: v1.y, y: 0.0 - v1.x, z: 0.0 }, s: 0.0 }
+        out = quat_vs(Vec3 { x: v1.y, y: 0.0 - v1.x, z: 0.0 }, 0.0)
     } else {
-        out = Quat { v: Vec3 { x: 0.0, y: v1.z, z: 0.0 - v1.y }, s: 0.0 }
+        out = quat_vs(Vec3 { x: 0.0, y: v1.z, z: 0.0 - v1.y }, 0.0)
     }
     return normalize_quat(out)
 }
@@ -526,15 +534,15 @@ compute_quat_between_unit_vectors(v1: Vec3, v2: Vec3) -> Quat {
 // accounted for, so the angle stays in [-pi, pi] without unwinding.
 get_twist_angle(q: Quat) -> float {
     twist = 0.0
-    if q.s < 0.0 { twist = atan2_approx(0.0 - q.v.z, 0.0 - q.s) } else { twist = atan2_approx(q.v.z, q.s) }
+    if q.w < 0.0 { twist = atan2_approx(0.0 - q.z, 0.0 - q.w) } else { twist = atan2_approx(q.z, q.w) }
     return 2.0 * twist
 }
 
 // Swing angle for a cone limit, in [0, pi]; polarity cannot matter since
 // every term is squared.
 get_swing_angle(q: Quat) -> float {
-    x = sqrt(q.v.z * q.v.z + q.s * q.s)
-    y = sqrt(q.v.x * q.v.x + q.v.y * q.v.y)
+    x = sqrt(q.z * q.z + q.w * q.w)
+    y = sqrt(q.x * q.x + q.y * q.y)
     return 2.0 * atan2_approx(y, x)
 }
 
@@ -543,7 +551,7 @@ get_swing_angle(q: Quat) -> float {
 nlerp(q1: Quat, q2: Quat, alpha: float) -> Quat {
     a = q1
     if dot_quat(q1, q2) < 0.0 { a = negate_quat(q1) }
-    return normalize_quat(Quat { v: lerp(a.v, q2.v, alpha), s: (1.0 - alpha) * a.s + alpha * q2.s })
+    return normalize_quat(quat_vs(lerp(qv(a), qv(q2), alpha), (1.0 - alpha) * a.w + alpha * q2.w))
 }
 
 // --- transforms ------------------------------------------------------------
@@ -679,15 +687,15 @@ abs_matrix3(m: Matrix3) -> Matrix3 { return Matrix3 { cx: abs_vec3(m.cx), cy: ab
 
 // The rotation matrix of a unit quaternion, for rotating many vectors.
 make_matrix_from_quat(q: Quat) -> Matrix3 {
-    xx = q.v.x * q.v.x
-    yy = q.v.y * q.v.y
-    zz = q.v.z * q.v.z
-    xy = q.v.x * q.v.y
-    xz = q.v.x * q.v.z
-    xw = q.v.x * q.s
-    yz = q.v.y * q.v.z
-    yw = q.v.y * q.s
-    zw = q.v.z * q.s
+    xx = q.x * q.x
+    yy = q.y * q.y
+    zz = q.z * q.z
+    xy = q.x * q.y
+    xz = q.x * q.z
+    xw = q.x * q.w
+    yz = q.y * q.z
+    yw = q.y * q.w
+    zw = q.z * q.w
     return Matrix3 { cx: Vec3 { x: 1.0 - 2.0 * (yy + zz), y: 2.0 * (xy + zw), z: 2.0 * (xz - yw) },
                      cy: Vec3 { x: 2.0 * (xy - zw), y: 1.0 - 2.0 * (xx + zz), z: 2.0 * (yz + xw) },
                      cz: Vec3 { x: 2.0 * (xz + yw), y: 2.0 * (yz - xw), z: 1.0 - 2.0 * (xx + yy) } }
@@ -978,7 +986,7 @@ is_valid_vec3(a: Vec3) -> bool { return is_valid_float(a.x) && is_valid_float(a.
 
 // Valid and normalised.
 is_valid_quat(q: Quat) -> bool {
-    if !is_valid_vec3(q.v) || !is_valid_float(q.s) { return false }
+    if !is_valid_vec3(qv(q)) || !is_valid_float(q.w) { return false }
     return is_normalized_quat(q)
 }
 
@@ -1012,4 +1020,4 @@ is_valid_world_transform(t: Transform) -> bool { return is_valid_position(t.p) &
 // --- text ------------------------------------------------------------------
 
 vec3_text(v: Vec3) -> string { return "(${v.x}, ${v.y}, ${v.z})" }
-quat_text(q: Quat) -> string { return "(${q.v.x}, ${q.v.y}, ${q.v.z}; ${q.s})" }
+quat_text(q: Quat) -> string { return "(${q.x}, ${q.y}, ${q.z}; ${q.w})" }

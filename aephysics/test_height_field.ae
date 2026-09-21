@@ -9,7 +9,7 @@
 
 import std.string
 import aephysics.math
-import aephysics.core
+import aephysics.basics
 import aephysics.distance
 import aephysics.manifold
 import aephysics.triangle_manifold
@@ -614,7 +614,7 @@ test_query_and_mover() {
 }
 
 main() {
-    before = core.alloc_count()
+    before = basics.alloc_count()
     test_create()
     test_flags()
     test_ray_and_overlap()
@@ -623,7 +623,7 @@ main() {
     test_backside()
     test_query_and_mover()
     // The module's scratch stays allocated: three blocks.
-    ensure("every other counted allocation was freed (${core.alloc_count() - before})", core.alloc_count() == before + 3)
+    ensure("every other counted allocation was freed (${basics.alloc_count() - before})", basics.alloc_count() == before + 3)
 
     println("height_field: ${checks} checks")
     if failures == 0 {

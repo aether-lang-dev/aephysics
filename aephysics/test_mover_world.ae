@@ -7,7 +7,7 @@
 // collisions without a world are in test_mover.ae.
 import std.string
 import aephysics.math
-import aephysics.core
+import aephysics.basics
 import aephysics.hull
 import aephysics.distance
 import aephysics.manifold

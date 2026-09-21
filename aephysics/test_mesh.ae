@@ -10,7 +10,7 @@
 
 import std.string
 import aephysics.math
-import aephysics.core
+import aephysics.basics
 import aephysics.distance
 import aephysics.manifold
 import aephysics.triangle_manifold
@@ -493,13 +493,13 @@ test_query_and_overlap() {
 }
 
 main() {
-    before = core.alloc_count()
+    before = basics.alloc_count()
     test_valley()
     test_creators()
     test_ray_casts()
     test_query_and_overlap()
     // The module's scratch stays allocated: three blocks.
-    ensure("every other counted allocation was freed", core.alloc_count() == before + 3)
+    ensure("every other counted allocation was freed", basics.alloc_count() == before + 3)
 
     println("mesh: ${checks} checks")
     if failures == 0 {

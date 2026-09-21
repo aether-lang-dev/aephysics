@@ -16,7 +16,7 @@
 // reference does.
 import std.string
 import aephysics.math
-import aephysics.core
+import aephysics.basics
 import aephysics.dynamic_tree
 import aephysics.distance
 import aephysics.mesh
@@ -130,11 +130,11 @@ step(id: WorldId, time_step: float, sub_step_count: int) {
     w = world_of(id)
     if w == null { return }
     w.locked = true
-    core.buffer_clear(&w.body_move_events)
-    core.buffer_clear(&w.sensor_begin_events)
-    core.buffer_clear(&w.contact_begin_events)
-    core.buffer_clear(&w.contact_hit_events)
-    core.buffer_clear(&w.joint_events)
+    basics.buffer_clear(&w.body_move_events)
+    basics.buffer_clear(&w.sensor_begin_events)
+    basics.buffer_clear(&w.contact_begin_events)
+    basics.buffer_clear(&w.contact_hit_events)
+    basics.buffer_clear(&w.joint_events)
     dynamics.update_pairs(w)
     ctx = contact_solver.default_step_context(w)
     ctx.dt = time_step
@@ -159,7 +159,7 @@ step(id: WorldId, time_step: float, sub_step_count: int) {
     dynamics.collide(w)
     if time_step > 0.0 { solver.solve(w, &ctx) }
     dynamics.overlap_sensors(w)
-    core.stack_grow(&w.stack)
+    basics.stack_grow(&w.stack)
     dynamics.swap_end_events(w)
     w.locked = false
 }
@@ -322,7 +322,7 @@ get_counters(id: WorldId) -> Counters {
     contacts = dynamics.world_contact_count(w)
     joints = dynamics.world_joint_count(w)
     islands = dynamics.world_island_count(w)
-    stack_used = core.stack_max_allocation(&w.stack)
+    stack_used = basics.stack_max_allocation(&w.stack)
     static_height = dynamic_tree.tree_get_height(broad_phase.broad_phase_tree(&w.broad_phase, dynamics.BODY_STATIC))
     dynamic_height = dynamic_tree.tree_get_height(broad_phase.broad_phase_tree(&w.broad_phase, dynamics.BODY_DYNAMIC))
     awake_contacts = dynamics.get_solver_set(w, dynamics.AWAKE_SET).contact_indices.count
@@ -442,7 +442,7 @@ const MOVER_PLANE_CAPACITY = 64
 var g_mover_planes: ptr = null   // PlaneResult[MOVER_PLANE_CAPACITY]
 
 mover_planes() -> PlaneResult[] {
-    if g_mover_planes == null { g_mover_planes = core.alloc(MOVER_PLANE_CAPACITY * sizeof(PlaneResult)) }
+    if g_mover_planes == null { g_mover_planes = basics.alloc(MOVER_PLANE_CAPACITY * sizeof(PlaneResult)) }
     return g_mover_planes as PlaneResult[]
 }
 
@@ -643,7 +643,7 @@ var g_mover_points: ptr = null   // Vec3[2]
 cast_mover(id: WorldId, origin: Vec3, mover: Capsule, translation: Vec3, filter: QueryFilter, has_filter: bool, filter_fn: fn(ShapeId, ptr) -> bool, context: ptr) -> float {
     w = world_of(id)
     if w == null { return 1.0 }
-    if g_mover_points == null { g_mover_points = core.alloc(2 * sizeof(Vec3)) }
+    if g_mover_points == null { g_mover_points = basics.alloc(2 * sizeof(Vec3)) }
     points = g_mover_points as Vec3[]
     points[0] = mover.center1
     points[1] = mover.center2
@@ -779,7 +779,7 @@ body_time_of_impact_mover(id: BodyId, origin: Vec3, mover: Capsule, mover_transl
     result = BodyTOIResult { point: math.vec3_zero(), normal: math.vec3_zero(), fraction: 1.0, shape_id: dynamics.null_shape_id() }
     w = body_world(id)
     if w == null { return result }
-    if g_mover_points == null { g_mover_points = core.alloc(2 * sizeof(Vec3)) }
+    if g_mover_points == null { g_mover_points = basics.alloc(2 * sizeof(Vec3)) }
     points = g_mover_points as Vec3[]
     points[0] = mover.center1
     points[1] = mover.center2

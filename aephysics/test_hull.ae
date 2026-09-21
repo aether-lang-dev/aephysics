@@ -8,7 +8,7 @@
 
 import std.string
 import aephysics.math
-import aephysics.core
+import aephysics.basics
 import aephysics.hull
 
 extern calloc(count: int, size: int) -> ptr
@@ -304,7 +304,7 @@ var xseed = 0
 
 xorshift() -> int {
     xseed = xseed ^ (xseed << 13)
-    xseed = xseed ^ core.lsr32(xseed, 17)
+    xseed = xseed ^ basics.lsr32(xseed, 17)
     xseed = xseed ^ (xseed << 5)
     return xseed
 }
@@ -452,7 +452,7 @@ test_degenerate() {
 exact_quat(axis: Vec3, radians: float) -> Quat {
     half = 0.5 * radians
     s = sin(half)
-    return Quat { v: math.mul_sv(s, axis), s: cos(half) }
+    return math.quat_vs(math.mul_sv(s, axis), cos(half))
 }
 
 corner_sign(i: int) -> Vec3 {
@@ -705,7 +705,7 @@ test_hull_2d() {
 }
 
 main() {
-    before = core.alloc_count()
+    before = basics.alloc_count()
     test_cube()
     test_tetrahedron()
     test_determinism()
@@ -719,7 +719,7 @@ main() {
     test_degenerate()
     test_transformed_box()
     test_hull_2d()
-    ensure("every counted allocation was freed", core.alloc_count() == before && core.bytes_in_use() == 0)
+    ensure("every counted allocation was freed", basics.alloc_count() == before && basics.bytes_in_use() == 0)
 
     println("hull: ${checks} checks")
     if failures == 0 {

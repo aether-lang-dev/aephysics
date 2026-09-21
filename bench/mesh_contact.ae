@@ -10,7 +10,7 @@
 import std.string
 import std.os
 import aephysics.math
-import aephysics.core
+import aephysics.basics
 import aephysics.hull
 import aephysics.distance
 import aephysics.manifold
@@ -80,7 +80,7 @@ run(name: string, ground: *Shape, convex: *Shape, radius: float) {
 main() {
     g_arena = calloc(1, sizeof(Arena))
     arena = g_arena as *Arena
-    made = core.arena_create(1 << 20)
+    made = basics.arena_create(1 << 20)
     arena.memory = made.memory
     arena.capacity = made.capacity
     arena.overflows = made.overflows

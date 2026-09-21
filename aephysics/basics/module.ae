@@ -1,4 +1,4 @@
-// aephysics.core -- the containers and allocators under the engine.
+// aephysics.basics -- the containers and allocators under the engine.
 //
 // The bit set, id pool, hash set, growable arrays and the stack and arena
 // allocators, in the shape of Box3D's core (Erin Catto, MIT), the reference

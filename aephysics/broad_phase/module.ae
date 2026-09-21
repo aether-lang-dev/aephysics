@@ -22,7 +22,7 @@
 // reference spreads them over workers.
 import std.string
 import aephysics.math
-import aephysics.core
+import aephysics.basics
 import aephysics.dynamic_tree
 
 exports (
@@ -90,23 +90,23 @@ proxy_key(id: int, kind: int) -> int { return (id << 2) | kind }
 broad_phase_tree(bp: *BroadPhase, kind: int) -> *DynamicTree { return (bp.trees + kind * sizeof(DynamicTree)) as *DynamicTree }
 
 create_broad_phase(bp: *BroadPhase, capacity: Capacity) {
-    bp.trees = core.alloc(BODY_TYPE_COUNT * sizeof(DynamicTree))
+    bp.trees = basics.alloc(BODY_TYPE_COUNT * sizeof(DynamicTree))
     made = dynamic_tree.tree_create(math.max_int(16, capacity.static_shape_count))
     copy_tree(broad_phase_tree(bp, BODY_STATIC), made)
     made = dynamic_tree.tree_create(16)
     copy_tree(broad_phase_tree(bp, BODY_KINEMATIC), made)
     made = dynamic_tree.tree_create(math.max_int(16, capacity.dynamic_shape_count))
     copy_tree(broad_phase_tree(bp, BODY_DYNAMIC), made)
-    bp.pair_set = core.set_create(math.max_int(32, 2 * capacity.contact_count))
+    bp.pair_set = basics.set_create(math.max_int(32, 2 * capacity.contact_count))
     bp.moved_siblings = null
     bp.moved_capacity = 0
     bp.pair_keys = null
     bp.pair_key_count = 0
     bp.pair_key_capacity = 0
-    bp.stack = core.alloc(STACK_SIZE * 4)
-    bp.pair_stack = core.alloc(2 * STACK_SIZE * 4)
-    bp.seeds = core.alloc(4 * CROSS_SEED_COUNT * 4)
-    bp.queue = core.alloc(4 * CROSS_SEED_COUNT * 4)
+    bp.stack = basics.alloc(STACK_SIZE * 4)
+    bp.pair_stack = basics.alloc(2 * STACK_SIZE * 4)
+    bp.seeds = basics.alloc(4 * CROSS_SEED_COUNT * 4)
+    bp.queue = basics.alloc(4 * CROSS_SEED_COUNT * 4)
 }
 
 copy_tree(dst: *DynamicTree, src: DynamicTree) {
@@ -136,14 +136,14 @@ destroy_broad_phase(bp: *BroadPhase) {
         dynamic_tree.tree_destroy(broad_phase_tree(bp, i))
         i = i + 1
     }
-    core.free_bytes(bp.trees, BODY_TYPE_COUNT * sizeof(DynamicTree))
-    core.set_destroy(&bp.pair_set)
-    core.free_bytes(bp.moved_siblings, bp.moved_capacity * 4)
-    core.free_bytes(bp.pair_keys, bp.pair_key_capacity * 8)
-    core.free_bytes(bp.stack, STACK_SIZE * 4)
-    core.free_bytes(bp.pair_stack, 2 * STACK_SIZE * 4)
-    core.free_bytes(bp.seeds, 4 * CROSS_SEED_COUNT * 4)
-    core.free_bytes(bp.queue, 4 * CROSS_SEED_COUNT * 4)
+    basics.free_bytes(bp.trees, BODY_TYPE_COUNT * sizeof(DynamicTree))
+    basics.set_destroy(&bp.pair_set)
+    basics.free_bytes(bp.moved_siblings, bp.moved_capacity * 4)
+    basics.free_bytes(bp.pair_keys, bp.pair_key_capacity * 8)
+    basics.free_bytes(bp.stack, STACK_SIZE * 4)
+    basics.free_bytes(bp.pair_stack, 2 * STACK_SIZE * 4)
+    basics.free_bytes(bp.seeds, 4 * CROSS_SEED_COUNT * 4)
+    basics.free_bytes(bp.queue, 4 * CROSS_SEED_COUNT * 4)
     memset(bp as ptr, 0, sizeof(BroadPhase))
 }
 
@@ -186,10 +186,10 @@ broad_phase_test_overlap(bp: *BroadPhase, key_a: int, key_b: int) -> bool {
 
 // --- the pair set and the keys -------------------------------------------------------------------
 
-add_pair(bp: *BroadPhase, key: long) -> bool { return core.set_add(&bp.pair_set, key) }
-remove_pair(bp: *BroadPhase, key: long) -> bool { return core.set_remove(&bp.pair_set, key) }
-has_pair(bp: *BroadPhase, key: long) -> bool { return core.set_contains(&bp.pair_set, key) }
-pair_count(bp: *BroadPhase) -> int { return core.set_count(&bp.pair_set) }
+add_pair(bp: *BroadPhase, key: long) -> bool { return basics.set_add(&bp.pair_set, key) }
+remove_pair(bp: *BroadPhase, key: long) -> bool { return basics.set_remove(&bp.pair_set, key) }
+has_pair(bp: *BroadPhase, key: long) -> bool { return basics.set_contains(&bp.pair_set, key) }
+pair_count(bp: *BroadPhase) -> int { return basics.set_count(&bp.pair_set) }
 
 pair_key_count(bp: *BroadPhase) -> int { return bp.pair_key_count }
 
@@ -198,17 +198,17 @@ pair_key(bp: *BroadPhase, index: int) -> long {
     return keys[index]
 }
 
-pair_key_shape_a(key: long) -> int { return (core.lsr(key, 64 - core.SHAPE_POWER) as int) & (core.MAX_SHAPES - 1) }
-pair_key_shape_b(key: long) -> int { return (core.lsr(key, 64 - 2 * core.SHAPE_POWER) as int) & (core.MAX_SHAPES - 1) }
-pair_key_child(key: long) -> int { return (key as int) & (core.MAX_CHILD_SHAPES - 1) }
+pair_key_shape_a(key: long) -> int { return (basics.lsr(key, 64 - basics.SHAPE_POWER) as int) & (basics.MAX_SHAPES - 1) }
+pair_key_shape_b(key: long) -> int { return (basics.lsr(key, 64 - 2 * basics.SHAPE_POWER) as int) & (basics.MAX_SHAPES - 1) }
+pair_key_child(key: long) -> int { return (key as int) & (basics.MAX_CHILD_SHAPES - 1) }
 
 push_key(bp: *BroadPhase, key: long) {
     if bp.pair_key_count == bp.pair_key_capacity {
         grown = math.max_int(64, 2 * bp.pair_key_capacity)
-        block = core.alloc(grown * 8)
+        block = basics.alloc(grown * 8)
         if bp.pair_keys != null {
             memcpy(block, bp.pair_keys, bp.pair_key_count * 8)
-            core.free_bytes(bp.pair_keys, bp.pair_key_capacity * 8)
+            basics.free_bytes(bp.pair_keys, bp.pair_key_capacity * 8)
         }
         bp.pair_keys = block
         bp.pair_key_capacity = grown
@@ -238,7 +238,7 @@ struct CompoundContext {
 
 compound_child_visitor(proxy: int, user_data: long, context: ptr) -> bool {
     ctx = context as *CompoundContext
-    key = core.shape_pair_key(ctx.compound_shape, ctx.other_shape, user_data as int)
+    key = basics.shape_pair_key(ctx.compound_shape, ctx.other_shape, user_data as int)
     if has_pair(ctx.bp, key) == false { push_key(ctx.bp, key) }
     return true
 }
@@ -276,7 +276,7 @@ add_candidate_pair(ctx: *PairContext, shape_a: int, shape_b: int, key_a: int, ke
             return
         }
     }
-    key = core.shape_pair_key(shape_a, shape_b, 0)
+    key = basics.shape_pair_key(shape_a, shape_b, 0)
     if has_pair(bp, key) { return }
     if visitors.should_pair(math.min_int(shape_a, shape_b), math.max_int(shape_a, shape_b), visitors.context) {
         push_key(bp, key)
@@ -498,9 +498,9 @@ update_broad_phase_pairs(bp: *BroadPhase, visitors: PairVisitors, has_compounds:
     // The dynamic tree's moved sibling pairs.
     pair_capacity = math.max_int(dynamic_tree_.node_end / 2, 1)
     if pair_capacity > bp.moved_capacity {
-        core.free_bytes(bp.moved_siblings, bp.moved_capacity * 4)
+        basics.free_bytes(bp.moved_siblings, bp.moved_capacity * 4)
         bp.moved_capacity = pair_capacity
-        bp.moved_siblings = core.alloc(pair_capacity * 4)
+        bp.moved_siblings = basics.alloc(pair_capacity * 4)
     }
     siblings = bp.moved_siblings as int[]
     dynamic_move_count = gather_moved_siblings(dynamic_tree_, siblings)

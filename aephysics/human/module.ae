@@ -18,7 +18,7 @@
 // muscle budget; design.md's research note says what comes next.
 import std.string
 import aephysics.math
-import aephysics.core
+import aephysics.basics
 import aephysics.manifold
 import aephysics.material
 import aephysics.shape
@@ -28,7 +28,7 @@ import aephysics.joint_solver
 exports (
     BONE_PELVIS, BONE_SPINE_01, BONE_SPINE_03, BONE_NECK, BONE_THIGH_L, BONE_CALF_L, BONE_THIGH_R, BONE_CALF_R,
     BONE_UPPER_ARM_L, BONE_LOWER_ARM_L, BONE_UPPER_ARM_R, BONE_LOWER_ARM_R, BONE_COUNT, FILTER_JOINT_COUNT,
-    Bone, Human, bone_at, filter_joint_at,
+    HumanBone, Human, bone_at, filter_joint_at,
     create_human, destroy_human, human_set_velocity, human_apply_angular_impulse, human_set_joint_friction_torque,
     human_set_joint_spring_hertz, human_set_joint_damping_ratio, human_align_spring, human_create_motor_anchors,
     human_create_parallel_anchors, human_set_bullet
@@ -55,7 +55,7 @@ const FILTER_JOINT_COUNT = 3
 // One bone: its body, the joint to its parent, the anchor a pose drive
 // hangs it from, the joint's frames on parent and bone, the bone's
 // frame in the reference pose, and the joint's limits and friction.
-struct Bone {
+struct HumanBone {
     body_id: BodyId
     joint_id: JointId
     anchor_id: BodyId
@@ -72,18 +72,18 @@ struct Bone {
 
 // The ragdoll: a heap block of bones and filter joints (create allocates, destroy frees).
 struct Human {
-    bones: ptr                     // Bone[BONE_COUNT]
+    bones: ptr                     // HumanBone[BONE_COUNT]
     filter_joints: ptr             // JointId[FILTER_JOINT_COUNT]
     filter_joint_count: int
     friction_torque: float
     is_spawned: bool
 }
 
-bone_at(h: *Human, index: int) -> *Bone { return (h.bones + index * sizeof(Bone)) as *Bone }
+bone_at(h: *Human, index: int) -> *HumanBone { return (h.bones + index * sizeof(HumanBone)) as *HumanBone }
 filter_joint_at(h: *Human, index: int) -> JointId { return (h.filter_joints as JointId[])[index] }
 
 transform_of(px: float, py: float, pz: float, qx: float, qy: float, qz: float, qs: float) -> Transform {
-    return Transform { p: math.vec3(px, py, pz), q: Quat { v: math.vec3(qx, qy, qz), s: qs } }
+    return Transform { p: math.vec3(px, py, pz), q: math.quat_vs(math.vec3(qx, qy, qz), qs) }
 }
 
 // A bone's body and shape: the body at the reference frame offset by the
@@ -102,7 +102,7 @@ struct BoneSpec {
     joint_friction: float
 }
 
-place_bone(h: *Human, world_id: WorldId, index: int, position: Vec3, spec: BoneSpec, user_data: ptr, group_index: int, density_scale: float) -> *Bone {
+place_bone(h: *Human, world_id: WorldId, index: int, position: Vec3, spec: BoneSpec, user_data: ptr, group_index: int, density_scale: float) -> *HumanBone {
     bone = bone_at(h, index)
     bone.parent_index = spec.parent
     bone.reference_frame = spec.reference
@@ -129,7 +129,7 @@ place_bone(h: *Human, world_id: WorldId, index: int, position: Vec3, spec: BoneS
 
 // The reference's figure, bone by bone (its frames measured from the rig).
 create_human(h: *Human, world_id: WorldId, position: Vec3, friction_torque: float, hertz: float, damping_ratio: float, group_index: int, user_data: ptr) {
-    h.bones = calloc(BONE_COUNT, sizeof(Bone))
+    h.bones = calloc(BONE_COUNT, sizeof(HumanBone))
     h.filter_joints = calloc(FILTER_JOINT_COUNT, sizeof(JointId))
     i = 0
     while i < BONE_COUNT {
@@ -288,7 +288,7 @@ create_human(h: *Human, world_id: WorldId, position: Vec3, friction_torque: floa
     h.is_spawned = true
 }
 
-add_foot(calf: *Bone, foot: Capsule) {
+add_foot(calf: *HumanBone, foot: Capsule) {
     sdef = dynamics.default_shape_def()
     sdef.base_material.friction = 0.1
     sdef.base_material.rolling_resistance = 0.1

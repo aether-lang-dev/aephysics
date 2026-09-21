@@ -10,7 +10,7 @@
 
 import std.string
 import aephysics.math
-import aephysics.core
+import aephysics.basics
 import aephysics.distance
 import aephysics.hull
 import aephysics.manifold
@@ -42,7 +42,7 @@ const HALF_ROOT2 = 0.70710678
 
 exact_quat(axis: Vec3, radians: float) -> Quat {
     half = 0.5 * radians
-    return Quat { v: math.mul_sv(sin(half), axis), s: cos(half) }
+    return math.quat_vs(math.mul_sv(sin(half), axis), cos(half))
 }
 
 exact_rotation(axis: Vec3, radians: float) -> Transform {
@@ -877,7 +877,7 @@ test_rounded_pairs() {
 }
 
 main() {
-    before = core.alloc_count()
+    before = basics.alloc_count()
     test_sat_fixed()
     test_sat_oracle()
     test_crossed_edge()
@@ -889,7 +889,7 @@ main() {
     test_sphere_hull_seam()
     test_rounded_pairs()
     // The module's clip scratch stays allocated: three blocks.
-    ensure("every other counted allocation was freed", core.alloc_count() == before + 3)
+    ensure("every other counted allocation was freed", basics.alloc_count() == before + 3)
 
     println("manifold: ${checks} checks")
     if failures == 0 {

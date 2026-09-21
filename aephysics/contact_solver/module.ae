@@ -20,7 +20,7 @@
 // solver layers; the joint solver and the solver share it.
 import std.string
 import aephysics.math
-import aephysics.core
+import aephysics.basics
 import aephysics.dynamics
 
 exports (
@@ -139,7 +139,7 @@ var g_dummy: ptr = null   // BodyState: a static body's, identity, never written
 
 dummy_state() -> *BodyState {
     if g_dummy == null {
-        g_dummy = core.alloc(sizeof(BodyState))
+        g_dummy = basics.alloc(sizeof(BodyState))
         d = g_dummy as *BodyState
         d.delta_rotation = math.quat_identity()
     }
@@ -184,7 +184,6 @@ count_color_constraints(color: *GraphColor, with_convex: bool) {
 // The separation is split: s = base + dot(cB + rB - cA - rA, normal) with the
 // normal held fixed, so the sub-steps only need the bodies' deltas.
 prepare_contact(ctx: *StepContext, c: *Contact, cc: *ContactConstraint, manifolds: ptr) {
-    w = ctx.world
     warm_start_scale = 0.0
     if ctx.enable_warm_starting { warm_start_scale = 1.0 }
     inv_tau = 1.0 / dynamics.SPECULATIVE_DISTANCE
@@ -318,7 +317,7 @@ prepare_contacts(ctx: *StepContext, color: *GraphColor, with_convex: bool) {
     if with_convex { convex_count = color.convex_contacts.count }
     i = 0
     while i < convex_count {
-        c = dynamics.contact_at(w, core.ints_get(&color.convex_contacts, i))
+        c = dynamics.contact_at(w, basics.ints_get(&color.convex_contacts, i))
         prepare_contact(ctx, c, contact_constraint_at(base, i), manifolds + i * sizeof(ManifoldConstraint))
         i = i + 1
     }
@@ -617,7 +616,7 @@ store_impulses(ctx: *StepContext, constraints: ptr, count: int, hit_bits: *BitSe
                 mp.total_normal_impulse = cp.total_normal_impulse
                 mp.normal_velocity = cp.relative_velocity
                 if check_hits && flagged == false && mp.normal_velocity < neg_threshold && mp.total_normal_impulse > 0.0 {
-                    core.bitset_set_grow(hit_bits, c.contact_id)
+                    basics.bitset_set_grow(hit_bits, c.contact_id)
                     has_hits = true
                     flagged = true
                 }

@@ -10,7 +10,7 @@
 import std.string
 import std.os
 import aephysics.math
-import aephysics.core
+import aephysics.basics
 import aephysics.hull
 import aephysics.manifold
 import aephysics.shape
@@ -77,12 +77,12 @@ main() {
     while c < dynamics.GRAPH_COLOR_COUNT {
         color = dynamics.graph_color(w, c)
         contact_solver.count_color_constraints(color, true)
-        color.contact_constraints = core.alloc(math.max_int(1, color.contact_constraint_count) * sizeof(ContactConstraint))
-        color.manifold_constraints = core.alloc(math.max_int(1, color.manifold_constraint_count) * sizeof(ManifoldConstraint))
+        color.contact_constraints = basics.alloc(math.max_int(1, color.contact_constraint_count) * sizeof(ContactConstraint))
+        color.manifold_constraints = basics.alloc(math.max_int(1, color.manifold_constraint_count) * sizeof(ManifoldConstraint))
         contact_total = contact_total + color.contact_constraint_count
         c = c + 1
     }
-    hit_bits = core.bitset_create(dynamics.world_contact_count(w))
+    hit_bits = basics.bitset_create(dynamics.world_contact_count(w))
     total_impulse = 0.0
     prepare_ns = 0 as long
     warm_ns = 0 as long
@@ -165,11 +165,11 @@ main() {
     c = 0
     while c < dynamics.GRAPH_COLOR_COUNT {
         color = dynamics.graph_color(w, c)
-        core.free_bytes(color.contact_constraints, math.max_int(1, color.contact_constraint_count) * sizeof(ContactConstraint))
-        core.free_bytes(color.manifold_constraints, math.max_int(1, color.manifold_constraint_count) * sizeof(ManifoldConstraint))
+        basics.free_bytes(color.contact_constraints, math.max_int(1, color.contact_constraint_count) * sizeof(ContactConstraint))
+        basics.free_bytes(color.manifold_constraints, math.max_int(1, color.manifold_constraint_count) * sizeof(ManifoldConstraint))
         c = c + 1
     }
-    core.bitset_destroy(&hit_bits)
+    basics.bitset_destroy(&hit_bits)
     dynamics.destroy_world(world_id)
     hull.destroy_hull(slab)
     hull.destroy_hull(box)

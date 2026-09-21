@@ -13,7 +13,7 @@
 import std.string
 import std.os
 import aephysics.math
-import aephysics.core
+import aephysics.basics
 import aephysics.hull
 import aephysics.manifold
 import aephysics.shape
@@ -49,7 +49,7 @@ step(w: *World, dt: float, sub_steps: int) {
     solver.solve(w, &ctx)
     dynamics.overlap_sensors(w)
     dynamics.swap_end_events(w)
-    core.stack_grow(&w.stack)
+    basics.stack_grow(&w.stack)
 }
 
 run(name: string, mode: string, count: int, columns: int, rows: int, spacing: float, base_height: float, layer_height: float, box: *HullData, slab: *HullData) {

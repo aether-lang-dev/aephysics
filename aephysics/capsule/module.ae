@@ -10,7 +10,7 @@
 // snake case: b3RayCastCapsule is ray_cast_capsule.
 import std.string
 import aephysics.math
-import aephysics.core
+import aephysics.basics
 import aephysics.distance
 import aephysics.manifold
 import aephysics.mesh

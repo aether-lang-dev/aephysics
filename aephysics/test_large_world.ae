@@ -9,7 +9,7 @@
 // throughout, so the far half always runs.
 import std.string
 import aephysics.math
-import aephysics.core
+import aephysics.basics
 import aephysics.hull
 import aephysics.distance
 import aephysics.manifold

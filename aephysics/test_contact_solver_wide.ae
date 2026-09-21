@@ -11,7 +11,7 @@
 // same path twice agrees to the bit.
 import std.string
 import aephysics.math
-import aephysics.core
+import aephysics.basics
 import aephysics.hull
 import aephysics.manifold
 import aephysics.shape

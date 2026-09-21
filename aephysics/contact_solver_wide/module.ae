@@ -19,7 +19,7 @@
 // overflow contacts stay with aephysics.contact_solver.
 import std.string
 import aephysics.math
-import aephysics.core
+import aephysics.basics
 import aephysics.dynamics
 import aephysics.contact_solver
 
@@ -348,10 +348,10 @@ gather_bodies(states: ptr, indices: *IntW) -> BodyStateW {
     dp = Vec3W { x: FloatW { x: s0.delta_position.x, y: s1.delta_position.x, z: s2.delta_position.x, w: s3.delta_position.x },
                  y: FloatW { x: s0.delta_position.y, y: s1.delta_position.y, z: s2.delta_position.y, w: s3.delta_position.y },
                  z: FloatW { x: s0.delta_position.z, y: s1.delta_position.z, z: s2.delta_position.z, w: s3.delta_position.z } }
-    dqv = Vec3W { x: FloatW { x: s0.delta_rotation.v.x, y: s1.delta_rotation.v.x, z: s2.delta_rotation.v.x, w: s3.delta_rotation.v.x },
-                  y: FloatW { x: s0.delta_rotation.v.y, y: s1.delta_rotation.v.y, z: s2.delta_rotation.v.y, w: s3.delta_rotation.v.y },
-                  z: FloatW { x: s0.delta_rotation.v.z, y: s1.delta_rotation.v.z, z: s2.delta_rotation.v.z, w: s3.delta_rotation.v.z } }
-    dqs = FloatW { x: s0.delta_rotation.s, y: s1.delta_rotation.s, z: s2.delta_rotation.s, w: s3.delta_rotation.s }
+    dqv = Vec3W { x: FloatW { x: s0.delta_rotation.x, y: s1.delta_rotation.x, z: s2.delta_rotation.x, w: s3.delta_rotation.x },
+                  y: FloatW { x: s0.delta_rotation.y, y: s1.delta_rotation.y, z: s2.delta_rotation.y, w: s3.delta_rotation.y },
+                  z: FloatW { x: s0.delta_rotation.z, y: s1.delta_rotation.z, z: s2.delta_rotation.z, w: s3.delta_rotation.z } }
+    dqs = FloatW { x: s0.delta_rotation.w, y: s1.delta_rotation.w, z: s2.delta_rotation.w, w: s3.delta_rotation.w }
     return BodyStateW { v: v, w: w, dp: dp, dq: QuatW { v: dqv, s: dqs } }
 }
 
@@ -521,7 +521,7 @@ prepare_wide_contacts(ctx: *StepContext, color: *GraphColor) {
     }
     i = 0
     while i < count {
-        c = dynamics.contact_at(w, core.ints_get(&color.convex_contacts, i))
+        c = dynamics.contact_at(w, basics.ints_get(&color.convex_contacts, i))
         prepare_lane(ctx, c, wide_constraint_at(base, i / WIDTH), i % WIDTH)
         i = i + 1
     }
@@ -773,13 +773,13 @@ store_wide_impulses(ctx: *StepContext, color: *GraphColor, hit_bits: *BitSet) ->
             mp.normal_velocity = lane(&cp.relative_velocity, l)
             point_index = point_index + 1
         }
-        contact = dynamics.contact_at(w, core.ints_get(&color.convex_contacts, i))
+        contact = dynamics.contact_at(w, basics.ints_get(&color.convex_contacts, i))
         if (contact.flags & dynamics.SIM_ENABLE_HIT_EVENT) != 0 {
             point_index = 0
             while point_index < point_count {
                 mp = dynamics.manifold_point_at(m, point_index)
                 if mp.normal_velocity < neg_threshold && mp.total_normal_impulse > 0.0 {
-                    core.bitset_set_grow(hit_bits, contact.contact_id)
+                    basics.bitset_set_grow(hit_bits, contact.contact_id)
                     has_hits = true
                     break
                 }

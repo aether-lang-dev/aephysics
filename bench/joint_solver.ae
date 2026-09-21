@@ -9,7 +9,7 @@
 import std.string
 import std.os
 import aephysics.math
-import aephysics.core
+import aephysics.basics
 import aephysics.hull
 import aephysics.manifold
 import aephysics.shape
@@ -30,7 +30,7 @@ run(kind: int, name: string, box: *HullData) {
     w = dynamics.get_world(world_id.index1 - 1)
     shape_def = dynamics.default_shape_def()
     shape_def.density = 1.0
-    ids_block = core.alloc(COUNT * sizeof(BodyId))
+    ids_block = basics.alloc(COUNT * sizeof(BodyId))
     ids = ids_block as BodyId[]
     i = 0
     while i < COUNT {
@@ -141,7 +141,7 @@ run(kind: int, name: string, box: *HullData) {
         i = i + 1
     }
     println("aephysics joint_solver: ${STEPS} steps of ${COUNT - 1} ${name} joints: prepare ${ms(prepare_ns)} ms, warm start ${ms(warm_ns)} ms, 4 biased solves ${ms(solve_ns)} ms, 4 relaxes ${ms(relax_ns)} ms (impulse sum ${checksum})")
-    core.free_bytes(ids_block, COUNT * sizeof(BodyId))
+    basics.free_bytes(ids_block, COUNT * sizeof(BodyId))
     dynamics.destroy_world(world_id)
 }
 

@@ -22,7 +22,7 @@
 // there for larger manifolds).
 import std.string
 import aephysics.math
-import aephysics.core
+import aephysics.basics
 import aephysics.distance
 import aephysics.hull
 
@@ -216,9 +216,9 @@ var g_clip_points: ptr = null
 
 scratch_ready() {
     if g_clip1 == null {
-        g_clip1 = core.alloc(MAX_CLIP_POINTS * sizeof(ClipVertex))
-        g_clip2 = core.alloc(MAX_CLIP_POINTS * sizeof(ClipVertex))
-        g_clip_points = core.alloc(MAX_CLIP_POINTS * sizeof(LocalManifoldPoint))
+        g_clip1 = basics.alloc(MAX_CLIP_POINTS * sizeof(ClipVertex))
+        g_clip2 = basics.alloc(MAX_CLIP_POINTS * sizeof(ClipVertex))
+        g_clip_points = basics.alloc(MAX_CLIP_POINTS * sizeof(LocalManifoldPoint))
     }
 }
 
@@ -1261,7 +1261,7 @@ collide_hulls(m: *LocalManifold, capacity: int, hull_a: *HullData, hull_b: *Hull
     clip_separation = cache.separation
     if m.point_count == 0 || edge_query.separation > clip_separation + math.LINEAR_SLOP {
         // The edge contact into its own point, kept only if it built one.
-        edge_block = core.alloc(sizeof(LocalManifoldPoint))
+        edge_block = basics.alloc(sizeof(LocalManifoldPoint))
         edge_manifold = local_manifold(edge_block)
         edge_cache = empty_sat_cache()
         build_edge_contact(&edge_manifold, hull_a, hull_b, transform_b_to_a, edge_query, &edge_cache)
@@ -1271,6 +1271,6 @@ collide_hulls(m: *LocalManifold, capacity: int, hull_a: *HullData, hull_b: *Hull
             set_manifold_point(m, 0, manifold_point(&edge_manifold, 0))
             copy_sat_cache(cache, edge_cache)
         }
-        core.free_bytes(edge_block, sizeof(LocalManifoldPoint))
+        basics.free_bytes(edge_block, sizeof(LocalManifoldPoint))
     }
 }
