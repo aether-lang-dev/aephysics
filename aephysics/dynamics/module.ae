@@ -126,7 +126,7 @@ exports (
     body_get_contact_capacity, body_get_joints, world_joint_count,
     Sensor, SensorBeginTouchEvent, SensorEndTouchEvent, sensor_at, world_sensor_count, Profile,
     world_sensor_begin_event_count, world_sensor_begin_event, world_sensor_end_event_count, world_sensor_end_event,
-    shape_enable_sensor_events, shape_are_sensor_events_enabled, shape_get_sensor_capacity, shape_get_sensor_data,
+    shape_enable_sensor_events, shape_are_sensor_events_enabled, shape_enable_contact_events, shape_are_contact_events_enabled, shape_enable_hit_events, shape_are_hit_events_enabled, shape_get_sensor_capacity, shape_get_sensor_data,
     shape_get_contact_capacity, add_sensor_hit, overlap_sensors, validate_joints,
     BodyMoveEvent, ContactHitEvent, JointEvent, SensorHit, TIME_TO_SLEEP,
     world_body_move_event_count, world_body_move_event, world_contact_hit_event_count, world_contact_hit_event,
@@ -5367,6 +5367,18 @@ shape_enable_sensor_events(id: ShapeId, flag: bool) {
     if flag { s.flags = s.flags | SHAPE_ENABLE_SENSOR_EVENTS } else { s.flags = s.flags & (0 - 1 - SHAPE_ENABLE_SENSOR_EVENTS) }
 }
 shape_are_sensor_events_enabled(id: ShapeId) -> bool { return (get_shape_full_id(world_at(id.world0), id).flags & SHAPE_ENABLE_SENSOR_EVENTS) != 0 }
+
+// Contact and hit events on a shape after its creation (b3Shape_EnableContactEvents, b3Shape_EnableHitEvents).
+shape_enable_contact_events(id: ShapeId, flag: bool) {
+    s = get_shape_full_id(world_at(id.world0), id)
+    if flag { s.flags = s.flags | SHAPE_ENABLE_CONTACT_EVENTS } else { s.flags = s.flags & (0 - 1 - SHAPE_ENABLE_CONTACT_EVENTS) }
+}
+shape_are_contact_events_enabled(id: ShapeId) -> bool { return (get_shape_full_id(world_at(id.world0), id).flags & SHAPE_ENABLE_CONTACT_EVENTS) != 0 }
+shape_enable_hit_events(id: ShapeId, flag: bool) {
+    s = get_shape_full_id(world_at(id.world0), id)
+    if flag { s.flags = s.flags | SHAPE_ENABLE_HIT_EVENTS } else { s.flags = s.flags & (0 - 1 - SHAPE_ENABLE_HIT_EVENTS) }
+}
+shape_are_hit_events_enabled(id: ShapeId) -> bool { return (get_shape_full_id(world_at(id.world0), id).flags & SHAPE_ENABLE_HIT_EVENTS) != 0 }
 
 // The shapes a sensor overlaps, as of the last pass.
 shape_get_sensor_capacity(id: ShapeId) -> int {
