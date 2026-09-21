@@ -9,17 +9,19 @@
 //    blocks and the tree's nodes carry theirs in the struct, as the
 //    reference does), and a counting semaphore the scheduler's threads
 //    wait on between steps.
-// 2. The lanes of aephysics.contact_solver_wide as vector code: the warm
-// start, solve and restitution over the module's WideConstraint, four
-// contacts per operation through GCC's vector extensions (SSE on
-// x86-64, NEON on arm64, both baseline). The constraints are packed
-// into single precision for the solve, as the reference computes them:
-// four floats are one register, where four doubles are two, and the
-// gathered bodies of a constraint then fit the register file. The
-// module's double layout is declared again here for the packing and
-// checked by aephysics_wide_constraint_size() against
-// sizeof(WideConstraint) on the Aether side; the arithmetic is the
-// module's, operation for operation.
+// 2. The lanes of aephysics.contact_solver_wide as vector code: the
+// prepare, warm start, solve and restitution over the module's
+// WideConstraint, four contacts per operation through GCC's vector
+// extensions (SSE on x86-64, NEON on arm64, both baseline). The
+// constraints are prepared in single precision for the solve, as the
+// reference computes them: four floats are one register, where four
+// doubles are two, and the gathered bodies of a constraint then fit
+// the register file. The module's double layout is declared again here
+// for the impulses handed back and checked by
+// aephysics_wide_constraint_size() against sizeof(WideConstraint) on
+// the Aether side; the module's other structures are read through the
+// field offsets it measures (aephysics_wide_layout); the arithmetic is
+// the module's, operation for operation.
 //
 // The multiply-adds are written as two operations: -ffp-contract=off
 // keeps the compiler from fusing them, so the lanes match each other
@@ -210,11 +212,12 @@ typedef struct {
 
 typedef struct { vec3w v, w, dp; quatw dq; } body_state_w;
 
-// The step's packed constraints: the block the module prepared, and its
-// float copy at the same offsets, grown to the largest step so far. The
-// block is set once a step (aephysics_wide_begin) and the packing and
-// unpacking go by ranges, so the solver's workers each pack the slots
-// they prepared and unpack the ones they store.
+// The step's constraints: the module's block, and the float copy the
+// solve reads at the same offsets, grown to the largest step so far. The
+// block is set once a step (aephysics_wide_begin); the prepare below
+// writes a lane's floats straight into the copy, and the impulses are
+// unpacked by ranges before the store, by whichever worker has the
+// range.
 static const wide_constraint_d* g_block = NULL;
 static wide_constraint* g_packed = NULL;
 static int g_packed_capacity = 0;
@@ -232,63 +235,8 @@ void aephysics_wide_begin(const void* block, int count)
 
 void aephysics_wide_end(void) { g_block = NULL; }
 
-static inline v4 narrow(d4 a) { return (v4){ (float)a.x, (float)a.y, (float)a.z, (float)a.w }; }
 static inline d4 widen(v4 a) { return (d4){ a[0], a[1], a[2], a[3] }; }
-static inline vec3w narrow3(vec3d a) { return (vec3w){ narrow(a.x), narrow(a.y), narrow(a.z) }; }
 static inline vec3d widen3(vec3w a) { return (vec3d){ widen(a.x), widen(a.y), widen(a.z) }; }
-static inline sym3w narrow_sym3(sym3d a)
-{
-    return (sym3w){ narrow(a.cxx), narrow(a.cxy), narrow(a.cxz), narrow(a.cyy), narrow(a.cyz), narrow(a.czz) };
-}
-
-// A range of the step's block into floats, after its prepare.
-void aephysics_wide_pack(const void* constraints, int count)
-{
-    const wide_constraint_d* first = constraints;
-    wide_constraint* packed = g_packed + (first - g_block);
-    for (int i = 0; i < count; ++i) {
-        const wide_constraint_d* d = first + i;
-        wide_constraint* f = packed + i;
-        f->index_a = d->index_a;
-        f->index_b = d->index_b;
-        f->point_counts = d->point_counts;
-        f->inv_mass_a = narrow(d->inv_mass_a);
-        f->inv_mass_b = narrow(d->inv_mass_b);
-        f->inv_inertia_a = narrow_sym3(d->inv_inertia_a);
-        f->inv_inertia_b = narrow_sym3(d->inv_inertia_b);
-        f->normal = narrow3(d->normal);
-        f->tangent1 = narrow3(d->tangent1);
-        f->tangent2 = narrow3(d->tangent2);
-        f->center_a = narrow3(d->center_a);
-        f->center_b = narrow3(d->center_b);
-        f->twist_mass = narrow(d->twist_mass);
-        f->twist_impulse = narrow(d->twist_impulse);
-        f->tangent_mass = (sym2w){ narrow(d->tangent_mass.cxx), narrow(d->tangent_mass.cxy), narrow(d->tangent_mass.cyy) };
-        f->friction_impulse = (vec2w){ narrow(d->friction_impulse.x), narrow(d->friction_impulse.y) };
-        f->rolling_mass = narrow_sym3(d->rolling_mass);
-        f->rolling_impulse = narrow3(d->rolling_impulse);
-        f->friction = narrow(d->friction);
-        f->rolling_resistance = narrow(d->rolling_resistance);
-        f->tangent_velocity1 = narrow(d->tangent_velocity1);
-        f->tangent_velocity2 = narrow(d->tangent_velocity2);
-        f->bias_rate = narrow(d->bias_rate);
-        f->mass_scale = narrow(d->mass_scale);
-        f->impulse_scale = narrow(d->impulse_scale);
-        f->restitution = narrow(d->restitution);
-        for (int j = 0; j < 4; ++j) {
-            const wide_point_d* dp = d->points + j;
-            wide_point* fp = f->points + j;
-            fp->anchor_a = narrow3(dp->anchor_a);
-            fp->anchor_b = narrow3(dp->anchor_b);
-            fp->base_separation = narrow(dp->base_separation);
-            fp->normal_impulse = narrow(dp->normal_impulse);
-            fp->total_normal_impulse = narrow(dp->total_normal_impulse);
-            fp->normal_mass = narrow(dp->normal_mass);
-            fp->lever_arm = narrow(dp->lever_arm);
-            fp->relative_velocity = narrow(dp->relative_velocity);
-        }
-    }
-}
 
 // A range's impulses back into the module's block, before its store.
 void aephysics_wide_unpack(void* constraints, int count)
@@ -317,6 +265,291 @@ static inline wide_constraint* packed_of(const void* constraints)
 
 int aephysics_wide_constraint_size(void) { return (int)sizeof(wide_constraint_d); }
 int aephysics_wide_body_state_size(void) { return (int)sizeof(body_state); }
+
+// --- the prepare, straight into the lanes ---------------------------------------------------------------------
+//
+// b3PrepareContacts_Convex's lane body, in doubles as the module computes
+// it (operation for operation, so a lane prepared here is the lane the
+// module prepares) and stored as the floats the solve reads. The module
+// used to prepare a lane at a time into its double block and this file
+// packed the block to floats: a millisecond a step of packing on the
+// large pyramid, and a prepare writing doubles a lane at a time at twice
+// the reference's cost. The module's structures are read through the
+// field offsets it measures at start (aephysics_wide_layout), so this
+// file declares none of them.
+//
+// What the store reads afterwards goes into the double block too: the
+// bodies' indices, the point counts, the manifolds, the tangents and
+// each point's relative velocity; the impulses come back from the solve
+// through aephysics_wide_unpack.
+
+enum {
+    OFF_C_INDEX_A, OFF_C_INDEX_B, OFF_C_MANIFOLDS, OFF_C_FRICTION, OFF_C_RESTITUTION, OFF_C_ROLLING, OFF_C_TANGENT_VELOCITY,
+    OFF_M_POINTS, OFF_M_POINT_STRIDE, OFF_M_NORMAL, OFF_M_TWIST_IMPULSE, OFF_M_FRICTION_IMPULSE, OFF_M_ROLLING_IMPULSE, OFF_M_POINT_COUNT,
+    OFF_P_ANCHOR_A, OFF_P_ANCHOR_B, OFF_P_SEPARATION, OFF_P_NORMAL_IMPULSE,
+    OFF_S_INV_MASS, OFF_S_INV_INERTIA_WORLD, OFF_S_SIZE,
+    OFF_B_LINEAR, OFF_B_ANGULAR, OFF_B_SIZE,
+    OFF_COUNT
+};
+
+static int g_off[OFF_COUNT];
+static int g_layout_known = 0;
+
+// The step's inputs the prepare shares: the body arrays and the softness.
+static const char* g_sims = NULL;
+static const char* g_states = NULL;
+static double g_soft[3], g_static_soft[3];
+static double g_warm_start_scale = 0.0;
+
+int aephysics_wide_layout_count(void) { return OFF_COUNT; }
+
+void aephysics_wide_layout(const int* offsets)
+{
+    memcpy(g_off, offsets, sizeof(g_off));
+    g_layout_known = 1;
+}
+
+void aephysics_wide_prepare_begin(const void* sims, const void* states,
+                                  double bias_rate, double mass_scale, double impulse_scale,
+                                  double static_bias_rate, double static_mass_scale, double static_impulse_scale,
+                                  int enable_warm_starting)
+{
+    g_sims = sims;
+    g_states = states;
+    g_soft[0] = bias_rate; g_soft[1] = mass_scale; g_soft[2] = impulse_scale;
+    g_static_soft[0] = static_bias_rate; g_static_soft[1] = static_mass_scale; g_static_soft[2] = static_impulse_scale;
+    g_warm_start_scale = enable_warm_starting ? 1.0 : 0.0;
+}
+
+// A slot's float lanes zeroed: the tail slot of a colour, whose spare
+// lanes must reach no body.
+void aephysics_wide_zero_packed(const void* slot)
+{
+    memset(packed_of(slot), 0, sizeof(wide_constraint));
+}
+
+typedef struct { double x, y, z; } dv3;
+typedef struct { dv3 cx, cy, cz; } dm3;
+
+#define FIELD(base, off, type) (*(const type*)((const char*)(base) + (off)))
+#define FIELD_DV3(base, off) (*(const dv3*)((const char*)(base) + (off)))
+
+static inline dv3 dv3_zero(void) { return (dv3){ 0.0, 0.0, 0.0 }; }
+static inline dv3 dv3_add(dv3 a, dv3 b) { return (dv3){ a.x + b.x, a.y + b.y, a.z + b.z }; }
+static inline dv3 dv3_sub(dv3 a, dv3 b) { return (dv3){ a.x - b.x, a.y - b.y, a.z - b.z }; }
+static inline double dv3_dot(dv3 a, dv3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+static inline dv3 dv3_cross(dv3 a, dv3 b)
+{
+    return (dv3){ a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x };
+}
+static inline dv3 dv3_mul_add(dv3 a, double s, dv3 b) { return (dv3){ a.x + s * b.x, a.y + s * b.y, a.z + s * b.z }; }
+static inline dv3 dv3_mul_sv(double s, dv3 a) { return (dv3){ s * a.x, s * a.y, s * a.z }; }
+static inline double dv3_length(dv3 v) { return sqrt(dv3_dot(v, v)); }
+// math.normalize: a unit vector, or zero for an input too small to have a direction.
+#define AE_TINY 0.0000000000000000000000000000000000000117549435
+static inline dv3 dv3_normalize(dv3 a)
+{
+    double ls = a.x * a.x + a.y * a.y + a.z * a.z;
+    if (ls > 1000.0 * AE_TINY) {
+        double s = 1.0 / sqrt(ls);
+        return (dv3){ s * a.x, s * a.y, s * a.z };
+    }
+    return dv3_zero();
+}
+// math.perp
+static inline dv3 dv3_perp(dv3 a)
+{
+    if (a.x < 0.0 - 0.5 || 0.5 < a.x) return dv3_normalize((dv3){ a.y, 0.0 - a.x, 0.0 });
+    return dv3_normalize((dv3){ 0.0, a.z, 0.0 - a.y });
+}
+static inline dm3 dm3_zero(void) { return (dm3){ dv3_zero(), dv3_zero(), dv3_zero() }; }
+static inline dv3 dm3_mul_mv(dm3 m, dv3 a)
+{
+    return (dv3){ m.cx.x * a.x + m.cy.x * a.y + m.cz.x * a.z,
+                  m.cx.y * a.x + m.cy.y * a.y + m.cz.y * a.z,
+                  m.cx.z * a.x + m.cy.z * a.y + m.cz.z * a.z };
+}
+static inline dm3 dm3_add(dm3 a, dm3 b) { return (dm3){ dv3_add(a.cx, b.cx), dv3_add(a.cy, b.cy), dv3_add(a.cz, b.cz) }; }
+static inline double dm3_det(dm3 m) { return dv3_dot(m.cx, dv3_cross(m.cy, m.cz)); }
+static inline double ae_abs(double a) { return a < 0.0 ? 0.0 - a : a; }
+// math.invert_matrix: the inverse, or zero when singular.
+static inline dm3 dm3_invert(dm3 m)
+{
+    double d = dm3_det(m);
+    if (ae_abs(d) > 1000.0 * AE_TINY) {
+        double inv = 1.0 / d;
+        dm3 out = { dv3_mul_sv(inv, dv3_cross(m.cy, m.cz)), dv3_mul_sv(inv, dv3_cross(m.cz, m.cx)), dv3_mul_sv(inv, dv3_cross(m.cx, m.cy)) };
+        return (dm3){ { out.cx.x, out.cy.x, out.cz.x }, { out.cx.y, out.cy.y, out.cz.y }, { out.cx.z, out.cy.z, out.cz.z } };
+    }
+    return dm3_zero();
+}
+static inline double ae_clamp(double a, double lower, double upper)
+{
+    if (a < lower) return lower;
+    if (upper < a) return upper;
+    return a;
+}
+
+static inline void lane_set(v4* f, int l, double v) { (*f)[l] = (float)v; }
+static inline void lane_set3(vec3w* f, int l, dv3 v) { lane_set(&f->x, l, v.x); lane_set(&f->y, l, v.y); lane_set(&f->z, l, v.z); }
+static inline void lane_set_sym3(sym3w* f, int l, dm3 m)
+{
+    lane_set(&f->cxx, l, m.cx.x); lane_set(&f->cxy, l, m.cx.y); lane_set(&f->cxz, l, m.cx.z);
+    lane_set(&f->cyy, l, m.cy.y); lane_set(&f->cyz, l, m.cy.z); lane_set(&f->czz, l, m.cz.z);
+}
+static inline void dlane_set(d4* d, int l, double v) { ((double*)d)[l] = v; }
+static inline void dlane_set3(vec3d* d, int l, dv3 v) { dlane_set(&d->x, l, v.x); dlane_set(&d->y, l, v.y); dlane_set(&d->z, l, v.z); }
+
+#define MAX_MANIFOLD_POINTS 4
+#define SPECULATIVE_DISTANCE 0.02
+#define MIN_FRICTION_WEIGHT 0.0000000001
+#define NULL_INDEX (-1)
+
+// One convex contact into lane `l` of the slot the module points at.
+void aephysics_wide_prepare(const void* contact, void* slot, int l)
+{
+    wide_constraint_d* d = slot;
+    wide_constraint* f = packed_of(slot);
+    const char* c = contact;
+    const char* manifold = FIELD(c, g_off[OFF_C_MANIFOLDS], const char*);
+    int index_a = FIELD(c, g_off[OFF_C_INDEX_A], int32_t);
+    int index_b = FIELD(c, g_off[OFF_C_INDEX_B], int32_t);
+    double inv_tau = 1.0 / SPECULATIVE_DISTANCE;
+
+    ((int32_t*)&d->index_a)[l] = index_a + 1;
+    ((int32_t*)&d->index_b)[l] = index_b + 1;
+    ((int32_t*)&f->index_a)[l] = index_a + 1;
+    ((int32_t*)&f->index_b)[l] = index_b + 1;
+    ((void**)&d->manifolds)[l] = (void*)manifold;
+
+    double m_a = 0.0, m_b = 0.0;
+    dm3 i_a = dm3_zero(), i_b = dm3_zero();
+    dv3 v_a = dv3_zero(), w_a = dv3_zero(), v_b = dv3_zero(), w_b = dv3_zero();
+    if (index_a != NULL_INDEX) {
+        const char* sim = g_sims + (size_t)index_a * g_off[OFF_S_SIZE];
+        const char* state = g_states + (size_t)index_a * g_off[OFF_B_SIZE];
+        m_a = FIELD(sim, g_off[OFF_S_INV_MASS], double);
+        i_a = FIELD(sim, g_off[OFF_S_INV_INERTIA_WORLD], dm3);
+        v_a = FIELD_DV3(state, g_off[OFF_B_LINEAR]);
+        w_a = FIELD_DV3(state, g_off[OFF_B_ANGULAR]);
+    }
+    if (index_b != NULL_INDEX) {
+        const char* sim = g_sims + (size_t)index_b * g_off[OFF_S_SIZE];
+        const char* state = g_states + (size_t)index_b * g_off[OFF_B_SIZE];
+        m_b = FIELD(sim, g_off[OFF_S_INV_MASS], double);
+        i_b = FIELD(sim, g_off[OFF_S_INV_INERTIA_WORLD], dm3);
+        v_b = FIELD_DV3(state, g_off[OFF_B_LINEAR]);
+        w_b = FIELD_DV3(state, g_off[OFF_B_ANGULAR]);
+    }
+    lane_set(&f->inv_mass_a, l, m_a);
+    lane_set(&f->inv_mass_b, l, m_b);
+    lane_set_sym3(&f->inv_inertia_a, l, i_a);
+    lane_set_sym3(&f->inv_inertia_b, l, i_b);
+    const double* soft = (index_a == NULL_INDEX || index_b == NULL_INDEX) ? g_static_soft : g_soft;
+    dv3 normal = FIELD_DV3(manifold, g_off[OFF_M_NORMAL]);
+    dv3 tangent1 = dv3_perp(normal);
+    dv3 tangent2 = dv3_cross(tangent1, normal);
+    lane_set3(&f->normal, l, normal);
+    lane_set3(&f->tangent1, l, tangent1);
+    lane_set3(&f->tangent2, l, tangent2);
+    dlane_set3(&d->tangent1, l, tangent1);
+    dlane_set3(&d->tangent2, l, tangent2);
+    dv3 tangent_velocity = FIELD_DV3(c, g_off[OFF_C_TANGENT_VELOCITY]);
+    lane_set(&f->friction, l, FIELD(c, g_off[OFF_C_FRICTION], double));
+    lane_set(&f->restitution, l, FIELD(c, g_off[OFF_C_RESTITUTION], double));
+    lane_set(&f->rolling_resistance, l, FIELD(c, g_off[OFF_C_ROLLING], double));
+    lane_set(&f->tangent_velocity1, l, dv3_dot(tangent_velocity, tangent1));
+    lane_set(&f->tangent_velocity2, l, dv3_dot(tangent_velocity, tangent2));
+    lane_set(&f->bias_rate, l, soft[0]);
+    lane_set(&f->mass_scale, l, soft[1]);
+    lane_set(&f->impulse_scale, l, soft[2]);
+    int point_count = FIELD(manifold, g_off[OFF_M_POINT_COUNT], int32_t);
+    ((int32_t*)&d->point_counts)[l] = point_count;
+    ((int32_t*)&f->point_counts)[l] = point_count;
+    dv3 center_a = dv3_zero(), center_b = dv3_zero();
+    double total_weight = 0.0;
+    for (int p = 0; p < point_count; ++p) {
+        const char* mp = manifold + g_off[OFF_M_POINTS] + (size_t)p * g_off[OFF_M_POINT_STRIDE];
+        wide_point* cp = f->points + p;
+        dv3 r_a = FIELD_DV3(mp, g_off[OFF_P_ANCHOR_A]);
+        dv3 r_b = FIELD_DV3(mp, g_off[OFF_P_ANCHOR_B]);
+        double s = FIELD(mp, g_off[OFF_P_SEPARATION], double);
+        // The friction centre decays with separation (the scalar prepare says why).
+        double weight = ae_clamp(2.0 - s * inv_tau, MIN_FRICTION_WEIGHT, 1.0);
+        center_a = dv3_mul_add(center_a, weight, r_a);
+        center_b = dv3_mul_add(center_b, weight, r_b);
+        total_weight = total_weight + weight;
+        lane_set3(&cp->anchor_a, l, r_a);
+        lane_set3(&cp->anchor_b, l, r_b);
+        lane_set(&cp->base_separation, l, s - dv3_dot(dv3_sub(r_b, r_a), normal));
+        lane_set(&cp->normal_impulse, l, g_warm_start_scale * FIELD(mp, g_off[OFF_P_NORMAL_IMPULSE], double));
+        lane_set(&cp->total_normal_impulse, l, 0.0);
+        dv3 rn_a = dv3_cross(r_a, normal);
+        dv3 rn_b = dv3_cross(r_b, normal);
+        double k_normal = m_a + m_b + dv3_dot(rn_a, dm3_mul_mv(i_a, rn_a)) + dv3_dot(rn_b, dm3_mul_mv(i_b, rn_b));
+        double normal_mass = 0.0;
+        if (k_normal > 0.0) normal_mass = 1.0 / k_normal;
+        lane_set(&cp->normal_mass, l, normal_mass);
+        dv3 vr_a = dv3_add(v_a, dv3_cross(w_a, r_a));
+        dv3 vr_b = dv3_add(v_b, dv3_cross(w_b, r_b));
+        double relative_velocity = dv3_dot(normal, dv3_sub(vr_b, vr_a));
+        lane_set(&cp->relative_velocity, l, relative_velocity);
+        dlane_set(&d->points[p].relative_velocity, l, relative_velocity);
+    }
+    double inv_weight = 1.0 / total_weight;
+    center_a = dv3_mul_sv(inv_weight, center_a);
+    center_b = dv3_mul_sv(inv_weight, center_b);
+    lane_set3(&f->center_a, l, center_a);
+    lane_set3(&f->center_b, l, center_b);
+    for (int p = 0; p < point_count; ++p) {
+        const char* mp = manifold + g_off[OFF_M_POINTS] + (size_t)p * g_off[OFF_M_POINT_STRIDE];
+        dv3 r_a = FIELD_DV3(mp, g_off[OFF_P_ANCHOR_A]);
+        lane_set(&f->points[p].lever_arm, l, dv3_length(dv3_sub(center_a, r_a)));
+    }
+    dv3 rt_a1 = dv3_cross(center_a, tangent1);
+    dv3 rt_a2 = dv3_cross(center_a, tangent2);
+    dv3 rt_b1 = dv3_cross(center_b, tangent1);
+    dv3 rt_b2 = dv3_cross(center_b, tangent2);
+    double kxx = m_a + m_b + dv3_dot(rt_a1, dm3_mul_mv(i_a, rt_a1)) + dv3_dot(rt_b1, dm3_mul_mv(i_b, rt_b1));
+    double kyy = m_a + m_b + dv3_dot(rt_a2, dm3_mul_mv(i_a, rt_a2)) + dv3_dot(rt_b2, dm3_mul_mv(i_b, rt_b2));
+    double kxy = dv3_dot(rt_a1, dm3_mul_mv(i_a, rt_a2)) + dv3_dot(rt_b1, dm3_mul_mv(i_b, rt_b2));
+    // math.invert2 of the 2x2 { cx: {kxx, kxy}, cy: {kxy, kyy} }: the inverse, or zero when singular.
+    double det2 = kxx * kyy - kxy * kxy;
+    double t_cxx = 0.0, t_cxy = 0.0, t_cyy = 0.0;
+    if (ae_abs(det2) > 1000.0 * AE_TINY) {
+        double inv = 1.0 / det2;
+        t_cxx = inv * kyy;
+        t_cxy = 0.0 - inv * kxy;
+        t_cyy = inv * kxx;
+    }
+    lane_set(&f->tangent_mass.cxx, l, t_cxx);
+    lane_set(&f->tangent_mass.cxy, l, t_cxy);
+    lane_set(&f->tangent_mass.cyy, l, t_cyy);
+    dv3 friction_impulse = FIELD_DV3(manifold, g_off[OFF_M_FRICTION_IMPULSE]);
+    lane_set(&f->friction_impulse.x, l, g_warm_start_scale * dv3_dot(friction_impulse, tangent1));
+    lane_set(&f->friction_impulse.y, l, g_warm_start_scale * dv3_dot(friction_impulse, tangent2));
+    dm3 i_sum = dm3_add(i_a, i_b);
+    double k_twist = dv3_dot(normal, dm3_mul_mv(i_sum, normal));
+    double twist_mass = 0.0;
+    if (k_twist > 0.0) twist_mass = 1.0 / k_twist;
+    lane_set(&f->twist_mass, l, twist_mass);
+    lane_set(&f->twist_impulse, l, g_warm_start_scale * FIELD(manifold, g_off[OFF_M_TWIST_IMPULSE], double));
+    lane_set_sym3(&f->rolling_mass, l, dm3_invert(i_sum));
+    lane_set3(&f->rolling_impulse, l, dv3_mul_sv(g_warm_start_scale, FIELD_DV3(manifold, g_off[OFF_M_ROLLING_IMPULSE])));
+    // The points the manifold lacks are zero: nothing reaches the bodies through them.
+    for (int p = point_count; p < MAX_MANIFOLD_POINTS; ++p) {
+        wide_point* cp = f->points + p;
+        lane_set3(&cp->anchor_a, l, dv3_zero());
+        lane_set3(&cp->anchor_b, l, dv3_zero());
+        lane_set(&cp->base_separation, l, 0.0);
+        lane_set(&cp->normal_impulse, l, 0.0);
+        lane_set(&cp->total_normal_impulse, l, 0.0);
+        lane_set(&cp->normal_mass, l, 0.0);
+        lane_set(&cp->relative_velocity, l, 0.0);
+        lane_set(&cp->lever_arm, l, 0.0);
+        dlane_set(&d->points[p].relative_velocity, l, 0.0);
+    }
+}
 
 static inline v4 splat(float s) { return (v4){ s, s, s, s }; }
 // Per lane: b where the comparison held, a elsewhere.

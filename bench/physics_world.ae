@@ -89,22 +89,44 @@ run(name: string, world_id: WorldId, steps: int) {
     dynamics.destroy_world(world_id)
 }
 
+// AEPHYSICS_BENCH_SCENE=pyramid|pyramids|grid runs one scene, for a
+// profile of it alone; unset, all three.
+wanted(scene: string) -> bool {
+    asked = os.getenv("AEPHYSICS_BENCH_SCENE")
+    if asked == null { return true }
+    return string.equals(asked, scene) == 1
+}
+
 main() {
     g_box = hull.make_box_hull(0.5, 0.5, 0.5) as ptr
     g_slabs = calloc(8, 8)
-    g_slabs_typed = g_slabs as ptr[]
-
-    // The large pyramid.
     wdef = dynamics.default_world_def()
-    world_id = dynamics.create_world(&wdef)
-    physics_world.enable_sleeping(world_id, false)
+    if wanted("pyramid") { large_pyramid(&wdef) }
+    if wanted("pyramids") { many_pyramids(&wdef) }
+    if wanted("grid") { joint_grid(&wdef) }
+    slabs = g_slabs as ptr[]
+    i = 0
+    while i < g_slab_count {
+        hull.destroy_hull(slabs[i] as *HullData)
+        i = i + 1
+    }
+    free(g_slabs)
+    hull.destroy_hull(g_box as *HullData)
+}
+
+// The large pyramid.
+large_pyramid(wdef: *WorldDef) {
+    world_id = dynamics.create_world(wdef)
     ground(world_id, 400.0)
     base_count = 100
     pyramid(world_id, base_count, 0.5, 0.0 - 0.5 * (base_count as float), 0.0, true)
+    physics_world.enable_sleeping(world_id, false)
     run("large pyramid", world_id, 200)
+}
 
-    // Many pyramids.
-    world_id = dynamics.create_world(&wdef)
+// Many pyramids.
+many_pyramids(wdef: *WorldDef) {
+    world_id = dynamics.create_world(wdef)
     base_count = 10
     extent = 0.5
     rows = 14
@@ -126,9 +148,11 @@ main() {
         i = i + 1
     }
     run("many pyramids", world_id, 100)
+}
 
-    // The joint grid.
-    world_id = dynamics.create_world(&wdef)
+// The joint grid.
+joint_grid(wdef: *WorldDef) {
+    world_id = dynamics.create_world(wdef)
     physics_world.enable_sleeping(world_id, false)
     n = 100
     ids_block = calloc(n * n, sizeof(BodyId))
@@ -172,12 +196,4 @@ main() {
     }
     run("joint grid", world_id, 100)
     free(ids_block)
-
-    i = 0
-    while i < g_slab_count {
-        hull.destroy_hull(g_slabs_typed[i] as *HullData)
-        i = i + 1
-    }
-    free(g_slabs)
-    hull.destroy_hull(g_box as *HullData)
 }

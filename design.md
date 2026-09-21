@@ -237,13 +237,15 @@ started until its tests pass.
      the mesh and overflow contacts stay scalar. The lanes are written
      twice: in Aether (plain code, what the reference's non-SIMD build
      is) and in aephysics_native.c beside the module as GCC vector code in single
-     precision (SSE or NEON, baseline), which packs the module's doubles
-     for the step and hands the impulses back; a switch per path, both
-     tested against the scalar solve on one scene. Measured, issue #22:
-     the layout alone buys 10%, the native lanes another 20-30%; the
-     solve itself is then at parity with the reference's (profiles of
-     both, same sampler), the remaining 1.2-1.6x is the prepare, the
-     pack, the narrow phase and the doubles elsewhere.
+     precision (SSE or NEON, baseline), which prepares the lanes'
+     floats itself (reading the module's structures through offsets the
+     module measures, issue #37) and hands the impulses back; a switch
+     per path, both tested against the scalar solve on one scene.
+     Measured, issue #22: the layout alone buys 10%, the native lanes
+     another 20-30%, the native prepare another 10%; the solve itself is
+     then at parity with the reference's (profiles of both, same
+     sampler), the remaining 1.1-1.5x is the narrow phase and the
+     doubles elsewhere.
    - `aephysics.joint_solver` (done, PR #20): the seven joints' prepare,
      warm start and solve (distance, motor, parallel, prismatic,
      revolute, spherical, weld, wheel: distance_joint.c and its
