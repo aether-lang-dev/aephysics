@@ -1,9 +1,11 @@
 // aephysics.native -- the Aether face of aephysics_native.c, the one C
-// file built with every program: the threads' helpers a worker pool
-// needs and Aether does not have (a thread-local worker index, a yield
-// and a pause, the processor count, atomics on an int in place). The
-// contact lanes in the same file are declared by
+// file that goes with the library, built into every program that
+// imports it (@source, Aether 0.704): the threads' helpers a worker
+// pool needs and Aether does not have (a thread-local worker index, a
+// yield and a pause, the processor count, atomics on an int in place).
+// The contact lanes in the same file are declared by
 // aephysics.contact_solver_wide, which owns them.
+@source("aephysics_native.c")
 exports (
     MAX_WORKERS, worker_index, set_worker_index, yield_thread, pause, processor_count, scratch,
     atomic_load, atomic_store, atomic_add, atomic_or, atomic_cas,

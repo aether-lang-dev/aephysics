@@ -16,7 +16,7 @@ for layer in $layers; do
         ref="target/${layer}_box3d"; [ -x "$ref" ] || ref="$ref.exe"
         "$ref"
     fi
-    AETHER_LIB_DIR="$root" ae build "bench/$layer.ae" --extra aephysics/native/aephysics_native.c -o "target/$layer" >"target/$layer.log" 2>&1 || { cat "target/$layer.log"; exit 1; }
+    AETHER_LIB_DIR="$root" ae build "bench/$layer.ae" -o "target/$layer" >"target/$layer.log" 2>&1 || { cat "target/$layer.log"; exit 1; }
     ours="target/$layer"; [ -x "$ours" ] || ours="$ours.exe"
     "$ours"
 done

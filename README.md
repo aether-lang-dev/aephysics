@@ -94,9 +94,8 @@ with (`-O3` and a wider inlining budget, so the small maths inline as
 the reference's `static inline` headers do; [why](bench/RESULTS.md#build-flags-inlining)).
 One C file goes with the library, `aephysics/native/aephysics_native.c`
 (the threads' helpers Aether has not, and the contact lanes as vector
-code), so a build adds it: `ae build app.ae --extra
-aephysics/native/aephysics_native.c` (or an `extra_sources` entry in
-the project's `aether.toml`); the scripts do.
+code); `aephysics.native` names it (`@source`, Aether 0.704), so every
+program that imports the library builds it in with no flag of its own.
 `contact_solver_wide.set_native_lanes(false)` runs the same lanes in
 Aether instead, and `solver.set_wide_contacts(false)` the scalar solve
 ([what each buys](bench/RESULTS.md#solver)).
