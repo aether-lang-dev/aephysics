@@ -733,7 +733,6 @@ execute_block(stage: *SolverStage, sc: *SolverContext, b: *SolverBlock, worker: 
         last = math.min_int(end * contact_solver_wide.WIDTH, color.convex_contacts.count)
         if kind == STAGE_PREPARE_WIDE {
             contact_solver_wide.prepare_wide_range(ctx, color, first, last)
-            contact_solver_wide.pack_wide(slots, count)
         } else if kind == STAGE_WARM_START { contact_solver_wide.warm_start_wide_contacts(ctx, slots, count) }
         else if kind == STAGE_SOLVE { contact_solver_wide.solve_wide_contacts(ctx, slots, count, true) }
         else if kind == STAGE_RELAX { contact_solver_wide.solve_wide_contacts(ctx, slots, count, false) }
@@ -1016,7 +1015,7 @@ solve(w: *World, ctx: *StepContext) {
         if wide { contact_solver_wide.zero_wide_tail(color) }
         c = c + 1
     }
-    contact_solver_wide.begin_wide_step(wide_block, wide_total)
+    contact_solver_wide.begin_wide_step(ctx, wide_block, wide_total)
     overflow = dynamics.graph_color(w, dynamics.OVERFLOW_INDEX)
     contact_solver.count_color_constraints(overflow, true)
     overflow.contact_constraints = basics.stack_alloc(stack, overflow.contact_constraint_count * sizeof(ContactConstraint))

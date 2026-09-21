@@ -497,37 +497,45 @@ sleeping off as the reference runs them.
 
 | scene | aephysics per step | Box3D per step |
 |---|---|---|
-| large pyramid: 5,050 cubes on a base of 100, 200 steps | 14.1 ms | **9.0** |
-| many pyramids: 196 pyramids of base 10, 10,780 cubes, 100 steps | 31.6 | **19.3** |
-| joint grid: 10,000 spheres on 19,800 spherical joints, 100 steps | 11.7 | **10.7** |
+| large pyramid: 5,050 cubes on a base of 100, 200 steps | 12.5 ms | **8.9** |
+| many pyramids: 196 pyramids of base 10, 10,780 cubes, 100 steps | 28.4 | **19.3** |
+| joint grid: 10,000 spheres on 19,800 spherical joints, 100 steps | 11.6 | **10.8** |
 
 The same height sums (167,556, 37,695 and -496,893), contact counts
 (14,950 and 28,420) and joint count. One run of the pair, on a machine
 whose other work moves both columns by 10-20% between runs (the joint
 grid has measured 11.1 to 14.1 ms, the reference 9.1 to 11.8): the
 ratios hold, 1.1x on the joint grid (no contacts: single against
-double precision and what the emitted C still loses) and 1.6x on the
-pyramids (24.5 and 53.0 ms before the wide path and the flags,
-2.2-2.4x; 17.1 and 41.5 before the parallel layer's stack allocator
-stopped zeroing). `scripts/profile.sh bench/physics_world.ae` on the large
-pyramid alone, and the reference's benchmark under the same sampler
-(`tools/sampler.c` linked into its C), ms per step at 60 steps:
+double precision and what the emitted C still loses) and 1.4-1.5x on
+the pyramids (14.1 and 31.6 before the native prepare, 1.6x; 24.5 and
+53.0 before the wide path and the flags, 2.2-2.4x; 17.1 and 41.5
+before the parallel layer's stack allocator stopped zeroing).
+`AEPHYSICS_BENCH_SCENE=pyramid scripts/profile.sh bench/physics_world.ae`
+on the large pyramid alone, and the reference's benchmark under the
+same sampler (`tools/sampler.c` linked into its C), ms per step:
 
 | stage | aephysics | Box3D |
 |---|---|---|
-| contact solve (with the gather and scatter) | 4.5 | 4.5 |
-| contact prepare | 2.5 | 1.3 |
-| narrow phase and recycling | 1.9 | 1.2 |
+| contact solve (with the gather and scatter) | 4.8 | 4.5 |
+| contact prepare | 2.1 | 1.3 |
+| narrow phase and recycling | 2.0 | 1.2 |
 | warm start | 1.0 | 0.7 |
-| pack to floats and unpack | 1.0 | -- |
-| the solver's own stages (integrate, finalize, blocks) | 1.9 | 1.0 |
+| unpack | 0.3 | -- |
+| the solver's own stages (integrate, finalize, blocks) | 1.7 | 1.0 |
 | store | 0.3 | 0.5 |
-| step | 14.7 | 9.7 |
+| step | 12.5 | 9.7 |
 
-The solve is at parity: the same lanes, the same precision. What is
-left is the prepare (Aether writing a lane at a time into a
-double-sized structure), the packing the doubles need, and a narrow
-phase in doubles (issue #17).
+The solve is at parity: the same lanes, the same precision. The
+prepare is the native file's now (issue #37): the module used to write
+a lane at a time into its double block and the file packed the block
+to floats, a millisecond a step of packing on this scene; the prepare
+writes the floats itself, reading the module's structures through the
+field offsets the module measures at start, and computes in doubles as
+the module did, operation for operation, so the lanes are the same to
+the bit (test_contact_solver_wide's native-against-lanes figure is
+unchanged, 3.87e-5, and the determinism traces are). What is left is
+the prepare's own writes (a lane at a time, as the reference's), the
+narrow phase in doubles (issue #17) and the solver's stages.
 
 ## parallel
 
