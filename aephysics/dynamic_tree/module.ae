@@ -21,6 +21,7 @@
 // asserts, so a test can check it.
 import std.string
 import aephysics.math
+import aephysics.native
 import aephysics.basics
 
 exports (
@@ -276,11 +277,16 @@ tree_create(proxy_capacity: int) -> DynamicTree {
     proxies[capacity - 1].node = NULL_INDEX
     proxies[capacity - 1].next = NULL_INDEX
 
-    t.stack = basics.alloc(TREE_STACK_SIZE * REBUILD_ITEM_INTS * 4)
-    t.stack_dist = basics.alloc(TREE_STACK_SIZE * 8)
+    t.stack = basics.alloc(native.MAX_WORKERS * (TREE_STACK_SIZE * REBUILD_ITEM_INTS * 4))
+    t.stack_dist = basics.alloc(native.MAX_WORKERS * (TREE_STACK_SIZE * 8))
     t.copy_stack = basics.alloc(TREE_STACK_SIZE * COPY_ITEM_INTS * 4)
     return t
 }
+
+// The calling worker's traversal stacks: queries run from any worker
+// (the continuous pass, the sensors), so each has a block of its own.
+query_stack(t: *DynamicTree) -> ptr { return native.scratch(t.stack, TREE_STACK_SIZE * REBUILD_ITEM_INTS * 4) }
+query_dists(t: *DynamicTree) -> ptr { return native.scratch(t.stack_dist, TREE_STACK_SIZE * 8) }
 
 tree_destroy(t: *DynamicTree) {
     basics.free_bytes(t.nodes, t.node_capacity * sizeof(TreeNode))
@@ -290,8 +296,8 @@ tree_destroy(t: *DynamicTree) {
     basics.free_bytes(t.leaf_indices, t.rebuild_capacity * 4)
     basics.free_bytes(t.leaf_nodes, t.rebuild_capacity * sizeof(TreeNode))
     basics.free_bytes(t.leaf_centers, t.rebuild_capacity * sizeof(Vec3))
-    basics.free_bytes(t.stack, TREE_STACK_SIZE * REBUILD_ITEM_INTS * 4)
-    basics.free_bytes(t.stack_dist, TREE_STACK_SIZE * 8)
+    basics.free_bytes(t.stack, native.MAX_WORKERS * (TREE_STACK_SIZE * REBUILD_ITEM_INTS * 4))
+    basics.free_bytes(t.stack_dist, native.MAX_WORKERS * (TREE_STACK_SIZE * 8))
     basics.free_bytes(t.copy_stack, TREE_STACK_SIZE * COPY_ITEM_INTS * 4)
     memset(t as ptr, 0, sizeof(DynamicTree))
     t.pair_free_list = NULL_INDEX
@@ -803,7 +809,7 @@ tree_query(t: *DynamicTree, box: AABB, mask_bits: long, require_all: bool,
     if t.proxy_count == 0 { return result }
     nodes = t.nodes as TreeNode[]
     proxies = t.proxies as TreeProxy[]
-    stack = t.stack as int[]
+    stack = query_stack(t) as int[]
     stack_count = 0
     stack[stack_count] = root_pair(nodes)
     stack_count = stack_count + 1
@@ -861,8 +867,8 @@ tree_query_closest(t: *DynamicTree, point: Vec3, mask_bits: long, require_all: b
     if t.proxy_count == 0 { return result }
     nodes = t.nodes as TreeNode[]
     proxies = t.proxies as TreeProxy[]
-    stack = t.stack as int[]
-    dists = t.stack_dist as float[]
+    stack = query_stack(t) as int[]
+    dists = query_dists(t) as float[]
     min_sqr = min_distance_sqr[0]
     stack_count = 0
 
@@ -950,7 +956,7 @@ tree_ray_cast(t: *DynamicTree, input: *RayCastInput, mask_bits: long, require_al
     if t.proxy_count == 0 { return result }
     nodes = t.nodes as TreeNode[]
     proxies = t.proxies as TreeProxy[]
-    stack = t.stack as int[]
+    stack = query_stack(t) as int[]
 
     p1 = input.origin
     d = input.translation
@@ -1035,7 +1041,7 @@ tree_box_cast(t: *DynamicTree, input: *BoxCastInput, mask_bits: long, require_al
     if t.proxy_count == 0 { return result }
     nodes = t.nodes as TreeNode[]
     proxies = t.proxies as TreeProxy[]
-    stack = t.stack as int[]
+    stack = query_stack(t) as int[]
 
     origin_box = input.box
     p1 = math.aabb_center(origin_box)
@@ -1269,7 +1275,7 @@ build_tree(t: *DynamicTree, leaf_count: int) {
         return
     }
 
-    stack = t.stack as int[]
+    stack = query_stack(t) as int[]
     top = 0
     stack[0] = ROOT_NODE                   // node_index
     stack[1] = bump_pair(t, ROOT_NODE)     // pair
@@ -1344,7 +1350,7 @@ tree_rebuild(t: *DynamicTree, full_build: bool) -> int {
     leaf_indices = t.leaf_indices as int[]
     leaves = t.leaf_nodes as TreeNode[]
     leaf_centers = t.leaf_centers as Vec3[]
-    stack = t.stack as int[]
+    stack = query_stack(t) as int[]
 
     // Gather the build leaves: a moved internal node is descended and left
     // behind, everything else is a build leaf, kept subtrees included.
@@ -1411,8 +1417,11 @@ tree_mark_proxy_moved_serial(t: *DynamicTree, proxy_id: int) {
 }
 
 // Set the leaf's box and mark the path to the root, stopping at an
-// ancestor already marked. The reference does the marking with atomics
-// so workers can share a tree; that arrives with the parallel layer.
+// ancestor already marked. Workers share a tree through the step's
+// finalize, so the ancestors are marked atomically (the leaf is the
+// body's own, unraced): a plain read first to skip the fetch-or where
+// the flag is already set, then the fetch-or, and the previous flags
+// say whether another worker got there first.
 tree_mark_proxy_moved(t: *DynamicTree, proxy_id: int, box: AABB) {
     nodes = t.nodes as TreeNode[]
     parents = t.parents as int[]
@@ -1422,8 +1431,9 @@ tree_mark_proxy_moved(t: *DynamicTree, proxy_id: int, box: AABB) {
     nodes[index].flag_index = nodes[index].flag_index | MOVED_NODE
     index = parents[index]
     while index != NULL_INDEX {
-        if (nodes[index].flag_index & MOVED_NODE) != 0 { break }
-        nodes[index].flag_index = nodes[index].flag_index | MOVED_NODE
+        flags = (&nodes[index].flag_index) as ptr
+        if (native.atomic_load(flags) & MOVED_NODE) != 0 { break }
+        if (native.atomic_or(flags, MOVED_NODE) & MOVED_NODE) != 0 { break }
         index = parents[index]
     }
 }
@@ -1433,7 +1443,7 @@ tree_clear_moved(t: *DynamicTree) {
     if is_node_moved(nodes[ROOT_NODE].flag_index) == false { return }
     nodes[ROOT_NODE].flag_index = nodes[ROOT_NODE].flag_index & (0 - 1 - MOVED_NODE)
     if is_leaf(nodes[ROOT_NODE].flag_index) { return }
-    stack = t.stack as int[]
+    stack = query_stack(t) as int[]
     stack[0] = left_child(nodes[ROOT_NODE].flag_index)
     stack_count = 1
     while stack_count > 0 {
@@ -1464,7 +1474,7 @@ tree_gather_moved_proxies(t: *DynamicTree, proxy_ids: int[]) -> int {
         return 1
     }
     count = 0
-    stack = t.stack as int[]
+    stack = query_stack(t) as int[]
     stack[0] = left_child(root.flag_index)
     stack_count = 1
     while stack_count > 0 {
@@ -1493,7 +1503,7 @@ refit_subtree(t: *DynamicTree, root_index: int) {
     nodes = t.nodes as TreeNode[]
     root = nodes[root_index]
     if is_leaf(root.flag_index) || is_node_moved(root.flag_index) == false { return }
-    stack = t.stack as int[]
+    stack = query_stack(t) as int[]
     stack[0] = 0 - 1 - root_index
     stack[1] = left_child(root.flag_index)
     stack[2] = left_child(root.flag_index) + 1

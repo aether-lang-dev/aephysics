@@ -15,6 +15,7 @@
 // math keeps its precision far from the world's origin, as the
 // reference does.
 import std.string
+import std.os
 import aephysics.math
 import aephysics.native
 import aephysics.basics
@@ -29,6 +30,7 @@ import aephysics.joint_solver
 import aephysics.solver
 
 exports (
+    get_profile,
     RayResult, BodyCastResult, BodyPlaneResult, BodyTOIResult, ExplosionDef, Counters,
     step, world_of, is_valid,
     body_event_count, body_event, contact_begin_event_count, contact_begin_event, contact_end_event_count, contact_end_event,
@@ -136,7 +138,10 @@ step(id: WorldId, time_step: float, sub_step_count: int) {
     basics.buffer_clear(&w.contact_begin_events)
     basics.buffer_clear(&w.contact_hit_events)
     basics.buffer_clear(&w.joint_events)
+    t0 = os.now_monotonic_ns()
     dynamics.update_pairs(w)
+    t1 = os.now_monotonic_ns()
+    w.profile.pairs = ms(t1 - t0)
     ctx = contact_solver.default_step_context(w)
     ctx.dt = time_step
     ctx.sub_step_count = math.max_int(1, sub_step_count)
@@ -157,12 +162,31 @@ step(id: WorldId, time_step: float, sub_step_count: int) {
     ctx.restitution_threshold = w.restitution_threshold
     ctx.max_linear_velocity = w.max_linear_speed
     ctx.enable_warm_starting = w.enable_warm_starting
+    t2 = os.now_monotonic_ns()
     dynamics.collide(w)
-    if time_step > 0.0 { solver.solve(w, &ctx) }
+    t3 = os.now_monotonic_ns()
+    w.profile.collide = ms(t3 - t2)
+    w.profile.solve = 0.0
+    if time_step > 0.0 {
+        solver.solve(w, &ctx)
+        w.profile.solve = ms(os.now_monotonic_ns() - t3)
+    }
+    t4 = os.now_monotonic_ns()
     dynamics.overlap_sensors(w)
+    t5 = os.now_monotonic_ns()
+    w.profile.sensors = ms(t5 - t4)
     basics.stack_grow(&w.stack)
     dynamics.swap_end_events(w)
+    w.profile.step = ms(os.now_monotonic_ns() - t0)
     w.locked = false
+}
+
+ms(ns: long) -> float { return (ns as float) / 1000000.0 }
+
+// Where the last step's time went (b3World_GetProfile).
+get_profile(id: WorldId) -> Profile {
+    w = world_of(id)
+    return w.profile
 }
 
 // --- events ----------------------------------------------------------------------------------------------------------

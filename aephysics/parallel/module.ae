@@ -1,60 +1,110 @@
 // aephysics.parallel -- the tasks a step runs on other threads: a
-// scheduler over Aether's worker pool (std.worker), and parallel_for
-// over it, the reference's b3ParallelFor.
+// scheduler of worker threads that wait on a semaphore for tasks, and
+// parallel_for over it, the reference's b3ParallelFor.
 //
-// A task is a run and a context; enqueue hands it to the pool with
-// a worker index and returns a handle; finish waits for it, yielding
-// the thread meanwhile. parallel_for divides a range into blocks that
-// tasks claim atomically -- a task that finishes early takes the next
-// block rather than waiting -- and runs the first task on the calling
-// thread, so the main thread works as worker 0 while the others do
-// their share. Every task's thread carries its worker index
-// (aephysics.native) for the duration, which is how the modules' scratch
-// stays one block per worker.
+// A task is a body and a context; enqueue writes it into a slot, marks
+// it pending and signals the semaphore, and returns a handle; finish
+// waits for it, executing other pending tasks meanwhile (the main
+// thread helps rather than idles) and yielding when there are none.
+// The threads are made once, when the scheduler is, and live until it
+// is destroyed: a thread wakes on the semaphore, claims every pending
+// task it can by compare-and-swap and runs each as the worker the task
+// names, then waits again. parallel_for divides a range into blocks
+// that tasks claim atomically -- a task that finishes early takes the
+// next block rather than waiting -- and runs the first task on the
+// calling thread, so the main thread works as worker 0 while the
+// others do their share. Every task's thread carries its worker index
+// (aephysics.native) for the duration, which is how the modules'
+// scratch stays one block per worker.
 //
 // This is Box3D's scheduler.c and parallel_for.c (Erin Catto, MIT). The
 // reference lets the host supply the task functions (a game's own job
-// system); here the pool is Aether's, sized once by the world's worker
-// count, and a world of one worker runs everything inline on the
-// calling thread and never touches the pool.
+// system); here the threads are Aether's (std.worker's run_detached, a
+// thread each), and a world of one worker runs everything inline on the
+// calling thread and never makes a thread. A step's tasks are slots
+// taken back at the start of each round of tasks (begin_round, once
+// the last round's are all complete): a round is at most a task per
+// worker, so the slots never run out.
 import std.worker
-import std.sync
 import aephysics.native
 
 exports (
-    MAX_WORKERS, Task, Scheduler,
-    create_scheduler, destroy_scheduler, enqueue, finish, parallel_for, scheduler_worker_count
+    MAX_WORKERS, MAX_TASKS, Task, Scheduler,
+    create_scheduler, destroy_scheduler, reset_scheduler, begin_round, enqueue, finish, parallel_for, scheduler_worker_count
 )
 
 extern calloc(count: int, size: int) -> ptr
 extern free(p: ptr)
+extern abort()
 
 const MAX_WORKERS = 64   // native.MAX_WORKERS, which a const cannot name
 const MAX_TASKS = 128
 
 const TASK_FREE = 0
 const TASK_PENDING = 1
-const TASK_COMPLETE = 2
+const TASK_CLAIMED = 2
+const TASK_COMPLETE = 3
 
-// A task in flight: what to call, on what, as which worker, and its status cell.
+// A task in a slot: its status (atomic, first so its address is the
+// task's), what to call, on what, and as which worker. (The callbacks
+// are `body`, not `run`: a fn parameter named `run` captures a
+// program's own `run`, aether#2130.)
 struct Task {
-    run: fn(ptr) -> void
+    status: int
+    body: fn(ptr) -> void
     context: ptr
     worker_index: int
-    status: ptr                    // an atomic cell
 }
 
-// The step's tasks: slots reused every step (reset), and the pool's size.
+// The threads, the slots, and what the threads watch: the next free
+// slot (atomic), the semaphore, the shutdown flag and the count of
+// threads still running (atomic), so destroy can wait for them.
 struct Scheduler {
-    worker_count: int
+    worker_count: int              // the main thread and the threads
+    thread_count: int
     tasks: ptr                     // Task[MAX_TASKS]
-    next_slot: int
+    next_slot: int                 // atomic
+    semaphore: ptr
+    shutdown: int                  // atomic
+    live: int                      // atomic
 }
 
-var g_pool_sized = 0
+task_at(s: *Scheduler, index: int) -> *Task { return (s.tasks + index * sizeof(Task)) as *Task }
+status_of(t: *Task) -> ptr { return (&t.status) as ptr }
 
-// A scheduler for this many workers: the main thread and worker_count - 1
-// pool threads. The pool is sized to the largest count asked for.
+// One pending task claimed and run, if there is one: whether there was.
+execute_one(s: *Scheduler) -> bool {
+    count = native.atomic_load((&s.next_slot) as ptr)
+    i = 0
+    while i < count {
+        t = task_at(s, i)
+        if native.atomic_load(status_of(t)) == TASK_PENDING && native.atomic_cas(status_of(t), TASK_PENDING, TASK_CLAIMED) {
+            native.set_worker_index(t.worker_index)
+            t.body(t.context)
+            native.atomic_store(status_of(t), TASK_COMPLETE)
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// A thread's life: wait for the semaphore, leave on shutdown, else run
+// every pending task there is.
+worker_main(s: *Scheduler) {
+    while true {
+        native.semaphore_wait(s.semaphore)
+        if native.atomic_load((&s.shutdown) as ptr) != 0 { break }
+        while execute_one(s) {
+        }
+    }
+    native.atomic_add((&s.live) as ptr, 0 - 1)
+}
+
+// A scheduler for this many workers: the main thread and worker_count
+// - 1 threads, made now. A thread the runtime refuses is a worker
+// short: its tasks are claimed by the others or by the main thread as
+// it waits.
 create_scheduler(worker_count: int) -> *Scheduler {
     count = worker_count
     if count < 1 { count = 1 }
@@ -62,79 +112,105 @@ create_scheduler(worker_count: int) -> *Scheduler {
     s = calloc(1, sizeof(Scheduler)) as *Scheduler
     s.worker_count = count
     s.tasks = calloc(MAX_TASKS, sizeof(Task))
-    tasks = s.tasks as Task[]
-    i = 0
-    while i < MAX_TASKS {
-        tasks[i].status = sync.atomic_new(TASK_FREE as long)
+    s.semaphore = native.semaphore_new(0)
+    i = 1
+    while i < count {
+        if worker.run_detached(| _c: ptr | { worker_main(s) }) {
+            s.thread_count = s.thread_count + 1
+            native.atomic_add((&s.live) as ptr, 1)
+        }
         i = i + 1
-    }
-    if count - 1 > g_pool_sized {
-        g_pool_sized = count - 1
-        worker.pool_size(g_pool_sized)
     }
     return s
 }
 
+// The threads told to leave and waited for, then the memory.
 destroy_scheduler(s: *Scheduler) {
-    tasks = s.tasks as Task[]
-    i = 0
-    while i < MAX_TASKS {
-        sync.atomic_free(tasks[i].status)
-        i = i + 1
+    native.atomic_store((&s.shutdown) as ptr, 1)
+    native.semaphore_signal(s.semaphore, s.thread_count)
+    while native.atomic_load((&s.live) as ptr) != 0 {
+        native.yield_thread()
     }
+    native.semaphore_free(s.semaphore)
     free(s.tasks)
     free(s as ptr)
 }
 
 scheduler_worker_count(s: *Scheduler) -> int { return s.worker_count }
 
-task_at(s: *Scheduler, index: int) -> *Task { return (s.tasks + index * sizeof(Task)) as *Task }
-
-// The task's body on its thread: the worker index for the modules'
-// scratch, the run, and the status the waiter watches.
-run_task(t: *Task) {
-    native.set_worker_index(t.worker_index)
-    t.run(t.context)
-    sync.atomic_store(t.status, TASK_COMPLETE as long)
+// The slots taken back, once every task of the last round is complete.
+reset_scheduler(s: *Scheduler) {
+    native.atomic_store((&s.next_slot) as ptr, 0)
 }
 
-// A task on the pool, as the given worker; the handle to finish it by.
-// With one worker, or the pool refusing the work, it runs here and now.
-enqueue(s: *Scheduler, run: fn(ptr) -> void, context: ptr, worker_index: int) -> *Task {
-    if s.next_slot >= MAX_TASKS { s.next_slot = 0 }
-    t = task_at(s, s.next_slot)
-    s.next_slot = s.next_slot + 1
-    t.run = run
-    t.context = context
-    t.worker_index = worker_index
-    sync.atomic_store(t.status, TASK_PENDING as long)
+// Before a round of tasks (one per worker at most): the slots taken
+// back when the last round is done, which it is once its tasks were
+// finished.
+begin_round(s: *Scheduler) {
+    if all_complete(s) { reset_scheduler(s) }
+}
+
+all_complete(s: *Scheduler) -> bool {
+    count = native.atomic_load((&s.next_slot) as ptr)
+    if count > MAX_TASKS { count = MAX_TASKS }
+    i = 0
+    while i < count {
+        status = native.atomic_load(status_of(task_at(s, i)))
+        if status == TASK_PENDING || status == TASK_CLAIMED { return false }
+        i = i + 1
+    }
+    return true
+}
+
+// A task in the next slot, as the given worker; the handle to finish
+// it by. With one worker it runs here and now. One signal per task: at
+// most one thread picks it up.
+enqueue(s: *Scheduler, body: fn(ptr) -> void, context: ptr, worker_index: int) -> *Task {
     if s.worker_count <= 1 {
-        run_task(t)
+        t = task_at(s, 0)
+        t.body = body
+        t.context = context
+        t.worker_index = worker_index
+        native.set_worker_index(worker_index)
+        body(context)
+        native.set_worker_index(0)
+        native.atomic_store(status_of(t), TASK_COMPLETE)
         return t
     }
-    handed = worker.run_detached(| _c: ptr | { run_task(t) })
-    if handed == false { run_task(t) }
+    slot = native.atomic_add((&s.next_slot) as ptr, 1)
+    if slot >= MAX_TASKS {
+        // Rounds begin with begin_round and hold at most MAX_WORKERS - 1 tasks, so this cannot be reached.
+        println("aephysics.parallel: more than ${MAX_TASKS} tasks in flight")
+        abort()
+    }
+    t = task_at(s, slot)
+    t.body = body
+    t.context = context
+    t.worker_index = worker_index
+    native.atomic_store(status_of(t), TASK_PENDING)
+    native.semaphore_signal(s.semaphore, 1)
     return t
 }
 
-// Wait for a task, yielding the thread between looks.
+// Wait for a task, running other pending tasks meanwhile and yielding
+// the thread when there are none; the caller is worker 0 again after.
 finish(s: *Scheduler, t: *Task) {
     if t == null { return }
-    while sync.atomic_load(t.status) != (TASK_COMPLETE as long) {
-        native.yield_thread()
+    while native.atomic_load(status_of(t)) != TASK_COMPLETE {
+        if execute_one(s) == false { native.yield_thread() }
     }
     native.set_worker_index(0)
 }
 
 // --- parallel_for --------------------------------------------------------------------------------------------
 
-// What the range's tasks share: the blocks left to claim and the run.
+// What the range's tasks share: the blocks left to claim (atomic) and the body.
 struct ForShared {
-    next_block: ptr                // an atomic cell
+    next_block: int
     block_count: int
     block_size: int
     item_count: int
-    run: fn(int, int, int, ptr) -> void
+    body: fn(int, int, int, ptr) -> void
     context: ptr
 }
 
@@ -143,39 +219,37 @@ struct ForTask {
     worker_index: int
 }
 
-// One task's loop: claim a block, run the run on it, until none is left.
+// One task's loop: claim a block, run the body on it, until none is left.
 for_trampoline(context: ptr) {
     t = context as *ForTask
     shared = t.shared
     while true {
-        block = (sync.atomic_add(shared.next_block, 1 as long) - (1 as long)) as int
+        block = native.atomic_add((&shared.next_block) as ptr, 1)
         if block >= shared.block_count { break }
         start = block * shared.block_size
         end = start + shared.block_size
         if end > shared.item_count { end = shared.item_count }
-        shared.run(start, end, t.worker_index, shared.context)
+        shared.body(start, end, t.worker_index, shared.context)
     }
 }
 
 var g_for_tasks: ptr = null        // ForTask[MAX_WORKERS]
 var g_for_handles: ptr = null      // *Task[MAX_WORKERS]
-var g_for_next: ptr = null         // the shared atomic, reused
 
 // [0, item_count) in blocks of at least min_range, over the scheduler's
 // workers; the caller works as worker 0 and returns when every block is
 // done. Blocks stay at min_range until there would be more than 32 a
 // worker, then grow so the count stays bounded.
-parallel_for(s: *Scheduler, run: fn(int, int, int, ptr) -> void, item_count: int, min_range: int, context: ptr) {
+parallel_for(s: *Scheduler, body: fn(int, int, int, ptr) -> void, item_count: int, min_range: int, context: ptr) {
     if item_count <= 0 { return }
     worker_count = s.worker_count
     if worker_count <= 1 {
-        run(0, item_count, 0, context)
+        body(0, item_count, 0, context)
         return
     }
     if g_for_tasks == null {
         g_for_tasks = calloc(MAX_WORKERS, sizeof(ForTask))
         g_for_handles = calloc(MAX_WORKERS, 8)
-        g_for_next = sync.atomic_new(0 as long)
     }
     max_block_count = 32 * worker_count
     block_size = min_range
@@ -183,9 +257,9 @@ parallel_for(s: *Scheduler, run: fn(int, int, int, ptr) -> void, item_count: int
     block_count = (item_count + block_size - 1) / block_size
     task_count = worker_count
     if block_count < task_count { task_count = block_count }
-    shared = ForShared { next_block: g_for_next, block_count: block_count, block_size: block_size, item_count: item_count,
-                         run: run, context: context }
-    sync.atomic_store(g_for_next, 0 as long)
+    shared = ForShared { next_block: 0, block_count: block_count, block_size: block_size, item_count: item_count,
+                         body: body, context: context }
+    begin_round(s)
     tasks = g_for_tasks as ForTask[]
     handles = g_for_handles as ptr[]
     i = 1

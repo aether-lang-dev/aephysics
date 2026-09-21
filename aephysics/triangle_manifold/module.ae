@@ -26,6 +26,7 @@ import aephysics.hull
 import aephysics.manifold
 
 exports (
+    reserve_scratch,
     TrianglePoint,
     FEATURE_NONE, FEATURE_TRIANGLE_FACE, FEATURE_HULL_FACE, FEATURE_EDGE1, FEATURE_EDGE2, FEATURE_EDGE3,
     FEATURE_VERTEX1, FEATURE_VERTEX2, FEATURE_VERTEX3,
@@ -111,6 +112,11 @@ scratch_ready() {
         g_triangle = basics.alloc(native.MAX_WORKERS * (3 * sizeof(Vec3)))
     }
 }
+
+// Every scratch block of the module allocated now, on the calling
+// thread: a world's creation reserves every module's before a step can
+// reach them from several workers at once.
+reserve_scratch() { scratch_ready() }
 
 triangle_proxy(v1: Vec3, v2: Vec3, v3: Vec3) -> ShapeProxy {
     scratch_ready()

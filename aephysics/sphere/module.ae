@@ -18,6 +18,7 @@ import aephysics.manifold
 import aephysics.mesh
 
 exports (
+    reserve_scratch,
     OVERLAP_SLOP,
     compute_sphere_mass, compute_sphere_aabb, compute_swept_sphere_aabb, overlap_sphere,
     ray_cast_sphere, ray_cast_hollow_sphere, shape_cast_sphere, collide_mover_and_sphere,
@@ -173,6 +174,14 @@ length_cell() -> ptr { return native.scratch(g_length, 8) }
 length_scratch() -> float[] {
     if g_length == null { g_length = basics.alloc(native.MAX_WORKERS * (8)) }
     return length_cell() as float[]
+}
+
+// Every scratch block of the module allocated now, on the calling
+// thread: a world's creation reserves every module's before a step can
+// reach them from several workers at once.
+reserve_scratch() {
+    center_buffer()
+    length_scratch()
 }
 
 // The mover's plane against a sphere: the normal from the sphere to the

@@ -24,7 +24,7 @@ import aephysics.dynamics
 import aephysics.contact_solver
 
 exports (
-    prepare_joint, warm_start_joint, solve_joint, prepare_joints, warm_start_joints, solve_joints,
+    prepare_joint, warm_start_joint, solve_joint, dummy_state, prepare_joints, warm_start_joints, solve_joints, prepare_joints_range, warm_start_joints_range, solve_joints_range,
     joint_get_constraint_force, joint_get_constraint_torque, get_joint_constraint_force, get_joint_constraint_torque,
     prepare_distance_joint, warm_start_distance_joint, solve_distance_joint,
     prepare_motor_joint, warm_start_motor_joint, solve_motor_joint,
@@ -2180,25 +2180,31 @@ solve_joint(base: *JointSim, ctx: *StepContext, use_bias: bool) {
 }
 
 // A colour's joints (the overflow's included), in order.
-prepare_joints(ctx: *StepContext, color: *GraphColor) {
-    i = 0
-    while i < color.joint_sims.count {
+// A colour's joints, or a block of them [start, end): the solver's
+// stages run a colour in blocks over the workers.
+prepare_joints(ctx: *StepContext, color: *GraphColor) { prepare_joints_range(ctx, color, 0, color.joint_sims.count) }
+warm_start_joints(ctx: *StepContext, color: *GraphColor) { warm_start_joints_range(ctx, color, 0, color.joint_sims.count) }
+solve_joints(ctx: *StepContext, color: *GraphColor, use_bias: bool) { solve_joints_range(ctx, color, 0, color.joint_sims.count, use_bias) }
+
+prepare_joints_range(ctx: *StepContext, color: *GraphColor, start: int, end: int) {
+    i = start
+    while i < end {
         prepare_joint(dynamics.joint_sim_at(&color.joint_sims, i), ctx)
         i = i + 1
     }
 }
 
-warm_start_joints(ctx: *StepContext, color: *GraphColor) {
-    i = 0
-    while i < color.joint_sims.count {
+warm_start_joints_range(ctx: *StepContext, color: *GraphColor, start: int, end: int) {
+    i = start
+    while i < end {
         warm_start_joint(dynamics.joint_sim_at(&color.joint_sims, i), ctx)
         i = i + 1
     }
 }
 
-solve_joints(ctx: *StepContext, color: *GraphColor, use_bias: bool) {
-    i = 0
-    while i < color.joint_sims.count {
+solve_joints_range(ctx: *StepContext, color: *GraphColor, start: int, end: int, use_bias: bool) {
+    i = start
+    while i < end {
         solve_joint(dynamics.joint_sim_at(&color.joint_sims, i), ctx, use_bias)
         i = i + 1
     }

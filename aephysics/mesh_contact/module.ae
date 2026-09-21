@@ -43,6 +43,7 @@ import aephysics.compound
 import aephysics.shape
 
 exports (
+    reserve_scratch,
     TriangleCache, MeshContactCache, Cluster, MeshManifolds,
     MAX_MESH_CONTACT_TRIANGLES, MAX_POINTS_PER_TRIANGLE, MAX_MANIFOLD_POINTS, MESH_REST_OFFSET, NULL_INDEX,
     mesh_contact_cache_create, mesh_contact_cache_destroy, refresh_cache, compute_mesh_manifolds,
@@ -291,9 +292,21 @@ final_points() -> ptr { return native.scratch(g_final, 4 * sizeof(Point2D)) }
 // Up to four of the points, in place: the farthest pair, then the point
 // making the largest triangle with them, then the point adding the most
 // area outside that triangle; ties to the deeper point. Returns how many.
+final_ready() {
+    if g_final == null { g_final = basics.alloc(native.MAX_WORKERS * (4 * sizeof(Point2D))) }
+}
+
+// Every scratch block of the module allocated now, on the calling
+// thread: a world's creation reserves every module's before a step can
+// reach them from several workers at once.
+reserve_scratch() {
+    scratch_ready()
+    final_ready()
+}
+
 cull_points(points: Point2D[], count: int) -> int {
     if count <= 1 { return count }
-    if g_final == null { g_final = basics.alloc(native.MAX_WORKERS * (4 * sizeof(Point2D))) }
+    final_ready()
     final = final_points() as Point2D[]
     tol = 0.25 * math.LINEAR_SLOP
     tol_sqr = tol * tol

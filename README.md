@@ -27,6 +27,8 @@ so a test written against the reference reads the same here.
 |---|---|---|
 | `aephysics.math` | vectors, quaternions, transforms, 3x3 matrices, bounding boxes, segment distances, inertia helpers, the deterministic atan2/cos/sin | done, `test_math.ae` (6M checks) |
 | `aephysics.basics` | bit set, id pool, hash set, a long-to-int map, arrays, the stack and arena allocators, the block hash (the reference's core.c, named so a host's own `core` module and this one can share a program) | done, `test_basics.ae` (100k checks) |
+| `aephysics.native` | the Aether face of the one C file built with every program: the threads' helpers Aether has not (a thread-local worker index, yield, pause, the processor count, atomics on an int in place, a semaphore) and the per-worker scratch every module keeps a block of | done |
+| `aephysics.parallel` | the reference's scheduler and `parallel_for`: worker threads made once and waiting on a semaphore, tasks in slots claimed by compare-and-swap, the main thread helping while it waits; a range in blocks the tasks claim, the caller working as worker 0 | done, `test_parallel.ae` (18 checks); [the step by worker count against the reference's](bench/RESULTS.md#parallel) |
 | `aephysics.dynamic_tree` | the bounding volume hierarchy under the broad phase: SAH insertion, rotations, enlarge, sweep refit, partial rebuild in depth-first order, box / closest / ray / swept-box queries | done, `test_dynamic_tree.ae` (12k checks); [same tree as the reference, ray cast 1.9x its time](bench/RESULTS.md#dynamic_tree) |
 | `aephysics.hull` | quickhull with face merging, the half-edge hull with its mass properties, box / cylinder / cone / rock hulls, clone-and-transform with mirroring, support functions, ray cast, the 2D hull | done, `test_hull.ae` (438 checks); [same hulls as the reference, 1.6-2x its time](bench/RESULTS.md#hull) |
 | `aephysics.distance` | GJK with the warm-started simplex cache, the shape cast by conservative advancement, the time of impact by separating-axis root finding | done, `test_distance.ae` (1.1k checks); [same results as the reference, 1.3-1.5x its time](bench/RESULTS.md#distance) |
@@ -46,7 +48,7 @@ so a test written against the reference reads the same here.
 | `aephysics.contact_solver` | the contact constraints of a step, scalar: prepared from the manifolds (anchors, base separations, normal masses, the friction centre and its tangent mass, twist and rolling masses), warm started, solved per sub-step (soft normal constraints with speculative bias, then central friction, twist friction and rolling resistance in the relax pass), the restitution pass, the impulses stored with the hit events; the step context | `test_contact_solver.ae` (49 checks: the passes by hand on a cube on a slab) | [ours alone](bench/RESULTS.md#contact_solver) |
 | `aephysics.contact_solver_wide` | a colour's convex contacts four at a time: the constraint of four contacts in lanes (a structure of arrays over the same prepare, warm start, solve, restitution and store), the bodies gathered into lanes and scattered back; the lanes in Aether, and the same lanes in `aephysics/native/aephysics_native.c` as vector code in single precision (the reference's SIMD path), on by default | `test_contact_solver_wide.ae` (19 checks: one scene three ways, the stack, the bounce with hit events, rolling resistance, a conveyor, a slide, agreeing to 1e-9 and 4e-5; the native lanes' layout checked, the same path twice bit for bit) | [scalar 252 ms, lanes in Aether 230, native lanes 187, the reference 157](bench/RESULTS.md#solver) |
 | `aephysics.joint_solver` | the seven joints solved: each kind's prepare (frames relative to the centres of mass, effective masses, spring softness), warm start and solve (rigid or soft constraints, speculative limits, springs, motors), the kinds' accessors (limits, springs, motors, current angles and translations, forces and torques), joint.c's dispatch with the constraint hertz clamp | `test_joint_solver.ae` (149 checks: test_joint.c's accessors on every kind, each kind solved by hand) | [ours alone](bench/RESULTS.md#joint_solver) |
-| `aephysics.solver` | the Soft Step: the constraints prepared, per sub-step the velocities integrated (gravity, damping, the gyroscopic torque), warm start, solve, positions, relax, colour by colour with the overflow first; restitution, the impulses stored; the bodies finalised (sleep velocities, move events, fast bodies swept for the time of impact, bounds and proxies), the joint and hit events, the trees refit, bullets, the sensors' hits, islands put to sleep | `test_solver.ae` (45 checks: free fall against the closed form, resting and sleeping, a stack, a bounce and its hit event, a joint event, a pendulum, a fast sphere stopped by a thin wall, a bullet, a sensor swept, two worlds bit for bit alike) | [1.2-1.4x the reference's step with the native lanes](bench/RESULTS.md#solver) |
+| `aephysics.solver` | the Soft Step over the workers, the reference's stages: the work in blocks (the bodies', each colour's joints, wide and scalar constraints) that workers claim by compare-and-swap, the stages published as sync bits by worker 0 -- the constraints prepared, per sub-step the velocities integrated (gravity, damping, the gyroscopic torque), warm start, solve, positions, relax, colour by colour with the overflow first on worker 0; restitution, the impulses stored; the bodies finalised in parallel (sleep velocities, move events, fast bodies swept for the time of impact, bounds and proxies), the joint and hit events, the trees refit, bullets, the sensors' hits, islands put to sleep | `test_solver.ae` (45 checks: free fall against the closed form, resting and sleeping, a stack, a bounce and its hit event, a joint event, a pendulum, a fast sphere stopped by a thin wall, a bullet, a sensor swept, two worlds bit for bit alike) | [1.2-1.4x the reference's step with the native lanes](bench/RESULTS.md#solver) |
 | `aephysics.physics_world` | the world's face: the step (pairs, narrow phase, solve, sensors, events), the events read back, the settings and counters, queries over every shape (overlap of a box or a proxy, the mover's planes, ray, shape and mover casts, the closest ray hit) and against one body at a transform of the caller's, explosions | `test_physics_world.ae` (94 checks: test_world.c's HelloWorld, contact, hit, move and sensor events, the explosion near and far; test_body_query.c's casts, overlaps, mover planes and time of impact; the world queries; a wave pile stepping alike twice) | [the reference's own benchmark scenes with the same checksums at 1.2-1.6x](bench/RESULTS.md#physics_world) |
 | `aephysics.human` | the ragdoll: twelve capsule bones on spherical joints with cone and twist limits and revolute joints with angle limits, a spring on every joint toward the reference pose, a motor whose torque limit is joint friction, filter joints for the limbs that clash; the align spring, kinematic anchors through motor or parallel joints (the pose drive of an active ragdoll), velocity, kicks, bullets | `test_human.ae` (46 checks: the figure's shape, a fall to rest in one piece, the setters, a kick, standing under the align spring, the pose held on anchors, the same drop twice bit for bit) | [the reference's rain benchmark, 300 ragdolls over 400 steps, at 1.05x](bench/RESULTS.md#human) |
 | `aephysics` | the public API | |
@@ -61,8 +63,10 @@ Deliberate choices:
 - **No SIMD intrinsics.** The wide contact solver is written scalar first
   and measured; where the benchmark says the wide path matters, that loop
   goes native behind the same interface.
-- **Threads.** The reference's task scheduler maps onto Aether's actors;
-  the single-threaded path comes first and the benchmarks record both.
+- **Threads.** The reference's task scheduler is ported as it is, on
+  threads Aether's std.worker makes, with the little C the threads need
+  (aephysics.native); the single-threaded path came first and the
+  benchmarks record both.
 
 ## Tests and benchmarks
 
@@ -88,29 +92,44 @@ and `GltfBuffer`).
 `aether.toml` gives `ae build` the flags the benchmarks are measured
 with (`-O3` and a wider inlining budget, so the small maths inline as
 the reference's `static inline` headers do; [why](bench/RESULTS.md#build-flags-inlining)).
-The contact lanes' vector code is C beside its module, so a build adds
-it: `ae build app.ae --extra aephysics/native/aephysics_native.c`
-(or an `extra_sources` entry in the project's `aether.toml`); the
-scripts do. `contact_solver_wide.set_native_lanes(false)` runs the
-same lanes in Aether instead, and `solver.set_wide_contacts(false)`
-the scalar solve ([what each buys](bench/RESULTS.md#solver)).
+One C file goes with the library, `aephysics/native/aephysics_native.c`
+(the threads' helpers Aether has not, and the contact lanes as vector
+code), so a build adds it: `ae build app.ae --extra
+aephysics/native/aephysics_native.c` (or an `extra_sources` entry in
+the project's `aether.toml`); the scripts do.
+`contact_solver_wide.set_native_lanes(false)` runs the same lanes in
+Aether instead, and `solver.set_wide_contacts(false)` the scalar solve
+([what each buys](bench/RESULTS.md#solver)).
+
+A world steps over as many threads as its definition asks
+(`WorldDef.worker_count`, one by default; `native.processor_count()`
+for the machine's): the narrow phase, the solver's stages, the bodies'
+finalize and the bullets go in blocks over the workers, the reference's
+way, with every worker writing its own context and the step merging
+them after. The result does not depend on the count: within a colour
+no two constraints move the same body, so a step is the same to the
+bit at one worker or twenty-four (`test_determinism.ae` runs each
+scene over four workers too). The worker threads are made when the
+world is and wait on a semaphore between steps; a world of one worker
+never makes a thread. [What the workers buy, against the reference's
+own scaling](bench/RESULTS.md#parallel).
 
 Beyond the modules' own tests, the reference's scene tests run on the
 world as a whole: `test_mover_world.ae` (the mover through a world:
 which material a plane came from, for meshes, compounds and convex
 shapes; 38 checks), `test_determinism.ae` (the reference's wave pile,
 query spawn and mesh drop with its own random numbers, and the
-falling ragdolls, each run to sleep twice and compared bit for bit; the
-query spawn sleeps a step after the reference's with its 59 query hits,
-the mesh drop two; 11 checks) and `test_large_world.ae` (a stack, a bullet and the
+falling ragdolls, each run to sleep twice and over four workers and
+compared bit for bit; the query spawn sleeps a step after the
+reference's with its 59 query hits, the mesh drop two; 16 checks) and `test_large_world.ae` (a stack, a bullet and the
 origin-relative queries at x = 0 and at x = 1e7 agree, the whole
 engine being in doubles; 43 checks).
 
-The step is deterministic across platforms, not only across runs:
-`AEPHYSICS_TRACE=1 target/test_determinism` prints every body's
-checksum after every step with its bits, CI records the Linux trace in
-its log, and the Windows trace (MinGW, a different gcc) matches it bit
-for bit on every step of the four scenes. The engine's own maths
+The step is deterministic across platforms and worker counts, not
+only across runs: `AEPHYSICS_TRACE=1 target/test_determinism` prints
+every body's checksum after every step with its bits, CI records the
+Linux trace in its log, and the Windows trace (MinGW, a different gcc)
+matches it bit for bit on every step of the four scenes. The engine's own maths
 (the reference's cos, sin and atan2 approximations, `sqrt`, `floor`
 and `remainder` as the only libm calls, no fused multiply-adds in the
 lanes) is what makes that hold; the one divergence seen so far was an

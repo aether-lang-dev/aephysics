@@ -33,6 +33,7 @@ import aephysics.sphere
 import aephysics.capsule
 
 exports (
+    reserve_scratch,
     CompoundCapsuleDef, CompoundHullDef, CompoundMeshDef, CompoundSphereDef, CompoundDef,
     CompoundData, CompoundCapsule, CompoundHull, CompoundMesh, CompoundSphere, ChildShape,
     COMPOUND_VERSION, MAX_COMPOUND_MESH_MATERIALS, MAX_CHILD_SHAPES, NULL_INDEX,
@@ -767,9 +768,21 @@ mover_visitor(proxy_id: int, user_data: long, context: ptr) -> bool {
 // The planes of the children the mover's capsule (in the compound's
 // frame) touches, up to the capacity, each carried back from its
 // child's frame with the child and the material.
+planes_ready() {
+    if g_planes == null { g_planes = basics.alloc(native.MAX_WORKERS * (MOVER_SCRATCH * sizeof(PlaneResult))) }
+}
+
+// Every scratch block of the module allocated now, on the calling
+// thread: a world's creation reserves every module's before a step can
+// reach them from several workers at once.
+reserve_scratch() {
+    scratch_ready()
+    planes_ready()
+}
+
 collide_mover_and_compound(planes: PlaneResult[], capacity: int, c: *CompoundData, mover: Capsule) -> int {
     if capacity == 0 { return 0 }
-    if g_planes == null { g_planes = basics.alloc(native.MAX_WORKERS * (MOVER_SCRATCH * sizeof(PlaneResult))) }
+    planes_ready()
     ctx = MoverContext { compound: c, planes: planes, capacity: capacity, count: 0, mover: mover }
     r = math.vec3(mover.radius, mover.radius, mover.radius)
     bounds = AABB { lower: math.sub(math.min_vec3(mover.center1, mover.center2), r), upper: math.add(math.max_vec3(mover.center1, mover.center2), r) }

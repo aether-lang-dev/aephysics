@@ -12,6 +12,8 @@
 // the printed values). The random numbers are the reference's
 // xorshift32 with its seeds. The falling ragdolls are the reference's
 // cross-platform scene: eight humans dropped on grid meshes and tori.
+// Each scene then runs again over four workers: the parallel layer
+// leaves a step the same to the bit at any worker count.
 import std.string
 import std.os
 import aephysics.math
@@ -35,8 +37,10 @@ var failures = 0
 var checks = 0
 
 // AEPHYSICS_TRACE=1 prints a checksum of every body after every step,
-// to find the first step two platforms part on (issue #27).
+// to find the first step two platforms part on (issue #27); the first
+// run of each scene prints, the repeats compare.
 var g_trace = false
+var g_trace_run = false
 
 // The checksum of every body's transform right now.
 checksum(bodies: BodyId[], count: int) -> float {
@@ -57,7 +61,7 @@ bits_of(value: float) -> long {
 }
 
 trace(scene: string, step: int, bodies: BodyId[], count: int) {
-    if g_trace {
+    if g_trace && g_trace_run {
         hash = checksum(bodies, count)
         println("trace ${scene} ${step} ${hash} ${bits_of(hash)}")
     }
@@ -174,8 +178,9 @@ const RAGDOLL_GRID_COUNT = 2
 const RAGDOLL_GROUP_SIZE = 2
 const RAGDOLL_GRID_SIZE = 15.0
 
-falling_ragdolls() -> Outcome {
+falling_ragdolls(workers: int) -> Outcome {
     wdef = dynamics.default_world_def()
+    wdef.worker_count = workers
     world_id = dynamics.create_world(&wdef)
     half_rows = 4
     grid = mesh.create_grid_mesh(2 * half_rows, 2 * half_rows, RAGDOLL_GRID_SIZE / (2.0 * (half_rows as float)), 0, true)
@@ -183,7 +188,6 @@ falling_ragdolls() -> Outcome {
     span = RAGDOLL_GRID_SIZE * (RAGDOLL_GRID_COUNT as float)
     human_count = RAGDOLL_GRID_COUNT * RAGDOLL_GRID_COUNT * RAGDOLL_GROUP_SIZE
     humans_block = calloc(human_count, sizeof(Human))
-    humans = humans_block as Human[]
     bodies_block = calloc(human_count * human.BONE_COUNT, sizeof(BodyId))
     bodies = bodies_block as BodyId[]
     gdef = dynamics.default_body_def()
@@ -239,8 +243,9 @@ const WAVE_PILE_GRID = 5
 const WAVE_PILE_LAYERS = 4
 const WAVE_PILE_BODY_COUNT = 100
 
-wave_pile() -> Outcome {
+wave_pile(workers: int) -> Outcome {
     wdef = dynamics.default_world_def()
+    wdef.worker_count = workers
     world_id = dynamics.create_world(&wdef)
     g_random_seed = 52977 as long
     // Height fields grow from a corner: the body offset centres the patch.
@@ -383,8 +388,9 @@ one_spawn(world_id: WorldId, state: *SpawnState, bodies: BodyId[], spawn_count: 
     bodies[spawn_count] = body_id
 }
 
-query_spawn() -> Outcome {
+query_spawn(workers: int) -> Outcome {
     wdef = dynamics.default_world_def()
+    wdef.worker_count = workers
     world_id = dynamics.create_world(&wdef)
     g_random_seed = 71689 as long
     // Empty space: motion comes only from the spawn velocities and the overlap pushes.
@@ -424,8 +430,9 @@ query_spawn() -> Outcome {
 
 const MESH_DROP_GRID_COUNT = 20
 
-mesh_drop() -> Outcome {
+mesh_drop(workers: int) -> Outcome {
     wdef = dynamics.default_world_def()
+    wdef.worker_count = workers
     world_id = dynamics.create_world(&wdef)
     gdef = dynamics.default_body_def()
     ground = dynamics.create_body(world_id, &gdef)
@@ -472,30 +479,46 @@ mesh_drop() -> Outcome {
 main() {
     value = os.getenv("AEPHYSICS_TRACE")
     g_trace = value != null && string.length(value) > 0
-    first = falling_ragdolls()
-    second = falling_ragdolls()
+    g_trace_run = true
+    first = falling_ragdolls(1)
+    g_trace_run = false
+    second = falling_ragdolls(1)
+    parallel = falling_ragdolls(4)
     println("determinism: falling ragdolls slept at step ${first.sleep_step}, checksum ${first.hash}")
     ensure("falling ragdolls: they slept", first.sleep_step > 0)
     ensure("falling ragdolls: the same scene twice, bit for bit", same_outcome(first, second))
+    ensure("falling ragdolls: the same over four workers, bit for bit", same_outcome(first, parallel))
 
-    first = wave_pile()
-    second = wave_pile()
+    g_trace_run = true
+    first = wave_pile(1)
+    g_trace_run = false
+    second = wave_pile(1)
+    parallel = wave_pile(4)
     println("determinism: wave pile slept at step ${first.sleep_step}, checksum ${first.hash}")
     ensure("wave pile: it slept", first.sleep_step > 0)
     ensure("wave pile: the same scene twice, bit for bit", same_outcome(first, second))
+    ensure("wave pile: the same over four workers, bit for bit", same_outcome(first, parallel))
 
-    first = query_spawn()
-    second = query_spawn()
+    g_trace_run = true
+    first = query_spawn(1)
+    g_trace_run = false
+    second = query_spawn(1)
+    parallel = query_spawn(4)
     println("determinism: query spawn slept at step ${first.sleep_step}, checksum ${first.hash}, ${first.query_hits} query hits, query checksum ${first.query_hash}")
     ensure("query spawn: it slept", first.sleep_step > 0)
     ensure("query spawn: the queries hit (${first.query_hits})", first.query_hits > 20)
     ensure("query spawn: the same scene twice, bit for bit", same_outcome(first, second))
+    ensure("query spawn: the same over four workers, bit for bit", same_outcome(first, parallel))
 
-    first = mesh_drop()
-    second = mesh_drop()
+    g_trace_run = true
+    first = mesh_drop(1)
+    g_trace_run = false
+    second = mesh_drop(1)
+    parallel = mesh_drop(4)
     println("determinism: mesh drop slept at step ${first.sleep_step}, checksum ${first.hash}")
     ensure("mesh drop: it slept", first.sleep_step > 0)
     ensure("mesh drop: the same scene twice, bit for bit", same_outcome(first, second))
+    ensure("mesh drop: the same over four workers, bit for bit", same_outcome(first, parallel))
 
     println("determinism: ${checks} checks")
     if failures == 0 {

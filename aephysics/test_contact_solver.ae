@@ -322,6 +322,7 @@ test_restitution_and_store() {
 }
 
 main() {
+    dynamics.reserve_scratch()
     before = basics.alloc_count()
     test_prepare()
     test_normal()
@@ -329,8 +330,8 @@ main() {
     test_restitution_and_store()
     hull.destroy_hull(g_cube as *HullData)
     hull.destroy_hull(g_slab as *HullData)
-    // The scratch stays allocated: the worlds' block, the masses, the contact and hull scratch (seven), the dummy state.
-    ensure("every other counted allocation was freed (${basics.alloc_count() - before})", basics.alloc_count() == before + 10)
+    // The scratch stays allocated: the worlds' block, the masses, the dummy state (the modules' scratch is reserved before the count).
+    ensure("every other counted allocation was freed (${basics.alloc_count() - before})", basics.alloc_count() == before + 3)
     println("contact_solver: ${checks} checks")
     if failures == 0 {
         println("contact_solver: all checks passed")

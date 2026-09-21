@@ -1,10 +1,13 @@
 // aephysics.native -- the Aether face of aephysics_native.c, the one C
 // file built with every program: the threads' helpers a worker pool
-// needs and Aether does not have (a thread-local worker index, a yield,
-// the processor count). The contact lanes in the same file are
-// declared by aephysics.contact_solver_wide, which owns them.
+// needs and Aether does not have (a thread-local worker index, a yield
+// and a pause, the processor count, atomics on an int in place). The
+// contact lanes in the same file are declared by
+// aephysics.contact_solver_wide, which owns them.
 exports (
-    MAX_WORKERS, worker_index, set_worker_index, yield_thread, processor_count, scratch
+    MAX_WORKERS, worker_index, set_worker_index, yield_thread, pause, processor_count, scratch,
+    atomic_load, atomic_store, atomic_add, atomic_or, atomic_cas,
+    semaphore_new, semaphore_free, semaphore_wait, semaphore_signal
 )
 
 // The most workers a world can have: every module's scratch is a block
@@ -15,6 +18,16 @@ extern aephysics_worker_index() -> int
 extern aephysics_set_worker_index(index: int)
 extern aephysics_yield()
 extern aephysics_processor_count() -> int
+extern aephysics_pause()
+extern aephysics_atomic_load(p: ptr) -> int
+extern aephysics_atomic_store(p: ptr, value: int)
+extern aephysics_atomic_add(p: ptr, value: int) -> int
+extern aephysics_atomic_or(p: ptr, value: int) -> int
+extern aephysics_atomic_cas(p: ptr, expected: int, desired: int) -> int
+extern aephysics_semaphore_new(initial: int) -> ptr
+extern aephysics_semaphore_free(s: ptr)
+extern aephysics_semaphore_wait(s: ptr)
+extern aephysics_semaphore_signal(s: ptr, count: int)
 
 // The worker the calling thread is running as: 0 on the main thread
 // outside a task, the task's worker inside one. Every module's scratch
@@ -22,7 +35,26 @@ extern aephysics_processor_count() -> int
 worker_index() -> int { return aephysics_worker_index() }
 set_worker_index(index: int) { aephysics_set_worker_index(index) }
 yield_thread() { aephysics_yield() }
+pause() { aephysics_pause() }
 processor_count() -> int { return aephysics_processor_count() }
+
+// Atomics on an int where it sits (`(&s.field) as ptr`), sequentially
+// consistent: the solver's block claims and completion counts, its sync
+// bits, the bullets' count and the tree's moved flags, which workers
+// share in place as the reference's do. atomic_add and atomic_or return
+// the value before; atomic_cas swaps `expected` for `desired` and says
+// whether it did.
+atomic_load(p: ptr) -> int { return aephysics_atomic_load(p) }
+atomic_store(p: ptr, value: int) { aephysics_atomic_store(p, value) }
+atomic_add(p: ptr, value: int) -> int { return aephysics_atomic_add(p, value) }
+atomic_or(p: ptr, value: int) -> int { return aephysics_atomic_or(p, value) }
+atomic_cas(p: ptr, expected: int, desired: int) -> bool { return aephysics_atomic_cas(p, expected, desired) != 0 }
+
+// A counting semaphore: the scheduler's threads wait on it for work.
+semaphore_new(initial: int) -> ptr { return aephysics_semaphore_new(initial) }
+semaphore_free(s: ptr) { aephysics_semaphore_free(s) }
+semaphore_wait(s: ptr) { aephysics_semaphore_wait(s) }
+semaphore_signal(s: ptr, count: int) { aephysics_semaphore_signal(s, count) }
 
 // The calling worker's block of a scratch buffer allocated as
 // MAX_WORKERS blocks of `bytes`: what the reference keeps on the stack

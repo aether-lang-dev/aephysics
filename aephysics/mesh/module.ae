@@ -28,6 +28,7 @@ import aephysics.manifold
 import aephysics.triangle_manifold
 
 exports (
+    reserve_scratch,
     MeshDef, MeshData, MeshNode, MeshTriangle, Mesh, Triangle, PlaneResult,
     MESH_VERSION, NULL_INDEX, MESH_STACK_SIZE, LEAF_NODE,
     mesh_def, mesh, mesh_nodes, mesh_vertices, mesh_triangles, mesh_material_indices, mesh_flags,
@@ -171,6 +172,11 @@ scratch_ready() {
         g_local = basics.alloc(native.MAX_WORKERS * (MAX_SHAPE_CAST_POINTS * sizeof(Vec3)))
     }
 }
+
+// Every scratch block of the module allocated now, on the calling
+// thread: a world's creation reserves every module's before a step can
+// reach them from several workers at once.
+reserve_scratch() { scratch_ready() }
 
 // --- height and validation -------------------------------------------------------------
 

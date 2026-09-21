@@ -12,14 +12,16 @@
 // sleep.
 //
 // This is Box3D's solver.c (Erin Catto, MIT), the reference this
-// engine is measured against, on one thread: the reference cuts the
-// work into blocks that workers claim by atomics and synchronises the
-// stages by sync bits; here the stages run in the same order, colour
-// by colour, joints before contacts, the overflow constraints first in
-// every pass as the reference has them. Names are the reference's
-// without its prefix, in snake case: b3Solve is solve,
-// b3SolveContinuous is solve_continuous.
+// engine is measured against, stages and all: the work is cut into
+// blocks that workers claim by atomics and the stages are synchronised
+// by sync bits (see "the stages" below); the overflow constraints run
+// first in every pass on worker 0 as the reference has them, and a
+// world of one worker runs every block on the calling thread. Names
+// are the reference's without its prefix, in snake case: b3Solve is
+// solve, b3SolveContinuous is solve_continuous, b3SolverTask is
+// solver_task.
 import std.string
+import std.os
 import aephysics.math
 import aephysics.native
 import aephysics.basics
@@ -28,6 +30,7 @@ import aephysics.distance
 import aephysics.shape
 import aephysics.broad_phase
 import aephysics.dynamics
+import aephysics.parallel
 import aephysics.contact_solver
 import aephysics.contact_solver_wide
 import aephysics.joint_solver
@@ -60,12 +63,16 @@ sim_at(base: ptr, index: int) -> *BodySim { return (base + index * sizeof(BodySi
 // damping as a Pade step, and the gyroscopic torque by one Newton step
 // in the body's frame (long thin bodies tumble right).
 integrate_velocities(ctx: *StepContext) {
+    awake = dynamics.get_solver_set(ctx.world, dynamics.AWAKE_SET)
+    integrate_velocities_range(ctx, 0, awake.body_sims.count)
+}
+
+integrate_velocities_range(ctx: *StepContext, start: int, end: int) {
     w = ctx.world
-    awake = dynamics.get_solver_set(w, dynamics.AWAKE_SET)
     gravity = w.gravity
     h = ctx.h
-    i = 0
-    while i < awake.body_sims.count {
+    i = start
+    while i < end {
         sim = sim_at(ctx.sims, i)
         state = state_at(ctx.states, i)
         v = state.linear_velocity
@@ -118,15 +125,18 @@ integrate_velocities(ctx: *StepContext) {
 // last constraint) and the speed caps (a body may not cross more than a
 // quarter turn per step unless it asked for fast rotation).
 integrate_positions(ctx: *StepContext) {
-    w = ctx.world
-    awake = dynamics.get_solver_set(w, dynamics.AWAKE_SET)
+    awake = dynamics.get_solver_set(ctx.world, dynamics.AWAKE_SET)
+    integrate_positions_range(ctx, 0, awake.body_states.count)
+}
+
+integrate_positions_range(ctx: *StepContext, start: int, end: int) {
     h = ctx.h
     max_linear_speed = ctx.max_linear_velocity
     max_angular_speed = MAX_ROTATION * ctx.inv_dt
     max_linear_squared = max_linear_speed * max_linear_speed
     max_angular_squared = max_angular_speed * max_angular_speed
-    i = 0
-    while i < awake.body_states.count {
+    i = start
+    while i < end {
         state = state_at(ctx.states, i)
         v = state.linear_velocity
         wv = state.angular_velocity
@@ -310,8 +320,9 @@ solve_continuous(w: *World, sim_index: int) {
     i = 0
     while i < ctx.sensor_count {
         if fractions[i] < ctx.fraction {
-            index = basics.buffer_push(&w.sensor_hits)
-            target = dynamics.sensor_hit_at(w, index)
+            tc = dynamics.task_context(w)
+            index = basics.buffer_push(&tc.sensor_hits)
+            target = dynamics.task_sensor_hit_at(tc, index)
             target.sensor_id = hits[i].sensor_id
             target.visitor_id = hits[i].visitor_id
         }
@@ -326,17 +337,36 @@ solve_continuous(w: *World, sim_index: int) {
 // correction, the move event, the transient flags gathered, the sleep
 // timer (a fast body swept instead, a bullet kept for later), the world
 // inverse inertia, the island kept awake or a split candidate noted,
-// and the shapes' bounds and proxies updated.
+// and the shapes' bounds and proxies updated. The bodies go in blocks
+// over the workers (b3FinalizeBodiesTask): a worker notes the islands
+// it kept awake, its split candidate and its sensor hits in its own
+// context, takes a bullet's slot atomically, and marks the tree's
+// moved paths atomically; the step merges the contexts after.
+struct FinalizeTask {
+    ctx: *StepContext
+    bullet_count: int              // atomic: the bullets' next slot
+}
+
 finalize_bodies(ctx: *StepContext) {
     w = ctx.world
     awake = dynamics.get_solver_set(w, dynamics.AWAKE_SET)
+    task = FinalizeTask { ctx: ctx, bullet_count: 0 }
+    parallel.parallel_for(w.scheduler as *Scheduler, finalize_range, awake.body_sims.count, 16, (&task) as ptr)
+    ctx.bullet_body_count = task.bullet_count
+}
+
+finalize_range(start: int, end: int, worker: int, context: ptr) {
+    task = context as *FinalizeTask
+    ctx = task.ctx
+    w = ctx.world
+    tc = dynamics.task_context_at(w, worker)
     enable_sleep = w.enable_sleep
     enable_continuous = w.enable_continuous
     time_step = ctx.dt
     inv_time_step = ctx.inv_dt
     bullets = ctx.bullet_bodies as int[]
-    sim_index = 0
-    while sim_index < awake.body_sims.count {
+    sim_index = start
+    while sim_index < end {
         state = state_at(ctx.states, sim_index)
         sim = sim_at(ctx.sims, sim_index)
         v = state.linear_velocity
@@ -374,8 +404,7 @@ finalize_bodies(ctx: *StepContext) {
             if body.kind == dynamics.BODY_DYNAMIC && enable_continuous && max_motion > body.safety_factor * sim.min_extent {
                 sim.flags = sim.flags | dynamics.IS_FAST
                 if (sim.flags & dynamics.IS_BULLET) != 0 {
-                    bullets[ctx.bullet_body_count] = sim_index
-                    ctx.bullet_body_count = ctx.bullet_body_count + 1
+                    bullets[native.atomic_add((&task.bullet_count) as ptr, 1)] = sim_index
                 } else {
                     solve_continuous(w, sim_index)
                 }
@@ -392,12 +421,12 @@ finalize_bodies(ctx: *StepContext) {
         sim.inv_inertia_world = math.mul_mm(math.mul_mm(rotation, sim.inv_inertia_local), math.transpose(rotation))
         island = dynamics.island_at(w, body.island_id)
         if body.sleep_time < dynamics.TIME_TO_SLEEP {
-            basics.bitset_set(&w.awake_island_bits, island.local_index)
+            basics.bitset_set(&tc.awake_island_bits, island.local_index)
         } else if island.constraint_remove_count > 0 {
             // Wants to sleep but its island needs splitting first: the sleepiest candidate, ties to the larger id.
-            if body.sleep_time > w.split_sleep_time || (body.sleep_time == w.split_sleep_time && body.island_id > w.split_island_candidate) {
-                w.split_island_candidate = body.island_id
-                w.split_sleep_time = body.sleep_time
+            if body.sleep_time > tc.split_sleep_time || (body.sleep_time == tc.split_sleep_time && body.island_id > tc.split_island_id) {
+                tc.split_island_id = body.island_id
+                tc.split_sleep_time = body.sleep_time
             }
         }
         // A fast body's bounds were done by the sweep (a bullet's come later).
@@ -421,18 +450,19 @@ finalize_bodies(ctx: *StepContext) {
 
 // --- the solve -------------------------------------------------------------------------------------------------
 
-// A colour's joints solved, the ones past their thresholds flagged for the joint events.
-solve_joints_flagging(ctx: *StepContext, color: *GraphColor, use_bias: bool) {
+// A block of a colour's joints solved, the ones past their thresholds
+// flagged in the bits given (the worker's own, merged after the solve).
+solve_joints_flagging_range(ctx: *StepContext, color: *GraphColor, start: int, end: int, use_bias: bool, joint_bits: *BitSet) {
     w = ctx.world
     max = math.MAX_FLOAT
-    i = 0
-    while i < color.joint_sims.count {
+    i = start
+    while i < end {
         sim = dynamics.joint_sim_at(&color.joint_sims, i)
         joint_solver.solve_joint(sim, ctx, use_bias)
-        if use_bias && (sim.force_threshold < max || sim.torque_threshold < max) && basics.bitset_get(&w.joint_state_bits, sim.joint_id) == false {
+        if use_bias && (sim.force_threshold < max || sim.torque_threshold < max) && basics.bitset_get(joint_bits, sim.joint_id) == false {
             reaction = dynamics.get_joint_reaction(w, sim, ctx.inv_h)
             if reaction.force >= sim.force_threshold || reaction.torque >= sim.torque_threshold {
-                basics.bitset_set(&w.joint_state_bits, sim.joint_id)
+                basics.bitset_set(joint_bits, sim.joint_id)
             }
         }
         i = i + 1
@@ -523,19 +553,428 @@ resize_move_events(w: *World, count: int) {
     }
 }
 
+// --- the stages -----------------------------------------------------------------------------------------------
+
+// The solve over workers, the reference's (solver.c): the work of a
+// step cut into blocks -- of the awake bodies, of a colour's joints, of
+// its wide constraints (convex contacts, WIDTH to a slot), of its scalar
+// constraints (mesh contacts) -- and the stages that run them in order,
+// each block array shared by every stage that walks the same items.
+// Worker 0, the calling thread, orchestrates: it publishes a stage as
+// sync bits (the stage's index and a sync index that grows with every
+// stage over the same blocks), sweeps the stage's blocks itself and
+// waits for the blocks the others claimed; the other workers spin on
+// the sync bits and sweep every stage they see. A block is claimed by
+// compare-and-swap of its sync index from the stage's previous value to
+// its new one, each worker starting at its own share of the ring so
+// they seldom contend. The overflow colour, whose constraints share
+// bodies, runs on worker 0 alone before each colour stage, as does the
+// work before the first stage and after the last. Within a colour no
+// two constraints move the same body and the blocks never overlap, so
+// the blocks' order and their workers do not affect the result: a step
+// is the same to the bit at any worker count.
+
+const BLOCK_BODY = 0
+const BLOCK_JOINT = 1
+const BLOCK_WIDE = 2
+const BLOCK_CONTACT = 3
+
+const STAGE_PREPARE_JOINTS = 0
+const STAGE_PREPARE_WIDE = 1
+const STAGE_PREPARE_CONTACTS = 2
+const STAGE_INTEGRATE_VELOCITIES = 3
+const STAGE_WARM_START = 4
+const STAGE_SOLVE = 5
+const STAGE_INTEGRATE_POSITIONS = 6
+const STAGE_RELAX = 7
+const STAGE_RESTITUTION = 8
+const STAGE_STORE_WIDE = 9
+const STAGE_STORE_CONTACTS = 10
+
+const MIN_BODIES_PER_BLOCK = 32
+const MIN_CONTACTS_PER_BLOCK = 4
+const MIN_JOINTS_PER_BLOCK = 4
+const SYNC_DONE = 0 - 1          // the sync bits that send the workers home
+const SYNC_SHIFT = 16            // the sync index above the stage index
+
+// A block of a stage's items and its claim: the sync index of the
+// stage that last ran it, first so its address is the block's.
+struct SolverBlock {
+    sync_index: int                // atomic
+    start: int
+    count: int
+    kind: int                      // BLOCK_*
+    color: int                     // a graph block's colour, NULL_INDEX for a body block
+}
+
+// A stage: what to do, its blocks, and how many are done.
+struct SolverStage {
+    completion_count: int          // atomic
+    kind: int                      // STAGE_*
+    blocks: ptr                    // SolverBlock[block_count]
+    block_count: int
+    color: int
+}
+
+// What every worker's task shares (b3StepContext's solver side).
+struct SolverContext {
+    sync_bits: int                 // atomic: the stage worker 0 published
+    ctx: *StepContext
+    stages: ptr                    // SolverStage[stage_count]
+    stage_count: int
+    active_color_count: int
+    worker_count: int
+    scalar_convex: bool
+}
+
+struct WorkerContext {
+    sc: *SolverContext
+    worker_index: int
+}
+
+// An active colour's blocks: its index, the dims of its three kinds,
+// and where its graph blocks start.
+struct ColorBlocks {
+    color: int
+    joint_dim: BlockDim
+    wide_dim: BlockDim
+    contact_dim: BlockDim
+    blocks: ptr
+    block_count: int
+}
+
+struct BlockDim {
+    size: int
+    count: int
+}
+
+// Blocks of at least min_size items, at most max_block_count of them (b3ComputeBlockCount).
+block_dim(item_count: int, min_size: int, max_block_count: int) -> BlockDim {
+    if item_count == 0 { return BlockDim { size: 0, count: 0 } }
+    size = min_size
+    if item_count > min_size * max_block_count { size = (item_count + max_block_count - 1) / max_block_count }
+    return BlockDim { size: size, count: (item_count + size - 1) / size }
+}
+
+block_at(blocks: ptr, index: int) -> *SolverBlock { return (blocks + index * sizeof(SolverBlock)) as *SolverBlock }
+stage_at(stages: ptr, index: int) -> *SolverStage { return (stages + index * sizeof(SolverStage)) as *SolverStage }
+color_blocks_at(base: ptr, index: int) -> *ColorBlocks { return (base + index * sizeof(ColorBlocks)) as *ColorBlocks }
+
+// The blocks of one item range, the last one short; claims at zero so
+// the first stage over them swaps 0 for 1.
+init_blocks(blocks: ptr, dim: BlockDim, item_count: int, kind: int, color: int) {
+    i = 0
+    while i < dim.count {
+        b = block_at(blocks, i)
+        b.sync_index = 0
+        b.start = i * dim.size
+        b.count = dim.size
+        b.kind = kind
+        b.color = color
+        i = i + 1
+    }
+    if dim.count > 0 { block_at(blocks, dim.count - 1).count = item_count - (dim.count - 1) * dim.size }
+}
+
+// A stage set up; the next one to fill.
+init_stage(stage: *SolverStage, kind: int, blocks: ptr, block_count: int, color: int) -> *SolverStage {
+    stage.completion_count = 0
+    stage.kind = kind
+    stage.blocks = blocks
+    stage.block_count = block_count
+    stage.color = color
+    return ((stage as ptr) + sizeof(SolverStage)) as *SolverStage
+}
+
+// One stage per active colour, `iterations` times over: warm start, solve, relax, restitution.
+init_color_stages(stage: *SolverStage, kind: int, iterations: int, colors: ptr, active_count: int) -> *SolverStage {
+    next = stage
+    j = 0
+    while j < iterations {
+        i = 0
+        while i < active_count {
+            cb = color_blocks_at(colors, i)
+            next = init_stage(next, kind, cb.blocks, cb.block_count, cb.color)
+            i = i + 1
+        }
+        j = j + 1
+    }
+    return next
+}
+
+// A block's work by the stage's kind and the block's (b3ExecuteBlock).
+// A wide block's items are constraint slots; its prepare and store
+// walk the slots' contacts, and pack and unpack the slots for the
+// lanes there and then, so a worker packs what it prepared.
+execute_block(stage: *SolverStage, sc: *SolverContext, b: *SolverBlock, worker: int) {
+    ctx = sc.ctx
+    w = ctx.world
+    kind = stage.kind
+    start = b.start
+    end = b.start + b.count
+    if b.kind == BLOCK_BODY {
+        if kind == STAGE_INTEGRATE_VELOCITIES { integrate_velocities_range(ctx, start, end) }
+        else if kind == STAGE_INTEGRATE_POSITIONS { integrate_positions_range(ctx, start, end) }
+        return
+    }
+    color = dynamics.graph_color(w, b.color)
+    tc = dynamics.task_context_at(w, worker)
+    if b.kind == BLOCK_JOINT {
+        if kind == STAGE_PREPARE_JOINTS { joint_solver.prepare_joints_range(ctx, color, start, end) }
+        else if kind == STAGE_WARM_START { joint_solver.warm_start_joints_range(ctx, color, start, end) }
+        else if kind == STAGE_SOLVE { solve_joints_flagging_range(ctx, color, start, end, true, &tc.joint_state_bits) }
+        else if kind == STAGE_RELAX { solve_joints_flagging_range(ctx, color, start, end, false, &tc.joint_state_bits) }
+        return
+    }
+    count = end - start
+    if b.kind == BLOCK_WIDE {
+        slots = color.wide_constraints + start * sizeof(WideConstraint)
+        first = start * contact_solver_wide.WIDTH
+        last = math.min_int(end * contact_solver_wide.WIDTH, color.convex_contacts.count)
+        if kind == STAGE_PREPARE_WIDE {
+            contact_solver_wide.prepare_wide_range(ctx, color, first, last)
+            contact_solver_wide.pack_wide(slots, count)
+        } else if kind == STAGE_WARM_START { contact_solver_wide.warm_start_wide_contacts(ctx, slots, count) }
+        else if kind == STAGE_SOLVE { contact_solver_wide.solve_wide_contacts(ctx, slots, count, true) }
+        else if kind == STAGE_RELAX { contact_solver_wide.solve_wide_contacts(ctx, slots, count, false) }
+        else if kind == STAGE_RESTITUTION { contact_solver_wide.apply_wide_restitution(ctx, slots, count) }
+        else if kind == STAGE_STORE_WIDE {
+            contact_solver_wide.unpack_wide(slots, count)
+            if contact_solver_wide.store_wide_range(ctx, color, first, last, &tc.hit_event_bits) { tc.has_hit_events = true }
+        }
+        return
+    }
+    constraints = contact_solver.contact_constraint_at(color.contact_constraints, start) as ptr
+    if kind == STAGE_PREPARE_CONTACTS { contact_solver.prepare_contacts_range(ctx, color, sc.scalar_convex, start, end) }
+    else if kind == STAGE_WARM_START { contact_solver.warm_start_contacts(ctx, constraints, count) }
+    else if kind == STAGE_SOLVE { contact_solver.solve_contacts(ctx, constraints, count, true) }
+    else if kind == STAGE_RELAX { contact_solver.solve_contacts(ctx, constraints, count, false) }
+    else if kind == STAGE_RESTITUTION { contact_solver.apply_restitution(ctx, constraints, count) }
+    else if kind == STAGE_STORE_CONTACTS {
+        if contact_solver.store_impulses(ctx, constraints, count, &tc.hit_event_bits) { tc.has_hit_events = true }
+    }
+}
+
+// Where a worker starts its sweep of a stage's ring, staggered so the
+// workers begin on different blocks; NULL_INDEX when there are fewer
+// blocks than workers and this one has none.
+worker_start_index(worker: int, block_count: int, worker_count: int) -> int {
+    if block_count <= worker_count {
+        if worker < block_count { return worker }
+        return NULL_INDEX
+    }
+    per_worker = block_count / worker_count
+    remainder = block_count - per_worker * worker_count
+    return per_worker * worker + math.min_int(remainder, worker)
+}
+
+// A worker's sweep of a stage (b3ExecuteStage): every block it can
+// claim, from its start index round the ring, and its count added to
+// the stage's completion.
+execute_stage(stage: *SolverStage, sc: *SolverContext, previous_sync: int, sync_index: int, worker: int) {
+    block_count = stage.block_count
+    start = worker_start_index(worker, block_count, sc.worker_count)
+    if start == NULL_INDEX { return }
+    completed = 0
+    index = start
+    i = 0
+    while i < block_count {
+        b = block_at(stage.blocks, index)
+        if native.atomic_cas((&b.sync_index) as ptr, previous_sync, sync_index) {
+            execute_block(stage, sc, b, worker)
+            completed = completed + 1
+        }
+        index = index + 1
+        if index >= block_count { index = 0 }
+        i = i + 1
+    }
+    native.atomic_add((&stage.completion_count) as ptr, completed)
+}
+
+// A stage from worker 0 (b3ExecuteMainStage): a single block done
+// here without ceremony; otherwise the sync bits published, the sweep,
+// and a wait for the blocks the other workers took.
+execute_main_stage(stage: *SolverStage, sc: *SolverContext, sync_bits: int) {
+    block_count = stage.block_count
+    if block_count == 0 { return }
+    if block_count == 1 {
+        execute_block(stage, sc, block_at(stage.blocks, 0), 0)
+        return
+    }
+    native.atomic_store((&sc.sync_bits) as ptr, sync_bits)
+    sync_index = sync_bits >> SYNC_SHIFT
+    execute_stage(stage, sc, sync_index - 1, sync_index, 0)
+    done = (&stage.completion_count) as ptr
+    while native.atomic_load(done) != block_count {
+        native.pause()
+    }
+    native.atomic_store(done, 0)
+}
+
+sync_bits(sync_index: int, stage_index: int) -> int { return (sync_index << SYNC_SHIFT) | stage_index }
+
+// Every worker's task (b3SolverTask). Worker 0 runs the stages in
+// order with the overflow colour's serial work between them, its sync
+// indices growing per block array (bodies, joints, wide, contacts,
+// graph) so a block's claim always moves from the previous stage's
+// index to this one's; it sends the others home with SYNC_DONE. The
+// other workers spin on the sync bits, pausing and then yielding, and
+// sweep each stage they see.
+solver_task(context: ptr) {
+    wc = context as *WorkerContext
+    sc = wc.sc
+    worker = wc.worker_index
+    stages = sc.stages
+    if worker == 0 {
+        orchestrate(sc)
+        return
+    }
+    bits_cell = (&sc.sync_bits) as ptr
+    last = 0
+    while true {
+        spin = 0
+        bits = native.atomic_load(bits_cell)
+        while bits == last {
+            if spin > 5 {
+                native.yield_thread()
+                spin = 0
+            } else {
+                native.pause()
+                native.pause()
+                spin = spin + 1
+            }
+            bits = native.atomic_load(bits_cell)
+        }
+        if bits == SYNC_DONE { break }
+        stage_index = bits & ((1 << SYNC_SHIFT) - 1)
+        sync_index = bits >> SYNC_SHIFT
+        execute_stage(stage_at(stages, stage_index), sc, sync_index - 1, sync_index, worker)
+        last = bits
+    }
+}
+
+orchestrate(sc: *SolverContext) {
+    ctx = sc.ctx
+    w = ctx.world
+    stages = sc.stages
+    active = sc.active_color_count
+    overflow = dynamics.graph_color(w, dynamics.OVERFLOW_INDEX)
+    tc0 = dynamics.task_context_at(w, 0)
+    stage_index = 0
+    body_sync = 1
+    joint_sync = 1
+    wide_sync = 1
+    contact_sync = 1
+    graph_sync = 1
+
+    // Prepare: the colours' joints, wide and scalar constraints in blocks, then the overflow's here.
+    execute_main_stage(stage_at(stages, stage_index), sc, sync_bits(joint_sync, stage_index))
+    stage_index = stage_index + 1
+    joint_sync = joint_sync + 1
+    execute_main_stage(stage_at(stages, stage_index), sc, sync_bits(wide_sync, stage_index))
+    stage_index = stage_index + 1
+    wide_sync = wide_sync + 1
+    execute_main_stage(stage_at(stages, stage_index), sc, sync_bits(contact_sync, stage_index))
+    stage_index = stage_index + 1
+    contact_sync = contact_sync + 1
+    joint_solver.prepare_joints(ctx, overflow)
+    contact_solver.prepare_contacts(ctx, overflow, true)
+
+    sub = 0
+    while sub < ctx.sub_step_count {
+        // The stage index restarts each sub-step; the sync indices keep growing.
+        iteration_stage = stage_index
+        execute_main_stage(stage_at(stages, iteration_stage), sc, sync_bits(body_sync, iteration_stage))
+        iteration_stage = iteration_stage + 1
+        body_sync = body_sync + 1
+        // Warm start: the overflow, then each colour.
+        joint_solver.warm_start_joints(ctx, overflow)
+        contact_solver.warm_start_contacts(ctx, overflow.contact_constraints, overflow.contact_constraint_count)
+        c = 0
+        while c < active {
+            execute_main_stage(stage_at(stages, iteration_stage), sc, sync_bits(graph_sync, iteration_stage))
+            iteration_stage = iteration_stage + 1
+            c = c + 1
+        }
+        graph_sync = graph_sync + 1
+        // Solve with bias.
+        solve_joints_flagging_range(ctx, overflow, 0, overflow.joint_sims.count, true, &tc0.joint_state_bits)
+        contact_solver.solve_contacts(ctx, overflow.contact_constraints, overflow.contact_constraint_count, true)
+        c = 0
+        while c < active {
+            execute_main_stage(stage_at(stages, iteration_stage), sc, sync_bits(graph_sync, iteration_stage))
+            iteration_stage = iteration_stage + 1
+            c = c + 1
+        }
+        graph_sync = graph_sync + 1
+        execute_main_stage(stage_at(stages, iteration_stage), sc, sync_bits(body_sync, iteration_stage))
+        iteration_stage = iteration_stage + 1
+        body_sync = body_sync + 1
+        // Relax.
+        solve_joints_flagging_range(ctx, overflow, 0, overflow.joint_sims.count, false, &tc0.joint_state_bits)
+        contact_solver.solve_contacts(ctx, overflow.contact_constraints, overflow.contact_constraint_count, false)
+        c = 0
+        while c < active {
+            execute_main_stage(stage_at(stages, iteration_stage), sc, sync_bits(graph_sync, iteration_stage))
+            iteration_stage = iteration_stage + 1
+            c = c + 1
+        }
+        graph_sync = graph_sync + 1
+        sub = sub + 1
+    }
+    stage_index = stage_index + 1 + active + active + 1 + active
+
+    // Restitution.
+    iteration = 0
+    while iteration < RESTITUTION_ITERATIONS {
+        contact_solver.apply_restitution(ctx, overflow.contact_constraints, overflow.contact_constraint_count)
+        c = 0
+        while c < active {
+            execute_main_stage(stage_at(stages, stage_index + c), sc, sync_bits(graph_sync, stage_index + c))
+            c = c + 1
+        }
+        graph_sync = graph_sync + 1
+        stage_index = stage_index + active
+        iteration = iteration + 1
+    }
+
+    // Store: the overflow's impulses, then the colours' wide and scalar ones.
+    if contact_solver.store_impulses(ctx, overflow.contact_constraints, overflow.contact_constraint_count, &tc0.hit_event_bits) { tc0.has_hit_events = true }
+    execute_main_stage(stage_at(stages, stage_index), sc, sync_bits(wide_sync, stage_index))
+    stage_index = stage_index + 1
+    execute_main_stage(stage_at(stages, stage_index), sc, sync_bits(contact_sync, stage_index))
+    stage_index = stage_index + 1
+    native.atomic_store((&sc.sync_bits) as ptr, SYNC_DONE)
+}
+
+// --- the solve ------------------------------------------------------------------------------------------------
+
 // The step's solve (b3Solve). The world's step counter advances; with
 // no awake body nothing else happens.
 solve(w: *World, ctx: *StepContext) {
     w.step_index = w.step_index + (1 as long)
     awake = dynamics.get_solver_set(w, dynamics.AWAKE_SET)
     awake_body_count = awake.body_sims.count
+    profile = &w.profile
+    profile.solver_setup = 0.0
+    profile.constraints = 0.0
+    profile.transforms = 0.0
+    profile.refit = 0.0
+    profile.bullets = 0.0
+    profile.sleep_islands = 0.0
     if awake_body_count == 0 { return }
+    ticks = Lap { mark: os.now_monotonic_ns() }
     stack = &w.stack
     ctx.bullet_body_count = 0
     ctx.bullet_bodies = basics.stack_alloc(stack, awake_body_count * 4)
     ctx.sims = awake.body_sims.data
     ctx.states = awake.body_states.data
     resize_move_events(w, awake_body_count)
+    // What the workers reach: allocated here, on one thread, if not yet.
+    continuous_buffers_ready()
+    contact_solver.dummy_state()
+    joint_solver.dummy_state()
+    worker_count = w.worker_count
 
     // The constraints' scratch: one block each over the active colours (the
     // wide constraints of the convex contacts, the scalar ones of the mesh
@@ -574,90 +1013,140 @@ solve(w: *World, ctx: *StepContext) {
         wide_base = wide_base + color.wide_constraint_count
         contact_base = contact_base + color.contact_constraint_count
         manifold_base = manifold_base + color.manifold_constraint_count
+        if wide { contact_solver_wide.zero_wide_tail(color) }
         c = c + 1
     }
+    contact_solver_wide.begin_wide_step(wide_block, wide_total)
     overflow = dynamics.graph_color(w, dynamics.OVERFLOW_INDEX)
     contact_solver.count_color_constraints(overflow, true)
     overflow.contact_constraints = basics.stack_alloc(stack, overflow.contact_constraint_count * sizeof(ContactConstraint))
     overflow.manifold_constraints = basics.stack_alloc(stack, overflow.manifold_constraint_count * sizeof(ManifoldConstraint))
-    basics.bitset_set_count_and_clear(&w.joint_state_bits, basics.idpool_capacity(&w.joint_id_pool))
-    basics.bitset_set_count_and_clear(&w.hit_event_bits, basics.idpool_capacity(&w.contact_id_pool))
 
-    // Prepare: joints then contacts (wide before scalar), the overflow after
-    // the colours (the reference's order).
+    // The blocks: the bodies', and each active colour's joints, wide and
+    // scalar constraints, at most four blocks a worker so the workers can
+    // steal from each other. The prepare and store stages walk the same
+    // items colour by colour through block arrays of their own.
+    max_block_count = 4 * worker_count
+    body_dim = block_dim(awake_body_count, MIN_BODIES_PER_BLOCK, max_block_count)
+    colors_block = basics.stack_alloc(stack, active_count * sizeof(ColorBlocks))
+    graph_block_count = 0
+    joint_block_count = 0
+    wide_block_count = 0
+    contact_block_count = 0
+    active = 0
     c = 0
     while c < dynamics.OVERFLOW_INDEX {
         color = dynamics.graph_color(w, c)
-        joint_solver.prepare_joints(ctx, color)
-        if wide { contact_solver_wide.prepare_wide_contacts(ctx, color) }
-        contact_solver.prepare_contacts(ctx, color, scalar_convex)
+        if color.wide_constraint_count + color.contact_constraint_count + color.joint_sims.count > 0 {
+            cb = color_blocks_at(colors_block, active)
+            cb.color = c
+            cb.joint_dim = block_dim(color.joint_sims.count, MIN_JOINTS_PER_BLOCK, max_block_count)
+            cb.wide_dim = block_dim(color.wide_constraint_count, MIN_CONTACTS_PER_BLOCK, max_block_count)
+            cb.contact_dim = block_dim(color.contact_constraint_count, MIN_CONTACTS_PER_BLOCK, max_block_count)
+            cb.block_count = cb.joint_dim.count + cb.wide_dim.count + cb.contact_dim.count
+            graph_block_count = graph_block_count + cb.block_count
+            joint_block_count = joint_block_count + cb.joint_dim.count
+            wide_block_count = wide_block_count + cb.wide_dim.count
+            contact_block_count = contact_block_count + cb.contact_dim.count
+            active = active + 1
+        }
         c = c + 1
     }
-    joint_solver.prepare_joints(ctx, overflow)
-    contact_solver.prepare_contacts(ctx, overflow, true)
-    contact_solver_wide.begin_wide_step(wide_block, wide_total)
+    body_blocks = basics.stack_alloc(stack, body_dim.count * sizeof(SolverBlock))
+    graph_blocks = basics.stack_alloc(stack, graph_block_count * sizeof(SolverBlock))
+    joint_blocks = basics.stack_alloc(stack, joint_block_count * sizeof(SolverBlock))
+    wide_blocks = basics.stack_alloc(stack, wide_block_count * sizeof(SolverBlock))
+    contact_blocks = basics.stack_alloc(stack, contact_block_count * sizeof(SolverBlock))
+    // Per sub-step: integrate velocities, warm start, solve, integrate positions, relax; then restitution and the stores.
+    stage_count = 3 + (1 + active_count + active_count + 1 + active_count) + RESTITUTION_ITERATIONS * active_count + 2
+    stages = basics.stack_alloc(stack, stage_count * sizeof(SolverStage))
 
-    sub = 0
-    while sub < ctx.sub_step_count {
-        integrate_velocities(ctx)
-        // Warm start: the overflow first, then each colour, joints before contacts.
-        joint_solver.warm_start_joints(ctx, overflow)
-        contact_solver.warm_start_contacts(ctx, overflow.contact_constraints, overflow.contact_constraint_count)
-        c = 0
-        while c < dynamics.OVERFLOW_INDEX {
-            color = dynamics.graph_color(w, c)
-            joint_solver.warm_start_joints(ctx, color)
-            contact_solver_wide.warm_start_wide_contacts(ctx, color.wide_constraints, color.wide_constraint_count)
-            contact_solver.warm_start_contacts(ctx, color.contact_constraints, color.contact_constraint_count)
-            c = c + 1
-        }
-        // Solve with bias.
-        solve_joints_flagging(ctx, overflow, true)
-        contact_solver.solve_contacts(ctx, overflow.contact_constraints, overflow.contact_constraint_count, true)
-        c = 0
-        while c < dynamics.OVERFLOW_INDEX {
-            color = dynamics.graph_color(w, c)
-            solve_joints_flagging(ctx, color, true)
-            contact_solver_wide.solve_wide_contacts(ctx, color.wide_constraints, color.wide_constraint_count, true)
-            contact_solver.solve_contacts(ctx, color.contact_constraints, color.contact_constraint_count, true)
-            c = c + 1
-        }
-        integrate_positions(ctx)
-        // Relax.
-        solve_joints_flagging(ctx, overflow, false)
-        contact_solver.solve_contacts(ctx, overflow.contact_constraints, overflow.contact_constraint_count, false)
-        c = 0
-        while c < dynamics.OVERFLOW_INDEX {
-            color = dynamics.graph_color(w, c)
-            solve_joints_flagging(ctx, color, false)
-            contact_solver_wide.solve_wide_contacts(ctx, color.wide_constraints, color.wide_constraint_count, false)
-            contact_solver.solve_contacts(ctx, color.contact_constraints, color.contact_constraint_count, false)
-            c = c + 1
-        }
-        sub = sub + 1
+    init_blocks(body_blocks, body_dim, awake_body_count, BLOCK_BODY, NULL_INDEX)
+    graph_next = graph_blocks
+    joint_next = joint_blocks
+    wide_next = wide_blocks
+    contact_next = contact_blocks
+    i = 0
+    while i < active_count {
+        cb = color_blocks_at(colors_block, i)
+        color = dynamics.graph_color(w, cb.color)
+        cb.blocks = graph_next
+        init_blocks(graph_next, cb.joint_dim, color.joint_sims.count, BLOCK_JOINT, cb.color)
+        graph_next = graph_next + cb.joint_dim.count * sizeof(SolverBlock)
+        init_blocks(graph_next, cb.wide_dim, color.wide_constraint_count, BLOCK_WIDE, cb.color)
+        graph_next = graph_next + cb.wide_dim.count * sizeof(SolverBlock)
+        init_blocks(graph_next, cb.contact_dim, color.contact_constraint_count, BLOCK_CONTACT, cb.color)
+        graph_next = graph_next + cb.contact_dim.count * sizeof(SolverBlock)
+        init_blocks(joint_next, cb.joint_dim, color.joint_sims.count, BLOCK_JOINT, cb.color)
+        joint_next = joint_next + cb.joint_dim.count * sizeof(SolverBlock)
+        init_blocks(wide_next, cb.wide_dim, color.wide_constraint_count, BLOCK_WIDE, cb.color)
+        wide_next = wide_next + cb.wide_dim.count * sizeof(SolverBlock)
+        init_blocks(contact_next, cb.contact_dim, color.contact_constraint_count, BLOCK_CONTACT, cb.color)
+        contact_next = contact_next + cb.contact_dim.count * sizeof(SolverBlock)
+        i = i + 1
     }
-    // Restitution.
-    iteration = 0
-    while iteration < RESTITUTION_ITERATIONS {
-        contact_solver.apply_restitution(ctx, overflow.contact_constraints, overflow.contact_constraint_count)
-        c = 0
-        while c < dynamics.OVERFLOW_INDEX {
-            color = dynamics.graph_color(w, c)
-            contact_solver_wide.apply_wide_restitution(ctx, color.wide_constraints, color.wide_constraint_count)
-            contact_solver.apply_restitution(ctx, color.contact_constraints, color.contact_constraint_count)
-            c = c + 1
-        }
-        iteration = iteration + 1
+    stage = stages as *SolverStage
+    stage = init_stage(stage, STAGE_PREPARE_JOINTS, joint_blocks, joint_block_count, NULL_INDEX)
+    stage = init_stage(stage, STAGE_PREPARE_WIDE, wide_blocks, wide_block_count, NULL_INDEX)
+    stage = init_stage(stage, STAGE_PREPARE_CONTACTS, contact_blocks, contact_block_count, NULL_INDEX)
+    stage = init_stage(stage, STAGE_INTEGRATE_VELOCITIES, body_blocks, body_dim.count, NULL_INDEX)
+    stage = init_color_stages(stage, STAGE_WARM_START, 1, colors_block, active_count)
+    stage = init_color_stages(stage, STAGE_SOLVE, 1, colors_block, active_count)
+    stage = init_stage(stage, STAGE_INTEGRATE_POSITIONS, body_blocks, body_dim.count, NULL_INDEX)
+    stage = init_color_stages(stage, STAGE_RELAX, 1, colors_block, active_count)
+    stage = init_color_stages(stage, STAGE_RESTITUTION, RESTITUTION_ITERATIONS, colors_block, active_count)
+    stage = init_stage(stage, STAGE_STORE_WIDE, wide_blocks, wide_block_count, NULL_INDEX)
+    stage = init_stage(stage, STAGE_STORE_CONTACTS, contact_blocks, contact_block_count, NULL_INDEX)
+
+    // The workers' own bits, cleared; the tasks on the pool, worker 0 here.
+    joint_capacity = basics.idpool_capacity(&w.joint_id_pool)
+    contact_capacity = basics.idpool_capacity(&w.contact_id_pool)
+    i = 0
+    while i < worker_count {
+        tc = dynamics.task_context_at(w, i)
+        basics.bitset_set_count_and_clear(&tc.joint_state_bits, joint_capacity)
+        basics.bitset_set_count_and_clear(&tc.hit_event_bits, contact_capacity)
+        tc.has_hit_events = false
+        i = i + 1
     }
-    // Store.
-    contact_solver_wide.end_wide_step(wide_block, wide_total)
-    has_hits = contact_solver.store_impulses(ctx, overflow.contact_constraints, overflow.contact_constraint_count, &w.hit_event_bits)
-    c = 0
-    while c < dynamics.OVERFLOW_INDEX {
-        color = dynamics.graph_color(w, c)
-        if wide && contact_solver_wide.store_wide_impulses(ctx, color, &w.hit_event_bits) { has_hits = true }
-        if contact_solver.store_impulses(ctx, color.contact_constraints, color.contact_constraint_count, &w.hit_event_bits) { has_hits = true }
-        c = c + 1
+    sc = SolverContext { sync_bits: 0, ctx: ctx, stages: stages, stage_count: stage_count, active_color_count: active_count,
+                         worker_count: worker_count, scalar_convex: scalar_convex }
+    profile.solver_setup = lap(&ticks)
+    workers_block = basics.stack_alloc(stack, worker_count * sizeof(WorkerContext))
+    handles_block = basics.stack_alloc(stack, worker_count * 8)
+    workers = workers_block as WorkerContext[]
+    handles = handles_block as ptr[]
+    scheduler = w.scheduler as *Scheduler
+    parallel.begin_round(scheduler)
+    i = 1
+    while i < worker_count {
+        workers[i] = WorkerContext { sc: &sc, worker_index: i }
+        handles[i] = parallel.enqueue(scheduler, solver_task, workers_block + i * sizeof(WorkerContext), i) as ptr
+        i = i + 1
+    }
+    workers[0] = WorkerContext { sc: &sc, worker_index: 0 }
+    native.set_worker_index(0)
+    solver_task(workers_block)
+    i = 1
+    while i < worker_count {
+        parallel.finish(scheduler, handles[i] as *Task)
+        i = i + 1
+    }
+    basics.stack_free(stack, handles_block)
+    basics.stack_free(stack, workers_block)
+    contact_solver_wide.end_wide_step()
+
+    // The workers' joint and hit bits merged.
+    basics.bitset_set_count_and_clear(&w.joint_state_bits, joint_capacity)
+    basics.bitset_set_count_and_clear(&w.hit_event_bits, contact_capacity)
+    has_hits = false
+    i = 0
+    while i < worker_count {
+        tc = dynamics.task_context_at(w, i)
+        basics.bitset_union(&w.joint_state_bits, &tc.joint_state_bits)
+        basics.bitset_union(&w.hit_event_bits, &tc.hit_event_bits)
+        if tc.has_hit_events { has_hits = true }
+        i = i + 1
     }
 
     // The island split the last step asked for (the reference runs it beside the solve).
@@ -665,13 +1154,29 @@ solve(w: *World, ctx: *StepContext) {
         dynamics.split_island(w, w.split_island_id)
         w.split_island_id = NULL_INDEX
     }
-    basics.buffer_clear(&w.sensor_hits)
-    basics.bitset_set_count_and_clear(&w.awake_island_bits, awake.island_sims.count)
-    w.split_island_candidate = NULL_INDEX
-    w.split_sleep_time = 0.0
+    island_count = awake.island_sims.count
+    i = 0
+    while i < worker_count {
+        tc = dynamics.task_context_at(w, i)
+        basics.buffer_clear(&tc.sensor_hits)
+        basics.bitset_set_count_and_clear(&tc.awake_island_bits, island_count)
+        tc.split_island_id = NULL_INDEX
+        tc.split_sleep_time = 0.0
+        i = i + 1
+    }
+
+    profile.constraints = lap(&ticks)
 
     finalize_bodies(ctx)
+    profile.transforms = lap(&ticks)
 
+    basics.stack_free(stack, stages)
+    basics.stack_free(stack, contact_blocks)
+    basics.stack_free(stack, wide_blocks)
+    basics.stack_free(stack, joint_blocks)
+    basics.stack_free(stack, graph_blocks)
+    basics.stack_free(stack, body_blocks)
+    basics.stack_free(stack, colors_block)
     basics.stack_free(stack, overflow.manifold_constraints)
     basics.stack_free(stack, overflow.contact_constraints)
     basics.stack_free(stack, manifold_block)
@@ -692,14 +1197,14 @@ solve(w: *World, ctx: *StepContext) {
 
     dynamic_tree.tree_refit(broad_phase.broad_phase_tree(&w.broad_phase, dynamics.BODY_KINEMATIC))
     dynamic_tree.tree_refit(broad_phase.broad_phase_tree(&w.broad_phase, dynamics.BODY_DYNAMIC))
+    profile.refit = lap(&ticks)
 
-    // Bullets: swept against everything now that the trees hold the step's moves, their proxies enlarged serially.
+    // Bullets: swept against everything now that the trees hold the step's
+    // moves, in the order of their sims whatever worker noted them, over
+    // the workers; their proxies enlarged serially after.
     bullets = ctx.bullet_bodies as int[]
-    i = 0
-    while i < ctx.bullet_body_count {
-        solve_continuous(w, bullets[i])
-        i = i + 1
-    }
+    basics.sort_ints(bullets, ctx.bullet_body_count)
+    parallel.parallel_for(w.scheduler as *Scheduler, bullet_range, ctx.bullet_body_count, 8, ctx as ptr)
     tree = broad_phase.broad_phase_tree(&w.broad_phase, dynamics.BODY_DYNAMIC)
     i = 0
     while i < ctx.bullet_body_count {
@@ -722,12 +1227,30 @@ solve(w: *World, ctx: *StepContext) {
     basics.stack_free(stack, ctx.bullet_bodies)
     ctx.bullet_bodies = null
     ctx.bullet_body_count = 0
+    profile.bullets = lap(&ticks)
 
-    // The sweeps' sensor hits to their sensors.
+    // The workers' sweeps' sensor hits to their sensors, and their islands
+    // and split candidates merged: the sleepiest candidate, ties to the
+    // larger id, the same whichever worker saw it.
+    basics.bitset_set_count_and_clear(&w.awake_island_bits, island_count)
+    w.split_island_candidate = NULL_INDEX
+    w.split_sleep_time = 0.0
     i = 0
-    while i < w.sensor_hits.count {
-        hit = dynamics.sensor_hit_at(w, i)
-        dynamics.add_sensor_hit(w, dynamics.world_shape_at(w, hit.sensor_id), dynamics.world_shape_at(w, hit.visitor_id))
+    while i < worker_count {
+        tc = dynamics.task_context_at(w, i)
+        h = 0
+        while h < tc.sensor_hits.count {
+            hit = dynamics.task_sensor_hit_at(tc, h)
+            dynamics.add_sensor_hit(w, dynamics.world_shape_at(w, hit.sensor_id), dynamics.world_shape_at(w, hit.visitor_id))
+            h = h + 1
+        }
+        basics.bitset_union(&w.awake_island_bits, &tc.awake_island_bits)
+        if tc.split_island_id != NULL_INDEX {
+            if tc.split_sleep_time > w.split_sleep_time || (tc.split_sleep_time == w.split_sleep_time && tc.split_island_id > w.split_island_candidate) {
+                w.split_island_candidate = tc.split_island_id
+                w.split_sleep_time = tc.split_sleep_time
+            }
+        }
         i = i + 1
     }
 
@@ -735,12 +1258,36 @@ solve(w: *World, ctx: *StepContext) {
     if w.enable_sleep {
         if w.split_island_candidate != NULL_INDEX { w.split_island_id = w.split_island_candidate }
         // Sleeping creates sets, which can move the sets' array: the awake set is found again each time.
-        island_index = awake.island_sims.count - 1
+        island_index = island_count - 1
         while island_index >= 0 {
             if basics.bitset_get(&w.awake_island_bits, island_index) == false {
                 dynamics.try_sleep_island(w, dynamics.island_sim_at(dynamics.get_solver_set(w, dynamics.AWAKE_SET), island_index).island_id)
             }
             island_index = island_index - 1
         }
+    }
+    profile.sleep_islands = lap(&ticks)
+}
+
+// A stopwatch: the milliseconds since its mark, and the mark moved to now.
+struct Lap {
+    mark: long
+}
+
+lap(t: *Lap) -> float {
+    now = os.now_monotonic_ns()
+    ms = ((now - t.mark) as float) / 1000000.0
+    t.mark = now
+    return ms
+}
+
+// A block of the bullets swept (b3BulletBodyTask).
+bullet_range(start: int, end: int, worker: int, context: ptr) {
+    ctx = context as *StepContext
+    bullets = ctx.bullet_bodies as int[]
+    i = start
+    while i < end {
+        solve_continuous(ctx.world, bullets[i])
+        i = i + 1
     }
 }

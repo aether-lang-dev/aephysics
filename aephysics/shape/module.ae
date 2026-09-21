@@ -29,6 +29,7 @@ import aephysics.capsule
 import aephysics.compound
 
 exports (
+    reserve_scratch,
     Shape, Filter, QueryFilter,
     SHAPE_SPHERE, SHAPE_CAPSULE, SHAPE_HULL, SHAPE_MESH, SHAPE_HEIGHT_FIELD, SHAPE_COMPOUND, SHAPE_KIND_COUNT,
     sphere_shape, capsule_shape, hull_shape, mesh_shape, height_field_shape, compound_shape,
@@ -405,6 +406,14 @@ toi_buffers_ready() {
         g_toi_points_a = basics.alloc(native.MAX_WORKERS * (2 * sizeof(Vec3)))
         g_toi_triangle = basics.alloc(native.MAX_WORKERS * (3 * sizeof(Vec3)))
     }
+}
+
+// Every scratch block of the module allocated now, on the calling
+// thread: a world's creation reserves every module's before a step can
+// reach them from several workers at once.
+reserve_scratch() {
+    local_buffer()
+    toi_buffers_ready()
 }
 
 // A proxy whose points are the module's own copy when they were the sphere module's shared ones.

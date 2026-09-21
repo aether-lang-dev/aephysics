@@ -28,6 +28,7 @@ import aephysics.triangle_manifold
 import aephysics.mesh
 
 exports (
+    reserve_scratch,
     HeightFieldDef, HeightFieldData,
     HEIGHT_FIELD_VERSION, HEIGHT_FIELD_HOLE, NULL_INDEX,
     height_field_def, height_field_heights, height_field_material_indices, height_field_flags,
@@ -350,6 +351,14 @@ corner_points() -> ptr { return native.scratch(g_corners, 4 * sizeof(Vec3)) }
 corners_ready() -> Vec3[] {
     if g_corners == null { g_corners = basics.alloc(native.MAX_WORKERS * (4 * sizeof(Vec3))) }
     return corner_points() as Vec3[]
+}
+
+// Every scratch block of the module allocated now, on the calling
+// thread: a world's creation reserves every module's before a step can
+// reach them from several workers at once.
+reserve_scratch() {
+    scratch_ready()
+    corners_ready()
 }
 
 // A triangle of the field, wound counter-clockwise about its front (down

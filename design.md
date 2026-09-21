@@ -32,8 +32,8 @@ started until its tests pass.
    returning false where the reference asserts. 12,772 checks against
    test_dynamic_tree.c; the same tree as the reference on the benchmark
    scene (same hits, height, area ratio), insert faster, ray cast 1.9x.
-   Save/load not ported; the atomic moved-marking waits for the parallel
-   layer.
+   Save/load not ported; the moved-marking is atomic, as the reference's,
+   since the parallel layer (14).
 4. **hull** (done): quickhull as `aephysics.hull`, the builder's
    pointers as indices with the intrusive lists chained through the
    pools and their sentinels in extra slots, int half-edge indices, no
@@ -336,8 +336,28 @@ started until its tests pass.
      test_determinism.ae; the reference's "rain" benchmark (300 ragdolls
      dropped in columns over 400 steps) as a pair at 1.05x its time. The
      research note below says what an active ragdoll takes from it.
-14. **parallel**: `parallel_for` and the scheduler over Aether's actors;
-   the benchmarks by thread count as the original records them.
+14. **parallel** (done, PR #31): `aephysics.parallel` is the reference's
+   scheduler.c and parallel_for.c -- worker threads made once with the
+   world (std.worker's run_detached, a thread each) that wait on a
+   semaphore, tasks in slots claimed by compare-and-swap, the main
+   thread helping while it waits, a range in blocks the tasks claim --
+   and `aephysics.native` what Aether has not: a thread-local worker
+   index, atomics on an int in place, the semaphore. Every module's
+   scratch became a block per worker chosen by the thread's index
+   (Aether has neither stack arrays nor thread-local variables), the
+   dynamic tree's traversal stacks and the moved-marking included. The
+   narrow phase, the bodies' finalize and the bullets are parallel_for
+   tasks; the solver is the reference's stage machine (solver blocks
+   with an atomic sync index, stages published as sync bits by worker
+   0, the overflow colour serial on it); each worker writes its own
+   task context (contact state, joint and hit bits, awake islands,
+   split candidate, sensor hits) and the step merges them. A step is
+   the same to the bit at any worker count, which test_determinism
+   checks; bench/parallel.ae against bench/parallel_box3d.c records
+   the scaling. Found on the way: every task on a fresh thread costs
+   180 us a round (the persistent threads cost 8), and the stack
+   allocator's zeroing was a millisecond a step (the reference's does
+   not zero; poisoning the memory shows nothing reads it first).
 15. **recording and replay**, `world_snapshot`: last, since they are the
    tooling and not the engine.
 16. **benchmarks**: `reference/benchmark/main.c`'s nine scenes ported, run
@@ -351,11 +371,11 @@ started until its tests pass.
   platforms too: the per-step trace CI records on Linux matches the
   Windows run bit for bit (PR #28), which the reference pins with golden
   hashes and this port pins by diffing the traces.
-- Speed: each benchmark scene, port against C, single thread first. The
-  honest expectation for a scalar double port against a wide-SIMD float
-  original is a gap; the work after the port is closing it -- and where
-  the gap is the SIMD contact solver, that one loop goes native behind
-  the same interface, measured.
+- Speed: each benchmark scene, port against C, single thread first,
+  then by worker count. The honest expectation for a scalar double port
+  against a wide-SIMD float original is a gap; the work after the port
+  is closing it -- and where the gap is the SIMD contact solver, that
+  one loop goes native behind the same interface, measured.
 
 ## The research this is the ground for
 

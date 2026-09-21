@@ -28,6 +28,7 @@ import aephysics.distance
 import aephysics.hull
 
 exports (
+    reserve_scratch,
     Sphere, Capsule, FeaturePair, LocalManifoldPoint, LocalManifold, SATCache, SeparatingAxis, AxisQuery,
     ClipVertex,
     MAX_MANIFOLD_POINTS, MAX_CLIP_POINTS, SPECULATIVE_DISTANCE, PARALLEL_EDGE_TOL, NULL_INDEX,
@@ -225,6 +226,11 @@ scratch_ready() {
         g_clip_points = basics.alloc(native.MAX_WORKERS * (MAX_CLIP_POINTS * sizeof(LocalManifoldPoint)))
     }
 }
+
+// Every scratch block of the module allocated now, on the calling
+// thread: a world's creation reserves every module's before a step can
+// reach them from several workers at once.
+reserve_scratch() { scratch_ready() }
 
 // --- the incident face and clipping ----------------------------------------------------
 

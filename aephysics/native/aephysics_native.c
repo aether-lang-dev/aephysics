@@ -2,9 +2,13 @@
 // (`ae build --extra aephysics/native/aephysics_native.c`): what Aether
 // cannot express yet, and nothing else.
 //
-// 1. The threads' side of aephysics.parallel: a thread-local worker
-//    index (Aether has no thread-local variables), a yield, and the
-//    processor count.
+// 1. The threads' side of aephysics.parallel and the solver's stages: a
+//    thread-local worker index (Aether has no thread-local variables), a
+//    yield and a pause, the processor count, atomic operations on an int
+//    in place (std.sync's atomics are cells of their own; the solver's
+//    blocks and the tree's nodes carry theirs in the struct, as the
+//    reference does), and a counting semaphore the scheduler's threads
+//    wait on between steps.
 // 2. The lanes of aephysics.contact_solver_wide as vector code: the warm
 // start, solve and restitution over the module's WideConstraint, four
 // contacts per operation through GCC's vector extensions (SSE on
@@ -27,8 +31,14 @@
 #include <string.h>
 #ifdef _WIN32
 #include <windows.h>
+#include <limits.h>
+#elif defined(__APPLE__)
+#include <dispatch/dispatch.h>
+#include <sched.h>
+#include <unistd.h>
 #else
 #include <sched.h>
+#include <semaphore.h>
 #include <unistd.h>
 #endif
 
@@ -63,6 +73,70 @@ int aephysics_processor_count(void)
     long n = sysconf(_SC_NPROCESSORS_ONLN);
     return n > 0 ? (int)n : 1;
 #endif
+}
+
+// A counting semaphore (the reference's b3Semaphore): the scheduler's
+// threads wait on it for work and are signalled one per task, or once
+// each to shut down. Win32's, Apple's dispatch one, POSIX's elsewhere.
+#ifdef _WIN32
+void *aephysics_semaphore_new(int initial) { return CreateSemaphoreExW(NULL, initial, INT_MAX, NULL, 0, SEMAPHORE_ALL_ACCESS); }
+void aephysics_semaphore_free(void *s) { CloseHandle((HANDLE)s); }
+void aephysics_semaphore_wait(void *s) { WaitForSingleObjectEx((HANDLE)s, INFINITE, FALSE); }
+void aephysics_semaphore_signal(void *s, int count) { ReleaseSemaphore((HANDLE)s, count, NULL); }
+#elif defined(__APPLE__)
+void *aephysics_semaphore_new(int initial) { return (void *)dispatch_semaphore_create(initial); }
+void aephysics_semaphore_free(void *s) { dispatch_release((dispatch_semaphore_t)s); }
+void aephysics_semaphore_wait(void *s) { dispatch_semaphore_wait((dispatch_semaphore_t)s, DISPATCH_TIME_FOREVER); }
+void aephysics_semaphore_signal(void *s, int count)
+{
+    for (int i = 0; i < count; ++i) dispatch_semaphore_signal((dispatch_semaphore_t)s);
+}
+#else
+void *aephysics_semaphore_new(int initial)
+{
+    sem_t *s = malloc(sizeof(sem_t));
+    if (s != NULL && sem_init(s, 0, (unsigned int)initial) != 0) {
+        free(s);
+        return NULL;
+    }
+    return s;
+}
+void aephysics_semaphore_free(void *s)
+{
+    sem_destroy((sem_t *)s);
+    free(s);
+}
+void aephysics_semaphore_wait(void *s)
+{
+    while (sem_wait((sem_t *)s) != 0) {
+    }
+}
+void aephysics_semaphore_signal(void *s, int count)
+{
+    for (int i = 0; i < count; ++i) sem_post((sem_t *)s);
+}
+#endif
+
+// A spin's pause: the processor's hint that the thread is waiting.
+void aephysics_pause(void)
+{
+#if defined(__x86_64__) || defined(__i386__)
+    __builtin_ia32_pause();
+#elif defined(__aarch64__)
+    __asm__ __volatile__("yield");
+#endif
+}
+
+// Atomics on an int in place, sequentially consistent like the
+// reference's C11 atomics: the load and store, fetch-add and fetch-or
+// (the value before), and compare-and-swap (whether it swapped).
+int aephysics_atomic_load(int *p) { return __atomic_load_n(p, __ATOMIC_SEQ_CST); }
+void aephysics_atomic_store(int *p, int value) { __atomic_store_n(p, value, __ATOMIC_SEQ_CST); }
+int aephysics_atomic_add(int *p, int value) { return __atomic_fetch_add(p, value, __ATOMIC_SEQ_CST); }
+int aephysics_atomic_or(int *p, int value) { return __atomic_fetch_or(p, value, __ATOMIC_SEQ_CST); }
+int aephysics_atomic_cas(int *p, int expected, int desired)
+{
+    return __atomic_compare_exchange_n(p, &expected, desired, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
 }
 
 // --- the contact lanes ----------------------------------------------------------------------------------------
@@ -137,10 +211,26 @@ typedef struct {
 typedef struct { vec3w v, w, dp; quatw dq; } body_state_w;
 
 // The step's packed constraints: the block the module prepared, and its
-// float copy, grown to the largest step so far.
+// float copy at the same offsets, grown to the largest step so far. The
+// block is set once a step (aephysics_wide_begin) and the packing and
+// unpacking go by ranges, so the solver's workers each pack the slots
+// they prepared and unpack the ones they store.
 static const wide_constraint_d* g_block = NULL;
 static wide_constraint* g_packed = NULL;
 static int g_packed_capacity = 0;
+
+// The step's block, and room for its float copy.
+void aephysics_wide_begin(const void* block, int count)
+{
+    g_block = block;
+    if (count > g_packed_capacity) {
+        free(g_packed);
+        g_packed_capacity = count + count / 2 + 1;
+        g_packed = malloc((size_t)g_packed_capacity * sizeof(wide_constraint));
+    }
+}
+
+void aephysics_wide_end(void) { g_block = NULL; }
 
 static inline v4 narrow(d4 a) { return (v4){ (float)a.x, (float)a.y, (float)a.z, (float)a.w }; }
 static inline d4 widen(v4 a) { return (d4){ a[0], a[1], a[2], a[3] }; }
@@ -151,18 +241,14 @@ static inline sym3w narrow_sym3(sym3d a)
     return (sym3w){ narrow(a.cxx), narrow(a.cxy), narrow(a.cxz), narrow(a.cyy), narrow(a.cyz), narrow(a.czz) };
 }
 
-// The module's block into floats, before the step's first stage.
-void aephysics_wide_pack(const void* block, int count)
+// A range of the step's block into floats, after its prepare.
+void aephysics_wide_pack(const void* constraints, int count)
 {
-    g_block = block;
-    if (count > g_packed_capacity) {
-        free(g_packed);
-        g_packed_capacity = count + count / 2 + 1;
-        g_packed = malloc((size_t)g_packed_capacity * sizeof(wide_constraint));
-    }
+    const wide_constraint_d* first = constraints;
+    wide_constraint* packed = g_packed + (first - g_block);
     for (int i = 0; i < count; ++i) {
-        const wide_constraint_d* d = g_block + i;
-        wide_constraint* f = g_packed + i;
+        const wide_constraint_d* d = first + i;
+        wide_constraint* f = packed + i;
         f->index_a = d->index_a;
         f->index_b = d->index_b;
         f->point_counts = d->point_counts;
@@ -204,12 +290,13 @@ void aephysics_wide_pack(const void* block, int count)
     }
 }
 
-// The impulses back into the module's block, before the store.
-void aephysics_wide_unpack(void* block, int count)
+// A range's impulses back into the module's block, before its store.
+void aephysics_wide_unpack(void* constraints, int count)
 {
-    wide_constraint_d* base = block;
+    wide_constraint_d* base = constraints;
+    const wide_constraint* packed = g_packed + (base - g_block);
     for (int i = 0; i < count; ++i) {
-        const wide_constraint* f = g_packed + i;
+        const wide_constraint* f = packed + i;
         wide_constraint_d* d = base + i;
         d->twist_impulse = widen(f->twist_impulse);
         d->friction_impulse = (vec2d){ widen(f->friction_impulse.x), widen(f->friction_impulse.y) };
@@ -219,7 +306,6 @@ void aephysics_wide_unpack(void* block, int count)
             d->points[j].total_normal_impulse = widen(f->points[j].total_normal_impulse);
         }
     }
-    g_block = NULL;
 }
 
 // A stage's constraints: the module passes a pointer into its block; the
