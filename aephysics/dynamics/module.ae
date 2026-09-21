@@ -70,7 +70,7 @@ exports (
     body_get_position, body_get_rotation, body_get_transform, body_set_transform,
     body_get_local_point, body_get_world_point, body_get_local_vector, body_get_world_vector,
     body_get_linear_velocity, body_get_angular_velocity, body_set_linear_velocity, body_set_angular_velocity,
-    body_apply_force, body_apply_force_to_center, body_apply_torque, body_apply_linear_impulse,
+    body_set_target_transform, body_apply_force, body_apply_force_to_center, body_apply_torque, body_apply_linear_impulse,
     body_apply_linear_impulse_to_center, body_apply_angular_impulse, body_set_bullet, body_is_bullet, ContactData, body_get_contact_data,
     body_get_local_point_velocity, body_get_world_point_velocity,
     body_get_type, body_get_mass, body_get_inverse_mass, body_get_local_rotational_inertia,
@@ -2030,6 +2030,39 @@ body_set_linear_velocity(id: BodyId, v: Vec3) {
 awake_for_apply(w: *World, body: *Body, wake: bool) -> bool {
     if wake && body.set_index >= FIRST_SLEEPING_SET { wake_body(w, body) }
     return body.set_index == AWAKE_SET
+}
+
+// The velocities that carry the body to a target transform over one time
+// step (b3Body_SetTargetTransform): how a kinematic body is moved by the
+// game, so the solver sees it moving and what rides on it comes along. A
+// sleeping body stays asleep when the movement would be below its
+// sleep threshold, unless woken.
+body_set_target_transform(id: BodyId, target: Transform, time_step: float, wake: bool) {
+    w = body_world(id)
+    body = get_body_full_id(w, id)
+    if body.set_index == DISABLED_SET { return }
+    if body.kind == BODY_STATIC || time_step <= 0.0 { return }
+    if body.set_index != AWAKE_SET && wake == false { return }
+    sim = get_body_sim(w, body)
+    center1 = sim.center
+    center2 = math.transform_point(target, sim.local_center)
+    inv_time_step = 1.0 / time_step
+    linear_velocity = math.mul_sv(inv_time_step, math.sub(center2, center1))
+    // q' = 0.5 w q, so w = 2 (q2 - q1) conj(q1) / dt, along the shorter arc.
+    q1 = sim.transform.q
+    q2 = target.q
+    if math.dot_quat(q1, q2) < 0.0 { q2 = math.negate_quat(q2) }
+    dq = math.quat_vs(math.sub(math.qv(q2), math.qv(q1)), q2.w - q1.w)
+    omega = math.mul_quat(dq, math.conjugate(q1))
+    angular_velocity = math.mul_sv(2.0 * inv_time_step, math.qv(omega))
+    if body.set_index != AWAKE_SET {
+        max_velocity = math.length(linear_velocity) + math.length(math.mul(angular_velocity, sim.max_extent))
+        if max_velocity < body.sleep_threshold { return }
+        wake_body(w, body)
+    }
+    state = get_body_state(w, body)
+    state.linear_velocity = linear_velocity
+    state.angular_velocity = angular_velocity
 }
 
 body_apply_force(id: BodyId, force: Vec3, point: Vec3, wake: bool) {

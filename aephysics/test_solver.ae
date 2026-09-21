@@ -161,6 +161,33 @@ test_resting_and_sleep() {
     ensure("stack: asleep as one", dynamics.body_is_awake(a) == false && dynamics.body_is_awake(c) == false && dynamics.world_awake_body_count(w) == 0)
     ensure("stack: valid", dynamics.validate_solver_sets(w) && dynamics.validate_contacts(w) && dynamics.validate_joints(w))
     dynamics.destroy_world(world_id)
+
+    // A kinematic lift driven to a target each step carries its rider:
+    // the target setter turns the move into a velocity the solver sees,
+    // so the cube on top rides at its full height instead of sinking.
+    world_id = world_with_slab()
+    w = world_of(world_id)
+    ldef = dynamics.default_body_def()
+    ldef.kind = dynamics.BODY_KINEMATIC
+    ldef.position = math.vec3(10.0, 0.5, 0.0)
+    lift = dynamics.create_body(world_id, &ldef)
+    sdef = dynamics.default_shape_def()
+    dynamics.create_hull_shape(lift, &sdef, g_cube as *HullData)
+    rider = cube_at(world_id, math.vec3(10.0, 1.5, 0.0))
+    steps(w, 30)
+    i = 0
+    while i < 120 {
+        target = Transform { p: math.vec3(10.0, 0.5 + 0.5 * ((i + 1) as float) / 60.0, 0.0), q: math.quat_identity() }
+        dynamics.body_set_target_transform(lift, target, 1.0 / 60.0, true)
+        steps(w, 1)
+        i = i + 1
+    }
+    lift_y = dynamics.body_get_position(lift).y
+    rider_y = dynamics.body_get_position(rider).y
+    small("lift: rose a metre in two seconds (${lift_y})", lift_y - 1.5, 0.02)
+    small("lift: the rider rode at its height (${rider_y - lift_y})", rider_y - lift_y - 1.0, 0.02)
+    small("lift: the lift's velocity is the drive's", dynamics.body_get_linear_velocity(lift).y - 0.5, 0.001)
+    dynamics.destroy_world(world_id)
 }
 
 test_bounce_and_events() {
