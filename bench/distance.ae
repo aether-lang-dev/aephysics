@@ -38,7 +38,7 @@ box_points(hx: float, hy: float, hz: float) -> ptr {
 
 exact_quat(axis: Vec3, radians: float) -> Quat {
     h = 0.5 * radians
-    return Quat { v: math.mul_sv(sin(h), axis), s: cos(h) }
+    return math.quat_vs(math.mul_sv(sin(h), axis), cos(h))
 }
 
 main() {

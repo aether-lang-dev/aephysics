@@ -85,8 +85,8 @@ test_hello_world() {
     rotation = dynamics.body_get_rotation(body)
     dynamics.destroy_world(world_id)
     small("hello: resting a unit above the ground", position.y - 1.0, 0.01)
-    small("hello: upright x", rotation.v.x, 0.01)
-    small("hello: upright z", rotation.v.z, 0.01)
+    small("hello: upright x", rotation.x, 0.01)
+    small("hello: upright z", rotation.z, 0.01)
     ensure("hello: the world is gone", physics_world.is_valid(world_id) == false && physics_world.body_event_count(world_id) == 0)
     hull.destroy_hull(ground_box)
     hull.destroy_hull(cube)
@@ -216,7 +216,7 @@ test_continuous_move_event() {
             if same_body(event.body_id, ball) {
                 have_move = true
                 if event.transform.p.x != xf.p.x || event.transform.p.y != xf.p.y || event.transform.p.z != xf.p.z { all_match = false }
-                if event.transform.q.v.x != xf.q.v.x || event.transform.q.s != xf.q.s { all_match = false }
+                if event.transform.q.x != xf.q.x || event.transform.q.w != xf.q.w { all_match = false }
             }
             i = i + 1
         }

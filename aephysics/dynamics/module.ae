@@ -3732,7 +3732,7 @@ try_recycle_contact(w: *World, c: *Contact, sim_a: *BodySim, sim_b: *BodySim, st
     if angular_distance <= CONTACT_RECYCLE_ANGULAR_DISTANCE || dist_squared >= tolerance * tolerance { return false }
     slack = tolerance - sqrt(dist_squared)
     qr = math.inv_mul_quat(xfc.q, xf.q)
-    a = math.abs_vec3(qr.v)
+    a = math.abs_vec3(math.qv(qr))
     arc = math.vec3(a.y * max_extent.z + a.z * max_extent.y, a.z * max_extent.x + a.x * max_extent.z, a.x * max_extent.y + a.y * max_extent.x)
     if 4.0 * math.length_squared(arc) >= slack * slack { return false }
     dq_a = math.mul_quat(xf_a.q, math.conjugate(c.cached_rotation_a))
@@ -4725,7 +4725,7 @@ joint_get_angular_separation(id: JointId) -> float {
     rel_q = math.inv_mul_quat(xf_a.q, xf_b.q)
     kind = j.kind
     if kind == JOINT_PARALLEL {
-        rel_q.v.z = 0.0
+        rel_q.z = 0.0
         return math.get_quat_angle(rel_q)
     }
     if kind == JOINT_PRISMATIC { return math.get_quat_angle(rel_q) }
@@ -4736,7 +4736,7 @@ joint_get_angular_separation(id: JointId) -> float {
             if angle < r.lower_angle { return math.get_quat_angle(rel_q) }
             if r.upper_angle < angle { return math.get_quat_angle(rel_q) }
         }
-        rel_q.v.z = 0.0
+        rel_q.z = 0.0
         return math.get_quat_angle(rel_q)
     }
     if kind == JOINT_SPHERICAL {

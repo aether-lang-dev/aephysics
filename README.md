@@ -74,6 +74,17 @@ scripts/bench.sh [layer]        # a layer of aephysics against the same code in 
 scripts/profile.sh file.ae [top] # a sampling profile on Windows (tools/sampler.c + tools/rank.ae)
 ```
 
+Aether keeps struct names in one namespace across modules, so a host
+engine and this library must agree on every name they both use. The
+math types are shared on purpose: `Vec2` and `Vec3` as `{x, y, z}`,
+`Quat` as `{x, y, z, w}` (the maths reads it through `math.qv` and
+`math.quat_vs`, the reference's `{v, s}`), the same definitions ae3d's
+core has, so a transform crosses between the two without conversion.
+The rest (`World`, `Plane`, `Buffer`, `HumanBone`, ...) is this
+library's; a host names its own types for what they are (ae3d's voxel
+world, frustum plane and glTF buffer are `VoxelWorld`, `FrustumPlane`
+and `GltfBuffer`).
+
 `aether.toml` gives `ae build` the flags the benchmarks are measured
 with (`-O3` and a wider inlining budget, so the small maths inline as
 the reference's `static inline` headers do; [why](bench/RESULTS.md#build-flags-inlining)).

@@ -340,7 +340,7 @@ finalize_bodies(ctx: *StepContext) {
         v = state.linear_velocity
         wv = state.angular_velocity
         local_omega = math.inv_rotate_vector(sim.transform.q, wv)
-        local_delta_rotation = math.inv_rotate_vector(sim.transform.q, state.delta_rotation.v)
+        local_delta_rotation = math.inv_rotate_vector(sim.transform.q, math.qv(state.delta_rotation))
         sim.center = math.add(sim.center, state.delta_position)
         sim.transform.q = math.normalize_quat(math.mul_quat(state.delta_rotation, sim.transform.q))
         velocity_arc = math.modified_cross(math.abs_vec3(local_omega), sim.max_extent)

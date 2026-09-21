@@ -74,7 +74,7 @@ points2(x0: float, y0: float, x1: float, y1: float) -> ptr {
 
 exact_quat(axis: Vec3, radians: float) -> Quat {
     half = 0.5 * radians
-    return Quat { v: math.mul_sv(sin(half), axis), s: cos(half) }
+    return math.quat_vs(math.mul_sv(sin(half), axis), cos(half))
 }
 
 // The reference's four.

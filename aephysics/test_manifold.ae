@@ -42,7 +42,7 @@ const HALF_ROOT2 = 0.70710678
 
 exact_quat(axis: Vec3, radians: float) -> Quat {
     half = 0.5 * radians
-    return Quat { v: math.mul_sv(sin(half), axis), s: cos(half) }
+    return math.quat_vs(math.mul_sv(sin(half), axis), cos(half))
 }
 
 exact_rotation(axis: Vec3, radians: float) -> Transform {

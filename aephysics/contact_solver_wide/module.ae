@@ -348,10 +348,10 @@ gather_bodies(states: ptr, indices: *IntW) -> BodyStateW {
     dp = Vec3W { x: FloatW { x: s0.delta_position.x, y: s1.delta_position.x, z: s2.delta_position.x, w: s3.delta_position.x },
                  y: FloatW { x: s0.delta_position.y, y: s1.delta_position.y, z: s2.delta_position.y, w: s3.delta_position.y },
                  z: FloatW { x: s0.delta_position.z, y: s1.delta_position.z, z: s2.delta_position.z, w: s3.delta_position.z } }
-    dqv = Vec3W { x: FloatW { x: s0.delta_rotation.v.x, y: s1.delta_rotation.v.x, z: s2.delta_rotation.v.x, w: s3.delta_rotation.v.x },
-                  y: FloatW { x: s0.delta_rotation.v.y, y: s1.delta_rotation.v.y, z: s2.delta_rotation.v.y, w: s3.delta_rotation.v.y },
-                  z: FloatW { x: s0.delta_rotation.v.z, y: s1.delta_rotation.v.z, z: s2.delta_rotation.v.z, w: s3.delta_rotation.v.z } }
-    dqs = FloatW { x: s0.delta_rotation.s, y: s1.delta_rotation.s, z: s2.delta_rotation.s, w: s3.delta_rotation.s }
+    dqv = Vec3W { x: FloatW { x: s0.delta_rotation.x, y: s1.delta_rotation.x, z: s2.delta_rotation.x, w: s3.delta_rotation.x },
+                  y: FloatW { x: s0.delta_rotation.y, y: s1.delta_rotation.y, z: s2.delta_rotation.y, w: s3.delta_rotation.y },
+                  z: FloatW { x: s0.delta_rotation.z, y: s1.delta_rotation.z, z: s2.delta_rotation.z, w: s3.delta_rotation.z } }
+    dqs = FloatW { x: s0.delta_rotation.w, y: s1.delta_rotation.w, z: s2.delta_rotation.w, w: s3.delta_rotation.w }
     return BodyStateW { v: v, w: w, dp: dp, dq: QuatW { v: dqv, s: dqs } }
 }
 

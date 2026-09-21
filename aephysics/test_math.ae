@@ -110,21 +110,21 @@ main() {
     axis = math.vec3(0.0, 0.0, 1.0)
     q1 = math.make_quat_from_axis_angle(axis, 0.0 - 0.5 * math.PI)
     q2 = math.compute_quat_between_unit_vectors(math.vec3(1.0, 0.0, 0.0), math.vec3(0.0, 0.0 - 1.0, 0.0))
-    ensure_small("a quarter turn about z from an axis-angle and from two vectors agree, x", q1.v.x - q2.v.x, math.EPSILON)
-    ensure_small("... y", q1.v.y - q2.v.y, math.EPSILON)
-    ensure_small("... z", q1.v.z - q2.v.z, math.EPSILON)
-    ensure_small("... s", q1.s - q2.s, math.EPSILON)
+    ensure_small("a quarter turn about z from an axis-angle and from two vectors agree, x", q1.x - q2.x, math.EPSILON)
+    ensure_small("... y", q1.y - q2.y, math.EPSILON)
+    ensure_small("... z", q1.z - q2.z, math.EPSILON)
+    ensure_small("... s", q1.w - q2.w, math.EPSILON)
 
     q3 = math.normalize_quat(math.quat(1.0, 0.0 - 2.0, 3.0, 4.0))
     q4 = math.inv_mul_quat(q3, q1)
     q5 = math.mul_quat(q3, q4)
-    ensure_small("q3 * (inv(q3) * q1) is q1, x", q1.v.x - q5.v.x, math.EPSILON)
-    ensure_small("... y", q1.v.y - q5.v.y, math.EPSILON)
-    ensure_small("... z", q1.v.z - q5.v.z, math.EPSILON)
-    ensure_small("... s", q1.s - q5.s, math.EPSILON)
+    ensure_small("q3 * (inv(q3) * q1) is q1, x", q1.x - q5.x, math.EPSILON)
+    ensure_small("... y", q1.y - q5.y, math.EPSILON)
+    ensure_small("... z", q1.z - q5.z, math.EPSILON)
+    ensure_small("... s", q1.w - q5.w, math.EPSILON)
 
     q6 = math.compute_quat_between_unit_vectors(math.vec3(0.0, 1.0, 0.0), math.vec3(0.0, 0.0 - 1.0, 0.0))
-    ensure_small("anti-parallel vectors give a half turn", q6.s, math.EPSILON)
+    ensure_small("anti-parallel vectors give a half turn", q6.w, math.EPSILON)
 
     // The rotation between every pair of directions rotates one onto the
     // other, and its twist stays in range.
@@ -141,7 +141,7 @@ main() {
                     r = math.compute_quat_between_unit_vectors(v, u)
                     ensure("the rotation between two directions is valid", math.is_valid_quat(r))
                     w = math.rotate_vector(r, v)
-                    ensure_small("the triple product identity", math.dot(r.v, math.cross(u, w)) - math.scalar_triple_product(r.v, u, w), math.EPSILON)
+                    ensure_small("the triple product identity", math.dot(math.qv(r), math.cross(u, w)) - math.scalar_triple_product(math.qv(r), u, w), math.EPSILON)
                     // Lots of round-off at large angles.
                     ensure_small("the rotation lands on the target, x", w.x - u.x, 0.001)
                     ensure_small("... y", w.y - u.y, 0.001)
@@ -192,8 +192,8 @@ main() {
     ensure_small("... z", rv.z - qv.z, 10.0 * math.EPSILON)
     qb = math.make_quat_from_matrix(rm)
     if math.dot_quat(qb, q) < 0.0 { qb = math.negate_quat(qb) }
-    ensure_small("the quaternion comes back from its matrix, x", qb.v.x - q.v.x, 10.0 * math.EPSILON)
-    ensure_small("... s", qb.s - q.s, 10.0 * math.EPSILON)
+    ensure_small("the quaternion comes back from its matrix, x", qb.x - q.x, 10.0 * math.EPSILON)
+    ensure_small("... s", qb.w - q.w, 10.0 * math.EPSILON)
 
     // Inertia: a sphere's is the same about every axis, a box's follows
     // its sides, a point mass offset adds the parallel-axis terms.

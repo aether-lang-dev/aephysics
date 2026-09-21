@@ -143,7 +143,7 @@ world_frame(sim: *BodySim, local_frame: Transform) -> Transform {
 
 // The perpendicular axes of a hinge: half the rotated relative rotation's x and y.
 perp_axis(quat_a: Quat, rel_q: Quat, axis: Vec3) -> Vec3 {
-    return math.mul_sv(0.5, math.rotate_vector(quat_a, math.add(math.mul_sv(rel_q.s, axis), math.cross(rel_q.v, axis))))
+    return math.mul_sv(0.5, math.rotate_vector(quat_a, math.add(math.mul_sv(rel_q.w, axis), math.cross(math.qv(rel_q), axis))))
 }
 
 // The point constraint's mass matrix: (mA + mB) I - skew(rA) iA skew(rA) - skew(rB) iB skew(rB).
@@ -668,7 +668,7 @@ solve_parallel_joint(base: *JointSim, ctx: *StepContext) {
     if math.dot_quat(quat_a, quat_b) < 0.0 { quat_b = math.negate_quat(quat_b) }
     rel_q = math.inv_mul_quat(quat_a, quat_b)
     if base.fixed_rotation == false && j.max_torque > 0.0 {
-        bias = Vec2 { x: j.softness.bias_rate * rel_q.v.x, y: j.softness.bias_rate * rel_q.v.y }
+        bias = Vec2 { x: j.softness.bias_rate * rel_q.x, y: j.softness.bias_rate * rel_q.y }
         perp_x = perp_axis(quat_a, rel_q, math.vec3_axis_x())
         perp_y = perp_axis(quat_a, rel_q, math.vec3_axis_y())
         j.perp_axis_x = perp_x
@@ -1151,7 +1151,7 @@ solve_revolute_joint(base: *JointSim, ctx: *StepContext, use_bias: bool) {
         mass_scale = 1.0
         impulse_scale = 0.0
         if use_bias {
-            bias2 = math.mul_sv2(base.constraint_softness.bias_rate, Vec2 { x: rel_q.v.x, y: rel_q.v.y })
+            bias2 = math.mul_sv2(base.constraint_softness.bias_rate, Vec2 { x: rel_q.x, y: rel_q.y })
             mass_scale = base.constraint_softness.mass_scale
             impulse_scale = base.constraint_softness.impulse_scale
         }
@@ -1315,7 +1315,7 @@ prepare_spherical_joint(base: *JointSim, ctx: *StepContext) {
     }
     if j.enable_twist_limit {
         rel_q = math.inv_mul_quat(j.frame_a.q, j.frame_b.q)
-        tan_half = sqrt((rel_q.v.x * rel_q.v.x + rel_q.v.y * rel_q.v.y) / (rel_q.v.z * rel_q.v.z + rel_q.s * rel_q.s))
+        tan_half = sqrt((rel_q.x * rel_q.x + rel_q.y * rel_q.y) / (rel_q.z * rel_q.z + rel_q.w * rel_q.w))
         swing_axis = math.normalize(math.cross(cone_axis, twist_axis))
         perp = math.cross(swing_axis, cone_axis)
         jacobian = math.mul_add(cone_axis, tan_half, perp)
@@ -1919,7 +1919,7 @@ solve_wheel_joint(base: *JointSim, ctx: *StepContext, use_bias: bool) {
             mass_scale2 = 1.0
             impulse_scale2 = 0.0
             if use_bias {
-                bias2 = math.mul_sv2(base.constraint_softness.bias_rate, Vec2 { x: rel_q.v.x, y: rel_q.v.y })
+                bias2 = math.mul_sv2(base.constraint_softness.bias_rate, Vec2 { x: rel_q.x, y: rel_q.y })
                 mass_scale2 = base.constraint_softness.mass_scale
                 impulse_scale2 = base.constraint_softness.impulse_scale
             }

@@ -452,7 +452,7 @@ test_degenerate() {
 exact_quat(axis: Vec3, radians: float) -> Quat {
     half = 0.5 * radians
     s = sin(half)
-    return Quat { v: math.mul_sv(s, axis), s: cos(half) }
+    return math.quat_vs(math.mul_sv(s, axis), cos(half))
 }
 
 corner_sign(i: int) -> Vec3 {
