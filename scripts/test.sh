@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build and run every test in aephysics/ with ae: what CI runs through aeb,
+# Build and run every test in tests/ with ae: what CI runs through aeb,
 # runnable anywhere ae is.
 #
 #   scripts/test.sh
@@ -8,7 +8,7 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
 mkdir -p target
 failures=0
-for test in aephysics/test_*.ae; do
+for test in tests/test_*.ae; do
     name="$(basename "$test" .ae)"
     if ! AETHER_LIB_DIR="$root" ae build "$test" --extra aephysics/native/aephysics_native.c -o "target/$name" >"target/$name.log" 2>&1; then
         echo "FAIL  $name (build)"

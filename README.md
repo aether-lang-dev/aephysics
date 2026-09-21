@@ -71,7 +71,7 @@ Deliberate choices:
 ## Tests and benchmarks
 
 ```
-scripts/test.sh                 # builds and runs every aephysics/test_*.ae with ae; what CI runs
+scripts/test.sh                 # builds and runs every tests/test_*.ae with ae; what CI runs
 scripts/fetch_references.sh     # Box3D and Jolt into reference/, built (needs cmake, ninja, gcc)
 scripts/bake.sh [steps]         # the bake-off scenes on the references
 scripts/bench.sh [layer]        # a layer of aephysics against the same code in the reference
