@@ -1,0 +1,31 @@
+// aephysics.native -- the Aether face of aephysics_native.c, the one C
+// file built with every program: the threads' helpers a worker pool
+// needs and Aether does not have (a thread-local worker index, a yield,
+// the processor count). The contact lanes in the same file are
+// declared by aephysics.contact_solver_wide, which owns them.
+exports (
+    MAX_WORKERS, worker_index, set_worker_index, yield_thread, processor_count, scratch
+)
+
+// The most workers a world can have: every module's scratch is a block
+// per worker up to this many.
+const MAX_WORKERS = 64
+
+extern aephysics_worker_index() -> int
+extern aephysics_set_worker_index(index: int)
+extern aephysics_yield()
+extern aephysics_processor_count() -> int
+
+// The worker the calling thread is running as: 0 on the main thread
+// outside a task, the task's worker inside one. Every module's scratch
+// is a block per worker chosen by this.
+worker_index() -> int { return aephysics_worker_index() }
+set_worker_index(index: int) { aephysics_set_worker_index(index) }
+yield_thread() { aephysics_yield() }
+processor_count() -> int { return aephysics_processor_count() }
+
+// The calling worker's block of a scratch buffer allocated as
+// MAX_WORKERS blocks of `bytes`: what the reference keeps on the stack
+// of each thread, kept here as one block per worker since Aether has
+// neither stack arrays nor thread-local variables.
+scratch(blocks: ptr, bytes: int) -> ptr { return blocks + aephysics_worker_index() * bytes }

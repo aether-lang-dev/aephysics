@@ -16,6 +16,7 @@
 // reference does.
 import std.string
 import aephysics.math
+import aephysics.native
 import aephysics.basics
 import aephysics.dynamic_tree
 import aephysics.distance
@@ -440,10 +441,11 @@ struct WorldMoverContext {
 
 const MOVER_PLANE_CAPACITY = 64
 var g_mover_planes: ptr = null   // PlaneResult[MOVER_PLANE_CAPACITY]
+mover_plane_block() -> ptr { return native.scratch(g_mover_planes, MOVER_PLANE_CAPACITY * sizeof(PlaneResult)) }
 
 mover_planes() -> PlaneResult[] {
-    if g_mover_planes == null { g_mover_planes = basics.alloc(MOVER_PLANE_CAPACITY * sizeof(PlaneResult)) }
-    return g_mover_planes as PlaneResult[]
+    if g_mover_planes == null { g_mover_planes = basics.alloc(native.MAX_WORKERS * (MOVER_PLANE_CAPACITY * sizeof(PlaneResult))) }
+    return mover_plane_block() as PlaneResult[]
 }
 
 mover_collide_visitor(proxy_id: int, user_data: long, context: ptr) -> bool {
@@ -637,20 +639,21 @@ mover_cast_visitor(input: *BoxCastInput, proxy_id: int, user_data: long, context
 }
 
 var g_mover_points: ptr = null   // Vec3[2]
+mover_points() -> ptr { return native.scratch(g_mover_points, 2 * sizeof(Vec3)) }
 
 // The fraction of the translation the mover's capsule can travel before
 // touching a shape (its filter asked per shape when given).
 cast_mover(id: WorldId, origin: Vec3, mover: Capsule, translation: Vec3, filter: QueryFilter, has_filter: bool, filter_fn: fn(ShapeId, ptr) -> bool, context: ptr) -> float {
     w = world_of(id)
     if w == null { return 1.0 }
-    if g_mover_points == null { g_mover_points = basics.alloc(2 * sizeof(Vec3)) }
-    points = g_mover_points as Vec3[]
+    if g_mover_points == null { g_mover_points = basics.alloc(native.MAX_WORKERS * (2 * sizeof(Vec3))) }
+    points = mover_points() as Vec3[]
     points[0] = mover.center1
     points[1] = mover.center2
     mc = WorldMoverCastContext { w: w, filter_fn: filter_fn, has_filter: has_filter, filter: filter, fraction: 1.0, origin: origin,
-                            proxy: distance.shape_proxy(g_mover_points, 2, mover.radius), translation: translation,
+                            proxy: distance.shape_proxy(mover_points(), 2, mover.radius), translation: translation,
                             can_encroach: mover.radius > 0.0, user_context: context }
-    input = BoxCastInput { box: math.offset_aabb(math.make_aabb(g_mover_points as float[], 2, mover.radius), origin), translation: translation, max_fraction: 1.0 }
+    input = BoxCastInput { box: math.offset_aabb(math.make_aabb(mover_points() as float[], 2, mover.radius), origin), translation: translation, max_fraction: 1.0 }
     i = 0
     while i < BODY_KIND_COUNT {
         dynamic_tree.tree_box_cast(broad_phase.broad_phase_tree(&w.broad_phase, i), &input, filter.mask_bits, false, mover_cast_visitor, (&mc) as ptr)
@@ -779,15 +782,15 @@ body_time_of_impact_mover(id: BodyId, origin: Vec3, mover: Capsule, mover_transl
     result = BodyTOIResult { point: math.vec3_zero(), normal: math.vec3_zero(), fraction: 1.0, shape_id: dynamics.null_shape_id() }
     w = body_world(id)
     if w == null { return result }
-    if g_mover_points == null { g_mover_points = basics.alloc(2 * sizeof(Vec3)) }
-    points = g_mover_points as Vec3[]
+    if g_mover_points == null { g_mover_points = basics.alloc(native.MAX_WORKERS * (2 * sizeof(Vec3))) }
+    points = mover_points() as Vec3[]
     points[0] = mover.center1
     points[1] = mover.center2
     xf1 = Transform { p: math.sub(transform1.p, origin), q: transform1.q }
     xf2 = Transform { p: math.sub(transform2.p, origin), q: transform2.q }
     body = dynamics.get_body_full_id(w, id)
     local_center = dynamics.get_body_sim(w, body).local_center
-    input = TOIInput { proxy_a: distance.shape_proxy(null, 0, 0.0), proxy_b: distance.shape_proxy(g_mover_points, 2, mover.radius),
+    input = TOIInput { proxy_a: distance.shape_proxy(null, 0, 0.0), proxy_b: distance.shape_proxy(mover_points(), 2, mover.radius),
                        sweep_a: Sweep { local_center: local_center, c1: math.transform_point(xf1, local_center), c2: math.transform_point(xf2, local_center), q1: transform1.q, q2: transform2.q },
                        sweep_b: Sweep { local_center: math.vec3_zero(), c1: math.vec3_zero(), c2: mover_translation, q1: math.quat_identity(), q2: math.quat_identity() },
                        max_fraction: 1.0 }

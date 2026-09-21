@@ -16,6 +16,7 @@
 // Differences: no union; a Shape holds every kind's fields and a kind.
 import std.string
 import aephysics.math
+import aephysics.native
 import aephysics.basics
 import aephysics.hull
 import aephysics.distance
@@ -298,10 +299,11 @@ ray_cast_shape(shape: *Shape, t: Transform, origin: Vec3, translation: Vec3, max
 }
 
 var g_local: ptr = null   // Vec3[MAX_SHAPE_CAST_POINTS], a proxy brought into the shape's frame
+local_points() -> ptr { return native.scratch(g_local, distance.MAX_SHAPE_CAST_POINTS * sizeof(Vec3)) }
 
 local_buffer() -> ptr {
-    if g_local == null { g_local = basics.alloc(distance.MAX_SHAPE_CAST_POINTS * sizeof(Vec3)) }
-    return g_local
+    if g_local == null { g_local = basics.alloc(native.MAX_WORKERS * (distance.MAX_SHAPE_CAST_POINTS * sizeof(Vec3))) }
+    return local_points()
 }
 
 // A proxy in world space swept against the shape under its transform.
@@ -391,14 +393,17 @@ struct ImpactContext {
 }
 
 var g_toi_points_b: ptr = null   // Vec3[2]: B's sphere or capsule points, safe from the children's
+toi_points_b() -> ptr { return native.scratch(g_toi_points_b, 2 * sizeof(Vec3)) }
 var g_toi_points_a: ptr = null   // Vec3[2]: a child's
+toi_points_a() -> ptr { return native.scratch(g_toi_points_a, 2 * sizeof(Vec3)) }
 var g_toi_triangle: ptr = null   // Vec3[3]: the triangle tried
+toi_triangle() -> ptr { return native.scratch(g_toi_triangle, 3 * sizeof(Vec3)) }
 
 toi_buffers_ready() {
     if g_toi_points_b == null {
-        g_toi_points_b = basics.alloc(2 * sizeof(Vec3))
-        g_toi_points_a = basics.alloc(2 * sizeof(Vec3))
-        g_toi_triangle = basics.alloc(3 * sizeof(Vec3))
+        g_toi_points_b = basics.alloc(native.MAX_WORKERS * (2 * sizeof(Vec3)))
+        g_toi_points_a = basics.alloc(native.MAX_WORKERS * (2 * sizeof(Vec3)))
+        g_toi_triangle = basics.alloc(native.MAX_WORKERS * (3 * sizeof(Vec3)))
     }
 }
 
@@ -438,11 +443,11 @@ mesh_time_of_impact_visitor(a: Vec3, b: Vec3, c: Vec3, triangle_index: int, cont
     if offset1 < 0.0 { return true }
     // Finished in front.
     if ctx.is_sensor == false && offset1 - offset2 < ctx.fallback_radius && offset2 > ctx.fallback_radius { return true }
-    triangle = g_toi_triangle as Vec3[]
+    triangle = toi_triangle() as Vec3[]
     triangle[0] = a
     triangle[1] = b
     triangle[2] = c
-    ctx.input.proxy_a = distance.shape_proxy(g_toi_triangle, 3, 0.0)
+    ctx.input.proxy_a = distance.shape_proxy(toi_triangle(), 3, 0.0)
     output = distance.time_of_impact(&ctx.input)
     if 0.0 < output.fraction && output.fraction < ctx.input.max_fraction {
         ctx.output = output
@@ -466,18 +471,18 @@ compound_time_of_impact_visitor(c: *CompoundData, child_index: int, context: ptr
     ctx.input.sweep_a = compound.make_compound_child_sweep(ctx.compound_transform, child.transform)
     kind = child.kind
     if kind == SHAPE_CAPSULE {
-        points = g_toi_points_a as Vec3[]
+        points = toi_points_a() as Vec3[]
         points[0] = child.capsule.center1
         points[1] = child.capsule.center2
-        ctx.input.proxy_a = distance.shape_proxy(g_toi_points_a, 2, child.capsule.radius)
+        ctx.input.proxy_a = distance.shape_proxy(toi_points_a(), 2, child.capsule.radius)
         better_hit(ctx, distance.time_of_impact(&ctx.input))
     } else if kind == SHAPE_HULL {
         ctx.input.proxy_a = hull.hull_proxy(child.hull)
         better_hit(ctx, distance.time_of_impact(&ctx.input))
     } else if kind == SHAPE_SPHERE {
-        points = g_toi_points_a as Vec3[]
+        points = toi_points_a() as Vec3[]
         points[0] = child.sphere.center
-        ctx.input.proxy_a = distance.shape_proxy(g_toi_points_a, 1, child.sphere.radius)
+        ctx.input.proxy_a = distance.shape_proxy(toi_points_a(), 1, child.sphere.radius)
         better_hit(ctx, distance.time_of_impact(&ctx.input))
     } else if kind == SHAPE_MESH {
         mesh_ctx = ImpactContext { input: ctx.input, output: ctx.output, local_centroid_b: ctx.local_centroid_b,
@@ -503,7 +508,7 @@ compound_time_of_impact_visitor(c: *CompoundData, child_index: int, context: ptr
 shape_time_of_impact(shape_a: *Shape, shape_b: *Shape, sweep_a: Sweep, sweep_b: Sweep, max_fraction: float, is_sensor_a: bool) -> TOIOutput {
     toi_buffers_ready()
     kind_a = shape_a.kind
-    proxy_b = own_proxy(shape_b, g_toi_points_b)
+    proxy_b = own_proxy(shape_b, toi_points_b())
     no_hit = TOIOutput { state: 0, point: math.vec3_zero(), normal: math.vec3_zero(), fraction: 0.0, distance: 0.0,
                          distance_iterations: 0, push_back_iterations: 0, root_iterations: 0 }
     if kind_a == SHAPE_COMPOUND {

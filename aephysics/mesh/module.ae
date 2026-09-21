@@ -21,6 +21,7 @@
 // scalar here; the hash is this engine's own.
 import std.string
 import aephysics.math
+import aephysics.native
 import aephysics.basics
 import aephysics.distance
 import aephysics.manifold
@@ -157,14 +158,17 @@ axis_of(v: Vec3, axis: int) -> float {
 // --- scratch ---------------------------------------------------------------------
 
 var g_stack: ptr = null       // int[MESH_STACK_SIZE], the traversal stack
+traversal_stack() -> ptr { return native.scratch(g_stack, MESH_STACK_SIZE * 4) }
 var g_triangle: ptr = null    // Vec3[3], a triangle as a GJK proxy
+triangle_points() -> ptr { return native.scratch(g_triangle, 3 * sizeof(Vec3)) }
 var g_local: ptr = null       // Vec3[MAX_SHAPE_CAST_POINTS], a proxy brought into the mesh's frame
+local_points() -> ptr { return native.scratch(g_local, MAX_SHAPE_CAST_POINTS * sizeof(Vec3)) }
 
 scratch_ready() {
     if g_stack == null {
-        g_stack = basics.alloc(MESH_STACK_SIZE * 4)
-        g_triangle = basics.alloc(3 * sizeof(Vec3))
-        g_local = basics.alloc(MAX_SHAPE_CAST_POINTS * sizeof(Vec3))
+        g_stack = basics.alloc(native.MAX_WORKERS * (MESH_STACK_SIZE * 4))
+        g_triangle = basics.alloc(native.MAX_WORKERS * (3 * sizeof(Vec3)))
+        g_local = basics.alloc(native.MAX_WORKERS * (MAX_SHAPE_CAST_POINTS * sizeof(Vec3)))
     }
 }
 
@@ -189,7 +193,7 @@ is_consistent(m: *MeshData) -> bool {
     triangles = mesh_triangles(m)
     vertices = mesh_vertices(m)
     scratch_ready()
-    stack = g_stack as int[]
+    stack = traversal_stack() as int[]
     count = 1
     stack[0] = 0
     while count > 0 {
@@ -584,7 +588,7 @@ sort_mesh_triangles(m: *MeshData) -> bool {
     temp_materials_block = basics.alloc(m.triangle_count * 4)
     temp_materials = temp_materials_block as int[]
     scratch_ready()
-    stack = g_stack as int[]
+    stack = traversal_stack() as int[]
     offset = 0
     count = 1
     stack[0] = 0
@@ -1240,18 +1244,18 @@ scaled_triangle(m: *MeshData, index: int, scale: Vec3, ccw: bool, out: Vec3[]) {
 // triangle of the mesh under its transform and scale.
 overlap_mesh(sh: Mesh, shape_transform: Transform, proxy: ShapeProxy) -> bool {
     scratch_ready()
-    local_proxy = make_local_proxy(proxy, shape_transform, g_local)
+    local_proxy = make_local_proxy(proxy, shape_transform, local_points())
     bounds = inverse_scaled_bounds(compute_proxy_aabb(local_proxy), sh.scale)
     center = math.aabb_center(bounds)
     extent = math.aabb_extents(bounds)
-    input = DistanceInput { proxy_a: distance.shape_proxy(g_triangle, 3, 0.0), proxy_b: local_proxy,
+    input = DistanceInput { proxy_a: distance.shape_proxy(triangle_points(), 3, 0.0), proxy_b: local_proxy,
                             transform: math.transform_identity(), use_radii: true }
     cache = distance.empty_cache()
     nodes = mesh_nodes(sh.data)
     triangles = mesh_triangles(sh.data)
     vertices = mesh_vertices(sh.data)
-    tri = g_triangle as Vec3[]
-    stack = g_stack as int[]
+    tri = triangle_points() as Vec3[]
+    stack = traversal_stack() as int[]
     count = 0
     index = 0
     while true {
@@ -1305,8 +1309,8 @@ ray_cast_mesh(sh: Mesh, origin: Vec3, translation: Vec3, max_fraction: float) ->
     ray_end = math.mul_add(ray_start, max_fraction, ray_delta)
     ray_box = AABB { lower: math.min_vec3(ray_start, ray_end), upper: math.max_vec3(ray_start, ray_end) }
     scratch_ready()
-    stack = g_stack as int[]
-    tri = g_triangle as Vec3[]
+    stack = traversal_stack() as int[]
+    tri = triangle_points() as Vec3[]
     nodes = mesh_nodes(m)
     materials = mesh_material_indices(m)
     count = 0
@@ -1398,8 +1402,8 @@ shape_cast_mesh(sh: Mesh, proxy: ShapeProxy, translation: Vec3, max_fraction: fl
     inv_box = AABB { lower: math.min_vec3(inv_start, inv_end), upper: math.max_vec3(inv_start, inv_end) }
     inv_extent = math.mul(abs_inv, extents)
     scratch_ready()
-    stack = g_stack as int[]
-    tri = g_triangle as Vec3[]
+    stack = traversal_stack() as int[]
+    tri = triangle_points() as Vec3[]
     nodes = mesh_nodes(m)
     materials = mesh_material_indices(m)
     count = 0
@@ -1421,11 +1425,11 @@ shape_cast_mesh(sh: Mesh, proxy: ShapeProxy, translation: Vec3, max_fraction: fl
                         if math.signed_volume(tri[0], tri[1], tri[2], center) >= 0.0 {
                             // In the triangle's own frame, shifted to its first vertex.
                             origin = tri[0]
-                            local = g_local as Vec3[]
+                            local = local_points() as Vec3[]
                             local[0] = math.vec3_zero()
                             local[1] = math.sub(tri[1], origin)
                             local[2] = math.sub(tri[2], origin)
-                            pair = ShapeCastPairInput { proxy_a: distance.shape_proxy(g_local, 3, 0.0), proxy_b: proxy,
+                            pair = ShapeCastPairInput { proxy_a: distance.shape_proxy(local_points(), 3, 0.0), proxy_b: proxy,
                                                         transform: Transform { p: math.neg(origin), q: math.quat_identity() },
                                                         translation_b: translation, max_fraction: best.fraction, can_encroach: can_encroach }
                             pair_output = distance.shape_cast(&pair)
@@ -1488,10 +1492,10 @@ get_mesh_triangle(sh: Mesh, triangle_index: int) -> Triangle {
 // the segment is inside (a mesh could not do better, so a hull does not).
 collide_mover_and_hull(planes: PlaneResult[], h: *HullData, mover: Capsule) -> int {
     scratch_ready()
-    segment = g_local as Vec3[]
+    segment = local_points() as Vec3[]
     segment[0] = mover.center1
     segment[1] = mover.center2
-    input = DistanceInput { proxy_a: hull.hull_proxy(h), proxy_b: distance.shape_proxy(g_local, 2, mover.radius),
+    input = DistanceInput { proxy_a: hull.hull_proxy(h), proxy_b: distance.shape_proxy(local_points(), 2, mover.radius),
                             transform: math.transform_identity(), use_radii: false }
     cache = distance.empty_cache()
     output = distance.shape_distance(&input, &cache, null, 0)
@@ -1509,7 +1513,7 @@ collide_mover_and_hull(planes: PlaneResult[], h: *HullData, mover: Capsule) -> i
 collide_mover_and_mesh(planes: PlaneResult[], capacity: int, sh: Mesh, mover: Capsule) -> int {
     if capacity == 0 { return 0 }
     scratch_ready()
-    input = DistanceInput { proxy_a: distance.shape_proxy(g_triangle, 3, 0.0), proxy_b: distance.shape_proxy((&mover) as ptr, 2, 0.0),
+    input = DistanceInput { proxy_a: distance.shape_proxy(triangle_points(), 3, 0.0), proxy_b: distance.shape_proxy((&mover) as ptr, 2, 0.0),
                             transform: math.transform_identity(), use_radii: false }
     cache = distance.empty_cache()
     radius = mover.radius
@@ -1524,8 +1528,8 @@ collide_mover_and_mesh(planes: PlaneResult[], capacity: int, sh: Mesh, mover: Ca
     triangles = mesh_triangles(sh.data)
     vertices = mesh_vertices(sh.data)
     materials = mesh_material_indices(sh.data)
-    tri = g_triangle as Vec3[]
-    stack = g_stack as int[]
+    tri = triangle_points() as Vec3[]
+    stack = traversal_stack() as int[]
     count = 0
     index = 0
     plane_count = 0
@@ -1590,7 +1594,7 @@ query_mesh(sh: Mesh, bounds: AABB, visitor: fn(Vec3, Vec3, Vec3, int, ptr) -> bo
     nodes = mesh_nodes(sh.data)
     triangles = mesh_triangles(sh.data)
     vertices = mesh_vertices(sh.data)
-    stack = g_stack as int[]
+    stack = traversal_stack() as int[]
     count = 0
     index = 0
     while true {

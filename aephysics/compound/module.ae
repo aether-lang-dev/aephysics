@@ -21,6 +21,7 @@
 // byte comparison behind it.
 import std.string
 import aephysics.math
+import aephysics.native
 import aephysics.basics
 import aephysics.dynamic_tree
 import aephysics.hull
@@ -600,12 +601,14 @@ overlap_visitor(proxy_id: int, user_data: long, context: ptr) -> bool {
 }
 
 var g_local: ptr = null    // Vec3[MAX_SHAPE_CAST_POINTS]: the proxy in the compound's frame
+local_points() -> ptr { return native.scratch(g_local, distance.MAX_SHAPE_CAST_POINTS * sizeof(Vec3)) }
 var g_child: ptr = null    // Vec3[MAX_SHAPE_CAST_POINTS]: the proxy in a child's frame
+child_points() -> ptr { return native.scratch(g_child, distance.MAX_SHAPE_CAST_POINTS * sizeof(Vec3)) }
 
 scratch_ready() {
     if g_local == null {
-        g_local = basics.alloc(distance.MAX_SHAPE_CAST_POINTS * sizeof(Vec3))
-        g_child = basics.alloc(distance.MAX_SHAPE_CAST_POINTS * sizeof(Vec3))
+        g_local = basics.alloc(native.MAX_WORKERS * (distance.MAX_SHAPE_CAST_POINTS * sizeof(Vec3)))
+        g_child = basics.alloc(native.MAX_WORKERS * (distance.MAX_SHAPE_CAST_POINTS * sizeof(Vec3)))
     }
 }
 
@@ -614,7 +617,7 @@ scratch_ready() {
 // the tree culls, each child tests in its own frame.
 overlap_compound(c: *CompoundData, shape_transform: Transform, proxy: ShapeProxy) -> bool {
     scratch_ready()
-    ctx = OverlapContext { compound: c, proxy: mesh.make_local_proxy(proxy, shape_transform, g_local), overlap: false }
+    ctx = OverlapContext { compound: c, proxy: mesh.make_local_proxy(proxy, shape_transform, local_points()), overlap: false }
     bounds = mesh.compute_proxy_aabb(ctx.proxy)
     dynamic_tree.tree_query(&c.tree, bounds, all_bits(), false, overlap_visitor, (&ctx) as ptr)
     return ctx.overlap
@@ -673,7 +676,7 @@ box_visitor(input: *BoxCastInput, proxy_id: int, user_data: long, context: ptr) 
     ctx = context as *CastContext
     child_index = user_data as int
     child = get_compound_child(ctx.compound, child_index)
-    local_proxy = mesh.make_local_proxy(ctx.proxy, child.transform, g_child)
+    local_proxy = mesh.make_local_proxy(ctx.proxy, child.transform, child_points())
     translation = math.inv_rotate_vector(child.transform.q, ctx.translation)
     output = distance.empty_cast_output()
     if child.kind == KIND_CAPSULE { output = capsule.shape_cast_capsule(child.capsule, local_proxy, translation, input.max_fraction, ctx.can_encroach) }
@@ -730,6 +733,7 @@ struct MoverContext {
 
 const MOVER_SCRATCH = 64
 var g_planes: ptr = null   // PlaneResult[MOVER_SCRATCH]: one child's planes before they are appended
+child_planes() -> ptr { return native.scratch(g_planes, MOVER_SCRATCH * sizeof(PlaneResult)) }
 
 mover_visitor(proxy_id: int, user_data: long, context: ptr) -> bool {
     ctx = context as *MoverContext
@@ -739,7 +743,7 @@ mover_visitor(proxy_id: int, user_data: long, context: ptr) -> bool {
                             center2: math.inv_transform_point(child.transform, ctx.mover.center2), radius: ctx.mover.radius }
     // A child writes into the scratch (a mesh up to its size), then its planes are appended.
     capacity = math.min_int(ctx.capacity - ctx.count, MOVER_SCRATCH)
-    scratch = g_planes as PlaneResult[]
+    scratch = child_planes() as PlaneResult[]
     plane_count = 0
     if child.kind == KIND_CAPSULE { plane_count = capsule.collide_mover_and_capsule(scratch, child.capsule, local_mover) }
     else if child.kind == KIND_HULL { plane_count = mesh.collide_mover_and_hull(scratch, child.hull, local_mover) }
@@ -765,7 +769,7 @@ mover_visitor(proxy_id: int, user_data: long, context: ptr) -> bool {
 // child's frame with the child and the material.
 collide_mover_and_compound(planes: PlaneResult[], capacity: int, c: *CompoundData, mover: Capsule) -> int {
     if capacity == 0 { return 0 }
-    if g_planes == null { g_planes = basics.alloc(MOVER_SCRATCH * sizeof(PlaneResult)) }
+    if g_planes == null { g_planes = basics.alloc(native.MAX_WORKERS * (MOVER_SCRATCH * sizeof(PlaneResult))) }
     ctx = MoverContext { compound: c, planes: planes, capacity: capacity, count: 0, mover: mover }
     r = math.vec3(mover.radius, mover.radius, mover.radius)
     bounds = AABB { lower: math.sub(math.min_vec3(mover.center1, mover.center2), r), upper: math.add(math.max_vec3(mover.center1, mover.center2), r) }

@@ -33,8 +33,8 @@ exports (
 extern sqrt(x: float) -> float
 extern memset(p: ptr, value: int, count: int) -> ptr
 
-// The lanes as vector code, lanes.c beside this module (built with it:
-// `ae build --extra aephysics/contact_solver_wide/lanes.c`, or an
+// The lanes as vector code in aephysics/native/aephysics_native.c (built with the program:
+// `ae build --extra aephysics/native/aephysics_native.c`, or an
 // extra_sources entry): the same layout and arithmetic, four contacts
 // per instruction. On by default; off, the Aether lanes below run.
 extern aephysics_wide_constraint_size() -> int
@@ -61,7 +61,7 @@ end_wide_step(block: ptr, count: int) {
     if g_native_lanes && count > 0 { aephysics_wide_unpack(block, count) }
 }
 
-// Whether lanes.c was built against this module's layout.
+// Whether the native file was built against this module's layout.
 native_layout_matches() -> bool {
     return aephysics_wide_constraint_size() == sizeof(WideConstraint) && aephysics_wide_body_state_size() == sizeof(BodyState)
 }

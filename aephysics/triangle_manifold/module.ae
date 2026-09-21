@@ -19,6 +19,7 @@
 // stack, as in aephysics.manifold.
 import std.string
 import aephysics.math
+import aephysics.native
 import aephysics.basics
 import aephysics.distance
 import aephysics.hull
@@ -97,24 +98,27 @@ struct TriangleData {
 // --- scratch --------------------------------------------------------------------
 
 var g_clip1: ptr = null
+clip1() -> ptr { return native.scratch(g_clip1, 2 * MAX_CLIP_POINTS * sizeof(ClipVertex)) }
 var g_clip2: ptr = null
+clip2() -> ptr { return native.scratch(g_clip2, 2 * MAX_CLIP_POINTS * sizeof(ClipVertex)) }
 var g_triangle: ptr = null   // Vec3[3], the GJK proxy of the triangle
+triangle_points() -> ptr { return native.scratch(g_triangle, 3 * sizeof(Vec3)) }
 
 scratch_ready() {
     if g_clip1 == null {
-        g_clip1 = basics.alloc(2 * MAX_CLIP_POINTS * sizeof(ClipVertex))
-        g_clip2 = basics.alloc(2 * MAX_CLIP_POINTS * sizeof(ClipVertex))
-        g_triangle = basics.alloc(3 * sizeof(Vec3))
+        g_clip1 = basics.alloc(native.MAX_WORKERS * (2 * MAX_CLIP_POINTS * sizeof(ClipVertex)))
+        g_clip2 = basics.alloc(native.MAX_WORKERS * (2 * MAX_CLIP_POINTS * sizeof(ClipVertex)))
+        g_triangle = basics.alloc(native.MAX_WORKERS * (3 * sizeof(Vec3)))
     }
 }
 
 triangle_proxy(v1: Vec3, v2: Vec3, v3: Vec3) -> ShapeProxy {
     scratch_ready()
-    points = g_triangle as Vec3[]
+    points = triangle_points() as Vec3[]
     points[0] = v1
     points[1] = v2
     points[2] = v3
-    return distance.shape_proxy(g_triangle, 3, 0.0)
+    return distance.shape_proxy(triangle_points(), 3, 0.0)
 }
 
 triangle_vertex(t: *TriangleData, i: int) -> Vec3 {
@@ -334,7 +338,7 @@ query_triangle_and_capsule_edges(v1: Vec3, v2: Vec3, v3: Vec3, plane: Plane, c: 
 
 capsule_segment(c: Capsule) -> ClipVertex[] {
     scratch_ready()
-    segment = g_clip1 as ClipVertex[]
+    segment = clip1() as ClipVertex[]
     segment[0] = ClipVertex { position: c.center1, separation: 0.0, pair: manifold.make_feature_pair(FEATURE_SHAPE_A, 0, FEATURE_SHAPE_A, 0) }
     segment[1] = ClipVertex { position: c.center2, separation: 0.0, pair: manifold.make_feature_pair(FEATURE_SHAPE_A, 1, FEATURE_SHAPE_A, 1) }
     return segment
@@ -543,8 +547,8 @@ collide_hull_face(m: *LocalManifold, point_capacity: int, t: *TriangleData, h: *
     points = hull.hull_points(h)
     ref_plane = planes[query.index_b]
     scratch_ready()
-    input = g_clip1 as ClipVertex[]
-    output = g_clip2 as ClipVertex[]
+    input = clip1() as ClipVertex[]
+    output = clip2() as ClipVertex[]
     input[0] = ClipVertex { position: t.v1, separation: math.plane_separation(ref_plane, t.v1), pair: manifold.make_feature_pair(FEATURE_SHAPE_B, 2, FEATURE_SHAPE_B, 0) }
     input[1] = ClipVertex { position: t.v2, separation: math.plane_separation(ref_plane, t.v2), pair: manifold.make_feature_pair(FEATURE_SHAPE_B, 0, FEATURE_SHAPE_B, 1) }
     input[2] = ClipVertex { position: t.v3, separation: math.plane_separation(ref_plane, t.v3), pair: manifold.make_feature_pair(FEATURE_SHAPE_B, 1, FEATURE_SHAPE_B, 2) }
@@ -614,8 +618,8 @@ collide_triangle_face(m: *LocalManifold, point_capacity: int, t: *TriangleData, 
     ref_plane = t.plane
     inc_face = manifold.find_incident_face(h, ref_plane.normal, query.index_b)
     scratch_ready()
-    input = g_clip1 as ClipVertex[]
-    output = g_clip2 as ClipVertex[]
+    input = clip1() as ClipVertex[]
+    output = clip2() as ClipVertex[]
     point_count = 0
     start = faces[inc_face]
     hull_edge_index = start

@@ -10,7 +10,7 @@ mkdir -p target
 failures=0
 for test in aephysics/test_*.ae; do
     name="$(basename "$test" .ae)"
-    if ! AETHER_LIB_DIR="$root" ae build "$test" --extra aephysics/contact_solver_wide/lanes.c -o "target/$name" >"target/$name.log" 2>&1; then
+    if ! AETHER_LIB_DIR="$root" ae build "$test" --extra aephysics/native/aephysics_native.c -o "target/$name" >"target/$name.log" 2>&1; then
         echo "FAIL  $name (build)"
         grep -i "error" "target/$name.log" | head -5
         failures=$((failures + 1))

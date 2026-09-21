@@ -1,0 +1,150 @@
+// The step by worker count: the reference's large pyramid (5,050 cubes,
+// 200 steps) and many pyramids (10,780 cubes, 100 steps) at 1, 2, 4 and
+// 8 workers, and the machine's processor count. What the parallel layer
+// buys, stage by stage as the stages go parallel, with the height sum
+// as the checksum: the same at every count, since a step's result does
+// not depend on which worker did what. Single-machine numbers; the
+// reference's own scaling is in its benchmark tables.
+import std.string
+import std.os
+import aephysics.math
+import aephysics.basics
+import aephysics.native
+import aephysics.hull
+import aephysics.manifold
+import aephysics.shape
+import aephysics.broad_phase
+import aephysics.dynamics
+import aephysics.physics_world
+
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+
+clock() -> long { return os.now_monotonic_ns() }
+ms(ns: long) -> float { return (ns as float) / 1000000.0 }
+
+var g_box: ptr = null
+var g_slab: ptr = null
+
+ground(world_id: WorldId) {
+    bdef = dynamics.default_body_def()
+    bdef.position = math.vec3(0.0, 0.0 - 1.0, 0.0)
+    id = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    dynamics.create_hull_shape(id, &sdef, g_slab as *HullData)
+}
+
+pyramid(world_id: WorldId, base_count: int, extent: float, center_x: float, base_z: float) {
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    sdef = dynamics.default_shape_def()
+    sdef.density = 100.0
+    i = 0
+    while i < base_count {
+        y = (2.0 * (i as float) + 1.0) * extent
+        j = i
+        while j < base_count {
+            x = ((i as float) + 1.0) * extent + 2.0 * ((j - i) as float) * extent + center_x
+            bdef.position = math.vec3(x, y, base_z)
+            id = dynamics.create_body(world_id, &bdef)
+            dynamics.create_hull_shape(id, &sdef, g_box as *HullData)
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+height_sum(world_id: WorldId) -> float {
+    w = dynamics.get_world(world_id.index1 - 1)
+    sum = 0.0
+    i = 0
+    while i < w.bodies.count {
+        body = dynamics.body_at(w, i)
+        if body.set_index != dynamics.NULL_INDEX && body.kind == dynamics.BODY_DYNAMIC {
+            sum = sum + dynamics.get_body_sim(w, body).transform.p.y
+        }
+        i = i + 1
+    }
+    return sum
+}
+
+run(name: string, world_id: WorldId, steps: int, workers: int) -> float {
+    t0 = clock()
+    s = 0
+    while s < steps {
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        s = s + 1
+    }
+    t1 = clock()
+    sum = height_sum(world_id)
+    println("aephysics parallel: ${name}, ${workers} workers: ${ms(t1 - t0) / (steps as float)} ms per step (height sum ${sum})")
+    dynamics.destroy_world(world_id)
+    return sum
+}
+
+large_pyramid(workers: int) -> float {
+    wdef = dynamics.default_world_def()
+    wdef.worker_count = workers
+    world_id = dynamics.create_world(&wdef)
+    physics_world.enable_sleeping(world_id, false)
+    ground(world_id)
+    pyramid(world_id, 100, 0.5, 0.0 - 50.0, 0.0)
+    return run("large pyramid", world_id, 200, workers)
+}
+
+many_pyramids(workers: int) -> float {
+    wdef = dynamics.default_world_def()
+    wdef.worker_count = workers
+    world_id = dynamics.create_world(&wdef)
+    ground(world_id)
+    base_count = 10
+    extent = 0.5
+    rows = 14
+    columns = 14
+    ground_extent = extent * (columns as float) * ((base_count as float) + 1.0)
+    base_width = 2.0 * extent * (base_count as float)
+    base_z = 0.0 - ground_extent + 2.0 * extent
+    delta_z = 2.0 * (ground_extent - 2.0 * extent) / ((rows as float) - 1.0)
+    i = 0
+    while i < rows {
+        j = 0
+        while j < columns {
+            center_x = 0.0 - ground_extent + (j as float) * (base_width + 2.0 * extent) + 2.0 * extent
+            pyramid(world_id, base_count, extent, center_x - 0.5, base_z)
+            j = j + 1
+        }
+        base_z = base_z + delta_z
+        i = i + 1
+    }
+    return run("many pyramids", world_id, 100, workers)
+}
+
+main() {
+    g_box = hull.make_box_hull(0.5, 0.5, 0.5) as ptr
+    g_slab = hull.make_box_hull(400.0, 1.0, 400.0) as ptr
+    counts_block = calloc(5, 4)
+    counts = counts_block as int[]
+    counts[0] = 1
+    counts[1] = 2
+    counts[2] = 4
+    counts[3] = 8
+    counts[4] = native.processor_count()
+    n = 5
+    if counts[4] <= 8 { n = 4 }
+    first = 0.0
+    i = 0
+    while i < n {
+        sum = large_pyramid(counts[i])
+        if i == 0 { first = sum } else if sum != first { println("aephysics parallel: WARNING the large pyramid's height sum changed with the worker count") }
+        i = i + 1
+    }
+    i = 0
+    while i < n {
+        sum = many_pyramids(counts[i])
+        if i == 0 { first = sum } else if sum != first { println("aephysics parallel: WARNING the many pyramids' height sum changed with the worker count") }
+        i = i + 1
+    }
+    free(counts_block)
+    hull.destroy_hull(g_slab as *HullData)
+    hull.destroy_hull(g_box as *HullData)
+}

@@ -1,4 +1,11 @@
-// The lanes of aephysics.contact_solver_wide as vector code: the warm
+// The native side of aephysics, one C file built with every program
+// (`ae build --extra aephysics/native/aephysics_native.c`): what Aether
+// cannot express yet, and nothing else.
+//
+// 1. The threads' side of aephysics.parallel: a thread-local worker
+//    index (Aether has no thread-local variables), a yield, and the
+//    processor count.
+// 2. The lanes of aephysics.contact_solver_wide as vector code: the warm
 // start, solve and restitution over the module's WideConstraint, four
 // contacts per operation through GCC's vector extensions (SSE on
 // x86-64, NEON on arm64, both baseline). The constraints are packed
@@ -18,6 +25,47 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <sched.h>
+#include <unistd.h>
+#endif
+
+// --- threads --------------------------------------------------------------------------------------------------
+
+// Which worker the calling thread is, set by the task running on it: the
+// per-worker scratch every module keeps is chosen by this. The main
+// thread is worker 0 until a task says otherwise.
+static _Thread_local int g_worker_index = 0;
+
+int aephysics_worker_index(void) { return g_worker_index; }
+void aephysics_set_worker_index(int index) { g_worker_index = index; }
+
+// The calling thread gives up the rest of its slice, for a spin that waits on another worker.
+void aephysics_yield(void)
+{
+#ifdef _WIN32
+    SwitchToThread();
+#else
+    sched_yield();
+#endif
+}
+
+// The processors the machine offers, at least one.
+int aephysics_processor_count(void)
+{
+#ifdef _WIN32
+    SYSTEM_INFO info;
+    GetSystemInfo(&info);
+    return info.dwNumberOfProcessors > 0 ? (int)info.dwNumberOfProcessors : 1;
+#else
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+    return n > 0 ? (int)n : 1;
+#endif
+}
+
+// --- the contact lanes ----------------------------------------------------------------------------------------
 
 // --- the module's layout, doubles ----------------------------------------------------------------------------
 

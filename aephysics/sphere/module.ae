@@ -11,6 +11,7 @@
 // prefix, in snake case: b3RayCastSphere is ray_cast_sphere.
 import std.string
 import aephysics.math
+import aephysics.native
 import aephysics.basics
 import aephysics.distance
 import aephysics.manifold
@@ -51,17 +52,18 @@ compute_swept_sphere_aabb(s: Sphere, xf1: Transform, xf2: Transform) -> AABB {
 }
 
 var g_center: ptr = null   // Vec3[2]: a sphere's centre or a capsule's two, for a proxy
+center_points() -> ptr { return native.scratch(g_center, 2 * sizeof(Vec3)) }
 
 center_buffer() -> Vec3[] {
-    if g_center == null { g_center = basics.alloc(2 * sizeof(Vec3)) }
-    return g_center as Vec3[]
+    if g_center == null { g_center = basics.alloc(native.MAX_WORKERS * (2 * sizeof(Vec3))) }
+    return center_points() as Vec3[]
 }
 
 // A sphere's centre as a one-point proxy, in the module's buffer until the next call.
 sphere_proxy(s: Sphere) -> ShapeProxy {
     buffer = center_buffer()
     buffer[0] = s.center
-    return distance.shape_proxy(g_center, 1, s.radius)
+    return distance.shape_proxy(center_points(), 1, s.radius)
 }
 
 // A capsule's two centres as a proxy, in the same buffer.
@@ -69,7 +71,7 @@ capsule_proxy(c: Capsule) -> ShapeProxy {
     buffer = center_buffer()
     buffer[0] = c.center1
     buffer[1] = c.center2
-    return distance.shape_proxy(g_center, 2, c.radius)
+    return distance.shape_proxy(center_points(), 2, c.radius)
 }
 
 // Two centres as a proxy with a radius: the mover's core segment.
@@ -77,7 +79,7 @@ segment_proxy(a: Vec3, b: Vec3, radius: float) -> ShapeProxy {
     buffer = center_buffer()
     buffer[0] = a
     buffer[1] = b
-    return distance.shape_proxy(g_center, 2, radius)
+    return distance.shape_proxy(center_points(), 2, radius)
 }
 
 overlap_sphere(s: Sphere, shape_transform: Transform, proxy: ShapeProxy) -> bool {
@@ -166,10 +168,11 @@ shape_cast_sphere(s: Sphere, proxy: ShapeProxy, translation: Vec3, max_fraction:
 }
 
 var g_length: ptr = null   // float[1], the out-parameter of get_length_and_normalize
+length_cell() -> ptr { return native.scratch(g_length, 8) }
 
 length_scratch() -> float[] {
-    if g_length == null { g_length = basics.alloc(8) }
-    return g_length as float[]
+    if g_length == null { g_length = basics.alloc(native.MAX_WORKERS * (8)) }
+    return length_cell() as float[]
 }
 
 // The mover's plane against a sphere: the normal from the sphere to the

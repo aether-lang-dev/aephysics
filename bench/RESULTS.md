@@ -484,7 +484,7 @@ through `contact_solver` (scalar; 308 and 61 ms before the [build
 flags](#build-flags-inlining)); four at a time through
 `contact_solver_wide`'s lanes in Aether, the reference's layout as
 plain code (the layout alone: 10%); and through the same lanes in
-`lanes.c`, GCC vector code in single precision (another 20-30%). The
+`aephysics_native.c`, GCC vector code in single precision (another 20-30%). The
 falling grid is mostly the narrow phase and the pairs (the cubes land
 and settle); the stacks are the solver's, 1.4x.
 

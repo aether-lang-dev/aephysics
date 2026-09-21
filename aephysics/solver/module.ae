@@ -21,6 +21,7 @@
 // b3SolveContinuous is solve_continuous.
 import std.string
 import aephysics.math
+import aephysics.native
 import aephysics.basics
 import aephysics.dynamic_tree
 import aephysics.distance
@@ -167,12 +168,14 @@ struct ContinuousContext {
 }
 
 var g_sensor_hits: ptr = null
+sensor_hits() -> ptr { return native.scratch(g_sensor_hits, MAX_CONTINUOUS_SENSOR_HITS * sizeof(SensorHit)) }
 var g_sensor_fractions: ptr = null
+sensor_fractions() -> ptr { return native.scratch(g_sensor_fractions, MAX_CONTINUOUS_SENSOR_HITS * 8) }
 
 continuous_buffers_ready() {
     if g_sensor_hits == null {
-        g_sensor_hits = basics.alloc(MAX_CONTINUOUS_SENSOR_HITS * sizeof(SensorHit))
-        g_sensor_fractions = basics.alloc(MAX_CONTINUOUS_SENSOR_HITS * 8)
+        g_sensor_hits = basics.alloc(native.MAX_WORKERS * (MAX_CONTINUOUS_SENSOR_HITS * sizeof(SensorHit)))
+        g_sensor_fractions = basics.alloc(native.MAX_WORKERS * (MAX_CONTINUOUS_SENSOR_HITS * 8))
     }
 }
 
@@ -252,7 +255,7 @@ solve_continuous(w: *World, sim_index: int) {
     dynamic_tree_ = broad_phase.broad_phase_tree(&w.broad_phase, dynamics.BODY_DYNAMIC)
     fast_body = dynamics.body_at(w, fast_sim.body_id)
     ctx = ContinuousContext { w: w, fast_sim: fast_sim, fast_shape: null, sweep: sweep, base: base, fraction: 1.0,
-                              sensor_hits: g_sensor_hits, sensor_fractions: g_sensor_fractions, sensor_count: 0 }
+                              sensor_hits: sensor_hits(), sensor_fractions: sensor_fractions(), sensor_count: 0 }
     is_bullet = (fast_sim.flags & dynamics.IS_BULLET) != 0
     mask = dynamic_tree.default_mask_bits()
     shape_id = fast_body.head_shape_id

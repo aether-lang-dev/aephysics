@@ -236,7 +236,7 @@ started until its tests pass.
      bodies' states, prepare, warm start, solve, restitution and store;
      the mesh and overflow contacts stay scalar. The lanes are written
      twice: in Aether (plain code, what the reference's non-SIMD build
-     is) and in lanes.c beside the module as GCC vector code in single
+     is) and in aephysics_native.c beside the module as GCC vector code in single
      precision (SSE or NEON, baseline), which packs the module's doubles
      for the step and hands the impulses back; a switch per path, both
      tested against the scalar solve on one scene. Measured, issue #22:
