@@ -484,7 +484,7 @@ through `contact_solver` (scalar; 308 and 61 ms before the [build
 flags](#build-flags-inlining)); four at a time through
 `contact_solver_wide`'s lanes in Aether, the reference's layout as
 plain code (the layout alone: 10%); and through the same lanes in
-`lanes.c`, GCC vector code in single precision (another 20-30%). The
+`aephysics_native.c`, GCC vector code in single precision (another 20-30%). The
 falling grid is mostly the narrow phase and the pairs (the cubes land
 and settle); the stacks are the solver's, 1.4x.
 
@@ -497,18 +497,19 @@ sleeping off as the reference runs them.
 
 | scene | aephysics per step | Box3D per step |
 |---|---|---|
-| large pyramid: 5,050 cubes on a base of 100, 200 steps | 17.1 ms | **10.5** |
-| many pyramids: 196 pyramids of base 10, 10,780 cubes, 100 steps | 41.5 | **27.0** |
-| joint grid: 10,000 spheres on 19,800 spherical joints, 100 steps | 14.1 | **11.8** |
+| large pyramid: 5,050 cubes on a base of 100, 200 steps | 14.1 ms | **9.0** |
+| many pyramids: 196 pyramids of base 10, 10,780 cubes, 100 steps | 31.6 | **19.3** |
+| joint grid: 10,000 spheres on 19,800 spherical joints, 100 steps | 11.7 | **10.7** |
 
 The same height sums (167,556, 37,695 and -496,893), contact counts
 (14,950 and 28,420) and joint count. One run of the pair, on a machine
 whose other work moves both columns by 10-20% between runs (the joint
 grid has measured 11.1 to 14.1 ms, the reference 9.1 to 11.8): the
-ratios hold, 1.2x on the joint grid (no contacts: single against
-double precision and what the emitted C still loses) and 1.5-1.6x on
-the pyramids (24.5 and 53.0 ms before the wide path and the flags,
-2.2-2.4x). `scripts/profile.sh bench/physics_world.ae` on the large
+ratios hold, 1.1x on the joint grid (no contacts: single against
+double precision and what the emitted C still loses) and 1.6x on the
+pyramids (24.5 and 53.0 ms before the wide path and the flags,
+2.2-2.4x; 17.1 and 41.5 before the parallel layer's stack allocator
+stopped zeroing). `scripts/profile.sh bench/physics_world.ae` on the large
 pyramid alone, and the reference's benchmark under the same sampler
 (`tools/sampler.c` linked into its C), ms per step at 60 steps:
 
@@ -527,6 +528,51 @@ The solve is at parity: the same lanes, the same precision. What is
 left is the prepare (Aether writing a lane at a time into a
 double-sized structure), the packing the doubles need, and a narrow
 phase in doubles (issue #17).
+
+## parallel
+
+`bench/parallel.ae` and `bench/parallel_box3d.c`: the three scenes
+above by worker count, ours through `WorldDef.worker_count` and the
+reference's through `b3WorldDef.workerCount` on its built-in
+scheduler, sleeping off, ms per step; 1, 2, 4 and 8 workers and the
+machine's 24 processors. The height sums are the same at every count
+on both sides.
+
+| scene | workers | aephysics | Box3D |
+|---|---|---|---|
+| large pyramid | 1 | 13.3 | **9.1** |
+| | 2 | 8.0 | **4.8** |
+| | 4 | 4.6 | **2.9** |
+| | 8 | 3.3 | **2.0** |
+| | 24 | 2.9 | **1.8** |
+| many pyramids | 1 | 32.0 | **20.6** |
+| | 2 | 17.6 | **10.4** |
+| | 4 | 10.8 | **5.3** |
+| | 8 | 6.8 | **3.5** |
+| | 24 | 5.6 | **2.8** |
+| joint grid | 1 | 12.2 | **11.4** |
+| | 2 | 6.2 | **5.6** |
+| | 4 | 3.8 | **3.3** |
+| | 8 | 2.4 | **2.1** |
+| | 24 | 2.2 | **1.6** |
+
+The scaling is the reference's (4.0x, 4.7x and 5.1x at eight workers
+against its 4.4x, 5.8x and 5.4x) and the ratio between the columns at
+eight workers is the single-thread one, so what is left is the
+per-thread work, not the layer. The profile the world keeps
+(`physics_world.get_profile`, the reference's b3Profile) says where
+the step goes at eight workers on the large pyramid: constraints 2.2
+ms (the stages), collide 0.5, pairs 0.3 (the broad phase, serial here
+and a task in the reference), transforms 0.14, setup 0.01.
+
+Two things the layer found on the way. A task on a fresh thread
+(std.worker's run_detached spawns one per call) costs 180 us a round
+of seven; the scheduler now makes its threads once and they wait on a
+semaphore, and a round is 8 us. And the stack allocator zeroed every
+allocation -- the constraint blocks are tens of megabytes a step --
+where the reference's does not: a millisecond a step on the pyramids,
+gone, with the memory poisoned under the determinism scenes to show
+nothing reads it before writing.
 
 ## human
 

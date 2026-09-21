@@ -35,7 +35,9 @@
 // hooks; a world's callbacks are plain function values.
 import std.string
 import aephysics.math
+import aephysics.native
 import aephysics.basics
+import aephysics.parallel
 import aephysics.dynamic_tree
 import aephysics.hull
 import aephysics.distance
@@ -52,6 +54,7 @@ import aephysics.broad_phase
 import aephysics.mesh_contact
 
 exports (
+    reserve_scratch,
     WorldDef, BodyDef, ShapeDef, MotionLocks, WorldId, BodyId, ShapeId,
     World, Body, BodySim, BodyState, WorldShape, Contact, ContactEdge, Joint, JointEdge,
     SolverSet, Island, IslandSim, ContactLink, JointLink,
@@ -121,14 +124,15 @@ exports (
     should_bodies_collide, world_set_custom_filter, world_clear_custom_filter,
     transfer_body, transfer_joint, merge_solver_sets, body_set_type, body_disable, body_enable, body_get_joint_count,
     body_get_contact_capacity, body_get_joints, world_joint_count,
-    Sensor, SensorBeginTouchEvent, SensorEndTouchEvent, sensor_at, world_sensor_count,
+    Sensor, SensorBeginTouchEvent, SensorEndTouchEvent, sensor_at, world_sensor_count, Profile,
     world_sensor_begin_event_count, world_sensor_begin_event, world_sensor_end_event_count, world_sensor_end_event,
     shape_enable_sensor_events, shape_are_sensor_events_enabled, shape_get_sensor_capacity, shape_get_sensor_data,
     shape_get_contact_capacity, add_sensor_hit, overlap_sensors, validate_joints,
     BodyMoveEvent, ContactHitEvent, JointEvent, SensorHit, TIME_TO_SLEEP,
     world_body_move_event_count, world_body_move_event, world_contact_hit_event_count, world_contact_hit_event,
     world_joint_event_count, world_joint_event, world_set_pre_solve, world_clear_pre_solve,
-    shape_user_material_id, make_relative_sweep, body_move_event_at, sensor_hit_at
+    shape_user_material_id, make_relative_sweep, body_move_event_at,
+    TaskContext, task_context, task_context_at, task_sensor_hit_at
 )
 
 extern memset(block: ptr, value: int, size: int) -> ptr
@@ -236,6 +240,7 @@ struct WorldDef {
     static_shape_count: int
     dynamic_shape_count: int
     contact_count: int
+    worker_count: int              // the threads a step runs over: 1 is the calling thread alone
     user_data: ptr
 }
 
@@ -315,7 +320,7 @@ default_world_def() -> WorldDef {
                       contact_hertz: 30.0, contact_damping_ratio: 10.0, maximum_linear_speed: 400.0,
                       friction_callback: default_friction, restitution_callback: default_restitution,
                       enable_sleep: true, enable_continuous: true, static_body_count: 0, dynamic_body_count: 0,
-                      static_shape_count: 0, dynamic_shape_count: 0, contact_count: 0, user_data: null }
+                      static_shape_count: 0, dynamic_shape_count: 0, contact_count: 0, worker_count: 1, user_data: null }
 }
 
 default_body_def() -> BodyDef {
@@ -1041,12 +1046,52 @@ struct SolverSet {
     set_index: int                 // NULL_INDEX when unused
 }
 
+// A worker's own state through a step (b3TaskContext): the narrow
+// phase's arena, the contacts whose touching changed and its counters;
+// the solver's joints past their thresholds, contacts with a hit,
+// islands kept awake, split candidate and sensor hits. Each worker
+// writes only its own and the step merges them after.
+struct TaskContext {
+    arena: Arena
+    contact_state: BitSet
+    sat_call_count: int
+    sat_cache_hit_count: int
+    recycled_contact_count: int
+    joint_state_bits: BitSet
+    hit_event_bits: BitSet
+    has_hit_events: bool
+    awake_island_bits: BitSet
+    split_island_id: int
+    split_sleep_time: float
+    sensor_hits: Buffer            // SensorHit, from the continuous pass
+}
+
+// Where a step's time went, in milliseconds (b3Profile): the broad
+// phase's pairs, the narrow phase, the solve and its parts, the
+// sensors, and the whole step.
+struct Profile {
+    step: float
+    pairs: float
+    collide: float
+    solve: float
+    solver_setup: float
+    constraints: float             // the stages over the workers, the split island and the merges
+    transforms: float              // finalize: the bodies' transforms, bounds and proxies
+    refit: float
+    bullets: float
+    sleep_islands: float
+    sensors: float
+}
+
 struct World {
+    profile: Profile
     stack: Stack
     broad_phase: BroadPhase
     constraint_graph: ConstraintGraph
-    arena: Arena                   // the collide pass's scratch (one worker)
-    contact_state: BitSet          // the contacts whose touching changed this pass
+    task_contexts: ptr             // TaskContext[worker_count]
+    worker_count: int
+    scheduler: ptr                 // *Scheduler (aephysics.parallel), the step's threads
+    contact_state: BitSet          // the contacts whose touching changed this pass, every worker's merged
     contact_begin_events: Buffer   // ContactBeginTouchEvent
     contact_end_events0: Buffer    // ContactEndTouchEvent, double buffered
     contact_end_events1: Buffer
@@ -1083,7 +1128,6 @@ struct World {
     joint_state_bits: BitSet       // the solver's: joints past their thresholds
     hit_event_bits: BitSet         // contacts with a hit
     awake_island_bits: BitSet      // islands a body kept awake
-    sensor_hits: Buffer            // SensorHit, from the continuous pass
     split_island_candidate: int    // the sleepiest island that needs splitting
     split_sleep_time: float
     compound_shape_count: int
@@ -1116,6 +1160,23 @@ var g_worlds: ptr = null           // World[MAX_WORLDS]
 
 worlds_ready() {
     if g_worlds == null { g_worlds = basics.alloc(MAX_WORLDS * sizeof(World)) }
+}
+
+// Every module's per-worker scratch allocated on the calling thread,
+// before a step can reach it from several workers at once (each block
+// is allocated once and kept for the program).
+reserve_scratch() {
+    contact_scratch_ready()
+    child_scratch_ready()
+    sensor_scratch_ready()
+    manifold.reserve_scratch()
+    triangle_manifold.reserve_scratch()
+    mesh.reserve_scratch()
+    mesh_contact.reserve_scratch()
+    height_field.reserve_scratch()
+    sphere.reserve_scratch()
+    compound.reserve_scratch()
+    shape.reserve_scratch()
 }
 
 world_at(index: int) -> *World { return (g_worlds + index * sizeof(World)) as *World }
@@ -1207,7 +1268,24 @@ create_world(def: *WorldDef) -> WorldId {
     w.generation = generation
     w.in_use = true
     w.stack = basics.stack_create(2048)
-    w.arena = basics.arena_create(1 << 20)
+    w.worker_count = def.worker_count
+    if w.worker_count < 1 { w.worker_count = 1 }
+    if w.worker_count > native.MAX_WORKERS { w.worker_count = native.MAX_WORKERS }
+    w.scheduler = parallel.create_scheduler(w.worker_count) as ptr
+    reserve_scratch()
+    w.task_contexts = basics.alloc(w.worker_count * sizeof(TaskContext))
+    i = 0
+    while i < w.worker_count {
+        tc = task_context_at(w, i)
+        tc.arena = basics.arena_create(1 << 20)
+        tc.contact_state = basics.bitset_create(64)
+        tc.joint_state_bits = basics.bitset_create(64)
+        tc.hit_event_bits = basics.bitset_create(64)
+        tc.awake_island_bits = basics.bitset_create(64)
+        tc.split_island_id = NULL_INDEX
+        tc.sensor_hits = basics.buffer_create(sizeof(SensorHit), 4)
+        i = i + 1
+    }
     w.contact_state = basics.bitset_create(64)
     w.contact_begin_events = basics.buffer_create(sizeof(ContactBeginTouchEvent), 4)
     w.contact_end_events0 = basics.buffer_create(sizeof(ContactEndTouchEvent), 4)
@@ -1240,7 +1318,6 @@ create_world(def: *WorldDef) -> WorldId {
     w.joint_state_bits = basics.bitset_create(64)
     w.hit_event_bits = basics.bitset_create(64)
     w.awake_island_bits = basics.bitset_create(64)
-    w.sensor_hits = basics.buffer_create(sizeof(SensorHit), 4)
     w.split_island_candidate = NULL_INDEX
     w.split_sleep_time = 0.0
     w.contact_id_pool = basics.idpool_create()
@@ -1303,7 +1380,6 @@ destroy_world(id: WorldId) {
     basics.bitset_destroy(&w.joint_state_bits)
     basics.bitset_destroy(&w.hit_event_bits)
     basics.bitset_destroy(&w.awake_island_bits)
-    basics.buffer_destroy(&w.sensor_hits)
     i = 0
     while i < w.contacts.count {
         c = contact_at(w, i)
@@ -1343,7 +1419,19 @@ destroy_world(id: WorldId) {
     basics.idpool_destroy(&w.island_id_pool)
     broad_phase.destroy_broad_phase(&w.broad_phase)
     destroy_graph(&w.constraint_graph)
-    basics.arena_destroy(&w.arena)
+    i = 0
+    while i < w.worker_count {
+        tc = task_context_at(w, i)
+        basics.arena_destroy(&tc.arena)
+        basics.bitset_destroy(&tc.contact_state)
+        basics.bitset_destroy(&tc.joint_state_bits)
+        basics.bitset_destroy(&tc.hit_event_bits)
+        basics.bitset_destroy(&tc.awake_island_bits)
+        basics.buffer_destroy(&tc.sensor_hits)
+        i = i + 1
+    }
+    basics.free_bytes(w.task_contexts, w.worker_count * sizeof(TaskContext))
+    parallel.destroy_scheduler(w.scheduler as *Scheduler)
     basics.bitset_destroy(&w.contact_state)
     basics.buffer_destroy(&w.contact_begin_events)
     basics.buffer_destroy(&w.contact_end_events0)
@@ -2800,12 +2888,14 @@ invalidate_body_contacts(w: *World, body: *Body) {
 }
 
 var g_local_points: ptr = null   // LocalManifoldPoint[MAX_MANIFOLD_POINTS]
+local_points() -> ptr { return native.scratch(g_local_points, MAX_MANIFOLD_POINTS * sizeof(LocalManifoldPoint)) }
 var g_old_points: ptr = null     // ManifoldPoint[MAX_MANIFOLD_POINTS]
+old_points() -> ptr { return native.scratch(g_old_points, MAX_MANIFOLD_POINTS * sizeof(ManifoldPoint)) }
 
 contact_scratch_ready() {
     if g_local_points == null {
-        g_local_points = basics.alloc(MAX_MANIFOLD_POINTS * sizeof(LocalManifoldPoint))
-        g_old_points = basics.alloc(MAX_MANIFOLD_POINTS * sizeof(ManifoldPoint))
+        g_local_points = basics.alloc(native.MAX_WORKERS * (MAX_MANIFOLD_POINTS * sizeof(LocalManifoldPoint)))
+        g_old_points = basics.alloc(native.MAX_WORKERS * (MAX_MANIFOLD_POINTS * sizeof(ManifoldPoint)))
     }
 }
 
@@ -2816,7 +2906,7 @@ compute_convex_manifold(w: *World, c: *Contact, geometry_a: *Shape, xf_a: Transf
     contact_scratch_ready()
     kind_a = geometry_a.kind
     kind_b = geometry_b.kind
-    m = manifold.local_manifold(g_local_points)
+    m = manifold.local_manifold(local_points())
     transform_b_to_a = math.inv_mul_transforms(xf_a, xf_b)
     if kind_a == KIND_SPHERE {
         manifold.collide_spheres(&m, MAX_MANIFOLD_POINTS, geometry_a.sphere, geometry_b.sphere, transform_b_to_a)
@@ -2828,15 +2918,16 @@ compute_convex_manifold(w: *World, c: *Contact, geometry_a: *Shape, xf_a: Transf
         else if kind_b == KIND_CAPSULE { manifold.collide_hull_and_capsule(&m, MAX_MANIFOLD_POINTS, geometry_a.hull, geometry_b.capsule, transform_b_to_a, &c.convex_cache.simplex_cache) }
         else {
             manifold.collide_hulls(&m, MAX_MANIFOLD_POINTS, geometry_a.hull, geometry_b.hull, transform_b_to_a, &c.convex_cache.sat_cache)
-            w.sat_call_count = w.sat_call_count + 1
-            w.sat_cache_hit_count = w.sat_cache_hit_count + c.convex_cache.sat_cache.hit
+            tc = task_context(w)
+            tc.sat_call_count = tc.sat_call_count + 1
+            tc.sat_cache_hit_count = tc.sat_cache_hit_count + c.convex_cache.sat_cache.hit
         }
     }
     if m.point_count == 0 {
         free_manifolds(c)
         return false
     }
-    old = g_old_points as ManifoldPoint[]
+    old = old_points() as ManifoldPoint[]
     old_count = 0
     if c.manifold_count == 0 {
         allocate_manifolds(c, 1)
@@ -2947,21 +3038,22 @@ update_mesh_contact(w: *World, c: *Contact, mesh_geometry: *Shape, mesh_shape: *
     contact_scratch_ready()
     bounds_b = shape_b.aabb
     enable_speculative = (c.flags & ENABLE_SPECULATIVE_POINTS) != 0
-    mark = w.arena.index
-    r = mesh_contact.compute_mesh_manifolds(&c.mesh_cache, mesh_geometry, xf_a, &shape_b.geometry, xf_b, bounds_b, is_fast, enable_speculative, &w.arena)
-    w.sat_call_count = w.sat_call_count + r.sat_calls
-    w.sat_cache_hit_count = w.sat_cache_hit_count + r.sat_cache_hits
+    tc = task_context(w)
+    mark = tc.arena.index
+    r = mesh_contact.compute_mesh_manifolds(&c.mesh_cache, mesh_geometry, xf_a, &shape_b.geometry, xf_b, bounds_b, is_fast, enable_speculative, &tc.arena)
+    tc.sat_call_count = tc.sat_call_count + r.sat_calls
+    tc.sat_cache_hit_count = tc.sat_cache_hit_count + r.sat_cache_hits
     cluster_count = r.cluster_count
     if cluster_count == 0 {
         free_manifolds(c)
-        w.arena.index = mark
+        tc.arena.index = mark
         return false
     }
     // The old manifolds, kept aside for the matching.
     old_count = c.manifold_count
     old_block = null
     if old_count > 0 {
-        old_block = basics.arena_bump(&w.arena, old_count * sizeof(Manifold))
+        old_block = basics.arena_bump(&tc.arena, old_count * sizeof(Manifold))
         memcpy(old_block, c.manifolds, old_count * sizeof(Manifold))
     }
     if old_count != cluster_count {
@@ -2972,7 +3064,7 @@ update_mesh_contact(w: *World, c: *Contact, mesh_geometry: *Shape, mesh_shape: *
     consumed_block = null
     consumed = null as int[]
     if old_count > 0 {
-        consumed_block = basics.arena_bump(&w.arena, old_count * 4)
+        consumed_block = basics.arena_bump(&tc.arena, old_count * 4)
         memset(consumed_block, 0, old_count * 4)
         consumed = consumed_block as int[]
     }
@@ -3094,29 +3186,35 @@ update_mesh_contact(w: *World, c: *Contact, mesh_geometry: *Shape, mesh_shape: *
     else if shape_b.geometry.kind == KIND_HULL { radius_b = shape_b.geometry.hull.inner_radius }
     c.rolling_resistance = material_b.rolling_resistance * radius_b
     c.tangent_velocity = math.sub(tangent_velocity_a, math.rotate_vector(xf_b.q, material_b.tangent_velocity))
-    w.arena.index = mark
+    tc.arena.index = mark
     return true
 }
 
 var g_child_geometry: ptr = null   // Shape: a compound's child as a shape
+child_geometry() -> ptr { return native.scratch(g_child_geometry, sizeof(Shape)) }
 var g_material_map: ptr = null     // int[4]
+material_map() -> ptr { return native.scratch(g_material_map, 4 * 4) }
 
 // The contact's manifolds and whether it touches, for any pair: a
 // compound's child stands in for the compound (its transform composed),
 // a mesh or height field goes through the mesh contact, the rest
 // through the convex manifolds; the anchors end relative to the centres
 // of mass.
+child_scratch_ready() {
+    if g_child_geometry == null {
+        g_child_geometry = basics.alloc(native.MAX_WORKERS * (sizeof(Shape)))
+        g_material_map = basics.alloc(native.MAX_WORKERS * (4 * 4))
+    }
+}
+
 update_contact(w: *World, c: *Contact, shape_a: *WorldShape, local_center_a: Vec3, xf_a: Transform, shape_b: *WorldShape,
                local_center_b: Vec3, xf_b: Transform, is_fast: bool) -> bool {
-    if g_child_geometry == null {
-        g_child_geometry = basics.alloc(sizeof(Shape))
-        g_material_map = basics.alloc(4 * 4)
-    }
+    child_scratch_ready()
     touching = false
     kind_a = shape_a.geometry.kind
     if kind_a == KIND_COMPOUND {
         child = compound.get_compound_child(shape_a.geometry.compound, c.child_index)
-        child_geometry = g_child_geometry as *Shape
+        child_geometry = child_geometry() as *Shape
         materials_a = shape_a.materials as SurfaceMaterial[]
         child_material = materials_a[math.clamp_int(child.material_index0, 0, shape_a.material_count - 1)]
         if child.kind == KIND_CAPSULE {
@@ -3136,12 +3234,12 @@ update_contact(w: *World, c: *Contact, shape_a: *WorldShape, local_center_a: Vec
             cg = shape.mesh_shape(child.mesh, shape_a.material_count)
             copy_geometry(child_geometry, cg)
             xf_child = math.mul_transforms(xf_a, child.transform)
-            map = g_material_map as int[]
+            map = material_map() as int[]
             map[0] = child.material_index0
             map[1] = child.material_index1
             map[2] = child.material_index2
             map[3] = child.material_index3
-            touching = update_mesh_contact(w, c, child_geometry, shape_a, g_material_map, xf_child, shape_b, xf_b, is_fast)
+            touching = update_mesh_contact(w, c, child_geometry, shape_a, material_map(), xf_child, shape_b, xf_b, is_fast)
             set_hit_event_flag(c, touching, shape_a.flags, shape_b.flags)
         } else {
             cg = shape.sphere_shape(child.sphere, 0.0)
@@ -3793,7 +3891,8 @@ try_recycle_contact(w: *World, c: *Contact, sim_a: *BodySim, sim_b: *BodySim, st
         }
         i = i + 1
     }
-    w.recycled_contact_count = w.recycled_contact_count + 1
+    tc = task_context(w)
+    tc.recycled_contact_count = tc.recycled_contact_count + 1
     return true
 }
 
@@ -3806,7 +3905,7 @@ collide_contact(w: *World, contact_id: int) {
     shape_b = world_shape_at(w, c.shape_id_b)
     if math.aabb_overlaps(shape_a.fat_aabb, shape_b.fat_aabb) == false {
         c.flags = (c.flags | SIM_DISJOINT) & (0 - 1 - SIM_TOUCHING)
-        basics.bitset_set(&w.contact_state, contact_id)
+        basics.bitset_set(&task_context(w).contact_state, contact_id)
         return
     }
     body_a = body_at(w, shape_a.body_id)
@@ -3837,10 +3936,10 @@ collide_contact(w: *World, contact_id: int) {
     }
     if touching && was_touching == false {
         c.flags = c.flags | SIM_STARTED_TOUCHING
-        basics.bitset_set(&w.contact_state, contact_id)
+        basics.bitset_set(&task_context(w).contact_state, contact_id)
     } else if touching == false && was_touching {
         c.flags = c.flags | SIM_STOPPED_TOUCHING
-        basics.bitset_set(&w.contact_state, contact_id)
+        basics.bitset_set(&task_context(w).contact_state, contact_id)
     }
     i = 0
     while i < c.manifold_count {
@@ -3878,6 +3977,26 @@ remove_non_touching_contact(w: *World, set_index: int, local_index: int) {
 // touching linked into islands and the graph (with a begin event),
 // contacts that stopped unlinked and back among the non-touching (with
 // an end event). Returns how many contacts changed state.
+// A block of the pass on one worker.
+struct CollideTask {
+    w: *World
+    indices: ptr                   // int[], the contacts of the pass
+}
+
+collide_range(start: int, end: int, worker: int, context: ptr) {
+    task = context as *CollideTask
+    indices = task.indices as int[]
+    i = start
+    while i < end {
+        collide_contact(task.w, indices[i])
+        i = i + 1
+    }
+}
+
+// The calling worker's context, and any worker's.
+task_context(w: *World) -> *TaskContext { return (w.task_contexts + native.worker_index() * sizeof(TaskContext)) as *TaskContext }
+task_context_at(w: *World, index: int) -> *TaskContext { return (w.task_contexts + index * sizeof(TaskContext)) as *TaskContext }
+
 collide(w: *World) -> int {
     basics.buffer_clear(&w.contact_begin_events)
     touching_count = 0
@@ -3916,17 +4035,35 @@ collide(w: *World) -> int {
         n = n + 1
         i = i + 1
     }
-    basics.bitset_set_count_and_clear(&w.contact_state, basics.idpool_capacity(&w.contact_id_pool))
+    capacity = basics.idpool_capacity(&w.contact_id_pool)
+    i = 0
+    while i < w.worker_count {
+        tc = task_context_at(w, i)
+        basics.bitset_set_count_and_clear(&tc.contact_state, capacity)
+        tc.sat_call_count = 0
+        tc.sat_cache_hit_count = 0
+        tc.recycled_contact_count = 0
+        i = i + 1
+    }
+    // The contacts in blocks over the workers; each writes its own context.
+    task = CollideTask { w: w, indices: indices_block }
+    parallel.parallel_for(w.scheduler as *Scheduler, collide_range, contact_count, 64, (&task) as ptr)
+    basics.stack_free(&w.stack, indices_block)
+    // The workers' state merged: the changed bits in one set, the counters summed.
+    basics.bitset_set_count_and_clear(&w.contact_state, capacity)
     w.sat_call_count = 0
     w.sat_cache_hit_count = 0
     w.recycled_contact_count = 0
     i = 0
-    while i < contact_count {
-        collide_contact(w, indices[i])
+    while i < w.worker_count {
+        tc = task_context_at(w, i)
+        basics.bitset_union(&w.contact_state, &tc.contact_state)
+        w.sat_call_count = w.sat_call_count + tc.sat_call_count
+        w.sat_cache_hit_count = w.sat_cache_hit_count + tc.sat_cache_hit_count
+        w.recycled_contact_count = w.recycled_contact_count + tc.recycled_contact_count
+        basics.arena_sync(&tc.arena)
         i = i + 1
     }
-    basics.stack_free(&w.stack, indices_block)
-    basics.arena_sync(&w.arena)
     // The state changes, in id order.
     changed = 0
     bits = w.contact_state.bits as long[]
@@ -5277,22 +5414,27 @@ struct SensorQueryContext {
 }
 
 var g_sensor_points: ptr = null   // Vec3[MAX_SHAPE_CAST_POINTS]: the visitor in the sensor's frame
+sensor_points() -> ptr { return native.scratch(g_sensor_points, distance.MAX_SHAPE_CAST_POINTS * sizeof(Vec3)) }
+
+sensor_scratch_ready() {
+    if g_sensor_points == null { g_sensor_points = basics.alloc(native.MAX_WORKERS * (distance.MAX_SHAPE_CAST_POINTS * sizeof(Vec3))) }
+}
 
 // Whether a convex visitor overlaps the sensor's shape: the visitor's
 // proxy in the sensor's frame against the sensor's geometry.
 overlap_sensor(sensor_shape: *WorldShape, sensor_transform: Transform, visitor: *WorldShape, visitor_transform: Transform) -> bool {
-    if g_sensor_points == null { g_sensor_points = basics.alloc(distance.MAX_SHAPE_CAST_POINTS * sizeof(Vec3)) }
+    sensor_scratch_ready()
     proxy = shape.make_shape_proxy(&visitor.geometry)
     relative = math.inv_mul_transforms(sensor_transform, visitor_transform)
     count = math.min_int(proxy.count, distance.MAX_SHAPE_CAST_POINTS)
     points = proxy.points as Vec3[]
-    local_points = g_sensor_points as Vec3[]
+    local_points = sensor_points() as Vec3[]
     i = 0
     while i < count {
         local_points[i] = math.transform_point(relative, points[i])
         i = i + 1
     }
-    return shape.overlap_shape(&sensor_shape.geometry, math.transform_identity(), distance.shape_proxy(g_sensor_points, count, proxy.radius))
+    return shape.overlap_shape(&sensor_shape.geometry, math.transform_identity(), distance.shape_proxy(sensor_points(), count, proxy.radius))
 }
 
 // A tree's proxy near a sensor: a convex shape on another body that
@@ -5439,7 +5581,7 @@ overlap_sensors(w: *World) {
 // --- the step's events and helpers ---------------------------------------------------------------------------
 
 body_move_event_at(w: *World, index: int) -> *BodyMoveEvent { return (w.body_move_events.data + index * sizeof(BodyMoveEvent)) as *BodyMoveEvent }
-sensor_hit_at(w: *World, index: int) -> *SensorHit { return (w.sensor_hits.data + index * sizeof(SensorHit)) as *SensorHit }
+task_sensor_hit_at(tc: *TaskContext, index: int) -> *SensorHit { return (tc.sensor_hits.data + index * sizeof(SensorHit)) as *SensorHit }
 world_body_move_event_count(w: *World) -> int { return w.body_move_events.count }
 world_body_move_event(w: *World, index: int) -> BodyMoveEvent {
     events = w.body_move_events.data as BodyMoveEvent[]

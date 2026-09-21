@@ -597,6 +597,7 @@ test_parallel_motor_wheel() {
 }
 
 main() {
+    dynamics.reserve_scratch()
     before = basics.alloc_count()
     test_accessors()
     test_distance()
@@ -606,7 +607,7 @@ main() {
     test_spherical()
     test_parallel_motor_wheel()
     hull.destroy_hull(g_cube as *HullData)
-    // The scratch stays allocated: the worlds' block, the masses, the dummy state.
+    // The scratch stays allocated: the worlds' block, the masses, the dummy state (the modules' scratch is reserved before the count).
     ensure("every other counted allocation was freed (${basics.alloc_count() - before})", basics.alloc_count() == before + 3)
     println("joint_solver: ${checks} checks")
     if failures == 0 {

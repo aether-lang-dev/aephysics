@@ -20,6 +20,7 @@
 // mesh module's scalar ones.
 import std.string
 import aephysics.math
+import aephysics.native
 import aephysics.basics
 import aephysics.distance
 import aephysics.manifold
@@ -27,6 +28,7 @@ import aephysics.triangle_manifold
 import aephysics.mesh
 
 exports (
+    reserve_scratch,
     HeightFieldDef, HeightFieldData,
     HEIGHT_FIELD_VERSION, HEIGHT_FIELD_HOLE, NULL_INDEX,
     height_field_def, height_field_heights, height_field_material_indices, height_field_flags,
@@ -97,12 +99,14 @@ align8(x: int) -> int { return (x + 7) & (0 - 8) }
 // --- scratch ---------------------------------------------------------------------
 
 var g_triangle: ptr = null   // Vec3[3]
+triangle_points() -> ptr { return native.scratch(g_triangle, 3 * sizeof(Vec3)) }
 var g_local: ptr = null      // Vec3[128]
+local_points() -> ptr { return native.scratch(g_local, 128 * sizeof(Vec3)) }
 
 scratch_ready() {
     if g_triangle == null {
-        g_triangle = basics.alloc(3 * sizeof(Vec3))
-        g_local = basics.alloc(128 * sizeof(Vec3))
+        g_triangle = basics.alloc(native.MAX_WORKERS * (3 * sizeof(Vec3)))
+        g_local = basics.alloc(native.MAX_WORKERS * (128 * sizeof(Vec3)))
     }
 }
 
@@ -342,10 +346,19 @@ cell_corners(h: *HeightFieldData, row: int, column: int, corners: Vec3[]) {
 }
 
 var g_corners: ptr = null
+corner_points() -> ptr { return native.scratch(g_corners, 4 * sizeof(Vec3)) }
 
 corners_ready() -> Vec3[] {
-    if g_corners == null { g_corners = basics.alloc(4 * sizeof(Vec3)) }
-    return g_corners as Vec3[]
+    if g_corners == null { g_corners = basics.alloc(native.MAX_WORKERS * (4 * sizeof(Vec3))) }
+    return corner_points() as Vec3[]
+}
+
+// Every scratch block of the module allocated now, on the calling
+// thread: a world's creation reserves every module's before a step can
+// reach them from several workers at once.
+reserve_scratch() {
+    scratch_ready()
+    corners_ready()
 }
 
 // A triangle of the field, wound counter-clockwise about its front (down
@@ -390,9 +403,9 @@ compute_height_field_aabb(h: *HeightFieldData, t: Transform) -> AABB { return ma
 // A ray is a shape cast of a point with no radius.
 ray_cast_height_field(h: *HeightFieldData, origin: Vec3, translation: Vec3, max_fraction: float) -> CastOutput {
     scratch_ready()
-    point = g_local as Vec3[]
+    point = local_points() as Vec3[]
     point[0] = origin
-    return shape_cast_height_field(h, distance.shape_proxy(g_local, 1, 0.0), translation, max_fraction, false)
+    return shape_cast_height_field(h, distance.shape_proxy(local_points(), 1, 0.0), translation, max_fraction, false)
 }
 
 // The proxy swept through the field: its box's leading corner is walked
@@ -603,11 +616,11 @@ shape_cast_height_field(h: *HeightFieldData, proxy: ShapeProxy, translation: Vec
 // best fraction after.
 cast_triangle(result: *CastOutput, proxy: ShapeProxy, translation: Vec3, can_encroach: bool, a: Vec3, b: Vec3, c: Vec3,
               best_fraction: float, triangle_index: int, material: int) -> float {
-    tri = g_triangle as Vec3[]
+    tri = triangle_points() as Vec3[]
     tri[0] = math.vec3_zero()
     tri[1] = math.sub(b, a)
     tri[2] = math.sub(c, a)
-    pair = ShapeCastPairInput { proxy_a: distance.shape_proxy(g_triangle, 3, 0.0), proxy_b: proxy,
+    pair = ShapeCastPairInput { proxy_a: distance.shape_proxy(triangle_points(), 3, 0.0), proxy_b: proxy,
                                 transform: Transform { p: math.neg(a), q: math.quat_identity() },
                                 translation_b: translation, max_fraction: best_fraction, can_encroach: can_encroach }
     output = distance.shape_cast(&pair)
@@ -645,17 +658,17 @@ cell_range(h: *HeightFieldData, bounds: AABB) -> CellRange {
 // triangle under the field's transform.
 overlap_height_field(h: *HeightFieldData, shape_transform: Transform, proxy: ShapeProxy) -> bool {
     scratch_ready()
-    local_proxy = mesh.make_local_proxy(proxy, shape_transform, g_local)
+    local_proxy = mesh.make_local_proxy(proxy, shape_transform, local_points())
     bounds = mesh.compute_proxy_aabb(local_proxy)
     range = cell_range(h, bounds)
     center = math.aabb_center(bounds)
     extent = math.aabb_extents(bounds)
-    input = DistanceInput { proxy_a: distance.shape_proxy(g_triangle, 3, 0.0), proxy_b: local_proxy,
+    input = DistanceInput { proxy_a: distance.shape_proxy(triangle_points(), 3, 0.0), proxy_b: local_proxy,
                             transform: math.transform_identity(), use_radii: true }
     cache = distance.empty_cache()
     materials = height_field_material_indices(h)
     corners = corners_ready()
-    tri = g_triangle as Vec3[]
+    tri = triangle_points() as Vec3[]
     tolerance = 0.1 * math.LINEAR_SLOP
     row = range.min_row
     while row <= range.max_row {
@@ -736,7 +749,7 @@ query_height_field(h: *HeightFieldData, bounds: AABB, visitor: fn(Vec3, Vec3, Ve
 collide_mover_and_height_field(planes: PlaneResult[], capacity: int, h: *HeightFieldData, mover: Capsule) -> int {
     if capacity == 0 { return 0 }
     scratch_ready()
-    input = DistanceInput { proxy_a: distance.shape_proxy(g_triangle, 3, 0.0), proxy_b: distance.shape_proxy((&mover) as ptr, 2, 0.0),
+    input = DistanceInput { proxy_a: distance.shape_proxy(triangle_points(), 3, 0.0), proxy_b: distance.shape_proxy((&mover) as ptr, 2, 0.0),
                             transform: math.transform_identity(), use_radii: false }
     cache = distance.empty_cache()
     radius = mover.radius
@@ -747,7 +760,7 @@ collide_mover_and_height_field(planes: PlaneResult[], capacity: int, h: *HeightF
     range = cell_range(h, bounds)
     materials = height_field_material_indices(h)
     corners = corners_ready()
-    tri = g_triangle as Vec3[]
+    tri = triangle_points() as Vec3[]
     plane_count = 0
     row = range.min_row
     while row <= range.max_row {

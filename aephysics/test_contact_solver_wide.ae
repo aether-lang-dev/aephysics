@@ -165,9 +165,9 @@ farthest(a: Outcome, b: Outcome) -> float {
     return worst
 }
 
-run_mode(wide: bool, native: bool) -> Outcome {
+run_mode(wide: bool, use_native: bool) -> Outcome {
     solver.set_wide_contacts(wide)
-    contact_solver_wide.set_native_lanes(native)
+    contact_solver_wide.set_native_lanes(use_native)
     return run_scene()
 }
 
@@ -184,8 +184,8 @@ main() {
 
     scalar = run_mode(false, false)
     lanes = run_mode(true, false)
-    native = run_mode(true, true)
-    native_again = run_mode(true, true)
+    lanes_native = run_mode(true, true)
+    lanes_native_again = run_mode(true, true)
 
     // The scene did what it was built to do.
     ensure("the ball bounced and reported hits (${scalar.hits})", scalar.hits >= 2)
@@ -196,18 +196,18 @@ main() {
     ensure("the stack stands (${stack[5].y})", stack[5].y > 5.3 && stack[5].y < 5.7)
 
     // The three paths land in the same place; the same path twice, to the bit.
-    println("contact_solver_wide: lanes vs scalar ${farthest(lanes, scalar)}, native vs lanes ${farthest(native, lanes)}, native twice ${farthest(native, native_again)}")
+    println("contact_solver_wide: lanes vs scalar ${farthest(lanes, scalar)}, native vs lanes ${farthest(lanes_native, lanes)}, native twice ${farthest(lanes_native, lanes_native_again)}")
     ensure("the Aether lanes agree with the scalar solve", farthest(lanes, scalar) < 0.001)
-    ensure("the native lanes agree with the Aether lanes", farthest(native, lanes) < 0.01)
-    ensure("the native lanes repeat to the bit", farthest(native, native_again) == 0.0)
-    ensure("hit events agree (${scalar.hits}, ${lanes.hits}, ${native.hits})", scalar.hits == lanes.hits && lanes.hits == native.hits)
-    ensure("the rolling speeds agree", math.abs_float(lanes.rolling_speed - scalar.rolling_speed) < 0.001 && math.abs_float(native.rolling_speed - lanes.rolling_speed) < 0.01)
-    ensure("the conveyor speeds agree", math.abs_float(lanes.conveyor_speed - scalar.conveyor_speed) < 0.001 && math.abs_float(native.conveyor_speed - lanes.conveyor_speed) < 0.01)
+    ensure("the native lanes agree with the Aether lanes", farthest(lanes_native, lanes) < 0.01)
+    ensure("the native lanes repeat to the bit", farthest(lanes_native, lanes_native_again) == 0.0)
+    ensure("hit events agree (${scalar.hits}, ${lanes.hits}, ${lanes_native.hits})", scalar.hits == lanes.hits && lanes.hits == lanes_native.hits)
+    ensure("the rolling speeds agree", math.abs_float(lanes.rolling_speed - scalar.rolling_speed) < 0.001 && math.abs_float(lanes_native.rolling_speed - lanes.rolling_speed) < 0.01)
+    ensure("the conveyor speeds agree", math.abs_float(lanes.conveyor_speed - scalar.conveyor_speed) < 0.001 && math.abs_float(lanes_native.conveyor_speed - lanes.conveyor_speed) < 0.01)
 
     free(scalar.positions)
     free(lanes.positions)
-    free(native.positions)
-    free(native_again.positions)
+    free(lanes_native.positions)
+    free(lanes_native_again.positions)
     hull.destroy_hull(g_box as *HullData)
     solver.set_wide_contacts(true)
     contact_solver_wide.set_native_lanes(true)

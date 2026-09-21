@@ -1,0 +1,192 @@
+// aephysics.parallel's checks: a task runs on the pool as the worker it
+// was given and finish waits for it; parallel_for covers every item of
+// a range exactly once, on every worker, however the blocks fall (a
+// range under one block, one block a worker, many blocks a worker); a
+// scheduler of one worker runs everything on the calling thread; the
+// per-worker scratch of the modules is a block per worker; and a
+// thousand rounds of tasks leave the pool as they found it.
+import std.string
+import std.sync
+import aephysics.basics
+import aephysics.native
+import aephysics.parallel
+
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+extern exit(code: int)
+
+var failures = 0
+var checks = 0
+
+ensure(name: string, ok: bool) {
+    checks = checks + 1
+    if !ok {
+        println("parallel: FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+// A task's context: where it ran, and a value it computes.
+struct Probe {
+    saw_worker: int
+    value: long
+}
+
+probe_task(context: ptr) {
+    p = context as *Probe
+    p.saw_worker = native.worker_index()
+    sum = 0 as long
+    i = 0
+    while i < 100000 { sum = sum + (i as long); i = i + 1 }
+    p.value = sum
+}
+
+// A range's context: a mark per item (how many times it was visited),
+// and a count of blocks per worker.
+struct Range {
+    marks: ptr                     // int[count]
+    count: int
+    blocks_by_worker: ptr          // int[MAX_WORKERS]
+    smallest_block: int
+    largest_block: int
+    worker_index_agreed: bool      // native.worker_index() matched the callback's argument
+}
+
+var g_spin = 0   // the work an item costs, so a block takes long enough for the pool's threads to join
+
+range_callback(start: int, end: int, worker: int, context: ptr) {
+    r = context as *Range
+    marks = r.marks as int[]
+    i = start
+    while i < end {
+        marks[i] = marks[i] + 1
+        // Work the compiler cannot skip: a sum it would have to run.
+        sum = 0 as long
+        k = 0
+        while k < g_spin { sum = sum + ((k * k) as long); k = k + 1 }
+        if sum == (12345 as long) { marks[i] = marks[i] + 1000 }
+        i = i + 1
+    }
+    per_worker = r.blocks_by_worker as int[]
+    // Not atomic: one worker's counter is only ever touched by that worker.
+    per_worker[worker] = per_worker[worker] + 1
+    if end - start < r.smallest_block { r.smallest_block = end - start }
+    if end - start > r.largest_block { r.largest_block = end - start }
+    if native.worker_index() != worker { r.worker_index_agreed = false }
+}
+
+run_range(s: *Scheduler, count: int, min_range: int) -> Range {
+    r = Range { marks: calloc(count + 1, 4), count: count, blocks_by_worker: calloc(parallel.MAX_WORKERS, 4),
+                smallest_block: 1000000000, largest_block: 0, worker_index_agreed: true }
+    parallel.parallel_for(s, range_callback, count, min_range, (&r) as ptr)
+    return r
+}
+
+every_item_once(r: Range) -> bool {
+    marks = r.marks as int[]
+    i = 0
+    while i < r.count {
+        if marks[i] != 1 { return false }
+        i = i + 1
+    }
+    return true
+}
+
+workers_used(r: Range) -> int {
+    per_worker = r.blocks_by_worker as int[]
+    used = 0
+    i = 0
+    while i < parallel.MAX_WORKERS {
+        if per_worker[i] > 0 { used = used + 1 }
+        i = i + 1
+    }
+    return used
+}
+
+free_range(r: Range) {
+    free(r.marks)
+    free(r.blocks_by_worker)
+}
+
+main() {
+    ensure("the machine reports its processors (${native.processor_count()})", native.processor_count() >= 1)
+    ensure("the main thread is worker 0", native.worker_index() == 0)
+
+    // Four workers: tasks land on their workers, finish waits.
+    s = parallel.create_scheduler(4)
+    ensure("four workers", parallel.scheduler_worker_count(s) == 4)
+    probes_block = calloc(3, sizeof(Probe))
+    probes = probes_block as Probe[]
+    handles_block = calloc(3, 8)
+    handles = handles_block as ptr[]
+    i = 0
+    while i < 3 {
+        probes[i] = Probe { saw_worker: 0 - 1, value: 0 as long }
+        handles[i] = parallel.enqueue(s, probe_task, probes_block + i * sizeof(Probe), i + 1) as ptr
+        i = i + 1
+    }
+    i = 0
+    while i < 3 {
+        parallel.finish(s, handles[i] as *Task)
+        i = i + 1
+    }
+    ensure("tasks ran as the workers they were given (${probes[0].saw_worker}, ${probes[1].saw_worker}, ${probes[2].saw_worker})",
+           probes[0].saw_worker == 1 && probes[1].saw_worker == 2 && probes[2].saw_worker == 3)
+    ensure("tasks computed their values", probes[0].value == (4999950000 as long) && probes[2].value == (4999950000 as long))
+    ensure("finish leaves the main thread worker 0", native.worker_index() == 0)
+    free(probes_block)
+    free(handles_block)
+
+    // parallel_for: every item once, whatever the block sizes. With a
+    // block's worth of work per item, the pool's threads join in.
+    g_spin = 2000
+    r = run_range(s, 10000, 16)
+    ensure("10,000 items in blocks of 16: every item once", every_item_once(r))
+    ensure("10,000 items: the callback's worker is the thread's", r.worker_index_agreed)
+    ensure("10,000 items: more than one worker took blocks (${workers_used(r)})", workers_used(r) >= 2)
+    ensure("10,000 items: blocks of 16 until the count bounds them (${r.smallest_block}, ${r.largest_block})", r.largest_block >= 16 && r.largest_block <= 10000)
+    free_range(r)
+    g_spin = 0
+    r = run_range(s, 7, 16)
+    ensure("7 items under one block: every item once, one block", every_item_once(r) && r.largest_block == 7 && workers_used(r) == 1)
+    free_range(r)
+    r = run_range(s, 1000000, 1)
+    ensure("a million items of range 1: every item once", every_item_once(r))
+    ensure("a million items: blocks grew past the minimum (${r.largest_block})", r.largest_block > 1 && r.largest_block <= 1000000 / (32 * 4) + 1)
+    free_range(r)
+    r = run_range(s, 0, 8)
+    ensure("an empty range runs nothing", r.largest_block == 0)
+    free_range(r)
+
+    // Round after round: the pool comes back the same.
+    bad_rounds = 0
+    round = 0
+    while round < 1000 {
+        r = run_range(s, 512, 8)
+        if every_item_once(r) == false { bad_rounds = bad_rounds + 1 }
+        free_range(r)
+        round = round + 1
+    }
+    ensure("a thousand rounds all covered their items (${bad_rounds} did not)", bad_rounds == 0)
+    parallel.destroy_scheduler(s)
+
+    // One worker: inline, on this thread, no pool.
+    one = parallel.create_scheduler(1)
+    r = run_range(one, 1000, 16)
+    ensure("one worker: every item once on worker 0", every_item_once(r) && workers_used(r) == 1 && r.worker_index_agreed)
+    ensure("one worker: one block, the whole range", r.largest_block == 1000)
+    free_range(r)
+    p = Probe { saw_worker: 0 - 1, value: 0 as long }
+    t = parallel.enqueue(one, probe_task, (&p) as ptr, 5)
+    parallel.finish(one, t)
+    ensure("one worker: a task runs inline as the worker asked", p.saw_worker == 5 && p.value == (4999950000 as long))
+    parallel.destroy_scheduler(one)
+
+    println("parallel: ${checks} checks")
+    if failures == 0 {
+        println("parallel: all checks passed")
+    } else {
+        println("parallel: ${failures} failure(s)")
+        exit(1)
+    }
+}

@@ -26,15 +26,15 @@ import aephysics.contact_solver
 exports (
     WIDTH, FloatW, Vec3W, IntW, WideConstraintPoint, WideConstraint,
     wide_constraint_at, wide_constraint_count, wide_point_at, lane, int_lane,
-    prepare_wide_contacts, warm_start_wide_contacts, solve_wide_contacts, apply_wide_restitution, store_wide_impulses,
+    pack_wide, unpack_wide, prepare_wide_contacts, prepare_wide_range, zero_wide_tail, warm_start_wide_contacts, solve_wide_contacts, apply_wide_restitution, store_wide_impulses, store_wide_range,
     set_native_lanes, native_lanes_enabled, native_layout_matches, begin_wide_step, end_wide_step
 )
 
 extern sqrt(x: float) -> float
 extern memset(p: ptr, value: int, count: int) -> ptr
 
-// The lanes as vector code, lanes.c beside this module (built with it:
-// `ae build --extra aephysics/contact_solver_wide/lanes.c`, or an
+// The lanes as vector code in aephysics/native/aephysics_native.c (built with the program:
+// `ae build --extra aephysics/native/aephysics_native.c`, or an
 // extra_sources entry): the same layout and arithmetic, four contacts
 // per instruction. On by default; off, the Aether lanes below run.
 extern aephysics_wide_constraint_size() -> int
@@ -42,8 +42,10 @@ extern aephysics_wide_body_state_size() -> int
 extern aephysics_wide_warm_start(states: ptr, constraints: ptr, count: int)
 extern aephysics_wide_solve(states: ptr, constraints: ptr, count: int, use_bias: int, inv_h: float, contact_speed: float, epsilon: float)
 extern aephysics_wide_restitution(states: ptr, constraints: ptr, count: int, threshold: float)
-extern aephysics_wide_pack(block: ptr, count: int)
-extern aephysics_wide_unpack(block: ptr, count: int)
+extern aephysics_wide_begin(block: ptr, count: int)
+extern aephysics_wide_end()
+extern aephysics_wide_pack(constraints: ptr, count: int)
+extern aephysics_wide_unpack(constraints: ptr, count: int)
 
 var g_native_lanes = true
 
@@ -51,17 +53,26 @@ set_native_lanes(enabled: bool) { g_native_lanes = enabled }
 native_lanes_enabled() -> bool { return g_native_lanes }
 
 // The step's wide constraints, all colours' in one block, handed to the
-// native lanes after the prepare (they pack a single-precision copy)
-// and taken back before the store (the impulses).
+// native lanes for the step; a range is packed (a single-precision
+// copy) after its prepare and unpacked (the impulses) before its store,
+// by whichever worker has the range.
 begin_wide_step(block: ptr, count: int) {
-    if g_native_lanes && count > 0 { aephysics_wide_pack(block, count) }
+    if g_native_lanes && count > 0 { aephysics_wide_begin(block, count) }
 }
 
-end_wide_step(block: ptr, count: int) {
-    if g_native_lanes && count > 0 { aephysics_wide_unpack(block, count) }
+end_wide_step() {
+    if g_native_lanes { aephysics_wide_end() }
 }
 
-// Whether lanes.c was built against this module's layout.
+pack_wide(constraints: ptr, count: int) {
+    if g_native_lanes && count > 0 { aephysics_wide_pack(constraints, count) }
+}
+
+unpack_wide(constraints: ptr, count: int) {
+    if g_native_lanes && count > 0 { aephysics_wide_unpack(constraints, count) }
+}
+
+// Whether the native file was built against this module's layout.
 native_layout_matches() -> bool {
     return aephysics_wide_constraint_size() == sizeof(WideConstraint) && aephysics_wide_body_state_size() == sizeof(BodyState)
 }
@@ -512,18 +523,34 @@ prepare_lane(ctx: *StepContext, c: *Contact, constraint: *WideConstraint, l: int
 // A colour's convex contacts into its wide constraints, four to a slot
 // in the order of the colour's array; the tail slot's spare lanes zeroed.
 prepare_wide_contacts(ctx: *StepContext, color: *GraphColor) {
-    w = ctx.world
     count = color.convex_contacts.count
     if count == 0 { return }
     base = color.wide_constraints
     if count % WIDTH != 0 {
         memset(base + (color.wide_constraint_count - 1) * sizeof(WideConstraint), 0, sizeof(WideConstraint))
     }
-    i = 0
-    while i < count {
+    prepare_wide_range(ctx, color, 0, count)
+}
+
+// A block [start, end) of a colour's convex contacts into their lanes;
+// the tail slot's spare lanes were zeroed (zero_wide_tail) before any
+// block ran.
+prepare_wide_range(ctx: *StepContext, color: *GraphColor, start: int, end: int) {
+    w = ctx.world
+    base = color.wide_constraints
+    i = start
+    while i < end {
         c = dynamics.contact_at(w, basics.ints_get(&color.convex_contacts, i))
         prepare_lane(ctx, c, wide_constraint_at(base, i / WIDTH), i % WIDTH)
         i = i + 1
+    }
+}
+
+// The tail slot's spare lanes zeroed, before the blocks fill it.
+zero_wide_tail(color: *GraphColor) {
+    count = color.convex_contacts.count
+    if count > 0 && count % WIDTH != 0 {
+        memset(color.wide_constraints + (color.wide_constraint_count - 1) * sizeof(WideConstraint), 0, sizeof(WideConstraint))
     }
 }
 
@@ -747,12 +774,15 @@ apply_wide_restitution(ctx: *StepContext, constraints: ptr, count: int) {
 // wants hit events and closed faster than the threshold with an impulse
 // sets its bit. Whether any did.
 store_wide_impulses(ctx: *StepContext, color: *GraphColor, hit_bits: *BitSet) -> bool {
+    return store_wide_range(ctx, color, 0, color.convex_contacts.count, hit_bits)
+}
+
+store_wide_range(ctx: *StepContext, color: *GraphColor, start: int, end: int, hit_bits: *BitSet) -> bool {
     w = ctx.world
     has_hits = false
     neg_threshold = 0.0 - w.hit_event_threshold
-    count = color.convex_contacts.count
-    i = 0
-    while i < count {
+    i = start
+    while i < end {
         c = wide_constraint_at(color.wide_constraints, i / WIDTH)
         l = i % WIDTH
         m = ptr_lane(&c.manifolds, l) as *Manifold

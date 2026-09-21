@@ -24,7 +24,7 @@ includes="$(ae cflags | tr ' ' '\n' | grep '^-[Ifw]' | tr '\n' ' ')"
 libs="$(ae cflags | tr ' ' '\n' | grep '^-[Ll]' | tr '\n' ' ')"
 AETHER_LIB_DIR="$root" aetherc "$source" "$out/$name.c" >"$out/$name.log" 2>&1 || { cat "$out/$name.log"; exit 1; }
 gcc $cflags -g $includes -c "$out/$name.c" -o "$out/$name.o" 2>>"$out/$name.log" || { cat "$out/$name.log"; exit 1; }
-gcc $cflags -g -c aephysics/contact_solver_wide/lanes.c -o "$out/lanes.o" || exit 1
+gcc $cflags -g -c aephysics/native/aephysics_native.c -o "$out/lanes.o" || exit 1
 gcc -O2 -c tools/sampler.c -o "$out/sampler.o" || exit 1
 gcc "$out/$name.o" "$out/lanes.o" "$out/sampler.o" -o "$out/$name.exe" $libs || exit 1
 ae build tools/rank.ae -o "$out/rank" >"$out/rank.log" 2>&1 || { cat "$out/rank.log"; exit 1; }

@@ -610,6 +610,7 @@ test_determinism() {
 }
 
 main() {
+    dynamics.reserve_scratch()
     before = basics.alloc_count()
     test_hello_world()
     test_contact_events()
@@ -620,8 +621,8 @@ main() {
     test_body_queries()
     test_world_queries()
     test_determinism()
-    // The scratch stays allocated: the worlds, the masses, the contact, sphere, sweep and query buffers, the solvers' dummies.
-    ensure("every other counted allocation was freed (${basics.alloc_count() - before})", basics.alloc_count() == before + 25)
+    // The scratch stays allocated: the worlds, the masses, the sweep and query buffers, the solvers' dummies (the modules' scratch is reserved before the count).
+    ensure("every other counted allocation was freed (${basics.alloc_count() - before})", basics.alloc_count() == before + 9)
     println("physics_world: ${checks} checks")
     if failures == 0 {
         println("physics_world: all checks passed")

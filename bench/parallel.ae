@@ -1,0 +1,225 @@
+// The step by worker count: the reference's large pyramid (5,050 cubes,
+// 200 steps), many pyramids (10,780 cubes, 100 steps) and joint grid
+// (10,000 spheres on 19,800 spherical joints, 100 steps), sleeping off
+// as bench/physics_world runs them, at 1, 2, 4 and 8 workers and the
+// machine's processor count. What the parallel layer buys, with the
+// height sum as the checksum: the same at every count, since a step's
+// result does not depend on which worker did what. Single-machine
+// numbers; the reference's own scaling is in its benchmark tables.
+import std.string
+import std.os
+import aephysics.math
+import aephysics.basics
+import aephysics.native
+import aephysics.hull
+import aephysics.manifold
+import aephysics.shape
+import aephysics.broad_phase
+import aephysics.dynamics
+import aephysics.physics_world
+
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+
+clock() -> long { return os.now_monotonic_ns() }
+ms(ns: long) -> float { return (ns as float) / 1000000.0 }
+
+var g_box: ptr = null
+var g_slab: ptr = null
+
+ground(world_id: WorldId) {
+    bdef = dynamics.default_body_def()
+    bdef.position = math.vec3(0.0, 0.0 - 1.0, 0.0)
+    id = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    dynamics.create_hull_shape(id, &sdef, g_slab as *HullData)
+}
+
+pyramid(world_id: WorldId, base_count: int, extent: float, center_x: float, base_z: float) {
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    sdef = dynamics.default_shape_def()
+    sdef.density = 100.0
+    i = 0
+    while i < base_count {
+        y = (2.0 * (i as float) + 1.0) * extent
+        j = i
+        while j < base_count {
+            x = ((i as float) + 1.0) * extent + 2.0 * ((j - i) as float) * extent + center_x
+            bdef.position = math.vec3(x, y, base_z)
+            id = dynamics.create_body(world_id, &bdef)
+            dynamics.create_hull_shape(id, &sdef, g_box as *HullData)
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+height_sum(world_id: WorldId) -> float {
+    w = dynamics.get_world(world_id.index1 - 1)
+    sum = 0.0
+    i = 0
+    while i < w.bodies.count {
+        body = dynamics.body_at(w, i)
+        if body.set_index != dynamics.NULL_INDEX && body.kind == dynamics.BODY_DYNAMIC {
+            sum = sum + dynamics.get_body_sim(w, body).transform.p.y
+        }
+        i = i + 1
+    }
+    return sum
+}
+
+// The steps timed, and the world's profile summed over them: where a
+// step's time goes at this worker count, the parts that stay serial
+// showing as the ones that do not shrink.
+run(name: string, world_id: WorldId, steps: int, workers: int) -> float {
+    total = Profile { step: 0.0, pairs: 0.0, collide: 0.0, solve: 0.0, solver_setup: 0.0, constraints: 0.0, transforms: 0.0,
+                      refit: 0.0, bullets: 0.0, sleep_islands: 0.0, sensors: 0.0 }
+    t0 = clock()
+    s = 0
+    while s < steps {
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        p = physics_world.get_profile(world_id)
+        total.pairs = total.pairs + p.pairs
+        total.collide = total.collide + p.collide
+        total.solver_setup = total.solver_setup + p.solver_setup
+        total.constraints = total.constraints + p.constraints
+        total.transforms = total.transforms + p.transforms
+        total.refit = total.refit + p.refit
+        total.bullets = total.bullets + p.bullets
+        total.sleep_islands = total.sleep_islands + p.sleep_islands
+        total.sensors = total.sensors + p.sensors
+        s = s + 1
+    }
+    t1 = clock()
+    sum = height_sum(world_id)
+    n = steps as float
+    println("aephysics parallel: ${name}, ${workers} workers: ${ms(t1 - t0) / n} ms per step (height sum ${sum})")
+    println("  pairs ${total.pairs / n}  collide ${total.collide / n}  setup ${total.solver_setup / n}  constraints ${total.constraints / n}  transforms ${total.transforms / n}  refit ${total.refit / n}  bullets ${total.bullets / n}  sleep ${total.sleep_islands / n}  sensors ${total.sensors / n}")
+    dynamics.destroy_world(world_id)
+    return sum
+}
+
+large_pyramid(workers: int) -> float {
+    wdef = dynamics.default_world_def()
+    wdef.worker_count = workers
+    world_id = dynamics.create_world(&wdef)
+    physics_world.enable_sleeping(world_id, false)
+    ground(world_id)
+    pyramid(world_id, 100, 0.5, 0.0 - 50.0, 0.0)
+    return run("large pyramid", world_id, 200, workers)
+}
+
+many_pyramids(workers: int) -> float {
+    wdef = dynamics.default_world_def()
+    wdef.worker_count = workers
+    world_id = dynamics.create_world(&wdef)
+    physics_world.enable_sleeping(world_id, false)
+    ground(world_id)
+    base_count = 10
+    extent = 0.5
+    rows = 14
+    columns = 14
+    ground_extent = extent * (columns as float) * ((base_count as float) + 1.0)
+    base_width = 2.0 * extent * (base_count as float)
+    base_z = 0.0 - ground_extent + 2.0 * extent
+    delta_z = 2.0 * (ground_extent - 2.0 * extent) / ((rows as float) - 1.0)
+    i = 0
+    while i < rows {
+        j = 0
+        while j < columns {
+            center_x = 0.0 - ground_extent + (j as float) * (base_width + 2.0 * extent) + 2.0 * extent
+            pyramid(world_id, base_count, extent, center_x - 0.5, base_z)
+            j = j + 1
+        }
+        base_z = base_z + delta_z
+        i = i + 1
+    }
+    return run("many pyramids", world_id, 100, workers)
+}
+
+joint_grid(workers: int) -> float {
+    wdef = dynamics.default_world_def()
+    wdef.worker_count = workers
+    world_id = dynamics.create_world(&wdef)
+    physics_world.enable_sleeping(world_id, false)
+    n = 100
+    ids_block = calloc(n * n, sizeof(BodyId))
+    ids = ids_block as BodyId[]
+    sdef = dynamics.default_shape_def()
+    sdef.filter.category_bits = 2 as long
+    sdef.filter.mask_bits = (0 as long) - 1 - (2 as long)
+    bdef = dynamics.default_body_def()
+    bdef.enable_sleep = false
+    index = 0
+    k = 0
+    while k < n {
+        i = 0
+        while i < n {
+            bdef.kind = dynamics.BODY_DYNAMIC
+            if i == 0 { bdef.kind = dynamics.BODY_STATIC }
+            bdef.position = math.vec3(k as float, 0.0 - (i as float), 0.0)
+            body = dynamics.create_body(world_id, &bdef)
+            dynamics.create_sphere_shape(body, &sdef, manifold.sphere(math.vec3_zero(), 0.4))
+            if i > 0 {
+                jdef = dynamics.default_spherical_joint_def()
+                jdef.base.body_id_a = ids[index - 1]
+                jdef.base.body_id_b = body
+                jdef.base.local_frame_a.p = math.vec3(0.0, 0.0 - 0.5, 0.0)
+                jdef.base.local_frame_b.p = math.vec3(0.0, 0.5, 0.0)
+                dynamics.create_spherical_joint(world_id, &jdef)
+            }
+            if k > 0 {
+                jdef = dynamics.default_spherical_joint_def()
+                jdef.base.body_id_a = ids[index - n]
+                jdef.base.body_id_b = body
+                jdef.base.local_frame_a.p = math.vec3(0.5, 0.0, 0.0)
+                jdef.base.local_frame_b.p = math.vec3(0.0 - 0.5, 0.0, 0.0)
+                dynamics.create_spherical_joint(world_id, &jdef)
+            }
+            ids[index] = body
+            index = index + 1
+            i = i + 1
+        }
+        k = k + 1
+    }
+    sum = run("joint grid", world_id, 100, workers)
+    free(ids_block)
+    return sum
+}
+
+main() {
+    g_box = hull.make_box_hull(0.5, 0.5, 0.5) as ptr
+    g_slab = hull.make_box_hull(400.0, 1.0, 400.0) as ptr
+    counts_block = calloc(5, 4)
+    counts = counts_block as int[]
+    counts[0] = 1
+    counts[1] = 2
+    counts[2] = 4
+    counts[3] = 8
+    counts[4] = native.processor_count()
+    n = 5
+    if counts[4] <= 8 { n = 4 }
+    first = 0.0
+    i = 0
+    while i < n {
+        sum = large_pyramid(counts[i])
+        if i == 0 { first = sum } else if sum != first { println("aephysics parallel: WARNING the large pyramid's height sum changed with the worker count") }
+        i = i + 1
+    }
+    i = 0
+    while i < n {
+        sum = many_pyramids(counts[i])
+        if i == 0 { first = sum } else if sum != first { println("aephysics parallel: WARNING the many pyramids' height sum changed with the worker count") }
+        i = i + 1
+    }
+    i = 0
+    while i < n {
+        sum = joint_grid(counts[i])
+        if i == 0 { first = sum } else if sum != first { println("aephysics parallel: WARNING the joint grid's height sum changed with the worker count") }
+        i = i + 1
+    }
+    free(counts_block)
+    hull.destroy_hull(g_slab as *HullData)
+    hull.destroy_hull(g_box as *HullData)
+}

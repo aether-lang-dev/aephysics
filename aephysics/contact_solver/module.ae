@@ -27,7 +27,7 @@ exports (
     StepContext, ManifoldConstraintPoint, ManifoldConstraint, ContactConstraint,
     MIN_FRICTION_WEIGHT,
     default_step_context, contact_constraint_at, manifold_constraint_at, constraint_point_at, state_at, sim_at, dummy_state,
-    prepare_contact, prepare_contacts, warm_start_contacts, solve_contacts, apply_restitution, store_impulses,
+    prepare_contact, prepare_contacts, prepare_contacts_range, warm_start_contacts, solve_contacts, apply_restitution, store_impulses,
     color_constraint_counts, count_color_constraints
 )
 
@@ -310,22 +310,28 @@ prepare_contact(ctx: *StepContext, c: *Contact, cc: *ContactConstraint, manifold
 // contacts first (one manifold each) when taken, then the specs' at
 // their manifold starts.
 prepare_contacts(ctx: *StepContext, color: *GraphColor, with_convex: bool) {
+    prepare_contacts_range(ctx, color, with_convex, 0, color.contact_constraint_count)
+}
+
+// A block [start, end) of a colour's scalar constraints: the convex
+// contacts' first when the wide path is off, then the specs' (the mesh
+// contacts'), each at its manifold start.
+prepare_contacts_range(ctx: *StepContext, color: *GraphColor, with_convex: bool, start: int, end: int) {
     w = ctx.world
     base = color.contact_constraints
     manifolds = color.manifold_constraints
     convex_count = 0
     if with_convex { convex_count = color.convex_contacts.count }
-    i = 0
-    while i < convex_count {
-        c = dynamics.contact_at(w, basics.ints_get(&color.convex_contacts, i))
-        prepare_contact(ctx, c, contact_constraint_at(base, i), manifolds + i * sizeof(ManifoldConstraint))
-        i = i + 1
-    }
-    i = 0
-    while i < color.contacts.count {
-        spec = dynamics.contact_spec_at(color, i)
-        c = dynamics.contact_at(w, spec.contact_id)
-        prepare_contact(ctx, c, contact_constraint_at(base, convex_count + i), manifolds + spec.manifold_start * sizeof(ManifoldConstraint))
+    i = start
+    while i < end {
+        if i < convex_count {
+            c = dynamics.contact_at(w, basics.ints_get(&color.convex_contacts, i))
+            prepare_contact(ctx, c, contact_constraint_at(base, i), manifolds + i * sizeof(ManifoldConstraint))
+        } else {
+            spec = dynamics.contact_spec_at(color, i - convex_count)
+            c = dynamics.contact_at(w, spec.contact_id)
+            prepare_contact(ctx, c, contact_constraint_at(base, i), manifolds + spec.manifold_start * sizeof(ManifoldConstraint))
+        }
         i = i + 1
     }
 }

@@ -1327,6 +1327,7 @@ test_sensors() {
 }
 
 main() {
+    dynamics.reserve_scratch()
     before = basics.alloc_count()
     test_mass()
     test_set_mass_data()
@@ -1340,9 +1341,8 @@ main() {
     test_sensors()
     hull.destroy_hull(g_cube as *HullData)
     hull.destroy_hull(g_slab as *HullData)
-    // The scratch stays allocated: the worlds' block, the masses, the contact scratch (five),
-    // the mesh's three, the mesh contact's six, the sphere's two, and the sensors' points.
-    ensure("every other counted allocation was freed (${basics.alloc_count() - before})", basics.alloc_count() == before + 19)
+    // The scratch stays allocated: the worlds' block and the masses (the modules' scratch is reserved before the count).
+    ensure("every other counted allocation was freed (${basics.alloc_count() - before})", basics.alloc_count() == before + 2)
 
     println("dynamics: ${checks} checks")
     if failures == 0 {

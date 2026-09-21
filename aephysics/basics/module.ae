@@ -21,7 +21,7 @@ import std.string
 
 exports (
     BitSet, IdPool, HashSet, IntArray, Buffer, Stack, Arena,
-    alloc, free_bytes, alloc_count, bytes_in_use,
+    alloc, free_bytes, alloc_count, bytes_in_use, sort_ints,
     is_power_of_2, bounding_power_of_2, round_up_power_of_2, lower_power_of_2_exponent,
     clz32, ctz32, ctz64, pop_count64, lsr, lsr32,
     bitset_create, bitset_destroy, bitset_set_count_and_clear, bitset_grow, bitset_union,
@@ -742,7 +742,10 @@ set_bytes(s: *HashSet) -> int { return s.capacity * sizeof(SetItem) }
 // A LIFO scratch allocator: what a step allocates it frees in reverse
 // order, so the memory is one block and a bump index. An allocation past
 // the block's end falls back to the heap and the block grows for next
-// time, at the same interface.
+// time, at the same interface. The memory is not zeroed, as the
+// reference's is not: a step's constraint blocks run to tens of
+// megabytes, and every field is written by the prepare that fills them
+// (the wide tail's spare lanes by the solver, expressly).
 const MAX_STACK_ENTRIES = 32
 const STACK_ALIGNMENT = 16
 
@@ -788,7 +791,6 @@ stack_alloc(s: *Stack, size: int) -> ptr {
         entry.used_malloc = true
     } else {
         entry.data = s.memory + s.index
-        memset(entry.data, 0, aligned)
         s.index = s.index + aligned
     }
     s.allocation = s.allocation + aligned
@@ -912,3 +914,55 @@ arena_sync(a: *Arena) {
 
 arena_capacity(a: *Arena) -> int { return a.capacity }
 arena_peak(a: *Arena) -> int { return a.peak_demand }
+
+// --- sorting --------------------------------------------------------------------------------------------------
+
+// Ints in ascending order: a quicksort with insertion sort below 16,
+// for lists gathered in claim order (the bullets) that the rest of the
+// step then walks in one order whatever the worker count.
+sort_ints(keys: int[], count: int) {
+    if count < 2 { return }
+    quick_sort_ints(keys, 0, count - 1)
+}
+
+quick_sort_ints(keys: int[], low: int, high: int) {
+    while low < high {
+        if high - low < 16 {
+            i = low + 1
+            while i <= high {
+                v = keys[i]
+                j = i - 1
+                while j >= low && keys[j] > v {
+                    keys[j + 1] = keys[j]
+                    j = j - 1
+                }
+                keys[j + 1] = v
+                i = i + 1
+            }
+            return
+        }
+        mid = low + (high - low) / 2
+        pivot = keys[mid]
+        i = low
+        j = high
+        while i <= j {
+            while keys[i] < pivot { i = i + 1 }
+            while keys[j] > pivot { j = j - 1 }
+            if i <= j {
+                swap = keys[i]
+                keys[i] = keys[j]
+                keys[j] = swap
+                i = i + 1
+                j = j - 1
+            }
+        }
+        // The smaller side recursed, the larger looped: the stack stays logarithmic.
+        if j - low < high - i {
+            quick_sort_ints(keys, low, j)
+            low = i
+        } else {
+            quick_sort_ints(keys, i, high)
+            high = j
+        }
+    }
+}

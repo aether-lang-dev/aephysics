@@ -22,11 +22,13 @@
 // there for larger manifolds).
 import std.string
 import aephysics.math
+import aephysics.native
 import aephysics.basics
 import aephysics.distance
 import aephysics.hull
 
 exports (
+    reserve_scratch,
     Sphere, Capsule, FeaturePair, LocalManifoldPoint, LocalManifold, SATCache, SeparatingAxis, AxisQuery,
     ClipVertex,
     MAX_MANIFOLD_POINTS, MAX_CLIP_POINTS, SPECULATIVE_DISTANCE, PARALLEL_EDGE_TOL, NULL_INDEX,
@@ -211,16 +213,24 @@ set_manifold_point(m: *LocalManifold, i: int, p: LocalManifoldPoint) {
 // The clip polygons and the unreduced points, allocated once. One collision
 // at a time until the parallel layer gives each worker its own.
 var g_clip1: ptr = null
+clip1() -> ptr { return native.scratch(g_clip1, MAX_CLIP_POINTS * sizeof(ClipVertex)) }
 var g_clip2: ptr = null
+clip2() -> ptr { return native.scratch(g_clip2, MAX_CLIP_POINTS * sizeof(ClipVertex)) }
 var g_clip_points: ptr = null
+clip_points() -> ptr { return native.scratch(g_clip_points, MAX_CLIP_POINTS * sizeof(LocalManifoldPoint)) }
 
 scratch_ready() {
     if g_clip1 == null {
-        g_clip1 = basics.alloc(MAX_CLIP_POINTS * sizeof(ClipVertex))
-        g_clip2 = basics.alloc(MAX_CLIP_POINTS * sizeof(ClipVertex))
-        g_clip_points = basics.alloc(MAX_CLIP_POINTS * sizeof(LocalManifoldPoint))
+        g_clip1 = basics.alloc(native.MAX_WORKERS * (MAX_CLIP_POINTS * sizeof(ClipVertex)))
+        g_clip2 = basics.alloc(native.MAX_WORKERS * (MAX_CLIP_POINTS * sizeof(ClipVertex)))
+        g_clip_points = basics.alloc(native.MAX_WORKERS * (MAX_CLIP_POINTS * sizeof(LocalManifoldPoint)))
     }
 }
+
+// Every scratch block of the module allocated now, on the calling
+// thread: a world's creation reserves every module's before a step can
+// reach them from several workers at once.
+reserve_scratch() { scratch_ready() }
 
 // --- the incident face and clipping ----------------------------------------------------
 
@@ -615,7 +625,7 @@ collide_capsules(m: *LocalManifold, capacity: int, capsule_a: Capsule, capsule_b
     axis = math.cross(edge_a, edge_b)
     if math.length_squared(axis) < alpha_tol_sqr {
         scratch_ready()
-        vertices_b = g_clip1 as ClipVertex[]
+        vertices_b = clip1() as ClipVertex[]
         vertices_b[0] = ClipVertex { position: center_b1, separation: 0.0, pair: make_feature_pair(FEATURE_SHAPE_A, 0, FEATURE_SHAPE_A, 0) }
         vertices_b[1] = ClipVertex { position: center_b2, separation: 0.0, pair: make_feature_pair(FEATURE_SHAPE_A, 1, FEATURE_SHAPE_A, 1) }
         plane1 = Plane { normal: math.neg(edge_a), offset: 0.0 - math.dot(edge_a, capsule_a.center1) }
@@ -726,7 +736,7 @@ build_hull_face_and_capsule_contact(m: *LocalManifold, hull_a: *HullData, capsul
     ref_face = query.index_a
     ref_plane = planes[ref_face]
     scratch_ready()
-    segment = g_clip1 as ClipVertex[]
+    segment = clip1() as ClipVertex[]
     segment[0] = ClipVertex { position: math.transform_point(transform_b_to_a, capsule_b.center1), separation: 0.0,
                               pair: make_feature_pair(FEATURE_SHAPE_A, 0, FEATURE_SHAPE_A, 0) }
     segment[1] = ClipVertex { position: math.transform_point(transform_b_to_a, capsule_b.center2), separation: 0.0,
@@ -792,7 +802,7 @@ collide_hull_and_capsule(m: *LocalManifold, capacity: int, hull_a: *HullData, ca
         // Two points when the closest-point direction is nearly the face normal.
         if math.abs_float(math.dot(ref_plane.normal, delta)) > 0.998 {
             scratch_ready()
-            vertices_b = g_clip1 as ClipVertex[]
+            vertices_b = clip1() as ClipVertex[]
             vertices_b[0] = ClipVertex { position: math.transform_point(transform_b_to_a, capsule_b.center1), separation: 0.0,
                                          pair: make_feature_pair(FEATURE_SHAPE_A, 0, FEATURE_SHAPE_A, 0) }
             vertices_b[1] = ClipVertex { position: math.transform_point(transform_b_to_a, capsule_b.center2), separation: 0.0,
@@ -1016,8 +1026,8 @@ build_face_a_contact(m: *LocalManifold, capacity: int, hull_a: *HullData, hull_b
     inc_face = find_incident_face(hull_b, ref_normal_in_b, query.index_b)
 
     scratch_ready()
-    input = g_clip1 as ClipVertex[]
-    output = g_clip2 as ClipVertex[]
+    input = clip1() as ClipVertex[]
+    output = clip2() as ClipVertex[]
     point_count = build_polygon(input, transform_b_to_a, hull_b, inc_face, ref_plane)
 
     start = faces_a[ref_face]
@@ -1042,7 +1052,7 @@ build_face_a_contact(m: *LocalManifold, capacity: int, hull_a: *HullData, hull_b
     }
     point_count = math.min_int(point_count, MAX_CLIP_POINTS)
 
-    points = g_clip_points as LocalManifoldPoint[]
+    points = clip_points() as LocalManifoldPoint[]
     min_separation = math.MAX_FLOAT
     m.normal = ref_plane.normal
     i = 0

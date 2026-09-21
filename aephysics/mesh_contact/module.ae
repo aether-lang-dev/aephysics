@@ -28,6 +28,7 @@
 // live in the caller's arena from where this function started bumping.
 import std.string
 import aephysics.math
+import aephysics.native
 import aephysics.basics
 import aephysics.hull
 import aephysics.distance
@@ -42,6 +43,7 @@ import aephysics.compound
 import aephysics.shape
 
 exports (
+    reserve_scratch,
     TriangleCache, MeshContactCache, Cluster, MeshManifolds,
     MAX_MESH_CONTACT_TRIANGLES, MAX_POINTS_PER_TRIANGLE, MAX_MANIFOLD_POINTS, MESH_REST_OFFSET, NULL_INDEX,
     mesh_contact_cache_create, mesh_contact_cache_destroy, refresh_cache, compute_mesh_manifolds,
@@ -149,18 +151,23 @@ collect_triangle(a: Vec3, b: Vec3, c: Vec3, triangle_index: int, context: ptr) -
 }
 
 var g_indices: ptr = null      // int[MAX_MESH_CONTACT_TRIANGLES]
+triangle_indices() -> ptr { return native.scratch(g_indices, MAX_MESH_CONTACT_TRIANGLES * 4) }
 var g_matched: ptr = null      // TriangleCache[MAX_MESH_CONTACT_TRIANGLES]
+matched_caches() -> ptr { return native.scratch(g_matched, MAX_MESH_CONTACT_TRIANGLES * sizeof(TriangleCache)) }
 var g_edges: ptr = null        // long[MAX_EDGE_COUNT]
+edge_keys() -> ptr { return native.scratch(g_edges, MAX_EDGE_COUNT * 8) }
 var g_vertices: ptr = null     // int[MAX_VERTEX_COUNT]
+vertex_keys() -> ptr { return native.scratch(g_vertices, MAX_VERTEX_COUNT * 4) }
 var g_triangle: ptr = null     // Vec3[3]
+triangle_points() -> ptr { return native.scratch(g_triangle, 3 * sizeof(Vec3)) }
 
 scratch_ready() {
     if g_indices == null {
-        g_indices = basics.alloc(MAX_MESH_CONTACT_TRIANGLES * 4)
-        g_matched = basics.alloc(MAX_MESH_CONTACT_TRIANGLES * sizeof(TriangleCache))
-        g_edges = basics.alloc(MAX_EDGE_COUNT * 8)
-        g_vertices = basics.alloc(MAX_VERTEX_COUNT * 4)
-        g_triangle = basics.alloc(3 * sizeof(Vec3))
+        g_indices = basics.alloc(native.MAX_WORKERS * (MAX_MESH_CONTACT_TRIANGLES * 4))
+        g_matched = basics.alloc(native.MAX_WORKERS * (MAX_MESH_CONTACT_TRIANGLES * sizeof(TriangleCache)))
+        g_edges = basics.alloc(native.MAX_WORKERS * (MAX_EDGE_COUNT * 8))
+        g_vertices = basics.alloc(native.MAX_WORKERS * (MAX_VERTEX_COUNT * 4))
+        g_triangle = basics.alloc(native.MAX_WORKERS * (3 * sizeof(Vec3)))
     }
 }
 
@@ -175,18 +182,18 @@ refresh_cache(cache: *MeshContactCache, mesh_shape: *Shape, xf_a: Transform, bou
     extension = math.vec3(radius, radius, radius)
     cache.query_bounds = AABB { lower: math.sub(bounds.lower, extension), upper: math.add(bounds.upper, extension) }
     local_bounds = math.aabb_transform(math.invert_transform(xf_a), cache.query_bounds)
-    q = TriangleQuery { indices: g_indices, capacity: MAX_MESH_CONTACT_TRIANGLES, count: 0 }
+    q = TriangleQuery { indices: triangle_indices(), capacity: MAX_MESH_CONTACT_TRIANGLES, count: 0 }
     if mesh_shape.kind == KIND_MESH {
         mesh.query_mesh(mesh_shape.mesh, local_bounds, collect_triangle, (&q) as ptr)
     } else {
         height_field.query_height_field(mesh_shape.height_field, local_bounds, collect_triangle, (&q) as ptr)
     }
-    indices = g_indices as int[]
+    indices = triangle_indices() as int[]
     triangle_count = q.count
     // The indices arrive sorted (both queries walk in index order), so
     // the old cache is matched in one pass.
     old = cache.triangles as TriangleCache[]
-    matched = g_matched as TriangleCache[]
+    matched = matched_caches() as TriangleCache[]
     index2 = 0
     index1 = 0
     while index1 < triangle_count {
@@ -203,7 +210,7 @@ refresh_cache(cache: *MeshContactCache, mesh_shape: *Shape, xf_a: Transform, bou
         cache.capacity = math.max_int(triangle_count, 8)
         cache.triangles = basics.alloc(cache.capacity * sizeof(TriangleCache))
     }
-    if triangle_count > 0 { memcpy(cache.triangles, g_matched, triangle_count * sizeof(TriangleCache)) }
+    if triangle_count > 0 { memcpy(cache.triangles, matched_caches(), triangle_count * sizeof(TriangleCache)) }
     cache.count = triangle_count
 }
 
@@ -224,7 +231,7 @@ edge_key(vertex1: int, vertex2: int) -> long {
 // True when the edge was not there (and is now, if there was room).
 add_edge(found: *Found, vertex1: int, vertex2: int) -> bool {
     key = edge_key(vertex1, vertex2)
-    keys = g_edges as long[]
+    keys = edge_keys() as long[]
     i = 0
     while i < found.edge_count {
         if keys[i] == key { return false }
@@ -238,7 +245,7 @@ add_edge(found: *Found, vertex1: int, vertex2: int) -> bool {
 
 find_edge(found: *Found, vertex1: int, vertex2: int) -> bool {
     key = edge_key(vertex1, vertex2)
-    keys = g_edges as long[]
+    keys = edge_keys() as long[]
     i = 0
     while i < found.edge_count {
         if keys[i] == key { return true }
@@ -248,7 +255,7 @@ find_edge(found: *Found, vertex1: int, vertex2: int) -> bool {
 }
 
 add_vertex(found: *Found, vertex: int) -> bool {
-    keys = g_vertices as int[]
+    keys = vertex_keys() as int[]
     i = 0
     while i < found.vertex_count {
         if keys[i] == vertex { return false }
@@ -280,14 +287,27 @@ is_better_cull_candidate(score: float, separation: float, best_score: float, bes
 }
 
 var g_final: ptr = null    // Point2D[4]
+final_points() -> ptr { return native.scratch(g_final, 4 * sizeof(Point2D)) }
 
 // Up to four of the points, in place: the farthest pair, then the point
 // making the largest triangle with them, then the point adding the most
 // area outside that triangle; ties to the deeper point. Returns how many.
+final_ready() {
+    if g_final == null { g_final = basics.alloc(native.MAX_WORKERS * (4 * sizeof(Point2D))) }
+}
+
+// Every scratch block of the module allocated now, on the calling
+// thread: a world's creation reserves every module's before a step can
+// reach them from several workers at once.
+reserve_scratch() {
+    scratch_ready()
+    final_ready()
+}
+
 cull_points(points: Point2D[], count: int) -> int {
     if count <= 1 { return count }
-    if g_final == null { g_final = basics.alloc(4 * sizeof(Point2D)) }
-    final = g_final as Point2D[]
+    final_ready()
+    final = final_points() as Point2D[]
     tol = 0.25 * math.LINEAR_SLOP
     tol_sqr = tol * tol
     separation_tol = math.LINEAR_SLOP
@@ -491,7 +511,7 @@ compute_mesh_manifolds(cache: *MeshContactCache, mesh_shape: *Shape, xf_a: Trans
     manifolds = manifold_buffer as LocalManifold[]
     manifold_count = 0
     kind_b = convex.kind
-    tri = g_triangle as Vec3[]
+    tri = triangle_points() as Vec3[]
 
     index = 0
     while index < triangle_count && total_point_count + 3 < point_capacity_total {
