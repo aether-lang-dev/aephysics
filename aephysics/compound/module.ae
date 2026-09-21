@@ -468,7 +468,7 @@ create_compound(def: *CompoundDef) -> *CompoundData {
     // The layout. The rebuild is dense, so only the live nodes travel.
     byte_count = align8(sizeof(CompoundData))
     node_offset = byte_count
-    byte_count = byte_count + align8(tree.node_end * sizeof(TreeNode))
+    byte_count = byte_count + align8(tree.node_end * sizeof(DynamicTreeNode))
     proxy_offset = byte_count
     byte_count = byte_count + align8(tree.proxy_count * sizeof(TreeProxy))
     stack_offset = byte_count
@@ -519,7 +519,7 @@ create_compound(def: *CompoundDef) -> *CompoundData {
 
     // The baked tree: its nodes, proxies and stack in the block; nothing
     // for insertions or rebuilds.
-    memcpy(block + node_offset, tree.nodes, tree.node_end * sizeof(TreeNode))
+    memcpy(block + node_offset, tree.nodes, tree.node_end * sizeof(DynamicTreeNode))
     memcpy(block + proxy_offset, tree.proxies, tree.proxy_count * sizeof(TreeProxy))
     c.tree = DynamicTree { nodes: block + node_offset, parents: null, proxies: block + proxy_offset,
                            node_end: tree.node_end, node_capacity: tree.node_end, pair_free_list: NULL_INDEX,

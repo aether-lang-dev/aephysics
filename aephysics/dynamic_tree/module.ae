@@ -25,7 +25,7 @@ import aephysics.native
 import aephysics.basics
 
 exports (
-    TreeNode, TreeProxy, TreeStats, DynamicTree, RayCastInput, BoxCastInput,
+    DynamicTreeNode, TreeProxy, TreeStats, DynamicTree, RayCastInput, BoxCastInput,
     NULL_INDEX, default_category_bits, default_mask_bits, TREE_STACK_SIZE,
     LEAF_NODE, MOVED_NODE, NODE_INDEX_MASK, EMPTY_NODE, ROOT_NODE,
     is_leaf, is_node_moved, is_empty_node, left_child, proxy_id_of, node_height,
@@ -66,7 +66,7 @@ const COPY_ITEM_INTS = 2
 
 // A node. Siblings sit together at an even index. For a leaf, `height`
 // holds the shape index, truncated from the proxy's user data.
-struct TreeNode {
+struct DynamicTreeNode {
     aabb: AABB
     flag_index: int
     height: int
@@ -101,7 +101,7 @@ struct BoxCastInput {
 }
 
 struct DynamicTree {
-    nodes: ptr          // TreeNode[]; root at 0, index 1 empty, siblings paired at even indices
+    nodes: ptr          // DynamicTreeNode[]; root at 0, index 1 empty, siblings paired at even indices
     parents: ptr        // int[] per node; the pair free list is chained through it
     proxies: ptr        // TreeProxy[]
     node_end: int       // every allocated node has a lower index
@@ -110,9 +110,9 @@ struct DynamicTree {
     proxy_count: int
     proxy_capacity: int
     proxy_free_list: int
-    swap_nodes: ptr     // TreeNode[]; the rebuild writes here and swaps
+    swap_nodes: ptr     // DynamicTreeNode[]; the rebuild writes here and swaps
     leaf_indices: ptr   // int[] for the rebuild
-    leaf_nodes: ptr     // TreeNode[] for the rebuild: a proxy or a kept subtree
+    leaf_nodes: ptr     // DynamicTreeNode[] for the rebuild: a proxy or a kept subtree
     leaf_centers: ptr   // Vec3[] for the rebuild
     rebuild_capacity: int
     dfs_ordered: bool   // children follow parents; a creation can break it
@@ -129,17 +129,17 @@ is_empty_node(flag_index: int) -> bool { return flag_index == EMPTY_NODE }
 left_child(flag_index: int) -> int { return flag_index & NODE_INDEX_MASK }
 proxy_id_of(flag_index: int) -> int { return flag_index & NODE_INDEX_MASK }
 
-node_height(n: TreeNode) -> int {
+node_height(n: DynamicTreeNode) -> int {
     if is_leaf(n.flag_index) { return 0 }
     return n.height
 }
 
-make_empty_node() -> TreeNode {
-    return TreeNode { aabb: math.aabb_empty(), flag_index: EMPTY_NODE, height: 0 }
+make_empty_node() -> DynamicTreeNode {
+    return DynamicTreeNode { aabb: math.aabb_empty(), flag_index: EMPTY_NODE, height: 0 }
 }
 
 // The pair below the root, or the root itself when it is a leaf.
-root_pair(nodes: TreeNode[]) -> int {
+root_pair(nodes: DynamicTreeNode[]) -> int {
     root = nodes[ROOT_NODE]
     if is_leaf(root.flag_index) { return ROOT_NODE }
     return left_child(root.flag_index)
@@ -147,25 +147,25 @@ root_pair(nodes: TreeNode[]) -> int {
 
 // The internal node above a sibling pair: their union, their moved flag,
 // one more than the taller.
-make_internal_node(nodes: TreeNode[], pair: int) -> TreeNode {
+make_internal_node(nodes: DynamicTreeNode[], pair: int) -> DynamicTreeNode {
     c1 = nodes[pair]
     c2 = nodes[pair + 1]
-    return TreeNode {
+    return DynamicTreeNode {
         aabb: math.aabb_union(c1.aabb, c2.aabb),
         flag_index: pair | ((c1.flag_index | c2.flag_index) & MOVED_NODE),
         height: 1 + math.max_int(node_height(c1), node_height(c2))
     }
 }
 
-make_leaf_node(box: AABB, proxy_id: int, user_data: long, moved: bool) -> TreeNode {
+make_leaf_node(box: AABB, proxy_id: int, user_data: long, moved: bool) -> DynamicTreeNode {
     flags = proxy_id | LEAF_NODE
     if moved { flags = flags | MOVED_NODE }
-    return TreeNode { aabb: box, flag_index: flags, height: user_data as int }
+    return DynamicTreeNode { aabb: box, flag_index: flags, height: user_data as int }
 }
 
 // A node landed at a new index, so tell what hangs below it.
 link_children(t: *DynamicTree, node_index: int) {
-    nodes = t.nodes as TreeNode[]
+    nodes = t.nodes as DynamicTreeNode[]
     n = nodes[node_index]
     if is_leaf(n.flag_index) {
         proxies = t.proxies as TreeProxy[]
@@ -180,13 +180,13 @@ link_children(t: *DynamicTree, node_index: int) {
 
 // The sweep refit visits indices from high to low, so it needs every
 // child above its parent.
-is_node_ordered(nodes: TreeNode[], node_index: int) -> bool {
+is_node_ordered(nodes: DynamicTreeNode[], node_index: int) -> bool {
     n = nodes[node_index]
     return is_leaf(n.flag_index) || node_index < left_child(n.flag_index)
 }
 
 tree_has_moved(t: *DynamicTree) -> bool {
-    nodes = t.nodes as TreeNode[]
+    nodes = t.nodes as DynamicTreeNode[]
     return is_node_moved(nodes[ROOT_NODE].flag_index)
 }
 
@@ -224,11 +224,11 @@ allocate_sibling_pair(t: *DynamicTree) -> int {
         old_capacity = t.node_capacity
         new_capacity = old_capacity + (old_capacity >> 1)
         new_capacity = new_capacity + (new_capacity & 1)
-        t.nodes = grow_zero(t.nodes, old_capacity * sizeof(TreeNode), new_capacity * sizeof(TreeNode))
+        t.nodes = grow_zero(t.nodes, old_capacity * sizeof(DynamicTreeNode), new_capacity * sizeof(DynamicTreeNode))
         t.parents = grow_zero(t.parents, old_capacity * 4, new_capacity * 4)
         t.node_capacity = new_capacity
         // The spare has to match; the rebuild allocates it again.
-        basics.free_bytes(t.swap_nodes, old_capacity * sizeof(TreeNode))
+        basics.free_bytes(t.swap_nodes, old_capacity * sizeof(DynamicTreeNode))
         t.swap_nodes = null
     }
     pair = t.node_end
@@ -237,7 +237,7 @@ allocate_sibling_pair(t: *DynamicTree) -> int {
 }
 
 free_pair(t: *DynamicTree, pair: int) {
-    nodes = t.nodes as TreeNode[]
+    nodes = t.nodes as DynamicTreeNode[]
     parents = t.parents as int[]
     nodes[pair] = make_empty_node()
     nodes[pair + 1] = make_empty_node()
@@ -257,9 +257,9 @@ tree_create(proxy_capacity: int) -> DynamicTree {
         stack: null, stack_dist: null, copy_stack: null
     }
     // A tree of n proxies has 2n - 1 nodes plus the empty node beside the root.
-    t.nodes = basics.alloc(t.node_capacity * sizeof(TreeNode))
+    t.nodes = basics.alloc(t.node_capacity * sizeof(DynamicTreeNode))
     t.parents = basics.alloc(t.node_capacity * 4)
-    nodes = t.nodes as TreeNode[]
+    nodes = t.nodes as DynamicTreeNode[]
     parents = t.parents as int[]
     nodes[ROOT_NODE] = make_empty_node()
     nodes[ROOT_NODE + 1] = make_empty_node()
@@ -289,12 +289,12 @@ query_stack(t: *DynamicTree) -> ptr { return native.scratch(t.stack, TREE_STACK_
 query_dists(t: *DynamicTree) -> ptr { return native.scratch(t.stack_dist, TREE_STACK_SIZE * 8) }
 
 tree_destroy(t: *DynamicTree) {
-    basics.free_bytes(t.nodes, t.node_capacity * sizeof(TreeNode))
+    basics.free_bytes(t.nodes, t.node_capacity * sizeof(DynamicTreeNode))
     basics.free_bytes(t.parents, t.node_capacity * 4)
     basics.free_bytes(t.proxies, t.proxy_capacity * sizeof(TreeProxy))
-    basics.free_bytes(t.swap_nodes, t.node_capacity * sizeof(TreeNode))
+    basics.free_bytes(t.swap_nodes, t.node_capacity * sizeof(DynamicTreeNode))
     basics.free_bytes(t.leaf_indices, t.rebuild_capacity * 4)
-    basics.free_bytes(t.leaf_nodes, t.rebuild_capacity * sizeof(TreeNode))
+    basics.free_bytes(t.leaf_nodes, t.rebuild_capacity * sizeof(DynamicTreeNode))
     basics.free_bytes(t.leaf_centers, t.rebuild_capacity * sizeof(Vec3))
     basics.free_bytes(t.stack, native.MAX_WORKERS * (TREE_STACK_SIZE * REBUILD_ITEM_INTS * 4))
     basics.free_bytes(t.stack_dist, native.MAX_WORKERS * (TREE_STACK_SIZE * 8))
@@ -347,7 +347,7 @@ free_proxy(t: *DynamicTree, proxy_id: int) {
 find_best_sibling(t: *DynamicTree, box_d: AABB) -> int {
     center_d = math.aabb_center(box_d)
     area_d = math.aabb_area(box_d)
-    nodes = t.nodes as TreeNode[]
+    nodes = t.nodes as DynamicTreeNode[]
     node_index = ROOT_NODE
     if is_leaf(nodes[node_index].flag_index) { return node_index }
 
@@ -432,7 +432,7 @@ find_best_sibling(t: *DynamicTree, box_d: AABB) -> int {
 // Swap a child of A with a grandchild under the other child:
 // (A (B (D E) C (F G)) -> (A (G) C (F B (D E)) when B and G swap.
 swap_nodes(t: *DynamicTree, i_down: int, i_up: int) {
-    nodes = t.nodes as TreeNode[]
+    nodes = t.nodes as DynamicTreeNode[]
     temp = nodes[i_down]
     nodes[i_down] = nodes[i_up]
     nodes[i_up] = temp
@@ -448,7 +448,7 @@ swap_nodes(t: *DynamicTree, i_down: int, i_up: int) {
 
 // A left or right rotation if node A is imbalanced: (A (B (D E) C (F G)).
 rotate_nodes(t: *DynamicTree, i_a: int) {
-    nodes = t.nodes as TreeNode[]
+    nodes = t.nodes as DynamicTreeNode[]
     a = nodes[i_a]
     i_b = left_child(a.flag_index)
     i_c = i_b + 1
@@ -506,7 +506,7 @@ rotate_nodes(t: *DynamicTree, i_a: int) {
 insert_leaf(t: *DynamicTree, box: AABB, proxy_id: int, moved: bool, should_rotate: bool) {
     proxies = t.proxies as TreeProxy[]
     leaf = make_leaf_node(box, proxy_id, proxies[proxy_id].user_data, moved)
-    nodes = t.nodes as TreeNode[]
+    nodes = t.nodes as DynamicTreeNode[]
     if is_empty_node(nodes[ROOT_NODE].flag_index) {
         nodes[ROOT_NODE] = leaf
         proxies[proxy_id].node = ROOT_NODE
@@ -519,7 +519,7 @@ insert_leaf(t: *DynamicTree, box: AABB, proxy_id: int, moved: bool, should_rotat
     // into a new pair beside the leaf, which puts it below its own children
     // when it is internal.
     pair = allocate_sibling_pair(t)
-    nodes = t.nodes as TreeNode[]
+    nodes = t.nodes as DynamicTreeNode[]
     parents = t.parents as int[]
     proxies = t.proxies as TreeProxy[]
     nodes[pair] = nodes[sibling]
@@ -544,7 +544,7 @@ insert_leaf(t: *DynamicTree, box: AABB, proxy_id: int, moved: bool, should_rotat
 }
 
 remove_leaf(t: *DynamicTree, proxy_id: int) {
-    nodes = t.nodes as TreeNode[]
+    nodes = t.nodes as DynamicTreeNode[]
     parents = t.parents as int[]
     proxies = t.proxies as TreeProxy[]
     leaf = proxies[proxy_id].node
@@ -601,7 +601,7 @@ tree_move_proxy(t: *DynamicTree, proxy_id: int, box: AABB) {
 // Grow a leaf in place and every ancestor that has to grow with it; mark
 // the whole path moved. The caller ensures the box is not already contained.
 tree_enlarge_proxy(t: *DynamicTree, proxy_id: int, box: AABB) {
-    nodes = t.nodes as TreeNode[]
+    nodes = t.nodes as DynamicTreeNode[]
     parents = t.parents as int[]
     proxies = t.proxies as TreeProxy[]
     index = proxies[proxy_id].node
@@ -625,7 +625,7 @@ tree_enlarge_proxy(t: *DynamicTree, proxy_id: int, box: AABB) {
 }
 
 // Enlarge a node's box to contain b; true if it grew.
-enlarge_node(nodes: TreeNode[], index: int, b: AABB) -> bool {
+enlarge_node(nodes: DynamicTreeNode[], index: int, b: AABB) -> bool {
     a = nodes[index].aabb
     changed = false
     if b.lower.x < a.lower.x { a.lower.x = b.lower.x
@@ -661,12 +661,12 @@ tree_get_user_data(t: *DynamicTree, proxy_id: int) -> long {
 
 tree_get_aabb(t: *DynamicTree, proxy_id: int) -> AABB {
     proxies = t.proxies as TreeProxy[]
-    nodes = t.nodes as TreeNode[]
+    nodes = t.nodes as DynamicTreeNode[]
     return nodes[proxies[proxy_id].node].aabb
 }
 
 tree_get_height(t: *DynamicTree) -> int {
-    nodes = t.nodes as TreeNode[]
+    nodes = t.nodes as DynamicTreeNode[]
     return node_height(nodes[ROOT_NODE])
 }
 
@@ -674,7 +674,7 @@ tree_get_height(t: *DynamicTree) -> int {
 // minimises, made dimensionless, so a measure of the tree's quality.
 tree_get_area_ratio(t: *DynamicTree) -> float {
     if t.proxy_count == 0 { return 0.0 }
-    nodes = t.nodes as TreeNode[]
+    nodes = t.nodes as DynamicTreeNode[]
     root_area = math.aabb_area(nodes[ROOT_NODE].aabb)
     if root_area <= 0.0 { return 0.0 }
     // Free nodes and the empty node are leaf tagged.
@@ -689,17 +689,17 @@ tree_get_area_ratio(t: *DynamicTree) -> float {
 
 tree_get_root_bounds(t: *DynamicTree) -> AABB {
     if t.proxy_count == 0 { return AABB { lower: math.vec3_zero(), upper: math.vec3_zero() } }
-    nodes = t.nodes as TreeNode[]
+    nodes = t.nodes as DynamicTreeNode[]
     return nodes[ROOT_NODE].aabb
 }
 
 tree_get_byte_count(t: *DynamicTree) -> int {
     size = sizeof(DynamicTree)
-    size = size + t.node_capacity * sizeof(TreeNode)
+    size = size + t.node_capacity * sizeof(DynamicTreeNode)
     size = size + t.node_capacity * 4
     size = size + t.proxy_capacity * sizeof(TreeProxy)
-    if t.swap_nodes != null { size = size + t.node_capacity * sizeof(TreeNode) }
-    size = size + t.rebuild_capacity * (4 + sizeof(TreeNode) + sizeof(Vec3))
+    if t.swap_nodes != null { size = size + t.node_capacity * sizeof(DynamicTreeNode) }
+    size = size + t.rebuild_capacity * (4 + sizeof(DynamicTreeNode) + sizeof(Vec3))
     size = size + TREE_STACK_SIZE * (REBUILD_ITEM_INTS * 4 + 8 + COPY_ITEM_INTS * 4)
     return size
 }
@@ -710,7 +710,7 @@ tree_get_byte_count(t: *DynamicTree) -> int {
 // the leaves it saw into leaf_count[0].
 validate_subtree(t: *DynamicTree, node_index: int, leaf_count: int[]) -> int {
     if node_index < 0 || node_index >= t.node_end { return 0 - 1 }
-    nodes = t.nodes as TreeNode[]
+    nodes = t.nodes as DynamicTreeNode[]
     parents = t.parents as int[]
     proxies = t.proxies as TreeProxy[]
     n = nodes[node_index]
@@ -750,7 +750,7 @@ validate_subtree(t: *DynamicTree, node_index: int, leaf_count: int[]) -> int {
 // would assert.
 tree_validate(t: *DynamicTree) -> bool {
     if t.node_end < 2 || t.node_end > t.node_capacity || (t.node_end & 1) != 0 { return false }
-    nodes = t.nodes as TreeNode[]
+    nodes = t.nodes as DynamicTreeNode[]
     parents = t.parents as int[]
     proxies = t.proxies as TreeProxy[]
     if t.parents != null && parents[ROOT_NODE] != NULL_INDEX { return false }
@@ -790,7 +790,7 @@ tree_validate(t: *DynamicTree) -> bool {
 }
 
 tree_validate_no_moved(t: *DynamicTree) -> bool {
-    nodes = t.nodes as TreeNode[]
+    nodes = t.nodes as DynamicTreeNode[]
     i = 0
     while i < t.node_end {
         if is_node_moved(nodes[i].flag_index) { return false }
@@ -807,7 +807,7 @@ tree_query(t: *DynamicTree, box: AABB, mask_bits: long, require_all: bool,
            visitor: fn(int, long, ptr) -> bool, context: ptr) -> TreeStats {
     result = TreeStats { node_visits: 0, leaf_visits: 0 }
     if t.proxy_count == 0 { return result }
-    nodes = t.nodes as TreeNode[]
+    nodes = t.nodes as DynamicTreeNode[]
     proxies = t.proxies as TreeProxy[]
     stack = query_stack(t) as int[]
     stack_count = 0
@@ -865,7 +865,7 @@ tree_query_closest(t: *DynamicTree, point: Vec3, mask_bits: long, require_all: b
                    min_distance_sqr: float[]) -> TreeStats {
     result = TreeStats { node_visits: 0, leaf_visits: 0 }
     if t.proxy_count == 0 { return result }
-    nodes = t.nodes as TreeNode[]
+    nodes = t.nodes as DynamicTreeNode[]
     proxies = t.proxies as TreeProxy[]
     stack = query_stack(t) as int[]
     dists = query_dists(t) as float[]
@@ -954,7 +954,7 @@ tree_ray_cast(t: *DynamicTree, input: *RayCastInput, mask_bits: long, require_al
               visitor: fn(*RayCastInput, int, long, ptr) -> float, context: ptr) -> TreeStats {
     result = TreeStats { node_visits: 0, leaf_visits: 0 }
     if t.proxy_count == 0 { return result }
-    nodes = t.nodes as TreeNode[]
+    nodes = t.nodes as DynamicTreeNode[]
     proxies = t.proxies as TreeProxy[]
     stack = query_stack(t) as int[]
 
@@ -1039,7 +1039,7 @@ tree_box_cast(t: *DynamicTree, input: *BoxCastInput, mask_bits: long, require_al
               visitor: fn(*BoxCastInput, int, long, ptr) -> float, context: ptr) -> TreeStats {
     result = TreeStats { node_visits: 0, leaf_visits: 0 }
     if t.proxy_count == 0 { return result }
-    nodes = t.nodes as TreeNode[]
+    nodes = t.nodes as DynamicTreeNode[]
     proxies = t.proxies as TreeProxy[]
     stack = query_stack(t) as int[]
 
@@ -1189,9 +1189,9 @@ set_left_child(flag_index: int, pair: int) -> int {
 
 // Copy a kept subtree from the old array into the array being built, in
 // depth-first order, with the bump allocator.
-copy_subtree(t: *DynamicTree, subtree: TreeNode, new_index: int) {
-    old_nodes = t.nodes as TreeNode[]
-    new_nodes = t.swap_nodes as TreeNode[]
+copy_subtree(t: *DynamicTree, subtree: DynamicTreeNode, new_index: int) {
+    old_nodes = t.nodes as DynamicTreeNode[]
+    new_nodes = t.swap_nodes as DynamicTreeNode[]
     proxies = t.proxies as TreeProxy[]
     node = subtree
     if is_leaf(node.flag_index) {
@@ -1243,9 +1243,9 @@ copy_subtree(t: *DynamicTree, subtree: TreeNode, new_index: int) {
     }
 }
 
-place_leaf(t: *DynamicTree, leaf: TreeNode, new_index: int) {
+place_leaf(t: *DynamicTree, leaf: DynamicTreeNode, new_index: int) {
     if is_leaf(leaf.flag_index) {
-        new_nodes = t.swap_nodes as TreeNode[]
+        new_nodes = t.swap_nodes as DynamicTreeNode[]
         new_nodes[new_index] = leaf
         proxies = t.proxies as TreeProxy[]
         proxies[proxy_id_of(leaf.flag_index)].node = new_index
@@ -1259,8 +1259,8 @@ place_leaf(t: *DynamicTree, leaf: TreeNode, new_index: int) {
 // written, the pair below it, how many children are done, and the leaf
 // range with its split.
 build_tree(t: *DynamicTree, leaf_count: int) {
-    nodes = t.swap_nodes as TreeNode[]
-    leaves = t.leaf_nodes as TreeNode[]
+    nodes = t.swap_nodes as DynamicTreeNode[]
+    leaves = t.leaf_nodes as DynamicTreeNode[]
     leaf_indices = t.leaf_indices as int[]
     leaf_centers = t.leaf_centers as Vec3[]
     parents = t.parents as int[]
@@ -1328,27 +1328,27 @@ build_tree(t: *DynamicTree, leaf_count: int) {
 tree_rebuild(t: *DynamicTree, full_build: bool) -> int {
     proxy_count = t.proxy_count
     if proxy_count == 0 { return 0 }
-    nodes = t.nodes as TreeNode[]
+    nodes = t.nodes as DynamicTreeNode[]
     root = nodes[ROOT_NODE]
     // An unordered tree is rebuilt even when nothing moved: the sweep needs the order.
     if full_build == false && is_node_moved(root.flag_index) == false && t.dfs_ordered { return 0 }
 
-    if t.swap_nodes == null { t.swap_nodes = basics.alloc(t.node_capacity * sizeof(TreeNode)) }
+    if t.swap_nodes == null { t.swap_nodes = basics.alloc(t.node_capacity * sizeof(DynamicTreeNode)) }
 
     if proxy_count > t.rebuild_capacity {
         old_capacity = t.rebuild_capacity
         new_capacity = proxy_count + proxy_count / 2
         basics.free_bytes(t.leaf_indices, old_capacity * 4)
         t.leaf_indices = basics.alloc(new_capacity * 4)
-        basics.free_bytes(t.leaf_nodes, old_capacity * sizeof(TreeNode))
-        t.leaf_nodes = basics.alloc(new_capacity * sizeof(TreeNode))
+        basics.free_bytes(t.leaf_nodes, old_capacity * sizeof(DynamicTreeNode))
+        t.leaf_nodes = basics.alloc(new_capacity * sizeof(DynamicTreeNode))
         basics.free_bytes(t.leaf_centers, old_capacity * sizeof(Vec3))
         t.leaf_centers = basics.alloc(new_capacity * sizeof(Vec3))
         t.rebuild_capacity = new_capacity
     }
 
     leaf_indices = t.leaf_indices as int[]
-    leaves = t.leaf_nodes as TreeNode[]
+    leaves = t.leaf_nodes as DynamicTreeNode[]
     leaf_centers = t.leaf_centers as Vec3[]
     stack = query_stack(t) as int[]
 
@@ -1406,7 +1406,7 @@ tree_rebuild(t: *DynamicTree, full_build: bool) -> int {
 
 // Mark the proxy's leaf and its ancestors moved.
 tree_mark_proxy_moved_serial(t: *DynamicTree, proxy_id: int) {
-    nodes = t.nodes as TreeNode[]
+    nodes = t.nodes as DynamicTreeNode[]
     parents = t.parents as int[]
     proxies = t.proxies as TreeProxy[]
     index = proxies[proxy_id].node
@@ -1423,7 +1423,7 @@ tree_mark_proxy_moved_serial(t: *DynamicTree, proxy_id: int) {
 // the flag is already set, then the fetch-or, and the previous flags
 // say whether another worker got there first.
 tree_mark_proxy_moved(t: *DynamicTree, proxy_id: int, box: AABB) {
-    nodes = t.nodes as TreeNode[]
+    nodes = t.nodes as DynamicTreeNode[]
     parents = t.parents as int[]
     proxies = t.proxies as TreeProxy[]
     index = proxies[proxy_id].node
@@ -1439,7 +1439,7 @@ tree_mark_proxy_moved(t: *DynamicTree, proxy_id: int, box: AABB) {
 }
 
 tree_clear_moved(t: *DynamicTree) {
-    nodes = t.nodes as TreeNode[]
+    nodes = t.nodes as DynamicTreeNode[]
     if is_node_moved(nodes[ROOT_NODE].flag_index) == false { return }
     nodes[ROOT_NODE].flag_index = nodes[ROOT_NODE].flag_index & (0 - 1 - MOVED_NODE)
     if is_leaf(nodes[ROOT_NODE].flag_index) { return }
@@ -1466,7 +1466,7 @@ tree_clear_moved(t: *DynamicTree) {
 
 // The ids of the moved proxies into proxy_ids; returns how many.
 tree_gather_moved_proxies(t: *DynamicTree, proxy_ids: int[]) -> int {
-    nodes = t.nodes as TreeNode[]
+    nodes = t.nodes as DynamicTreeNode[]
     root = nodes[ROOT_NODE]
     if is_node_moved(root.flag_index) == false { return 0 }
     if is_leaf(root.flag_index) {
@@ -1500,7 +1500,7 @@ tree_gather_moved_proxies(t: *DynamicTree, proxy_ids: int[]) -> int {
 // The refit for an unordered tree, from the tests: a parent is pushed
 // (as its complement) before its children, so the union runs after both.
 refit_subtree(t: *DynamicTree, root_index: int) {
-    nodes = t.nodes as TreeNode[]
+    nodes = t.nodes as DynamicTreeNode[]
     root = nodes[root_index]
     if is_leaf(root.flag_index) || is_node_moved(root.flag_index) == false { return }
     stack = query_stack(t) as int[]
@@ -1533,7 +1533,7 @@ refit_subtree(t: *DynamicTree, root_index: int) {
 // every child is above its parent, so one sweep from the end does it.
 tree_refit(t: *DynamicTree) {
     if tree_has_moved(t) == false { return }
-    nodes = t.nodes as TreeNode[]
+    nodes = t.nodes as DynamicTreeNode[]
     if t.dfs_ordered == false {
         refit_subtree(t, ROOT_NODE)
         return

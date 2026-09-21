@@ -284,15 +284,15 @@ add_candidate_pair(ctx: *PairContext, shape_a: int, shape_b: int, key_a: int, ke
 }
 
 // Did either move, and if so do they overlap?
-test_pair(a: TreeNode, b: TreeNode) -> bool {
+test_pair(a: DynamicTreeNode, b: DynamicTreeNode) -> bool {
     if ((a.flag_index | b.flag_index) & dynamic_tree.MOVED_NODE) == 0 { return false }
     return math.aabb_overlaps(a.aabb, b.aabb)
 }
 
 // A leaf against a subtree of a tree (its own or another): the moved
 // flag on either side and the boxes cull.
-collide_proxy_and_subtree(ctx: *PairContext, leaf: TreeNode, leaf_key: int, tree: *DynamicTree, tree_kind: int, pair: int) {
-    nodes = tree.nodes as TreeNode[]
+collide_proxy_and_subtree(ctx: *PairContext, leaf: DynamicTreeNode, leaf_key: int, tree: *DynamicTree, tree_kind: int, pair: int) {
+    nodes = tree.nodes as DynamicTreeNode[]
     proxies = tree.proxies as TreeProxy[]
     leaf_mark = leaf.flag_index & dynamic_tree.MOVED_NODE
     leaf_box = leaf.aabb
@@ -324,8 +324,8 @@ collide_proxy_and_subtree(ctx: *PairContext, leaf: TreeNode, leaf_key: int, tree
 // One node against another: a pair of leaves is a candidate, a leaf
 // against a subtree walks it, two subtrees go on the stack.
 visit_pair(ctx: *PairContext, tree_a: *DynamicTree, kind_a: int, tree_b: *DynamicTree, kind_b: int, a: int, b: int) {
-    nodes_a = tree_a.nodes as TreeNode[]
-    nodes_b = tree_b.nodes as TreeNode[]
+    nodes_a = tree_a.nodes as DynamicTreeNode[]
+    nodes_b = tree_b.nodes as DynamicTreeNode[]
     node_a = nodes_a[a]
     node_b = nodes_b[b]
     if test_pair(node_a, node_b) == false { return }
@@ -371,7 +371,7 @@ collide_cross_pairs(ctx: *PairContext, tree_a: *DynamicTree, kind_a: int, tree_b
 
 // The dynamic tree's sibling pairs a moved node touched, in order.
 gather_moved_siblings(tree: *DynamicTree, siblings: int[]) -> int {
-    nodes = tree.nodes as TreeNode[]
+    nodes = tree.nodes as DynamicTreeNode[]
     count = 0
     pair = 2
     while pair < tree.node_end {
@@ -388,8 +388,8 @@ gather_moved_siblings(tree: *DynamicTree, siblings: int[]) -> int {
 // holds enough node pairs to seed the cross walk (the reference spreads
 // them over workers; here they keep the same order).
 gather_cross_seeds(bp: *BroadPhase, tree_a: *DynamicTree, tree_b: *DynamicTree, seeds: int[], seed_offset: int) -> int {
-    nodes_a = tree_a.nodes as TreeNode[]
-    nodes_b = tree_b.nodes as TreeNode[]
+    nodes_a = tree_a.nodes as DynamicTreeNode[]
+    nodes_b = tree_b.nodes as DynamicTreeNode[]
     queue = bp.queue as int[]
     mask = 2 * CROSS_SEED_COUNT - 1
     head = 0
