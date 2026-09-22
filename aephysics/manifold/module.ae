@@ -218,12 +218,17 @@ var g_clip2: ptr = null
 clip2() -> ptr { return native.scratch(g_clip2, MAX_CLIP_POINTS * sizeof(ClipVertex)) }
 var g_clip_points: ptr = null
 clip_points() -> ptr { return native.scratch(g_clip_points, MAX_CLIP_POINTS * sizeof(LocalManifoldPoint)) }
+// A's edges, gathered once before the edge-pair loop reads them a
+// hundred times (see edge_axes).
+var g_edge_axes: ptr = null
+edge_axes() -> ptr { return native.scratch(g_edge_axes, (hull.MAX_HULL_EDGES / 2) * sizeof(EdgeAxis)) }
 
 scratch_ready() {
     if g_clip1 == null {
         g_clip1 = basics.alloc(native.MAX_WORKERS * (MAX_CLIP_POINTS * sizeof(ClipVertex)))
         g_clip2 = basics.alloc(native.MAX_WORKERS * (MAX_CLIP_POINTS * sizeof(ClipVertex)))
         g_clip_points = basics.alloc(native.MAX_WORKERS * (MAX_CLIP_POINTS * sizeof(LocalManifoldPoint)))
+        g_edge_axes = basics.alloc(native.MAX_WORKERS * ((hull.MAX_HULL_EDGES / 2) * sizeof(EdgeAxis)))
     }
 }
 
@@ -231,6 +236,24 @@ scratch_ready() {
 // thread: a world's creation reserves every module's before a step can
 // reach them from several workers at once.
 reserve_scratch() { scratch_ready() }
+
+// One of hull A's edges, as the edge-pair test reads it: the edge's
+// direction, its two faces' normals, its first vertex and the tolerance
+// that rejects a near-parallel pair. The inner loop below runs over
+// every edge of A for every edge of B -- a hundred and forty-four times
+// for two boxes, and MAX_HULL_EDGES squared over four for two hulls --
+// and reading them through the half-edge structure each time (a face
+// index into the planes, an origin index into the points) is a pointer
+// chase per pair. The reference gathers the same values into flat arrays
+// before its own loop; this is that gather, in single precision, since a
+// separating axis is a direction and the reference finds it in floats.
+struct EdgeAxis {
+    dir: Vec3f                     // the edge, from its origin to its twin's
+    n0: Vec3f                      // its face's normal
+    n1: Vec3f                      // its twin's face's normal
+    v0: Vec3f                      // its origin
+    tol: f32                       // the squared tolerance a pair must beat
+}
 
 // --- the incident face and clipping ----------------------------------------------------
 
@@ -915,6 +938,29 @@ compute_separating_axis(hull_a: *HullData, hull_b: *HullData, xf_b: Transform, e
     // C and D are its two face normals, DC its edge, bv0 its first vertex.
     squared_tol = PARALLEL_EDGE_TOL * PARALLEL_EDGE_TOL
     eps = 0.0 - 0.0001
+    // A's edges, gathered once: what the inner loop reads for every edge
+    // of B. The axis test is reachable without a clip (a query that only
+    // asks whether two hulls are apart), so it makes sure of its own
+    // scratch rather than relying on the caller's path.
+    scratch_ready()
+    axes = edge_axes() as EdgeAxis[]
+    axis_count = 0
+    i = 0
+    while i < hull_a.edge_count {
+        twin_a = i + 1
+        av0 = points_a[edges_a[i].origin]
+        ad = math.sub(points_a[edges_a[twin_a].origin], av0)
+        axes[axis_count] = EdgeAxis {
+            dir: math.narrow3(ad),
+            n0: math.narrow3(planes_a[edges_a[i].face].normal),
+            n1: math.narrow3(planes_a[edges_a[twin_a].face].normal),
+            v0: math.narrow3(av0),
+            tol: (squared_tol * math.length_squared(ad)) as f32
+        }
+        axis_count = axis_count + 1
+        i = i + 2
+    }
+    f32 eps32 = eps
     j = 0
     while j < hull_b.edge_count {
         twin_b = j + 1
@@ -923,29 +969,33 @@ compute_separating_axis(hull_a: *HullData, hull_b: *HullData, xf_b: Transform, e
         bv0 = math.neg(math.add(math.mul_mv(r, points_b[edges_b[j].origin]), xf_b.p))
         bv1 = math.neg(math.add(math.mul_mv(r, points_b[edges_b[twin_b].origin]), xf_b.p))
         dc = math.sub(bv1, bv0)
-        i = 0
-        while i < hull_a.edge_count {
-            twin_a = i + 1
-            n0 = planes_a[edges_a[i].face].normal
-            n1 = planes_a[edges_a[twin_a].face].normal
-            av0 = points_a[edges_a[i].origin]
-            ad = math.sub(points_a[edges_a[twin_a].origin], av0)
-            cba = math.dot(c, ad)
-            dba = math.dot(d, ad)
-            if cba * dba < eps {
-                adc = math.dot(n0, dc)
-                bdc = math.dot(n1, dc)
-                if adc * bdc < eps && cba * bdc < eps {
+        c32 = math.narrow3(c)
+        d32 = math.narrow3(d)
+        dc32 = math.narrow3(dc)
+        k = 0
+        while k < axis_count {
+            axis = axes[k]
+            cba = math.dotf(c32, axis.dir)
+            dba = math.dotf(d32, axis.dir)
+            if cba * dba < eps32 {
+                adc = math.dotf(axis.n0, dc32)
+                bdc = math.dotf(axis.n1, dc32)
+                if adc * bdc < eps32 && cba * bdc < eps32 {
                     // Near-parallel edges are not an axis.
-                    max_cd = math.max_float(cba * cba, dba * dba)
-                    if max_cd > squared_tol * math.length_squared(ad) {
-                        t = (0.0 - cba) / (dba - cba)
+                    max_cd = math.max_f32(cba * cba, dba * dba)
+                    if max_cd > axis.tol {
+                        // The axis itself is worth a double: it is the
+                        // normal a contact is built on, and the
+                        // separation is compared against the others'.
+                        cbad = math.dot(c, math.widen3(axis.dir))
+                        dbad = math.dot(d, math.widen3(axis.dir))
+                        t = (0.0 - cbad) / (dbad - cbad)
                         n = math.normalize(math.add(c, math.mul_sv(t, math.sub(d, c))))
-                        separation = 0.0 - math.dot(math.add(av0, bv0), n)
+                        separation = 0.0 - math.dot(math.add(math.widen3(axis.v0), bv0), n)
                         if separation > res.edge.separation {
                             res.edge.normal = n
                             res.edge.separation = separation
-                            res.edge.index_a = i
+                            res.edge.index_a = 2 * k
                             res.edge.index_b = j
                             if separation > SPECULATIVE_DISTANCE && early_return {
                                 res.separated_feature = AXIS_EDGE_PAIR
@@ -955,7 +1005,7 @@ compute_separating_axis(hull_a: *HullData, hull_b: *HullData, xf_b: Transform, e
                     }
                 }
             }
-            i = i + 2
+            k = k + 1
         }
         j = j + 2
     }
