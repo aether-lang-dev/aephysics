@@ -158,7 +158,7 @@ hull-capsule and 20,000 hull-sphere collisions along a sweep.
 
 | phase | aephysics | Box3D |
 |---|---|---|
-| 20,000 hull-hull, cold cache | 12.7 ms | **9.1** |
+| 20,000 hull-hull, cold cache | 11.2 ms | **9.2** |
 | 20,000 hull-hull, warm cache | **3.2** | 3.6 |
 | 20,000 hull-capsule | **4.8** | 4.9 |
 | 20,000 hull-sphere | **2.4** | 2.5 |
@@ -176,10 +176,25 @@ each test read a face index into the planes and an origin index into the
 points, a pointer chase per pair; they are gathered once into a flat
 array of directions, normals and tolerances before the loop, in single
 precision, since a separating axis is a direction and the reference
-finds it in floats (#42). The axis that wins is still computed in double:
-it is the normal a contact is built on. What is left between the columns
-is the reference's SIMD, which tests eight edge pairs at once where this
-tests one.
+finds it in floats (#42). That took it to 12.7.
+
+It is 11.2 since the gather became thirteen flat arrays and the loop
+reads four of A's edges at a time (`std.lanes`, Aether 0.706): the whole
+first test -- four dot products, a maximum and four comparisons -- is one
+pass of lane arithmetic, and only a lane that survives it takes the
+double path. The reference does the same thing with intrinsics; this is
+the first place the port answers its SIMD in Aether rather than in the
+native file. Every manifold is unchanged (52,386 cold points, the same
+separation sums): each lane computes what the edge computed on its own,
+in the same order, and the reduction keeps the lowest index among equal
+values, so the axis a pair chooses is the axis it chose before.
+
+The same treatment of the face tests does not pay and is not in: the
+support search over the other hull's vertices, gathered into lanes the
+same way, took the cold test from 11.2 to 11.8 ms. A box has eight
+vertices, so a search is two lane steps and the reduction across four
+lanes costs more than the eight dot products it replaces. It is worth
+measuring again on hulls with vertices in the dozens.
 
 ## triangle_manifold
 
