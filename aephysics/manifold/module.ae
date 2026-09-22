@@ -20,6 +20,7 @@
 // a time until the parallel layer gives each worker its own; the reduction
 // to four points is the reference's default (the 2D-hull alternative is
 // there for larger manifolds).
+import std.lanes
 import std.string
 import aephysics.math
 import aephysics.native
@@ -221,14 +222,14 @@ clip_points() -> ptr { return native.scratch(g_clip_points, MAX_CLIP_POINTS * si
 // A's edges, gathered once before the edge-pair loop reads them a
 // hundred times (see edge_axes).
 var g_edge_axes: ptr = null
-edge_axes() -> ptr { return native.scratch(g_edge_axes, (hull.MAX_HULL_EDGES / 2) * sizeof(EdgeAxis)) }
+edge_axes() -> ptr { return native.scratch(g_edge_axes, AXIS_FIELDS * AXIS_SLOTS * 4) }
 
 scratch_ready() {
     if g_clip1 == null {
         g_clip1 = basics.alloc(native.MAX_WORKERS * (MAX_CLIP_POINTS * sizeof(ClipVertex)))
         g_clip2 = basics.alloc(native.MAX_WORKERS * (MAX_CLIP_POINTS * sizeof(ClipVertex)))
         g_clip_points = basics.alloc(native.MAX_WORKERS * (MAX_CLIP_POINTS * sizeof(LocalManifoldPoint)))
-        g_edge_axes = basics.alloc(native.MAX_WORKERS * ((hull.MAX_HULL_EDGES / 2) * sizeof(EdgeAxis)))
+        g_edge_axes = basics.alloc(native.MAX_WORKERS * (AXIS_FIELDS * AXIS_SLOTS * 4))
     }
 }
 
@@ -237,23 +238,40 @@ scratch_ready() {
 // reach them from several workers at once.
 reserve_scratch() { scratch_ready() }
 
-// One of hull A's edges, as the edge-pair test reads it: the edge's
+// Hull A's edges, as the edge-pair test reads them: the edge's
 // direction, its two faces' normals, its first vertex and the tolerance
 // that rejects a near-parallel pair. The inner loop below runs over
 // every edge of A for every edge of B -- a hundred and forty-four times
 // for two boxes, and MAX_HULL_EDGES squared over four for two hulls --
 // and reading them through the half-edge structure each time (a face
 // index into the planes, an origin index into the points) is a pointer
-// chase per pair. The reference gathers the same values into flat arrays
-// before its own loop; this is that gather, in single precision, since a
-// separating axis is a direction and the reference finds it in floats.
-struct EdgeAxis {
-    dir: Vec3f                     // the edge, from its origin to its twin's
-    n0: Vec3f                      // its face's normal
-    n1: Vec3f                      // its twin's face's normal
-    v0: Vec3f                      // its origin
-    tol: f32                       // the squared tolerance a pair must beat
-}
+// chase per pair. The reference gathers the same values first; this is
+// that gather, in single precision, since a separating axis is a
+// direction and the reference finds it in floats.
+//
+// Thirteen flat arrays over one block rather than a record per edge, so
+// four edges of A are one load per field and the whole first test --
+// two dot products, two more, a maximum and four comparisons -- is four
+// edges at a time (std.lanes, Aether 0.706). Each lane computes what the
+// edge computed on its own, in the same order, so the axis a pair
+// chooses is the axis it chose before: the tests hold the traces.
+const AXIS_SLOTS = 64              // MAX_HULL_EDGES / 2, already a multiple of four
+const AXIS_FIELDS = 13
+// Where each array starts, in elements: x, y, z of the direction, of
+// both face normals and of the origin, then the tolerance.
+const AXIS_DIR_X = 0
+const AXIS_DIR_Y = 64
+const AXIS_DIR_Z = 128
+const AXIS_N0_X = 192
+const AXIS_N0_Y = 256
+const AXIS_N0_Z = 320
+const AXIS_N1_X = 384
+const AXIS_N1_Y = 448
+const AXIS_N1_Z = 512
+const AXIS_V0_X = 576
+const AXIS_V0_Y = 640
+const AXIS_V0_Z = 704
+const AXIS_TOL = 768
 
 // --- the incident face and clipping ----------------------------------------------------
 
@@ -943,22 +961,43 @@ compute_separating_axis(hull_a: *HullData, hull_b: *HullData, xf_b: Transform, e
     // asks whether two hulls are apart), so it makes sure of its own
     // scratch rather than relying on the caller's path.
     scratch_ready()
-    axes = edge_axes() as EdgeAxis[]
+    axes = edge_axes()
+    slots = axes as f32[]
     axis_count = 0
     i = 0
     while i < hull_a.edge_count {
         twin_a = i + 1
         av0 = points_a[edges_a[i].origin]
         ad = math.sub(points_a[edges_a[twin_a].origin], av0)
-        axes[axis_count] = EdgeAxis {
-            dir: math.narrow3(ad),
-            n0: math.narrow3(planes_a[edges_a[i].face].normal),
-            n1: math.narrow3(planes_a[edges_a[twin_a].face].normal),
-            v0: math.narrow3(av0),
-            tol: (squared_tol * math.length_squared(ad)) as f32
-        }
+        dir32 = math.narrow3(ad)
+        n0_32 = math.narrow3(planes_a[edges_a[i].face].normal)
+        n1_32 = math.narrow3(planes_a[edges_a[twin_a].face].normal)
+        v0_32 = math.narrow3(av0)
+        slots[AXIS_DIR_X + axis_count] = dir32.x
+        slots[AXIS_DIR_Y + axis_count] = dir32.y
+        slots[AXIS_DIR_Z + axis_count] = dir32.z
+        slots[AXIS_N0_X + axis_count] = n0_32.x
+        slots[AXIS_N0_Y + axis_count] = n0_32.y
+        slots[AXIS_N0_Z + axis_count] = n0_32.z
+        slots[AXIS_N1_X + axis_count] = n1_32.x
+        slots[AXIS_N1_Y + axis_count] = n1_32.y
+        slots[AXIS_N1_Z + axis_count] = n1_32.z
+        slots[AXIS_V0_X + axis_count] = v0_32.x
+        slots[AXIS_V0_Y + axis_count] = v0_32.y
+        slots[AXIS_V0_Z + axis_count] = v0_32.z
+        slots[AXIS_TOL + axis_count] = (squared_tol * math.length_squared(ad)) as f32
         axis_count = axis_count + 1
         i = i + 2
+    }
+    // The tail of the last four. A zero direction answers zero to both of
+    // the first dot products, and zero is not under eps, so a lane past
+    // the count decides nothing.
+    padded = axis_count
+    while padded % 4 != 0 {
+        slots[AXIS_DIR_X + padded] = 0.0
+        slots[AXIS_DIR_Y + padded] = 0.0
+        slots[AXIS_DIR_Z + padded] = 0.0
+        padded = padded + 1
     }
     f32 eps32 = eps
     j = 0
@@ -972,30 +1011,60 @@ compute_separating_axis(hull_a: *HullData, hull_b: *HullData, xf_b: Transform, e
         c32 = math.narrow3(c)
         d32 = math.narrow3(d)
         dc32 = math.narrow3(dc)
+        cx = lanes.splat4(c32.x)
+        cy = lanes.splat4(c32.y)
+        cz = lanes.splat4(c32.z)
+        dx = lanes.splat4(d32.x)
+        dy = lanes.splat4(d32.y)
+        dz = lanes.splat4(d32.z)
+        dcx = lanes.splat4(dc32.x)
+        dcy = lanes.splat4(dc32.y)
+        dcz = lanes.splat4(dc32.z)
+        eps_lane = lanes.splat4(eps32)
         k = 0
-        while k < axis_count {
-            axis = axes[k]
-            cba = math.dotf(c32, axis.dir)
-            dba = math.dotf(d32, axis.dir)
-            if cba * dba < eps32 {
-                adc = math.dotf(axis.n0, dc32)
-                bdc = math.dotf(axis.n1, dc32)
-                if adc * bdc < eps32 && cba * bdc < eps32 {
-                    // Near-parallel edges are not an axis.
-                    max_cd = math.max_f32(cba * cba, dba * dba)
-                    if max_cd > axis.tol {
+        while k < padded {
+            dir_x = lanes.load4(axes, (AXIS_DIR_X + k) as long)
+            dir_y = lanes.load4(axes, (AXIS_DIR_Y + k) as long)
+            dir_z = lanes.load4(axes, (AXIS_DIR_Z + k) as long)
+            cba = cx * dir_x + cy * dir_y + cz * dir_z
+            dba = dx * dir_x + dy * dir_y + dz * dir_z
+            live = lanes.lt4(cba * dba, eps_lane)
+            if lanes.any4(live) {
+                n0_x = lanes.load4(axes, (AXIS_N0_X + k) as long)
+                n0_y = lanes.load4(axes, (AXIS_N0_Y + k) as long)
+                n0_z = lanes.load4(axes, (AXIS_N0_Z + k) as long)
+                n1_x = lanes.load4(axes, (AXIS_N1_X + k) as long)
+                n1_y = lanes.load4(axes, (AXIS_N1_Y + k) as long)
+                n1_z = lanes.load4(axes, (AXIS_N1_Z + k) as long)
+                adc = n0_x * dcx + n0_y * dcy + n0_z * dcz
+                bdc = n1_x * dcx + n1_y * dcy + n1_z * dcz
+                live = lanes.mask_and(live, lanes.lt4(adc * bdc, eps_lane))
+                live = lanes.mask_and(live, lanes.lt4(cba * bdc, eps_lane))
+                // Near-parallel edges are not an axis.
+                max_cd = lanes.max4(cba * cba, dba * dba)
+                live = lanes.mask_and(live, lanes.gt4(max_cd, lanes.load4(axes, (AXIS_TOL + k) as long)))
+                lane = 0
+                while lane < 4 {
+                    if lanes.mask_lane(live, lane as long) != 0 {
                         // The axis itself is worth a double: it is the
                         // normal a contact is built on, and the
                         // separation is compared against the others'.
-                        cbad = math.dot(c, math.widen3(axis.dir))
-                        dbad = math.dot(d, math.widen3(axis.dir))
+                        at = k + lane
+                        edge_dir = math.vec3(slots[AXIS_DIR_X + at] as float,
+                                             slots[AXIS_DIR_Y + at] as float,
+                                             slots[AXIS_DIR_Z + at] as float)
+                        edge_v0 = math.vec3(slots[AXIS_V0_X + at] as float,
+                                            slots[AXIS_V0_Y + at] as float,
+                                            slots[AXIS_V0_Z + at] as float)
+                        cbad = math.dot(c, edge_dir)
+                        dbad = math.dot(d, edge_dir)
                         t = (0.0 - cbad) / (dbad - cbad)
                         n = math.normalize(math.add(c, math.mul_sv(t, math.sub(d, c))))
-                        separation = 0.0 - math.dot(math.add(math.widen3(axis.v0), bv0), n)
+                        separation = 0.0 - math.dot(math.add(edge_v0, bv0), n)
                         if separation > res.edge.separation {
                             res.edge.normal = n
                             res.edge.separation = separation
-                            res.edge.index_a = 2 * k
+                            res.edge.index_a = 2 * at
                             res.edge.index_b = j
                             if separation > SPECULATIVE_DISTANCE && early_return {
                                 res.separated_feature = AXIS_EDGE_PAIR
@@ -1003,9 +1072,10 @@ compute_separating_axis(hull_a: *HullData, hull_b: *HullData, xf_b: Transform, e
                             }
                         }
                     }
+                    lane = lane + 1
                 }
             }
-            k = k + 1
+            k = k + 4
         }
         j = j + 2
     }
