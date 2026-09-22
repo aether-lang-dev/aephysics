@@ -15,6 +15,7 @@ import aephysics.manifold
 import aephysics.shape
 import aephysics.broad_phase
 import aephysics.dynamics
+import aephysics.solver
 import aephysics.physics_world
 
 extern calloc(count: int, size: int) -> ptr
@@ -77,15 +78,27 @@ height_sum(world_id: WorldId) -> float {
 }
 
 run(name: string, world_id: WorldId, steps: int) {
+    // The phases of the step, summed as the run goes: the world fills its
+    // profile every step the way the reference fills b3Profile, and
+    // bench/physics_world_box3d.c prints the same columns.
+    pairs_ms = 0.0
+    collide_ms = 0.0
+    sensors_ms = 0.0
     t0 = clock()
     s = 0
     while s < steps {
         physics_world.step(world_id, 1.0 / 60.0, 4)
+        seen = physics_world.get_profile(world_id)
+        pairs_ms = pairs_ms + seen.pairs
+        collide_ms = collide_ms + seen.collide
+        sensors_ms = sensors_ms + seen.sensors
         s = s + 1
     }
     t1 = clock()
     counters = physics_world.get_counters(world_id)
     println("aephysics physics_world: ${name}: ${steps} steps of ${counters.body_count} bodies ${ms(t1 - t0)} ms, ${ms(t1 - t0) / (steps as float)} ms per step (height sum ${height_sum(world_id)}, ${counters.contact_count} contacts, ${counters.joint_count} joints)")
+    println("aephysics phases ms/step: pairs ${pairs_ms / (steps as float)} collide ${collide_ms / (steps as float)} sensors ${sensors_ms / (steps as float)}")
+    solver.stage_report()
     dynamics.destroy_world(world_id)
 }
 

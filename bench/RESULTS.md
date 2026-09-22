@@ -567,6 +567,35 @@ The pyramids were 12.5 and 28.4 against 8.9 and 19.3 before the wide
 constraint became one single-precision record in the module's own lanes
 (#46): 1.40x and 1.47x to 1.22x and 1.31x.
 
+### Stage by stage
+
+`AEPHYSICS_STAGES=1` times every stage a worker runs and prints the
+per-step averages; the world's own profile carries the phases around them,
+and `bench/physics_world_box3d.c` prints the reference's `b3Profile`, which
+names the same stages. So the two columns are the same run, stage for
+stage, rather than two totals. The large pyramid, one thread:
+
+| stage | aephysics | Box3D | difference |
+|---|---|---|---|
+| pairs (broad phase) | 0.32 ms | 0.22 | +0.10 |
+| **collide (narrow phase and recycling)** | **2.17** | **1.04** | **+1.13** |
+| **prepare constraints** | **2.07** | **1.26** | **+0.82** |
+| integrate velocities | 0.57 | 0.58 | 0.00 |
+| warm start | 1.13 | 1.15 | -0.02 |
+| solve (biased) | 1.92 | 1.75 | +0.17 |
+| integrate positions | 0.11 | 0.11 | 0.00 |
+| relax (no bias) | 2.43 | 2.24 | +0.20 |
+| restitution | 0.01 | 0.01 | 0.00 |
+| store impulses | 0.76 | 0.44 | +0.31 |
+| step | 11.9 | 9.1 | +2.8 |
+
+Two stages are seven tenths of the whole difference: the **collide pass**
+(#17) and the **prepare**. Everything the lanes touch -- warm start, solve,
+relax, restitution, integrate -- is within two tenths of a millisecond of
+the reference, and the warm start is ahead of it. That is what #48 bought
+and where the port stands: the solve is the reference's equal, and what is
+left is the narrow phase and the work of filling the constraints.
+
 The same height sums (167,556, 37,695 and -496,893), contact counts
 (14,950 and 28,420) and joint count. One run of the pair, on a machine
 whose other work moves both columns by 10-20% between runs (the joint
