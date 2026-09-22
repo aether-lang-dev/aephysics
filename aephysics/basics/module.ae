@@ -14,13 +14,13 @@
 // generics, so a growable array of structs is a Buffer -- a block, a
 // stride, a count and a capacity -- that a caller reads through a typed
 // cast (`bodies = buffer.data as Body[]`) after every call that may grow
-// it. IntArray is the one typed array, since ids are what most arrays
+// it. Ints is the one typed array, since ids are what most arrays
 // hold. The allocation counters the original keeps (b3Alloc, b3Free with
 // sizes) are kept so a leak is a number.
 import std.string
 
 exports (
-    BitSet, IdPool, HashSet, IntArray, Buffer, Stack, Arena,
+    BitSet, IdPool, HashSet, Ints, Buffer, Stack, Arena,
     alloc, free_bytes, alloc_count, bytes_in_use, sort_ints,
     is_power_of_2, bounding_power_of_2, round_up_power_of_2, lower_power_of_2_exponent,
     clz32, ctz32, ctz64, pop_count64, lsr, lsr32,
@@ -384,26 +384,30 @@ hash_bytes(block: ptr, byte_count: int) -> long {
 
 // --- int array (container.h for ints) --------------------------------------
 
-struct IntArray {
+// Named Ints rather than IntArray: `struct IntArray` is a C type of the
+// standard library's (std.intarr's block), and a program that imports
+// both got two definitions of one name in the generated C -- one
+// namespace across every module and the runtime (aether#2162).
+struct Ints {
     data: ptr        // int[]
     count: int
     capacity: int
 }
 
-ints_create(capacity: int) -> IntArray {
-    a = IntArray { data: null, count: 0, capacity: 0 }
+ints_create(capacity: int) -> Ints {
+    a = Ints { data: null, count: 0, capacity: 0 }
     if capacity > 0 { ints_reserve(&a, capacity) }
     return a
 }
 
-ints_destroy(a: *IntArray) {
+ints_destroy(a: *Ints) {
     free_bytes(a.data, a.capacity * 4)
     a.data = null
     a.count = 0
     a.capacity = 0
 }
 
-ints_reserve(a: *IntArray, capacity: int) {
+ints_reserve(a: *Ints, capacity: int) {
     if capacity <= a.capacity { return }
     fresh = alloc(capacity * 4)
     if a.data != null {
@@ -414,7 +418,7 @@ ints_reserve(a: *IntArray, capacity: int) {
     a.capacity = capacity
 }
 
-ints_push(a: *IntArray, value: int) {
+ints_push(a: *Ints, value: int) {
     if a.count == a.capacity {
         grown = 8
         if a.capacity > 0 { grown = a.capacity + a.capacity / 2 + 1 }
@@ -425,28 +429,28 @@ ints_push(a: *IntArray, value: int) {
     a.count = a.count + 1
 }
 
-ints_pop(a: *IntArray) -> int {
+ints_pop(a: *Ints) -> int {
     a.count = a.count - 1
     data = a.data as int[]
     return data[a.count]
 }
 
-ints_get(a: *IntArray, index: int) -> int {
+ints_get(a: *Ints, index: int) -> int {
     data = a.data as int[]
     return data[index]
 }
 
-ints_set(a: *IntArray, index: int, value: int) {
+ints_set(a: *Ints, index: int, value: int) {
     data = a.data as int[]
     data[index] = value
 }
 
-ints_clear(a: *IntArray) { a.count = 0 }
+ints_clear(a: *Ints) { a.count = 0 }
 
 // Removes by moving the last in: the order is not kept, the way
 // b3Array_RemoveSwap does not keep it. Returns the moved index (count) so
 // a caller tracking positions can fix the one that moved.
-ints_remove_swap(a: *IntArray, index: int) -> int {
+ints_remove_swap(a: *Ints, index: int) -> int {
     data = a.data as int[]
     moved = a.count - 1
     if index != moved { data[index] = data[moved] }
@@ -454,9 +458,9 @@ ints_remove_swap(a: *IntArray, index: int) -> int {
     return moved
 }
 
-ints_count(a: *IntArray) -> int { return a.count }
-ints_capacity(a: *IntArray) -> int { return a.capacity }
-ints_bytes(a: *IntArray) -> int { return a.capacity * 4 }
+ints_count(a: *Ints) -> int { return a.count }
+ints_capacity(a: *Ints) -> int { return a.capacity }
+ints_bytes(a: *Ints) -> int { return a.capacity * 4 }
 
 // --- buffer: a growable array of anything -----------------------------------
 
@@ -527,7 +531,7 @@ buffer_bytes(b: *Buffer) -> int { return b.capacity * b.stride }
 
 // Ids handed out densely and recycled, so an id indexes an array.
 struct IdPool {
-    free_ids: IntArray
+    free_ids: Ints
     next_index: int
 }
 

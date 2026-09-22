@@ -996,7 +996,7 @@ struct SensorHit {
 struct GraphColor {
     body_set: BitSet               // by body id; unused on the overflow colour
     joint_sims: Buffer             // JointSim
-    convex_contacts: IntArray      // contact ids (the wide solver's)
+    convex_contacts: Ints      // contact ids (the wide solver's)
     contacts: Buffer               // ContactSpec (mesh contacts and the overflow's)
     contact_constraints: ptr       // the solver's ContactConstraint[contact_constraint_count] for the step
     manifold_constraints: ptr      // its ManifoldConstraint[manifold_constraint_count]
@@ -1028,7 +1028,7 @@ struct Island {
     local_index: int
     island_id: int
     constraint_remove_count: int
-    bodies: IntArray
+    bodies: Ints
     contacts: Buffer               // ContactLink
     joints: Buffer                 // JointLink
 }
@@ -1042,7 +1042,7 @@ struct SolverSet {
     body_sims: Buffer              // BodySim
     body_states: Buffer            // BodyState, the awake set only
     joint_sims: Buffer             // the joint layer's JointSim, sleeping and disabled sets
-    contact_indices: IntArray      // sleeping sets' contacts; the awake set's non-touching ones
+    contact_indices: Ints      // sleeping sets' contacts; the awake set's non-touching ones
     island_sims: Buffer            // IslandSim
     set_index: int                 // NULL_INDEX when unused
 }
