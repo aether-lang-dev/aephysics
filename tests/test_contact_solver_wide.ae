@@ -180,7 +180,7 @@ main() {
            contact_solver_wide.wide_constraint_count(5) == 2 && contact_solver_wide.wide_constraint_count(8) == 2 &&
            contact_solver_wide.wide_constraint_count(9) == 3)
     ensure("the native lanes were built against this layout", contact_solver_wide.native_layout_matches())
-    ensure("the wide path and the native lanes are on by default", solver.wide_contacts_enabled() && contact_solver_wide.native_lanes_enabled())
+    ensure("the wide path is on by default, in Aether's own lanes", solver.wide_contacts_enabled() && contact_solver_wide.native_lanes_enabled() == false)
 
     scalar = run_mode(false, false)
     lanes = run_mode(true, false)
@@ -198,7 +198,10 @@ main() {
     // The three paths land in the same place; the same path twice, to the bit.
     println("contact_solver_wide: lanes vs scalar ${farthest(lanes, scalar)}, native vs lanes ${farthest(lanes_native, lanes)}, native twice ${farthest(lanes_native, lanes_native_again)}")
     ensure("the Aether lanes agree with the scalar solve", farthest(lanes, scalar) < 0.001)
-    ensure("the native lanes agree with the Aether lanes", farthest(lanes_native, lanes) < 0.01)
+    // To the bit, since the conversion to f32x4: the two compute one
+    // record with one arithmetic, and the native file is now a second
+    // copy of it rather than a second precision (#46).
+    ensure("the native lanes agree with the Aether lanes to the bit", farthest(lanes_native, lanes) == 0.0)
     ensure("the native lanes repeat to the bit", farthest(lanes_native, lanes_native_again) == 0.0)
     ensure("hit events agree (${scalar.hits}, ${lanes.hits}, ${lanes_native.hits})", scalar.hits == lanes.hits && lanes.hits == lanes_native.hits)
     ensure("the rolling speeds agree", math.abs_float(lanes.rolling_speed - scalar.rolling_speed) < 0.001 && math.abs_float(lanes_native.rolling_speed - lanes.rolling_speed) < 0.01)
@@ -210,7 +213,7 @@ main() {
     free(lanes_native_again.positions)
     hull.destroy_hull(g_box as *HullData)
     solver.set_wide_contacts(true)
-    contact_solver_wide.set_native_lanes(true)
+    contact_solver_wide.set_native_lanes(false)
     println("contact_solver_wide: ${checks} checks")
     if failures == 0 {
         println("contact_solver_wide: all checks passed")
