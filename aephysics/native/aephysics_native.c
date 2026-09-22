@@ -13,15 +13,12 @@
 // prepare, warm start, solve and restitution over the module's
 // WideConstraint, four contacts per operation through GCC's vector
 // extensions (SSE on x86-64, NEON on arm64, both baseline). The
-// constraints are prepared in single precision for the solve, as the
-// reference computes them: four floats are one register, where four
-// doubles are two, and the gathered bodies of a constraint then fit
-// the register file. The module's double layout is declared again here
-// for the impulses handed back and checked by
-// aephysics_wide_constraint_size() against sizeof(WideConstraint) on
-// the Aether side; the module's other structures are read through the
-// field offsets it measures (aephysics_wide_layout); the arithmetic is
-// the module's, operation for operation.
+// constraint is one record in single precision, the module's own
+// (`f32x4` there, `v4` here), checked by aephysics_wide_constraint_size()
+// against sizeof(WideConstraint) on the Aether side; the module's other
+// structures are read through the field offsets it measures
+// (aephysics_wide_layout); the arithmetic is the module's, operation for
+// operation.
 //
 // The multiply-adds are written as two operations: -ffp-contract=off
 // keeps the compiler from fusing them, so the lanes match each other
@@ -143,35 +140,8 @@ int aephysics_atomic_cas(int *p, int expected, int desired)
 
 // --- the contact lanes ----------------------------------------------------------------------------------------
 
-// --- the module's layout, doubles ----------------------------------------------------------------------------
-
-typedef struct { double x, y, z, w; } d4;
-typedef struct { d4 x, y, z; } vec3d;
-typedef struct { d4 x, y; } vec2d;
-typedef struct { d4 cxx, cxy, cyy; } sym2d;
-typedef struct { d4 cxx, cxy, cxz, cyy, cyz, czz; } sym3d;
 typedef struct { int32_t x, y, z, w; } intw;
 typedef struct { void *x, *y, *z, *w; } ptrw;
-
-typedef struct {
-    vec3d anchor_a, anchor_b;
-    d4 base_separation, normal_impulse, total_normal_impulse, normal_mass, lever_arm, relative_velocity;
-} wide_point_d;
-
-typedef struct {
-    intw index_a, index_b, point_counts;
-    d4 inv_mass_a, inv_mass_b;
-    sym3d inv_inertia_a, inv_inertia_b;
-    vec3d normal, tangent1, tangent2, center_a, center_b;
-    d4 twist_mass, twist_impulse;
-    sym2d tangent_mass;
-    vec2d friction_impulse;
-    sym3d rolling_mass;
-    vec3d rolling_impulse;
-    d4 friction, rolling_resistance, tangent_velocity1, tangent_velocity2, bias_rate, mass_scale, impulse_scale, restitution;
-    ptrw manifolds;
-    wide_point_d points[4];
-} wide_constraint_d;
 
 // aephysics.dynamics's BodyState.
 typedef struct {
@@ -181,7 +151,13 @@ typedef struct {
 
 #define DYNAMIC_FLAG 0x1000
 
-// --- the solve's layout, float lanes --------------------------------------------------------------------------
+// --- the constraint, the module's own record ------------------------------------------------------------------
+//
+// One layout, in single precision, shared with the module: the module
+// carries `f32x4` where this carries `v4` (std.lanes, Aether 0.706), and
+// both are four floats in a register. It used to be two -- the module's
+// in doubles and a float copy here for the solve -- which cost a pack
+// every sub-step and an unpack of the impulses before every store.
 
 typedef float v4 __attribute__((vector_size(16)));
 typedef int32_t m4 __attribute__((vector_size(16)));   // a comparison's lanes: all bits or none
@@ -207,63 +183,23 @@ typedef struct {
     sym3w rolling_mass;
     vec3w rolling_impulse;
     v4 friction, rolling_resistance, tangent_velocity1, tangent_velocity2, bias_rate, mass_scale, impulse_scale, restitution;
+    ptrw manifolds;                // *Manifold per lane, the module's; the solve never reads it
     wide_point points[4];
 } wide_constraint;
 
 typedef struct { vec3w v, w, dp; quatw dq; } body_state_w;
 
-// The step's constraints: the module's block, and the float copy the
-// solve reads at the same offsets, grown to the largest step so far. The
-// block is set once a step (aephysics_wide_begin); the prepare below
-// writes a lane's floats straight into the copy, and the impulses are
-// unpacked by ranges before the store, by whichever worker has the
-// range.
-static const wide_constraint_d* g_block = NULL;
-static wide_constraint* g_packed = NULL;
-static int g_packed_capacity = 0;
+// The step's constraints are the module's own block: the stages read and
+// write it in place, so there is nothing to begin or end but the pair of
+// calls the module still makes around a step.
+void aephysics_wide_begin(const void* block, int count) { (void)block; (void)count; }
 
-// The step's block, and room for its float copy.
-void aephysics_wide_begin(const void* block, int count)
-{
-    g_block = block;
-    if (count > g_packed_capacity) {
-        free(g_packed);
-        g_packed_capacity = count + count / 2 + 1;
-        g_packed = malloc((size_t)g_packed_capacity * sizeof(wide_constraint));
-    }
-}
+void aephysics_wide_end(void) {}
 
-void aephysics_wide_end(void) { g_block = NULL; }
+// A stage's constraints: the module passes a pointer into its block.
+static inline wide_constraint* packed_of(const void* constraints) { return (wide_constraint*)constraints; }
 
-static inline d4 widen(v4 a) { return (d4){ a[0], a[1], a[2], a[3] }; }
-static inline vec3d widen3(vec3w a) { return (vec3d){ widen(a.x), widen(a.y), widen(a.z) }; }
-
-// A range's impulses back into the module's block, before its store.
-void aephysics_wide_unpack(void* constraints, int count)
-{
-    wide_constraint_d* base = constraints;
-    const wide_constraint* packed = g_packed + (base - g_block);
-    for (int i = 0; i < count; ++i) {
-        const wide_constraint* f = packed + i;
-        wide_constraint_d* d = base + i;
-        d->twist_impulse = widen(f->twist_impulse);
-        d->friction_impulse = (vec2d){ widen(f->friction_impulse.x), widen(f->friction_impulse.y) };
-        d->rolling_impulse = widen3(f->rolling_impulse);
-        for (int j = 0; j < 4; ++j) {
-            d->points[j].normal_impulse = widen(f->points[j].normal_impulse);
-            d->points[j].total_normal_impulse = widen(f->points[j].total_normal_impulse);
-        }
-    }
-}
-
-// A stage's constraints: the module passes a pointer into its block; the
-// same offset into the packed copy.
-static inline wide_constraint* packed_of(const void* constraints)
-{
-    return g_packed + ((const wide_constraint_d*)constraints - g_block);
-}
-
-int aephysics_wide_constraint_size(void) { return (int)sizeof(wide_constraint_d); }
+int aephysics_wide_constraint_size(void) { return (int)sizeof(wide_constraint); }
 int aephysics_wide_body_state_size(void) { return (int)sizeof(body_state); }
 
 // --- the prepare, straight into the lanes ---------------------------------------------------------------------
@@ -278,10 +214,10 @@ int aephysics_wide_body_state_size(void) { return (int)sizeof(body_state); }
 // field offsets it measures at start (aephysics_wide_layout), so this
 // file declares none of them.
 //
-// What the store reads afterwards goes into the double block too: the
-// bodies' indices, the point counts, the manifolds, the tangents and
-// each point's relative velocity; the impulses come back from the solve
-// through aephysics_wide_unpack.
+// The prepare writes the whole record -- the bodies' indices, the point
+// counts, the manifolds, the tangents and each point's relative velocity
+// among them -- because the module's store reads that same record after
+// the solve has run over it.
 
 enum {
     OFF_C_INDEX_A, OFF_C_INDEX_B, OFF_C_MANIFOLDS, OFF_C_FRICTION, OFF_C_RESTITUTION, OFF_C_ROLLING, OFF_C_TANGENT_VELOCITY,
@@ -319,13 +255,6 @@ void aephysics_wide_prepare_begin(const void* sims, const void* states,
     g_soft[0] = bias_rate; g_soft[1] = mass_scale; g_soft[2] = impulse_scale;
     g_static_soft[0] = static_bias_rate; g_static_soft[1] = static_mass_scale; g_static_soft[2] = static_impulse_scale;
     g_warm_start_scale = enable_warm_starting ? 1.0 : 0.0;
-}
-
-// A slot's float lanes zeroed: the tail slot of a colour, whose spare
-// lanes must reach no body.
-void aephysics_wide_zero_packed(const void* slot)
-{
-    memset(packed_of(slot), 0, sizeof(wide_constraint));
 }
 
 typedef struct { double x, y, z; } dv3;
@@ -397,9 +326,6 @@ static inline void lane_set_sym3(sym3w* f, int l, dm3 m)
     lane_set(&f->cxx, l, m.cx.x); lane_set(&f->cxy, l, m.cx.y); lane_set(&f->cxz, l, m.cx.z);
     lane_set(&f->cyy, l, m.cy.y); lane_set(&f->cyz, l, m.cy.z); lane_set(&f->czz, l, m.cz.z);
 }
-static inline void dlane_set(d4* d, int l, double v) { ((double*)d)[l] = v; }
-static inline void dlane_set3(vec3d* d, int l, dv3 v) { dlane_set(&d->x, l, v.x); dlane_set(&d->y, l, v.y); dlane_set(&d->z, l, v.z); }
-
 #define MAX_MANIFOLD_POINTS 4
 #define SPECULATIVE_DISTANCE 0.02
 #define MIN_FRICTION_WEIGHT 0.0000000001
@@ -408,19 +334,16 @@ static inline void dlane_set3(vec3d* d, int l, dv3 v) { dlane_set(&d->x, l, v.x)
 // One convex contact into lane `l` of the slot the module points at.
 void aephysics_wide_prepare(const void* contact, void* slot, int l)
 {
-    wide_constraint_d* d = slot;
-    wide_constraint* f = packed_of(slot);
+    wide_constraint* f = slot;
     const char* c = contact;
     const char* manifold = FIELD(c, g_off[OFF_C_MANIFOLDS], const char*);
     int index_a = FIELD(c, g_off[OFF_C_INDEX_A], int32_t);
     int index_b = FIELD(c, g_off[OFF_C_INDEX_B], int32_t);
     double inv_tau = 1.0 / SPECULATIVE_DISTANCE;
 
-    ((int32_t*)&d->index_a)[l] = index_a + 1;
-    ((int32_t*)&d->index_b)[l] = index_b + 1;
     ((int32_t*)&f->index_a)[l] = index_a + 1;
     ((int32_t*)&f->index_b)[l] = index_b + 1;
-    ((void**)&d->manifolds)[l] = (void*)manifold;
+    ((void**)&f->manifolds)[l] = (void*)manifold;
 
     double m_a = 0.0, m_b = 0.0;
     dm3 i_a = dm3_zero(), i_b = dm3_zero();
@@ -452,8 +375,6 @@ void aephysics_wide_prepare(const void* contact, void* slot, int l)
     lane_set3(&f->normal, l, normal);
     lane_set3(&f->tangent1, l, tangent1);
     lane_set3(&f->tangent2, l, tangent2);
-    dlane_set3(&d->tangent1, l, tangent1);
-    dlane_set3(&d->tangent2, l, tangent2);
     dv3 tangent_velocity = FIELD_DV3(c, g_off[OFF_C_TANGENT_VELOCITY]);
     lane_set(&f->friction, l, FIELD(c, g_off[OFF_C_FRICTION], double));
     lane_set(&f->restitution, l, FIELD(c, g_off[OFF_C_RESTITUTION], double));
@@ -464,7 +385,6 @@ void aephysics_wide_prepare(const void* contact, void* slot, int l)
     lane_set(&f->mass_scale, l, soft[1]);
     lane_set(&f->impulse_scale, l, soft[2]);
     int point_count = FIELD(manifold, g_off[OFF_M_POINT_COUNT], int32_t);
-    ((int32_t*)&d->point_counts)[l] = point_count;
     ((int32_t*)&f->point_counts)[l] = point_count;
     dv3 center_a = dv3_zero(), center_b = dv3_zero();
     double total_weight = 0.0;
@@ -494,7 +414,6 @@ void aephysics_wide_prepare(const void* contact, void* slot, int l)
         dv3 vr_b = dv3_add(v_b, dv3_cross(w_b, r_b));
         double relative_velocity = dv3_dot(normal, dv3_sub(vr_b, vr_a));
         lane_set(&cp->relative_velocity, l, relative_velocity);
-        dlane_set(&d->points[p].relative_velocity, l, relative_velocity);
     }
     double inv_weight = 1.0 / total_weight;
     center_a = dv3_mul_sv(inv_weight, center_a);
@@ -547,7 +466,6 @@ void aephysics_wide_prepare(const void* contact, void* slot, int l)
         lane_set(&cp->normal_mass, l, 0.0);
         lane_set(&cp->relative_velocity, l, 0.0);
         lane_set(&cp->lever_arm, l, 0.0);
-        dlane_set(&d->points[p].relative_velocity, l, 0.0);
     }
 }
 

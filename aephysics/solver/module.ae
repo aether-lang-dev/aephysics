@@ -738,7 +738,6 @@ execute_block(stage: *SolverStage, sc: *SolverContext, b: *SolverBlock, worker: 
         else if kind == STAGE_RELAX { contact_solver_wide.solve_wide_contacts(ctx, slots, count, false) }
         else if kind == STAGE_RESTITUTION { contact_solver_wide.apply_wide_restitution(ctx, slots, count) }
         else if kind == STAGE_STORE_WIDE {
-            contact_solver_wide.unpack_wide(slots, count)
             if contact_solver_wide.store_wide_range(ctx, color, first, last, &tc.hit_event_bits) { tc.has_hit_events = true }
         }
         return

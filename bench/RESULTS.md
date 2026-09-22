@@ -525,19 +525,30 @@ colour).
 
 | scene, 120 steps | scalar | lanes in Aether | native lanes | Box3D |
 |---|---|---|---|---|
-| 5,000 cubes falling onto a slab | 252 ms | 230 | 187 | **157** |
-| 100 stacks of 10 cubes | 50 | 46 | 40 | **28** |
+| 5,000 cubes falling onto a slab | 249 ms | **162** | 162 | **161** |
+| 100 stacks of 10 cubes | 50 | **35** | 36 | **28** |
 
 The same height sums (2,499.65 and 4,983.87), every body asleep at the
 end, the same contact counts (5,000 and 1,000), in every column. The
 convex contacts three ways (issue #22's measure): solved one at a time
 through `contact_solver` (scalar; 308 and 61 ms before the [build
 flags](#build-flags-inlining)); four at a time through
-`contact_solver_wide`'s lanes in Aether, the reference's layout as
-plain code (the layout alone: 10%); and through the same lanes in
-`aephysics_native.c`, GCC vector code in single precision (another 20-30%). The
-falling grid is mostly the narrow phase and the pairs (the cubes land
-and settle); the stacks are the solver's, 1.4x.
+`contact_solver_wide`'s lanes in Aether; and through the same lanes in
+`aephysics_native.c`, GCC vector code.
+
+The two lane columns were 230 and 187 until the module's lanes became
+the language's `f32x4` (std.lanes, Aether 0.706, #46): four doubles in a
+record left to the C compiler to vectorise became four floats in a
+register, the constraint became one single-precision record instead of
+the module's doubles and a float copy for the solve, and with it went
+the pack every sub-step and the unpack before every store. The Aether
+lanes are now the native ones' equal on the falling grid and their
+better on the stacks, and they compute the same record bit for bit
+(`tests/test_contact_solver_wide`: "native vs lanes 0"), so the wide
+path is the Aether one and the native vector code goes.
+
+On the falling grid the port is now the reference's equal. The stacks
+are the solver's remaining 1.25x.
 
 ## physics_world
 
@@ -548,9 +559,13 @@ sleeping off as the reference runs them.
 
 | scene | aephysics per step | Box3D per step |
 |---|---|---|
-| large pyramid: 5,050 cubes on a base of 100, 200 steps | 12.5 ms | **8.9** |
-| many pyramids: 196 pyramids of base 10, 10,780 cubes, 100 steps | 28.4 | **19.3** |
-| joint grid: 10,000 spheres on 19,800 spherical joints, 100 steps | 11.6 | **10.8** |
+| large pyramid: 5,050 cubes on a base of 100, 200 steps | 11.5 ms | **9.5** |
+| many pyramids: 196 pyramids of base 10, 10,780 cubes, 100 steps | 27.2 | **20.7** |
+| joint grid: 10,000 spheres on 19,800 spherical joints, 100 steps | 13.1 | **10.8** |
+
+The pyramids were 12.5 and 28.4 against 8.9 and 19.3 before the wide
+constraint became one single-precision record in the module's own lanes
+(#46): 1.40x and 1.47x to 1.22x and 1.31x.
 
 The same height sums (167,556, 37,695 and -496,893), contact counts
 (14,950 and 28,420) and joint count. One run of the pair, on a machine
