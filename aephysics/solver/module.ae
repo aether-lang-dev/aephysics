@@ -37,8 +37,56 @@ import aephysics.joint_solver
 
 exports (
     solve, integrate_velocities, integrate_positions, finalize_bodies, solve_continuous, set_wide_contacts, wide_contacts_enabled,
+    stage_report,
     MAX_ROTATION, GYROSCOPIC_ITERATIONS, RESTITUTION_ITERATIONS
 )
+
+// --- what each stage of the step costs ------------------------------------
+//
+// AEPHYSICS_STAGES=1 times every stage block a worker runs and prints the
+// per-step averages at the end of a benchmark, so our step can be read
+// against the reference's own b3Profile (bench/physics_world_box3d.c
+// prints the same stages). Off, it is one comparison against a flag per
+// block, which is nothing beside the block itself.
+const STAGE_COUNT = 12
+var g_stage_ms: ptr = null
+var g_stage_on = 0 - 1
+var g_stage_steps = 0
+
+stages_timed() -> bool {
+    if g_stage_on < 0 {
+        g_stage_on = 0
+        asked = os.getenv("AEPHYSICS_STAGES")
+        if asked != null && string.equals(asked, "1") == 1 { g_stage_on = 1 }
+    }
+    return g_stage_on == 1
+}
+
+stage_clock() -> float[] {
+    if g_stage_ms == null { g_stage_ms = basics.alloc(STAGE_COUNT * 8) }
+    return g_stage_ms as float[]
+}
+
+stage_now_ms() -> float { return (os.now_monotonic_ns() as float) / 1000000.0 }
+
+stage_note(kind: int, started: float) {
+    if kind < 0 || kind >= STAGE_COUNT { return }
+    clock = stage_clock()
+    clock[kind] = clock[kind] + (stage_now_ms() - started)
+}
+
+// One more step over the same stages, for the averages.
+stage_step() {
+    if stages_timed() { g_stage_steps = g_stage_steps + 1 }
+}
+
+// The averages, in the reference's own order and words.
+stage_report() {
+    if stages_timed() == false || g_stage_steps == 0 { return }
+    clock = stage_clock()
+    n = g_stage_steps as float
+    println("aephysics stages ms/step: prepare_joints ${clock[STAGE_PREPARE_JOINTS] / n} prepare_wide ${clock[STAGE_PREPARE_WIDE] / n} prepare_contacts ${clock[STAGE_PREPARE_CONTACTS] / n} integrate_v ${clock[STAGE_INTEGRATE_VELOCITIES] / n} warm ${clock[STAGE_WARM_START] / n} solve ${clock[STAGE_SOLVE] / n} integrate_p ${clock[STAGE_INTEGRATE_POSITIONS] / n} relax ${clock[STAGE_RELAX] / n} restitution ${clock[STAGE_RESTITUTION] / n} store ${clock[STAGE_STORE_WIDE] / n}")
+}
 
 const NULL_INDEX = 0 - 1
 const MAX_ROTATION = 0.78539816339744830962   // a quarter turn per step at most
@@ -712,9 +760,13 @@ execute_block(stage: *SolverStage, sc: *SolverContext, b: *SolverBlock, worker: 
     kind = stage.kind
     start = b.start
     end = b.start + b.count
+    timed = stages_timed()
+    at = 0.0
+    if timed { at = stage_now_ms() }
     if b.kind == BLOCK_BODY {
         if kind == STAGE_INTEGRATE_VELOCITIES { integrate_velocities_range(ctx, start, end) }
         else if kind == STAGE_INTEGRATE_POSITIONS { integrate_positions_range(ctx, start, end) }
+        if timed { stage_note(kind, at) }
         return
     }
     color = dynamics.graph_color(w, b.color)
@@ -724,6 +776,7 @@ execute_block(stage: *SolverStage, sc: *SolverContext, b: *SolverBlock, worker: 
         else if kind == STAGE_WARM_START { joint_solver.warm_start_joints_range(ctx, color, start, end) }
         else if kind == STAGE_SOLVE { solve_joints_flagging_range(ctx, color, start, end, true, &tc.joint_state_bits) }
         else if kind == STAGE_RELAX { solve_joints_flagging_range(ctx, color, start, end, false, &tc.joint_state_bits) }
+        if timed { stage_note(kind, at) }
         return
     }
     count = end - start
@@ -740,6 +793,7 @@ execute_block(stage: *SolverStage, sc: *SolverContext, b: *SolverBlock, worker: 
         else if kind == STAGE_STORE_WIDE {
             if contact_solver_wide.store_wide_range(ctx, color, first, last, &tc.hit_event_bits) { tc.has_hit_events = true }
         }
+        if timed { stage_note(kind, at) }
         return
     }
     constraints = contact_solver.contact_constraint_at(color.contact_constraints, start) as ptr
@@ -751,6 +805,7 @@ execute_block(stage: *SolverStage, sc: *SolverContext, b: *SolverBlock, worker: 
     else if kind == STAGE_STORE_CONTACTS {
         if contact_solver.store_impulses(ctx, constraints, count, &tc.hit_event_bits) { tc.has_hit_events = true }
     }
+    if timed { stage_note(kind, at) }
 }
 
 // Where a worker starts its sweep of a stage's ring, staggered so the

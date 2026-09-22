@@ -69,19 +69,56 @@ static double heightSum( b3WorldId worldId, b3BodyId* ids, int count )
 static int g_idCount;
 static b3BodyId* g_ids;
 
+// The reference's own stage timings, summed over the run: b3Profile is
+// what its world fills in every step, and it names the same stages ours
+// times (AEPHYSICS_STAGES=1), so the two columns can be read side by
+// side rather than as two totals.
+typedef struct
+{
+	double pairs, collide, prepare, integrateVelocities, warmStart, solve, integratePositions, relax, restitution, store, transforms, refit, other;
+} stage_sum;
+
+static void add_profile( stage_sum* sum, b3Profile p )
+{
+	sum->pairs += p.pairs;
+	sum->collide += p.collide;
+	sum->prepare += p.prepareConstraints;
+	sum->integrateVelocities += p.integrateVelocities;
+	sum->warmStart += p.warmStart;
+	sum->solve += p.solveImpulses;
+	sum->integratePositions += p.integratePositions;
+	sum->relax += p.relaxImpulses;
+	sum->restitution += p.applyRestitution;
+	sum->store += p.storeImpulses;
+	sum->transforms += p.transforms;
+	sum->refit += p.refit;
+	sum->other += p.step - ( p.pairs + p.collide + p.solve );
+}
+
+static void print_profile( const char* name, stage_sum sum, int steps )
+{
+	double n = steps;
+	printf( "box3d stages ms/step (%s): pairs %.3f collide %.3f prepare %.3f integrate_v %.3f warm %.3f solve %.3f integrate_p %.3f relax %.3f restitution %.3f store %.3f transforms %.3f refit %.3f other %.3f\n",
+			name, sum.pairs / n, sum.collide / n, sum.prepare / n, sum.integrateVelocities / n, sum.warmStart / n, sum.solve / n,
+			sum.integratePositions / n, sum.relax / n, sum.restitution / n, sum.store / n, sum.transforms / n, sum.refit / n, sum.other / n );
+}
+
 static void run( const char* name, b3WorldId worldId, int steps )
 {
 	// Gather the body ids through the move events after one zero step would miss sleeping ones; walk our own list instead.
+	stage_sum sum = { 0 };
 	double t0 = now_ms();
 	for ( int s = 0; s < steps; ++s )
 	{
 		b3World_Step( worldId, 1.0f / 60.0f, 4 );
+		add_profile( &sum, b3World_GetProfile( worldId ) );
 	}
 	double t1 = now_ms();
 	b3Counters counters = b3World_GetCounters( worldId );
 	printf( "box3d physics_world: %s: %d steps of %d bodies %.1f ms, %.3f ms per step (height sum %.3f, %d contacts, %d joints)\n", name,
 			steps, counters.bodyCount, t1 - t0, ( t1 - t0 ) / steps, heightSum( worldId, g_ids, g_idCount ), counters.contactCount,
 			counters.jointCount );
+	print_profile( name, sum, steps );
 	b3DestroyWorld( worldId );
 	g_idCount = 0;
 }

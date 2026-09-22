@@ -132,6 +132,7 @@ is_valid(id: WorldId) -> bool { return dynamics.world_is_valid(id) }
 step(id: WorldId, time_step: float, sub_step_count: int) {
     w = world_of(id)
     if w == null { return }
+    solver.stage_step()
     w.locked = true
     basics.buffer_clear(&w.body_move_events)
     basics.buffer_clear(&w.sensor_begin_events)

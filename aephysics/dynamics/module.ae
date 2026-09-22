@@ -1070,6 +1070,12 @@ struct TaskContext {
 // Where a step's time went, in milliseconds (b3Profile): the broad
 // phase's pairs, the narrow phase, the solve and its parts, the
 // sensors, and the whole step.
+// What a step spent, stage by stage, as the reference's b3Profile has it
+// (bench/physics_world_box3d.c prints its columns): the phases of the
+// step, and inside `constraints` the stages the workers run. The stages
+// are filled only when the solver is timing them (AEPHYSICS_STAGES=1),
+// since a clock around every block is worth having only when someone is
+// reading it.
 struct Profile {
     step: float
     pairs: float
@@ -1082,6 +1088,15 @@ struct Profile {
     bullets: float
     sleep_islands: float
     sensors: float
+    // The stages, per step, averaged over the run by whoever reads them.
+    prepare_constraints: float
+    integrate_velocities: float
+    warm_start: float
+    solve_impulses: float
+    integrate_positions: float
+    relax_impulses: float
+    apply_restitution: float
+    store_impulses: float
 }
 
 struct World {
