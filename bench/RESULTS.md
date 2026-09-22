@@ -148,6 +148,31 @@ The sums of the results agree to the precision of the reference's floats
 1.3-1.5x the reference's time; the simplex is passed by value here
 where the reference works on it in place.
 
+## lanes
+
+`bench/lanes.ae` and `bench/lanes_native.c`: the contact solve's
+per-point body, four contacts to a pass -- rotate both anchors by the
+bodies' delta rotations, the separation and its bias, the relative
+normal velocity, the clamped impulse and the two bodies' velocity
+updates -- over the same flat block of floats, once in Aether's
+`std.lanes` and once in C with GCC's vector extensions, the way
+`aephysics/native/aephysics_native.c` writes its own. Same layout, same
+operations, same order, same compiler flags. 4,096 bundles x 4 points x
+200 passes.
+
+| | time |
+|---|---|
+| C, GCC vector extensions | 54-55 ms |
+| Aether, `std.lanes` | 55-56 ms |
+
+Within two percent, and the same sum of impulses to the last digit
+(37,201,532). A lane operation in Aether costs what the same lane
+operation costs in C, which is what the native file's vector code was
+waiting on: the wide contact solver -- prepare, warm start, solve,
+restitution, and the pack and unpack that exist only because the
+module's constraints are doubles and the solve's are floats -- can come
+back into the module in Aether without paying for it (#46).
+
 ## manifold
 
 `bench/manifold.ae` and `bench/manifold_box3d.c`: 20,000 hull-hull
