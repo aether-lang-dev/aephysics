@@ -25,7 +25,7 @@ so a test written against the reference reads the same here.
 
 | module | holds | state |
 |---|---|---|
-| `aephysics.math` | vectors, quaternions, transforms, 3x3 matrices, bounding boxes, segment distances, inertia helpers, the deterministic atan2/cos/sin | done, `test_math.ae` (6M checks) |
+| `aephysics.math` | vectors, quaternions, transforms, 3x3 matrices, bounding boxes, segment distances, inertia helpers, the deterministic atan2/cos/sin, and the same vectors in single precision (`Vec3f`, `Quatf`, `Matrix3f`) for the geometry the reference keeps in `float` ([#42](https://github.com/aether-lang-dev/aephysics/issues/42)) | done, `test_math.ae` (6M checks) |
 | `aephysics.basics` | bit set, id pool, hash set, a long-to-int map, arrays, the stack and arena allocators, the block hash (the reference's core.c, named so a host's own `core` module and this one can share a program) | done, `test_basics.ae` (100k checks) |
 | `aephysics.native` | the Aether face of the one C file built with every program: the threads' helpers Aether has not (a thread-local worker index, yield, pause, the processor count, atomics on an int in place, a semaphore) and the per-worker scratch every module keeps a block of | done |
 | `aephysics.parallel` | the reference's scheduler and `parallel_for`: worker threads made once and waiting on a semaphore, tasks in slots claimed by compare-and-swap, the main thread helping while it waits; a range in blocks the tasks claim, the caller working as worker 0 | done, `test_parallel.ae` (18 checks); [the step by worker count against the reference's](bench/RESULTS.md#parallel) |

@@ -29,6 +29,51 @@ ensure_small(name: string, value: float, tolerance: float) {
     ensure(name, math.abs_float(value) < tolerance)
 }
 
+// The single-precision family beside the double one: every operation is
+// the double's, written once at a float's width, so a result converted
+// from one is the other to what a float can hold (#42). The tolerance is
+// a float's epsilon, scaled by the size of what is being compared.
+single_precision() {
+    a = math.vec3(0.35, 0.0 - 1.25, 2.5)
+    b = math.vec3(0.0 - 0.75, 0.5, 1.5)
+    af = math.narrow3(a)
+    bf = math.narrow3(b)
+    ensure_close_f32("narrowing and widening keeps a vector", math.widen3(af), a, 10.0)
+    ensure_close_f32("the sum", math.widen3(math.addf(af, bf)), math.add(a, b), 10.0)
+    ensure_close_f32("the difference", math.widen3(math.subf(af, bf)), math.sub(a, b), 10.0)
+    ensure_close_f32("the cross product", math.widen3(math.crossf(af, bf)), math.cross(a, b), 10.0)
+    ensure_small("the dot product", (math.dotf(af, bf) as float) - math.dot(a, b), 10.0 * math.EPSILON_F32)
+    ensure_small("the length", (math.lengthf(af) as float) - math.length(a), 10.0 * math.EPSILON_F32)
+    ensure_close_f32("the unit vector", math.widen3(math.normalizef(af)), math.normalize(a), 10.0)
+    ensure_close_f32("a + s * b", math.widen3(math.mul_addf(af, 0.25, bf)), math.mul_add(a, 0.25, b), 10.0)
+    ensure("a perpendicular is perpendicular and unit",
+           math.abs_f32(math.dotf(math.perpf(af), af)) < 100.0 * math.EPSILON_F32 && math.is_normalizedf(math.perpf(af)))
+    ensure("a zero vector normalises to zero", math.lengthf(math.normalizef(math.vec3f_zero())) == 0.0)
+
+    // A rotation, a matrix and their products.
+    q = math.make_quat_from_axis_angle(math.normalize(math.vec3(0.3, 0.7, 0.0 - 0.2)), 0.85)
+    qf = math.narrow_quat(q)
+    ensure_close_f32("a vector turned by a rotation", math.widen3(math.rotate_vectorf(qf, af)), math.rotate_vector(q, a), 20.0)
+    ensure_close_f32("and turned back", math.widen3(math.inv_rotate_vectorf(qf, math.rotate_vectorf(qf, af))), a, 20.0)
+    turned = math.mul_quat(q, q)
+    turnedf = math.mul_quatf(qf, qf)
+    ensure_small("two rotations composed", (turnedf.w as float) - turned.w, 20.0 * math.EPSILON_F32)
+    m = math.matrix3(math.vec3(2.0, 0.1, 0.0), math.vec3(0.0 - 0.3, 1.5, 0.2), math.vec3(0.0, 0.0, 0.75))
+    mf = math.narrow_mat3(m)
+    ensure_close_f32("a matrix times a vector", math.widen3(math.mul_mvf(mf, af)), math.mul_mv(m, a), 20.0)
+    ensure_close_f32("the inverse times the vector", math.widen3(math.mul_mvf(math.invert_matrixf(mf), af)),
+                     math.mul_mv(math.invert_matrix(m), a), 200.0)
+    ensure("a singular matrix inverts to zero",
+           math.lengthf(math.mul_mvf(math.invert_matrixf(math.mat3f_zero()), af)) == 0.0)
+}
+
+// Two vectors the same to a float's precision, scaled by their size.
+ensure_close_f32(name: string, got: Vec3, want: Vec3, scale: float) {
+    reach = math.length(want)
+    if reach < 1.0 { reach = 1.0 }
+    ensure_small(name, math.distance(got, want), scale * reach * math.EPSILON_F32)
+}
+
 // 0.0023 degrees
 const ATAN_TOL = 0.00004
 
@@ -262,6 +307,7 @@ main() {
     ensure("a perpendicular is perpendicular and unit", math.abs_float(math.dot(math.perp(v), v)) < 10.0 * math.EPSILON && math.is_normalized(math.perp(v)))
     ensure("safe scale keeps a scale off zero", math.safe_scale(math.vec3(0.0, 0.0 - 0.001, 2.0)).y == 0.0 - math.MIN_SCALE)
 
+    single_precision()
     println("math: ${checks} checks, ${pairs} direction pairs; cos/sin off libm by at most ${worst_cs}, atan2 by ${worst_atan}")
     if failures == 0 {
         println("math: all checks passed")
