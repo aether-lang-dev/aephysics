@@ -1,0 +1,136 @@
+// Aether's std.lanes against the same kernel written in C with GCC's
+// vector extensions (bench/lanes_native.c), so the question the port has
+// to answer before its native file can come back into Aether is measured
+// rather than assumed: does a lane operation in Aether cost what the same
+// lane operation costs in C?
+//
+// The kernel is the contact solve's per-point body, four contacts to a
+// pass -- rotate both anchors by the bodies' delta rotations, the
+// separation and its bias, the relative normal velocity, the clamped
+// impulse and the two bodies' velocity updates -- over the same flat
+// block of floats, in the same order, with the same operations.
+import std.lanes
+import std.time
+
+extern calloc(count: int, size: int) -> ptr
+
+const BUNDLES = 4096
+const PER_BUNDLE = 4
+const PASSES = 200
+const STRIDE = 224             // 56 fields of four floats
+
+struct Vec3w {
+    x: f32x4
+    y: f32x4
+    z: f32x4
+}
+
+addw(a: Vec3w, b: Vec3w) -> Vec3w { return Vec3w { x: a.x + b.x, y: a.y + b.y, z: a.z + b.z } }
+subw(a: Vec3w, b: Vec3w) -> Vec3w { return Vec3w { x: a.x - b.x, y: a.y - b.y, z: a.z - b.z } }
+mul_svw(s: f32x4, a: Vec3w) -> Vec3w { return Vec3w { x: s * a.x, y: s * a.y, z: s * a.z } }
+dotw(a: Vec3w, b: Vec3w) -> f32x4 { return (a.x * b.x + a.y * b.y) + a.z * b.z }
+crossw(a: Vec3w, b: Vec3w) -> Vec3w {
+    return Vec3w { x: a.y * b.z - a.z * b.y, y: a.z * b.x - a.x * b.z, z: a.x * b.y - a.y * b.x }
+}
+rotatew(qv: Vec3w, qs: f32x4, a: Vec3w) -> Vec3w {
+    t1 = crossw(qv, a)
+    t2 = Vec3w { x: t1.x + qs * a.x, y: t1.y + qs * a.y, z: t1.z + qs * a.z }
+    t3 = crossw(qv, t2)
+    two = lanes.splat4(2.0)
+    return Vec3w { x: a.x + two * t3.x, y: a.y + two * t3.y, z: a.z + two * t3.z }
+}
+
+main() {
+    block = calloc(BUNDLES * 56 * 4, 4)
+    cells = block as f32[]
+    i = 0
+    while i < BUNDLES * 56 * 4 {
+        cells[i] = 0.1 + ((i * 37) % 19) as f32 * 0.01
+        i = i + 1
+    }
+    // The impulse a point starts the pass with, so the clamp is not the
+    // only branch the data ever takes.
+    b0 = 0
+    while b0 < BUNDLES {
+        lane = 0
+        while lane < 4 {
+            cells[b0 * 224 + 212 + lane] = 5.0
+            lane = lane + 1
+        }
+        b0 = b0 + 1
+    }
+    inv_h = lanes.splat4(240.0)
+    contact_speed = lanes.splat4(0.0 - 3.0)
+    zero = lanes.splat4(0.0)
+    one = lanes.splat4(1.0)
+    sink = lanes.splat4(0.0)
+    started = time.now_ms()
+    pass = 0
+    while pass < PASSES {
+        b = 0
+        while b < BUNDLES {
+            at = b * 56 * 4
+            normal = Vec3w { x: lanes.load4(block, (at) as long), y: lanes.load4(block, (at + 4) as long), z: lanes.load4(block, (at + 8) as long) }
+            dp = Vec3w { x: lanes.load4(block, (at + 12) as long), y: lanes.load4(block, (at + 16) as long), z: lanes.load4(block, (at + 20) as long) }
+            dqa_v = Vec3w { x: lanes.load4(block, (at + 24) as long), y: lanes.load4(block, (at + 28) as long), z: lanes.load4(block, (at + 32) as long) }
+            dqa_s = lanes.load4(block, (at + 36) as long)
+            dqb_v = Vec3w { x: lanes.load4(block, (at + 40) as long), y: lanes.load4(block, (at + 44) as long), z: lanes.load4(block, (at + 48) as long) }
+            dqb_s = lanes.load4(block, (at + 52) as long)
+            va = Vec3w { x: lanes.load4(block, (at + 56) as long), y: lanes.load4(block, (at + 60) as long), z: lanes.load4(block, (at + 64) as long) }
+            wa = Vec3w { x: lanes.load4(block, (at + 68) as long), y: lanes.load4(block, (at + 72) as long), z: lanes.load4(block, (at + 76) as long) }
+            vb = Vec3w { x: lanes.load4(block, (at + 80) as long), y: lanes.load4(block, (at + 84) as long), z: lanes.load4(block, (at + 88) as long) }
+            wb = Vec3w { x: lanes.load4(block, (at + 92) as long), y: lanes.load4(block, (at + 96) as long), z: lanes.load4(block, (at + 100) as long) }
+            inv_mass_a = lanes.load4(block, (at + 104) as long)
+            inv_mass_b = lanes.load4(block, (at + 108) as long)
+            bias_rate = lanes.load4(block, (at + 112) as long)
+            mass_scale = lanes.load4(block, (at + 116) as long)
+            impulse_scale = lanes.load4(block, (at + 120) as long)
+            j = 0
+            while j < PER_BUNDLE {
+                base = at + 124 + j * 24
+                ra = Vec3w { x: lanes.load4(block, (base) as long), y: lanes.load4(block, (base + 4) as long), z: lanes.load4(block, (base + 8) as long) }
+                rb = Vec3w { x: lanes.load4(block, (base + 12) as long), y: lanes.load4(block, (base + 16) as long), z: lanes.load4(block, (base + 20) as long) }
+                base_separation = lanes.load4(block, (at + 220) as long)
+                normal_mass = lanes.load4(block, (at + 216) as long)
+                normal_impulse = lanes.load4(block, (at + 212) as long)
+                rsa = rotatew(dqa_v, dqa_s, ra)
+                rsb = rotatew(dqb_v, dqb_s, rb)
+                ds = addw(dp, subw(rsb, rsa))
+                s = dotw(normal, ds) + base_separation
+                apart = lanes.gt4(s, zero)
+                bias = lanes.select4(apart, s * inv_h, lanes.max4(bias_rate * s, contact_speed))
+                point_mass_scale = lanes.select4(apart, one, mass_scale)
+                point_impulse_scale = lanes.select4(apart, zero, impulse_scale)
+                vra = addw(va, crossw(wa, ra))
+                vrb = addw(vb, crossw(wb, rb))
+                vn = dotw(subw(vrb, vra), normal)
+                neg_impulse = normal_mass * (point_mass_scale * vn + bias) + point_impulse_scale * normal_impulse
+                new_impulse = lanes.max4(normal_impulse - neg_impulse, zero)
+                delta = new_impulse - normal_impulse
+                p = mul_svw(delta, normal)
+                wa = subw(wa, mul_svw(inv_mass_a, crossw(ra, p)))
+                va = subw(va, mul_svw(inv_mass_a, p))
+                wb = addw(wb, mul_svw(inv_mass_b, crossw(rb, p)))
+                vb = addw(vb, mul_svw(inv_mass_b, p))
+                sink = sink + new_impulse
+                j = j + 1
+            }
+            lanes.store4(block, (at + 56) as long, va.x)
+            lanes.store4(block, (at + 60) as long, va.y)
+            lanes.store4(block, (at + 64) as long, va.z)
+            lanes.store4(block, (at + 68) as long, wa.x)
+            lanes.store4(block, (at + 72) as long, wa.y)
+            lanes.store4(block, (at + 76) as long, wa.z)
+            lanes.store4(block, (at + 80) as long, vb.x)
+            lanes.store4(block, (at + 84) as long, vb.y)
+            lanes.store4(block, (at + 88) as long, vb.z)
+            lanes.store4(block, (at + 92) as long, wb.x)
+            lanes.store4(block, (at + 96) as long, wb.y)
+            lanes.store4(block, (at + 100) as long, wb.z)
+            b = b + 1
+        }
+        pass = pass + 1
+    }
+    elapsed = time.now_ms() - started
+    println("aether lanes: ${BUNDLES} bundles x ${PER_BUNDLE} points x ${PASSES} passes in ${elapsed} ms (sink ${lanes.sum4(sink)})")
+}

@@ -10,6 +10,15 @@ cd "$root"
 mkdir -p target
 layers="${1:-tree}"
 for layer in $layers; do
+    # A layer measured against C of our own rather than against the
+    # reference (the lanes) builds and runs that first, with the flags
+    # aether.toml gives ae build so both sides are compiled alike.
+    if [ -f "bench/${layer}_native.c" ]; then
+        native_cflags="$(sed -n 's/^cflags = "\(.*\)"/\1/p' aether.toml)"
+        gcc $native_cflags "bench/${layer}_native.c" -o "target/${layer}_native" -lm || exit 1
+        native="target/${layer}_native"; [ -x "$native" ] || native="$native.exe"
+        "$native"
+    fi
     # A layer the reference only has inside its world (the broad phase) runs ours alone.
     if [ -f "bench/${layer}_box3d.c" ]; then
         gcc -O3 -Ireference/box3d/include -Ireference/box3d/shared "bench/${layer}_box3d.c" -o "target/${layer}_box3d" -Lreference/box3d/out/shared -Lreference/box3d/out/src -lshared -lbox3d -lm || exit 1
