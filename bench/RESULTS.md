@@ -158,17 +158,28 @@ hull-capsule and 20,000 hull-sphere collisions along a sweep.
 
 | phase | aephysics | Box3D |
 |---|---|---|
-| 20,000 hull-hull, cold cache | 15.3 ms | **9.5** |
-| 20,000 hull-hull, warm cache | 3.7 | **3.6** |
-| 20,000 hull-capsule | 7.2 | **5.0** |
-| 20,000 hull-sphere | 4.0 | **2.6** |
+| 20,000 hull-hull, cold cache | 12.7 ms | **9.1** |
+| 20,000 hull-hull, warm cache | **3.2** | 3.6 |
+| 20,000 hull-capsule | **4.8** | 4.9 |
+| 20,000 hull-sphere | **2.4** | 2.5 |
 
 The same manifolds come out: 52,386 / 52,074 / 23,482 / 11,500 contact
 points, 19,706 cache hits, and equal separation sums on every phase. With
-the cache warm -- the state a resting stack is in -- the port is at parity;
-the cold separating axis test is 1.6x, the reference's being SIMD four
-edge pairs at a time, which is the wide path to consider if a step
-benchmark ever shows the cold SAT.
+the cache warm -- the state a resting stack is in -- and on capsules and
+spheres, the port is at or past the reference; the cold separating axis
+test is 1.4x.
+
+The cold test was 13.2 ms until the edge-pair loop stopped reading A's
+edges through the half-edge structure. Every edge of A is tested against
+every edge of B -- a hundred and forty-four pairs for two boxes -- and
+each test read a face index into the planes and an origin index into the
+points, a pointer chase per pair; they are gathered once into a flat
+array of directions, normals and tolerances before the loop, in single
+precision, since a separating axis is a direction and the reference
+finds it in floats (#42). The axis that wins is still computed in double:
+it is the normal a contact is built on. What is left between the columns
+is the reference's SIMD, which tests eight edge pairs at once where this
+tests one.
 
 ## triangle_manifold
 

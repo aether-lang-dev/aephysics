@@ -888,8 +888,10 @@ main() {
     test_hull_capsule_edge_deep()
     test_sphere_hull_seam()
     test_rounded_pairs()
-    // The module's clip scratch stays allocated: three blocks.
-    ensure("every other counted allocation was freed", basics.alloc_count() == before + 3)
+    // The module's scratch stays allocated: the two clip polygons, the
+    // unreduced points, and the edge axes the separating-axis test
+    // gathers A's edges into.
+    ensure("every other counted allocation was freed", basics.alloc_count() == before + 4)
 
     println("manifold: ${checks} checks")
     if failures == 0 {
