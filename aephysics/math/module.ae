@@ -24,6 +24,15 @@ import std.string
 
 exports (
     Vec2, Vec3, CosSin, Quat, Transform, Matrix2, Matrix3, AABB, Plane, SegmentDistanceResult,
+    Vec3f, Quatf, Matrix3f, EPSILON_F32, TINY_F32,
+    vec3f, quatf, matrix3f, vec3f_zero, vec3f_one, vec3f_axis_x, vec3f_axis_y, vec3f_axis_z,
+    quatf_identity, mat3f_zero, mat3f_identity,
+    narrow3, widen3, narrow_quat, widen_quat, narrow_mat3, widen_mat3,
+    addf, subf, mulf, negf, dotf, lengthf, length_squaredf, distancef, distance_squaredf,
+    mul_addf, mul_subf, mul_svf, crossf, normalizef, perpf, is_normalizedf,
+    min_vec3f, max_vec3f, lerpf, abs_f32, min_f32, max_f32, clamp_f32, sqrt_f32,
+    mul_mvf, add_mmf, transposef, detf, invert_matrixf, rotate_vectorf, inv_rotate_vectorf,
+    mul_quatf, normalize_quatf,
     PI, TWO_PI, PI_OVER_TWO, PI_OVER_FOUR, SQRT3, DEG_TO_RAD, RAD_TO_DEG, MIN_SCALE,
     EPSILON, TINY, MAX_FLOAT, HUGE,
     vec2, vec3, quat, quat_vs, qv, transform, matrix3, aabb, plane,
@@ -59,6 +68,9 @@ exports (
 )
 
 extern sqrt(x: float) -> float
+// libm's single-precision square root: the one the f32 family uses, so a
+// length is computed at the width it is stored at.
+extern sqrtf(x: f32) -> f32
 extern remainder(x: float, y: float) -> float
 
 const PI = 3.14159265359
@@ -1021,3 +1033,196 @@ is_valid_world_transform(t: Transform) -> bool { return is_valid_position(t.p) &
 
 vec3_text(v: Vec3) -> string { return "(${v.x}, ${v.y}, ${v.z})" }
 quat_text(q: Quat) -> string { return "(${q.x}, ${q.y}, ${q.z}; ${q.w})" }
+
+// The smallest step a float takes near one, and the smallest positive
+// float: the double constants' single-precision twins.
+const EPSILON_F32 = 0.00000011920929
+const TINY_F32 = 0.000000000000000000000000000000000000011754944
+
+// --- single precision --------------------------------------------------------
+//
+// The same vectors in f32, for the geometry the reference keeps in
+// `float`: a hull's vertices and planes, a manifold's normals, the
+// inertia a body integrates. Four floats fit a register where two
+// doubles do, and the narrow phase's support search runs in 9 ms against
+// 21 (#42). World positions stay `float` (a double): the reference keeps
+// those double too in its large-world build, and a stack at x = 1e7 has
+// to agree with one at the origin.
+//
+// Every operation here is the double one, written once in single
+// precision -- the same order of operations, so a result converted from
+// one is the other to a float's last bit.
+
+struct Vec3f {
+    x: f32
+    y: f32
+    z: f32
+}
+
+// A quaternion in single precision: x, y, z the vector part, w the scalar.
+struct Quatf {
+    x: f32
+    y: f32
+    z: f32
+    w: f32
+}
+
+// A 3x3 matrix in single precision, by columns.
+struct Matrix3f {
+    cx: Vec3f
+    cy: Vec3f
+    cz: Vec3f
+}
+
+vec3f(x: f32, y: f32, z: f32) -> Vec3f { return Vec3f { x: x, y: y, z: z } }
+quatf(x: f32, y: f32, z: f32, w: f32) -> Quatf { return Quatf { x: x, y: y, z: z, w: w } }
+matrix3f(cx: Vec3f, cy: Vec3f, cz: Vec3f) -> Matrix3f { return Matrix3f { cx: cx, cy: cy, cz: cz } }
+
+vec3f_zero() -> Vec3f { return Vec3f { x: 0.0, y: 0.0, z: 0.0 } }
+vec3f_one() -> Vec3f { return Vec3f { x: 1.0, y: 1.0, z: 1.0 } }
+vec3f_axis_x() -> Vec3f { return Vec3f { x: 1.0, y: 0.0, z: 0.0 } }
+vec3f_axis_y() -> Vec3f { return Vec3f { x: 0.0, y: 1.0, z: 0.0 } }
+vec3f_axis_z() -> Vec3f { return Vec3f { x: 0.0, y: 0.0, z: 1.0 } }
+quatf_identity() -> Quatf { return Quatf { x: 0.0, y: 0.0, z: 0.0, w: 1.0 } }
+mat3f_zero() -> Matrix3f { return Matrix3f { cx: vec3f_zero(), cy: vec3f_zero(), cz: vec3f_zero() } }
+mat3f_identity() -> Matrix3f { return Matrix3f { cx: vec3f_axis_x(), cy: vec3f_axis_y(), cz: vec3f_axis_z() } }
+
+// Between the two precisions: narrowed at the store, widened at the read,
+// exactly as C converts.
+narrow3(a: Vec3) -> Vec3f { return Vec3f { x: a.x as f32, y: a.y as f32, z: a.z as f32 } }
+widen3(a: Vec3f) -> Vec3 { return Vec3 { x: a.x as float, y: a.y as float, z: a.z as float } }
+narrow_quat(q: Quat) -> Quatf { return Quatf { x: q.x as f32, y: q.y as f32, z: q.z as f32, w: q.w as f32 } }
+widen_quat(q: Quatf) -> Quat { return Quat { x: q.x as float, y: q.y as float, z: q.z as float, w: q.w as float } }
+narrow_mat3(m: Matrix3) -> Matrix3f { return Matrix3f { cx: narrow3(m.cx), cy: narrow3(m.cy), cz: narrow3(m.cz) } }
+widen_mat3(m: Matrix3f) -> Matrix3 { return Matrix3 { cx: widen3(m.cx), cy: widen3(m.cy), cz: widen3(m.cz) } }
+
+addf(a: Vec3f, b: Vec3f) -> Vec3f { return Vec3f { x: a.x + b.x, y: a.y + b.y, z: a.z + b.z } }
+subf(a: Vec3f, b: Vec3f) -> Vec3f { return Vec3f { x: a.x - b.x, y: a.y - b.y, z: a.z - b.z } }
+mulf(a: Vec3f, b: Vec3f) -> Vec3f { return Vec3f { x: a.x * b.x, y: a.y * b.y, z: a.z * b.z } }
+negf(a: Vec3f) -> Vec3f { return Vec3f { x: 0.0 - a.x, y: 0.0 - a.y, z: 0.0 - a.z } }
+dotf(a: Vec3f, b: Vec3f) -> f32 { return a.x * b.x + a.y * b.y + a.z * b.z }
+length_squaredf(a: Vec3f) -> f32 { return a.x * a.x + a.y * a.y + a.z * a.z }
+lengthf(v: Vec3f) -> f32 { return sqrt_f32(length_squaredf(v)) }
+distancef(a: Vec3f, b: Vec3f) -> f32 { return lengthf(subf(b, a)) }
+distance_squaredf(a: Vec3f, b: Vec3f) -> f32 { return length_squaredf(subf(b, a)) }
+// a + s * b
+mul_addf(a: Vec3f, s: f32, b: Vec3f) -> Vec3f { return Vec3f { x: a.x + s * b.x, y: a.y + s * b.y, z: a.z + s * b.z } }
+// a - s * b
+mul_subf(a: Vec3f, s: f32, b: Vec3f) -> Vec3f { return Vec3f { x: a.x - s * b.x, y: a.y - s * b.y, z: a.z - s * b.z } }
+// s * a
+mul_svf(s: f32, a: Vec3f) -> Vec3f { return Vec3f { x: s * a.x, y: s * a.y, z: s * a.z } }
+
+crossf(a: Vec3f, b: Vec3f) -> Vec3f {
+    return Vec3f { x: a.y * b.z - a.z * b.y, y: a.z * b.x - a.x * b.z, z: a.x * b.y - a.y * b.x }
+}
+
+// A unit vector, or zero for an input too small to have a direction --
+// the double one's rule at a float's scale.
+normalizef(a: Vec3f) -> Vec3f {
+    ls = a.x * a.x + a.y * a.y + a.z * a.z
+    if ls > 1000.0 * TINY_F32 {
+        s = 1.0 / sqrt_f32(ls)
+        return Vec3f { x: s * a.x, y: s * a.y, z: s * a.z }
+    }
+    return vec3f_zero()
+}
+
+// Any unit vector at right angles to this one, chosen the stable way.
+perpf(a: Vec3f) -> Vec3f {
+    if a.x < 0.0 - 0.5 || 0.5 < a.x {
+        return normalizef(Vec3f { x: a.y, y: 0.0 - a.x, z: 0.0 })
+    }
+    return normalizef(Vec3f { x: 0.0, y: a.z, z: 0.0 - a.y })
+}
+
+is_normalizedf(a: Vec3f) -> bool {
+    aa = dotf(a, a)
+    return abs_f32(1.0 - aa) < 100.0 * EPSILON_F32
+}
+
+min_vec3f(a: Vec3f, b: Vec3f) -> Vec3f {
+    return Vec3f { x: min_f32(a.x, b.x), y: min_f32(a.y, b.y), z: min_f32(a.z, b.z) }
+}
+
+max_vec3f(a: Vec3f, b: Vec3f) -> Vec3f {
+    return Vec3f { x: max_f32(a.x, b.x), y: max_f32(a.y, b.y), z: max_f32(a.z, b.z) }
+}
+
+lerpf(a: Vec3f, b: Vec3f, alpha: f32) -> Vec3f {
+    return Vec3f { x: (1.0 - alpha) * a.x + alpha * b.x,
+                   y: (1.0 - alpha) * a.y + alpha * b.y,
+                   z: (1.0 - alpha) * a.z + alpha * b.z }
+}
+
+abs_f32(a: f32) -> f32 {
+    if a < 0.0 { return 0.0 - a }
+    return a
+}
+min_f32(a: f32, b: f32) -> f32 { if a < b { return a } return b }
+max_f32(a: f32, b: f32) -> f32 { if a > b { return a } return b }
+clamp_f32(a: f32, lower: f32, upper: f32) -> f32 {
+    if a < lower { return lower }
+    if upper < a { return upper }
+    return a
+}
+sqrt_f32(a: f32) -> f32 { return sqrtf(a) }
+
+// m * a, a as a column.
+mul_mvf(m: Matrix3f, a: Vec3f) -> Vec3f {
+    return Vec3f { x: m.cx.x * a.x + m.cy.x * a.y + m.cz.x * a.z,
+                   y: m.cx.y * a.x + m.cy.y * a.y + m.cz.y * a.z,
+                   z: m.cx.z * a.x + m.cy.z * a.y + m.cz.z * a.z }
+}
+
+add_mmf(a: Matrix3f, b: Matrix3f) -> Matrix3f {
+    return Matrix3f { cx: addf(a.cx, b.cx), cy: addf(a.cy, b.cy), cz: addf(a.cz, b.cz) }
+}
+
+transposef(m: Matrix3f) -> Matrix3f {
+    return Matrix3f { cx: Vec3f { x: m.cx.x, y: m.cy.x, z: m.cz.x },
+                      cy: Vec3f { x: m.cx.y, y: m.cy.y, z: m.cz.y },
+                      cz: Vec3f { x: m.cx.z, y: m.cy.z, z: m.cz.z } }
+}
+
+detf(m: Matrix3f) -> f32 { return dotf(m.cx, crossf(m.cy, m.cz)) }
+
+// The inverse, or zero when singular.
+invert_matrixf(m: Matrix3f) -> Matrix3f {
+    d = detf(m)
+    if abs_f32(d) > 1000.0 * TINY_F32 {
+        inv = 1.0 / d
+        out = Matrix3f { cx: mul_svf(inv, crossf(m.cy, m.cz)),
+                         cy: mul_svf(inv, crossf(m.cz, m.cx)),
+                         cz: mul_svf(inv, crossf(m.cx, m.cy)) }
+        return transposef(out)
+    }
+    return mat3f_zero()
+}
+
+// q * v * conjugate(q): the vector turned by the rotation.
+rotate_vectorf(q: Quatf, v: Vec3f) -> Vec3f {
+    qv_part = Vec3f { x: q.x, y: q.y, z: q.z }
+    t = mul_svf(2.0, crossf(qv_part, v))
+    return addf(addf(v, mul_svf(q.w, t)), crossf(qv_part, t))
+}
+
+// conjugate(q) * v * q: the vector brought into the rotation's frame.
+inv_rotate_vectorf(q: Quatf, v: Vec3f) -> Vec3f {
+    return rotate_vectorf(Quatf { x: 0.0 - q.x, y: 0.0 - q.y, z: 0.0 - q.z, w: q.w }, v)
+}
+
+mul_quatf(a: Quatf, b: Quatf) -> Quatf {
+    return Quatf { x: a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+                   y: a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+                   z: a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+                   w: a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z }
+}
+
+normalize_quatf(q: Quatf) -> Quatf {
+    ls = q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w
+    if ls > 1000.0 * TINY_F32 {
+        s = 1.0 / sqrt_f32(ls)
+        return Quatf { x: s * q.x, y: s * q.y, z: s * q.z, w: s * q.w }
+    }
+    return quatf_identity()
+}
