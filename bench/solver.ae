@@ -97,12 +97,10 @@ main() {
     box = hull.make_box_hull(0.5, 0.5, 0.5)
     slab = hull.make_box_hull(110.0, 0.5, 60.0)
     mode = 0
-    while mode < 3 {
+    while mode < 2 {
         solver.set_wide_contacts(mode > 0)
-        contact_solver_wide.set_native_lanes(mode == 2)
         label = "scalar"
         if mode == 1 { label = "lanes in Aether" }
-        if mode == 2 { label = "native lanes" }
         run("falling grid", label, 5000, 100, 50, 2.0, 1.5, 0.0, box, slab)
         run("stacks of ten", label, 1000, 10, 10, 4.0, 0.5, 1.0, box, slab)
         mode = mode + 1

@@ -1069,7 +1069,6 @@ solve(w: *World, ctx: *StepContext) {
         if wide { contact_solver_wide.zero_wide_tail(color) }
         c = c + 1
     }
-    contact_solver_wide.begin_wide_step(ctx, wide_block, wide_total)
     overflow = dynamics.graph_color(w, dynamics.OVERFLOW_INDEX)
     contact_solver.count_color_constraints(overflow, true)
     overflow.contact_constraints = basics.stack_alloc(stack, overflow.contact_constraint_count * sizeof(ContactConstraint))
@@ -1187,7 +1186,6 @@ solve(w: *World, ctx: *StepContext) {
     }
     basics.stack_free(stack, handles_block)
     basics.stack_free(stack, workers_block)
-    contact_solver_wide.end_wide_step()
 
     // The workers' joint and hit bits merged.
     basics.bitset_set_count_and_clear(&w.joint_state_bits, joint_capacity)

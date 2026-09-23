@@ -165,9 +165,8 @@ farthest(a: Outcome, b: Outcome) -> float {
     return worst
 }
 
-run_mode(wide: bool, use_native: bool) -> Outcome {
+run_mode(wide: bool) -> Outcome {
     solver.set_wide_contacts(wide)
-    contact_solver_wide.set_native_lanes(use_native)
     return run_scene()
 }
 
@@ -179,13 +178,11 @@ main() {
            contact_solver_wide.wide_constraint_count(1) == 1 && contact_solver_wide.wide_constraint_count(4) == 1 &&
            contact_solver_wide.wide_constraint_count(5) == 2 && contact_solver_wide.wide_constraint_count(8) == 2 &&
            contact_solver_wide.wide_constraint_count(9) == 3)
-    ensure("the native lanes were built against this layout", contact_solver_wide.native_layout_matches())
-    ensure("the wide path is on by default, in Aether's own lanes", solver.wide_contacts_enabled() && contact_solver_wide.native_lanes_enabled() == false)
+    ensure("the wide path is on by default", solver.wide_contacts_enabled())
 
-    scalar = run_mode(false, false)
-    lanes = run_mode(true, false)
-    lanes_native = run_mode(true, true)
-    lanes_native_again = run_mode(true, true)
+    scalar = run_mode(false)
+    lanes = run_mode(true)
+    lanes_again = run_mode(true)
 
     // The scene did what it was built to do.
     ensure("the ball bounced and reported hits (${scalar.hits})", scalar.hits >= 2)
@@ -195,25 +192,23 @@ main() {
     stack = scalar.positions as Vec3[]
     ensure("the stack stands (${stack[5].y})", stack[5].y > 5.3 && stack[5].y < 5.7)
 
-    // The three paths land in the same place; the same path twice, to the bit.
-    println("contact_solver_wide: lanes vs scalar ${farthest(lanes, scalar)}, native vs lanes ${farthest(lanes_native, lanes)}, native twice ${farthest(lanes_native, lanes_native_again)}")
-    ensure("the Aether lanes agree with the scalar solve", farthest(lanes, scalar) < 0.001)
-    // To the bit, since the conversion to f32x4: the two compute one
-    // record with one arithmetic, and the native file is now a second
-    // copy of it rather than a second precision (#46).
-    ensure("the native lanes agree with the Aether lanes to the bit", farthest(lanes_native, lanes) == 0.0)
-    ensure("the native lanes repeat to the bit", farthest(lanes_native, lanes_native_again) == 0.0)
-    ensure("hit events agree (${scalar.hits}, ${lanes.hits}, ${lanes_native.hits})", scalar.hits == lanes.hits && lanes.hits == lanes_native.hits)
-    ensure("the rolling speeds agree", math.abs_float(lanes.rolling_speed - scalar.rolling_speed) < 0.001 && math.abs_float(lanes_native.rolling_speed - lanes.rolling_speed) < 0.01)
-    ensure("the conveyor speeds agree", math.abs_float(lanes.conveyor_speed - scalar.conveyor_speed) < 0.001 && math.abs_float(lanes_native.conveyor_speed - lanes.conveyor_speed) < 0.01)
+    // The lanes land where the scalar solve does -- single precision
+    // against double, so within a millimetre over the scene -- and the
+    // same lanes twice land in the same place to the bit. The native
+    // file's copy of the lanes, which this compared against while it
+    // existed, agreed with them to the bit too (#48) and is gone (#46).
+    println("contact_solver_wide: lanes vs scalar ${farthest(lanes, scalar)}, lanes twice ${farthest(lanes, lanes_again)}")
+    ensure("the lanes agree with the scalar solve", farthest(lanes, scalar) < 0.001)
+    ensure("the lanes repeat to the bit", farthest(lanes, lanes_again) == 0.0)
+    ensure("hit events agree (${scalar.hits}, ${lanes.hits})", scalar.hits == lanes.hits && lanes.hits == lanes_again.hits)
+    ensure("the rolling speeds agree", math.abs_float(lanes.rolling_speed - scalar.rolling_speed) < 0.001)
+    ensure("the conveyor speeds agree", math.abs_float(lanes.conveyor_speed - scalar.conveyor_speed) < 0.001)
 
     free(scalar.positions)
     free(lanes.positions)
-    free(lanes_native.positions)
-    free(lanes_native_again.positions)
+    free(lanes_again.positions)
     hull.destroy_hull(g_box as *HullData)
     solver.set_wide_contacts(true)
-    contact_solver_wide.set_native_lanes(false)
     println("contact_solver_wide: ${checks} checks")
     if failures == 0 {
         println("contact_solver_wide: all checks passed")

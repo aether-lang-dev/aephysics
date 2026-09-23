@@ -234,18 +234,19 @@ started until its tests pass.
      its siblings) for a colour's convex contacts: FloatW lanes of four,
      the constraint as a structure of arrays, gather and scatter of the
      bodies' states, prepare, warm start, solve, restitution and store;
-     the mesh and overflow contacts stay scalar. The lanes are written
-     twice: in Aether (plain code, what the reference's non-SIMD build
-     is) and in aephysics_native.c beside the module as GCC vector code in single
-     precision (SSE or NEON, baseline), which prepares the lanes'
-     floats itself (reading the module's structures through offsets the
-     module measures, issue #37) and hands the impulses back; a switch
-     per path, both tested against the scalar solve on one scene.
-     Measured, issue #22: the layout alone buys 10%, the native lanes
-     another 20-30%, the native prepare another 10%; the solve itself is
-     then at parity with the reference's (profiles of both, same
-     sampler), the remaining 1.1-1.5x is the narrow phase and the
-     doubles elsewhere.
+     the mesh and overflow contacts stay scalar. The lanes are the
+     language's `f32x4` (std.lanes, Aether 0.706) over one
+     single-precision constraint record: four floats in a register, the
+     reference's SSE and NEON lanes. They were written twice for a while
+     -- in Aether as plain code over doubles, and in aephysics_native.c
+     as GCC vector code in single precision, which is where the speed
+     was (issue #22: the layout alone bought 10%, the vector lanes
+     another 20-30%). Once Aether had lanes, a kernel measured at what
+     the same C costs (bench/lanes.ae), the module's lanes became f32x4,
+     computed the native file's record to the bit and ran faster on the
+     pyramids (PR #48), and the C copy went (#46). The solve is then at
+     parity with the reference's; the rest of the step's gap is the
+     collide pass and the prepare (bench/RESULTS.md, stage by stage).
    - `aephysics.joint_solver` (done, PR #20): the seven joints' prepare,
      warm start and solve (distance, motor, parallel, prismatic,
      revolute, spherical, weld, wheel: distance_joint.c and its
