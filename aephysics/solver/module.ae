@@ -37,7 +37,7 @@ import aephysics.joint_solver
 
 exports (
     solve, integrate_velocities, integrate_positions, finalize_bodies, solve_continuous, set_wide_contacts, wide_contacts_enabled,
-    stage_report,
+    stage_report, stage_step,
     MAX_ROTATION, GYROSCOPIC_ITERATIONS, RESTITUTION_ITERATIONS
 )
 
