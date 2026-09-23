@@ -20,7 +20,8 @@
 import std.string
 
 exports (
-    BitSet, IdPool, HashSet, Ints, Buffer, Stack, Arena,
+    BitSet, IdPool, HashSet, Ints, Buffer, Stack, Arena, BlockAllocator, BLOCK_SIZE,
+    block_allocator_create, block_allocator_destroy, block_allocate, block_free,
     alloc, free_bytes, alloc_count, bytes_in_use, sort_ints,
     is_power_of_2, bounding_power_of_2, round_up_power_of_2, lower_power_of_2_exponent,
     clz32, ctz32, ctz64, pop_count64, lsr, lsr32,
@@ -526,6 +527,75 @@ buffer_remove_swap(b: *Buffer, index: int) -> int {
 buffer_count(b: *Buffer) -> int { return b.count }
 buffer_capacity(b: *Buffer) -> int { return b.capacity }
 buffer_bytes(b: *Buffer) -> int { return b.capacity * b.stride }
+
+// --- block allocator (block_allocator.c) ---------------------------------------
+//
+// Elements of one size, handed out of blocks of BLOCK_SIZE: what the
+// reference allocates a contact's manifolds from. A manifold is touched
+// by the collide pass, the prepare and the store every step, one
+// contact after another; allocated one by one from the heap they land
+// wherever the allocator put them, and the first touch of each was a
+// cache miss (the line profile had 72% of the recycling's samples on
+// it). From a block, the manifolds of contacts made together sit
+// together. A freed element keeps the free list's next pointer in its
+// own first bytes, so an element is at least a pointer wide.
+const BLOCK_EXPONENT = 8
+const BLOCK_SIZE = 256
+
+struct BlockAllocator {
+    blocks: Buffer                 // ptr per block of BLOCK_SIZE elements
+    free_list: ptr
+    element_size: int
+    next_index: int
+    allocation_count: int
+}
+
+block_allocator_create(element_size: int) -> BlockAllocator {
+    // A multiple of the alignment every block is allocated at, so each
+    // element is aligned and can hold the free list's pointer.
+    size = element_size
+    if size < 8 { size = 8 }
+    size = ((size - 1) | 15) + 1
+    return BlockAllocator { blocks: buffer_create(8, 0), free_list: null, element_size: size, next_index: 0, allocation_count: 0 }
+}
+
+block_allocator_destroy(a: *BlockAllocator) {
+    blocks = a.blocks.data as ptr[]
+    i = 0
+    while i < a.blocks.count {
+        free_bytes(blocks[i], BLOCK_SIZE * a.element_size)
+        i = i + 1
+    }
+    buffer_destroy(&a.blocks)
+    a.free_list = null
+    a.next_index = 0
+    a.allocation_count = 0
+}
+
+// One element, its contents whatever they were: the caller clears it.
+block_allocate(a: *BlockAllocator) -> ptr {
+    a.allocation_count = a.allocation_count + 1
+    if a.free_list != null {
+        element = a.free_list
+        a.free_list = (element as ptr[])[0]
+        return element
+    }
+    index = a.next_index
+    a.next_index = index + 1
+    block_index = index >> BLOCK_EXPONENT
+    while a.blocks.count <= block_index {
+        at = buffer_push(&a.blocks)
+        (a.blocks.data as ptr[])[at] = alloc(BLOCK_SIZE * a.element_size)
+    }
+    offset = index & (BLOCK_SIZE - 1)
+    return (a.blocks.data as ptr[])[block_index] + offset * a.element_size
+}
+
+block_free(a: *BlockAllocator, element: ptr) {
+    a.allocation_count = a.allocation_count - 1
+    (element as ptr[])[0] = a.free_list
+    a.free_list = element
+}
 
 // --- id pool ---------------------------------------------------------------
 

@@ -1102,6 +1102,15 @@ struct Profile {
 struct World {
     profile: Profile
     stack: Stack
+    // A contact's manifolds come out of these, one allocator per manifold
+    // count (the first hands out one manifold, the second two, and so on),
+    // as the reference's world keeps them: allocated one by one from the
+    // heap, the manifolds of neighbouring contacts were scattered and
+    // every pass that walks the contacts missed the cache on each. The
+    // narrow phase runs on every worker, so the lock is a word the
+    // workers swap for.
+    manifold_allocators: Buffer    // BlockAllocator
+    manifold_lock: int
     broad_phase: BroadPhase
     constraint_graph: ConstraintGraph
     task_contexts: ptr             // TaskContext[worker_count]
@@ -1285,6 +1294,8 @@ create_world(def: *WorldDef) -> WorldId {
     w.generation = generation
     w.in_use = true
     w.stack = basics.stack_create(2048)
+    w.manifold_allocators = basics.buffer_create(sizeof(BlockAllocator), 0)
+    w.manifold_lock = 0
     // The threads: the host's scheduler when it lends one (the reference's
     // task callbacks: a game runs its physics on its own job system), else
     // the world's own, destroyed with it.
@@ -1411,11 +1422,18 @@ destroy_world(id: WorldId) {
     while i < w.contacts.count {
         c = contact_at(w, i)
         if c.contact_id != NULL_INDEX {
-            free_manifolds(c)
+            free_manifolds(w, c)
             if (c.flags & SIM_MESH_CONTACT) != 0 { mesh_contact.mesh_contact_cache_destroy(&c.mesh_cache) }
         }
         i = i + 1
     }
+    allocators = w.manifold_allocators.data as BlockAllocator[]
+    i = 0
+    while i < w.manifold_allocators.count {
+        basics.block_allocator_destroy(&allocators[i])
+        i = i + 1
+    }
+    basics.buffer_destroy(&w.manifold_allocators)
     i = 0
     while i < w.islands.count {
         island = island_at(w, i)
@@ -2800,25 +2818,48 @@ set_contact_edge_next(w: *World, key: int, next: int) {
     if (key & 1) == 0 { c.edge_a.next_key = next } else { c.edge_b.next_key = next }
 }
 
-free_manifolds(c: *Contact) {
-    if c.manifold_count > 0 { basics.free_bytes(c.manifolds, c.manifold_count * sizeof(Manifold)) }
+// The world's manifold lock: a word swapped from 0 to 1, spun on while
+// another worker holds it. It is held for a free-list pop or push.
+lock_manifolds(w: *World) {
+    while native.atomic_cas((&w.manifold_lock) as ptr, 0, 1) == false { native.pause() }
+}
+
+unlock_manifolds(w: *World) { native.atomic_store((&w.manifold_lock) as ptr, 0) }
+
+free_manifolds(w: *World, c: *Contact) {
+    if c.manifold_count > 0 {
+        lock_manifolds(w)
+        allocators = w.manifold_allocators.data as BlockAllocator[]
+        basics.block_free(&allocators[c.manifold_count - 1], c.manifolds)
+        unlock_manifolds(w)
+    }
     c.manifolds = null
     c.manifold_count = 0
 }
 
-allocate_manifolds(c: *Contact, count: int) {
-    free_manifolds(c)
-    if count > 0 {
-        c.manifolds = basics.alloc(count * sizeof(Manifold))
-        c.manifold_count = count
+// `count` manifolds, zeroed, from the allocator for that many.
+allocate_manifolds(w: *World, c: *Contact, count: int) {
+    free_manifolds(w, c)
+    if count <= 0 { return }
+    lock_manifolds(w)
+    while w.manifold_allocators.count < count {
+        at = basics.buffer_push(&w.manifold_allocators)
+        allocators = w.manifold_allocators.data as BlockAllocator[]
+        allocators[at] = basics.block_allocator_create((at + 1) * sizeof(Manifold))
     }
+    allocators = w.manifold_allocators.data as BlockAllocator[]
+    block = basics.block_allocate(&allocators[count - 1])
+    unlock_manifolds(w)
+    memset(block, 0, count * sizeof(Manifold))
+    c.manifolds = block
+    c.manifold_count = count
 }
 
 // The contact out of the pair set, both bodies' lists, its island, its
 // colour or its set's indices; its bodies woken when asked and it was touching.
 destroy_contact(w: *World, c: *Contact, wake_bodies: bool) {
     broad_phase.remove_pair(&w.broad_phase, basics.shape_pair_key(c.shape_id_a, c.shape_id_b, c.child_index))
-    free_manifolds(c)
+    free_manifolds(w, c)
     body_id_a = c.edge_a.body_id
     body_id_b = c.edge_b.body_id
     body_a = body_at(w, body_id_a)
@@ -2951,13 +2992,13 @@ compute_convex_manifold(w: *World, c: *Contact, geometry_a: *Shape, xf_a: Transf
         }
     }
     if m.point_count == 0 {
-        free_manifolds(c)
+        free_manifolds(w, c)
         return false
     }
     old = old_points() as ManifoldPoint[]
     old_count = 0
     if c.manifold_count == 0 {
-        allocate_manifolds(c, 1)
+        allocate_manifolds(w, c, 1)
     } else {
         first = manifold_at(c, 0)
         old_count = first.point_count
@@ -3072,7 +3113,7 @@ update_mesh_contact(w: *World, c: *Contact, mesh_geometry: *Shape, mesh_shape: *
     tc.sat_cache_hit_count = tc.sat_cache_hit_count + r.sat_cache_hits
     cluster_count = r.cluster_count
     if cluster_count == 0 {
-        free_manifolds(c)
+        free_manifolds(w, c)
         tc.arena.index = mark
         return false
     }
@@ -3084,7 +3125,7 @@ update_mesh_contact(w: *World, c: *Contact, mesh_geometry: *Shape, mesh_shape: *
         memcpy(old_block, c.manifolds, old_count * sizeof(Manifold))
     }
     if old_count != cluster_count {
-        allocate_manifolds(c, cluster_count)
+        allocate_manifolds(w, c, cluster_count)
     } else {
         memset(c.manifolds, 0, cluster_count * sizeof(Manifold))
     }

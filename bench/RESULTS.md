@@ -589,6 +589,41 @@ stage, rather than two totals. The large pyramid, one thread:
 | store impulses | 0.76 | 0.44 | +0.31 |
 | step | 11.9 | 9.1 | +2.8 |
 
+### Manifolds from blocks
+
+The line profile of the collide pass (`scripts/profile.sh` samples mapped to
+source lines with `addr2line`) put 72% of the recycling's samples on two
+lines: the first read of a contact's manifold and the first read of its
+points. The arithmetic is the reference's, operation for operation; the
+difference was where the manifolds were. The port allocated each contact's
+manifolds from the heap one by one, so the manifolds of neighbouring
+contacts were anywhere, and every pass that walks the contacts -- the
+collide, the prepare, the store -- missed the cache on each. The reference
+hands them out of a block allocator per manifold count
+(`b3AllocateManifolds`), and so does the port now
+(`basics.BlockAllocator`, a port of `block_allocator.c`, held by the world
+behind a spinlock since the narrow phase runs on every worker).
+
+The large pyramid, the two builds run in turn, four rounds:
+
+| | ms per step |
+|---|---|
+| manifolds from the heap | 11.57, 11.34, 11.36, 11.65 |
+| manifolds from blocks | **11.17, 11.19, 11.36, 11.23** |
+
+and stage by stage, collide 1.94-2.02 to 1.55-1.72 ms, prepare 1.87-1.95
+to 1.75-1.81, store 0.64-0.68 to 0.60-0.64. The same height sum; the
+suite passes.
+
+A probe that never reused a freed manifold -- every allocation the next
+slot of one long run, in the order the contacts were made -- measured 10.7
+to 11.3 in the same rounds, so the layout has more in it than the
+allocator gives: a freed slot is reused last-in first-out, which is the
+reference's behaviour and scatters the order a little. The reference's own
+note on the contact (`todo embed single manifold`) points at the rest: a
+contact with one manifold carrying it inline, where the pass is already
+reading.
+
 Two stages are seven tenths of the whole difference: the **collide pass**
 (#17) and the **prepare**. Everything the lanes touch -- warm start, solve,
 relax, restitution, integrate -- is within two tenths of a millisecond of
