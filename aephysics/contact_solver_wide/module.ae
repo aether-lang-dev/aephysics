@@ -28,8 +28,7 @@ import aephysics.contact_solver
 exports (
     WIDTH, Vec3W, IntW, WideConstraintPoint, WideConstraint,
     wide_constraint_at, wide_constraint_count, wide_point_at, lane, int_lane,
-    prepare_wide_contacts, prepare_wide_range, zero_wide_tail, warm_start_wide_contacts, solve_wide_contacts, apply_wide_restitution, store_wide_impulses, store_wide_range,
-    set_native_lanes, native_lanes_enabled, native_layout_matches, begin_wide_step, end_wide_step
+    prepare_wide_contacts, prepare_wide_range, zero_wide_tail, warm_start_wide_contacts, solve_wide_contacts, apply_wide_restitution, store_wide_impulses, store_wide_range
 )
 
 // libm's single-precision square root: what a lane's square root is four
@@ -37,108 +36,6 @@ exports (
 extern sqrtf(x: f32) -> f32
 sqrt_f32(x: f32) -> f32 { return sqrtf(x) }
 extern memset(p: ptr, value: int, count: int) -> ptr
-
-// The same lanes as vector code in aephysics/native/aephysics_native.c,
-// which is where they lived while Aether had no lane type. It computes
-// the same record, bit for bit (tests/test_contact_solver_wide), and the
-// Aether lanes above are the faster of the two on the pyramids, so they
-// are the path; the native one stays one release for the comparison and
-// goes with #46.
-extern aephysics_wide_constraint_size() -> int
-extern aephysics_wide_body_state_size() -> int
-extern aephysics_wide_warm_start(states: ptr, constraints: ptr, count: int)
-extern aephysics_wide_solve(states: ptr, constraints: ptr, count: int, use_bias: int, inv_h: float, contact_speed: float, epsilon: float)
-extern aephysics_wide_restitution(states: ptr, constraints: ptr, count: int, threshold: float)
-extern aephysics_wide_begin(block: ptr, count: int)
-extern aephysics_wide_end()
-extern aephysics_wide_layout_count() -> int
-extern aephysics_wide_layout(offsets: ptr)
-extern aephysics_wide_prepare_begin(sims: ptr, states: ptr, bias_rate: float, mass_scale: float, impulse_scale: float,
-                                    static_bias_rate: float, static_mass_scale: float, static_impulse_scale: float, enable_warm_starting: int)
-extern aephysics_wide_prepare(contact: ptr, slot: ptr, lane: int)
-extern calloc(count: int, size: int) -> ptr
-extern free(p: ptr)
-
-var g_native_lanes = false
-
-set_native_lanes(enabled: bool) {
-    if g_native_lanes != enabled { g_native_lanes = enabled }
-}
-native_lanes_enabled() -> bool { return g_native_lanes }
-
-// The step's wide constraints, all colours' in one block, handed to the
-// native lanes for the step, with what the native prepare shares (the
-// bodies, the softness); a range's impulses are unpacked before its
-// store, by whichever worker has the range.
-begin_wide_step(ctx: *StepContext, block: ptr, count: int) {
-    if g_native_lanes && count > 0 {
-        layout_for_native()
-        aephysics_wide_begin(block, count)
-        warm = 0
-        if ctx.enable_warm_starting { warm = 1 }
-        aephysics_wide_prepare_begin(ctx.sims, ctx.states,
-                                     ctx.contact_softness.bias_rate, ctx.contact_softness.mass_scale, ctx.contact_softness.impulse_scale,
-                                     ctx.static_softness.bias_rate, ctx.static_softness.mass_scale, ctx.static_softness.impulse_scale, warm)
-    }
-}
-
-end_wide_step() {
-    if g_native_lanes { aephysics_wide_end() }
-}
-
-// The native prepare reads the module's structures through the offsets
-// of the fields it needs, measured here on samples of each: the native
-// file declares none of them, so a field added to a structure moves
-// nothing there. Once.
-var g_layout_sent = false
-
-field_offset(base: ptr, field: ptr) -> int { return field - base }
-
-layout_for_native() {
-    if g_layout_sent { return }
-    block = calloc(aephysics_wide_layout_count(), 4)
-    offsets = block as int[]
-    c = calloc(1, sizeof(Contact)) as *Contact
-    offsets[0] = field_offset(c as ptr, (&c.body_sim_index_a) as ptr)
-    offsets[1] = field_offset(c as ptr, (&c.body_sim_index_b) as ptr)
-    offsets[2] = field_offset(c as ptr, (&c.manifolds) as ptr)
-    offsets[3] = field_offset(c as ptr, (&c.friction) as ptr)
-    offsets[4] = field_offset(c as ptr, (&c.restitution) as ptr)
-    offsets[5] = field_offset(c as ptr, (&c.rolling_resistance) as ptr)
-    offsets[6] = field_offset(c as ptr, (&c.tangent_velocity) as ptr)
-    free(c as ptr)
-    m = calloc(1, sizeof(Manifold)) as *Manifold
-    offsets[7] = field_offset(m as ptr, (&m.point0) as ptr)
-    offsets[8] = sizeof(ManifoldPoint)
-    offsets[9] = field_offset(m as ptr, (&m.normal) as ptr)
-    offsets[10] = field_offset(m as ptr, (&m.twist_impulse) as ptr)
-    offsets[11] = field_offset(m as ptr, (&m.friction_impulse) as ptr)
-    offsets[12] = field_offset(m as ptr, (&m.rolling_impulse) as ptr)
-    offsets[13] = field_offset(m as ptr, (&m.point_count) as ptr)
-    offsets[14] = field_offset(m as ptr, (&m.point0.anchor_a) as ptr)
-    offsets[15] = field_offset(m as ptr, (&m.point0.anchor_b) as ptr)
-    offsets[16] = field_offset(m as ptr, (&m.point0.separation) as ptr)
-    offsets[17] = field_offset(m as ptr, (&m.point0.normal_impulse) as ptr)
-    free(m as ptr)
-    s = calloc(1, sizeof(BodySim)) as *BodySim
-    offsets[18] = field_offset(s as ptr, (&s.inv_mass) as ptr)
-    offsets[19] = field_offset(s as ptr, (&s.inv_inertia_world) as ptr)
-    offsets[20] = sizeof(BodySim)
-    free(s as ptr)
-    b = calloc(1, sizeof(BodyState)) as *BodyState
-    offsets[21] = field_offset(b as ptr, (&b.linear_velocity) as ptr)
-    offsets[22] = field_offset(b as ptr, (&b.angular_velocity) as ptr)
-    offsets[23] = sizeof(BodyState)
-    free(b as ptr)
-    aephysics_wide_layout(block)
-    free(block)
-    g_layout_sent = true
-}
-
-// Whether the native file was built against this module's layout.
-native_layout_matches() -> bool {
-    return aephysics_wide_constraint_size() == sizeof(WideConstraint) && aephysics_wide_body_state_size() == sizeof(BodyState)
-}
 
 const WIDTH = 4
 const NULL_INDEX = 0 - 1
@@ -580,20 +477,10 @@ prepare_wide_contacts(ctx: *StepContext, color: *GraphColor) {
 
 // A block [start, end) of a colour's convex contacts into their lanes;
 // the tail slot's spare lanes were zeroed (zero_wide_tail) before any
-// block ran. With the native lanes the prepare is theirs, writing the
-// same record.
+// block ran.
 prepare_wide_range(ctx: *StepContext, color: *GraphColor, start: int, end: int) {
     w = ctx.world
     base = color.wide_constraints
-    if g_native_lanes {
-        i = start
-        while i < end {
-            c = dynamics.contact_at(w, basics.ints_get(&color.convex_contacts, i))
-            aephysics_wide_prepare(c as ptr, wide_constraint_at(base, i / WIDTH) as ptr, i % WIDTH)
-            i = i + 1
-        }
-        return
-    }
     i = start
     while i < end {
         c = dynamics.contact_at(w, basics.ints_get(&color.convex_contacts, i))
@@ -613,10 +500,6 @@ zero_wide_tail(color: *GraphColor) {
 // Last step's impulses applied before solving (b3WarmStartContacts_Convex).
 warm_start_wide_contacts(ctx: *StepContext, constraints: ptr, count: int) {
     states = ctx.states
-    if g_native_lanes {
-        aephysics_wide_warm_start(states, constraints, count)
-        return
-    }
     index = 0
     while index < count {
         c = wide_constraint_at(constraints, index)
@@ -658,12 +541,6 @@ warm_start_wide_contacts(ctx: *StepContext, constraints: ptr, count: int) {
 // rolling resistance, twist friction and central friction.
 solve_wide_contacts(ctx: *StepContext, constraints: ptr, count: int, use_bias: bool) {
     states = ctx.states
-    if g_native_lanes {
-        bias_flag = 0
-        if use_bias { bias_flag = 1 }
-        aephysics_wide_solve(states, constraints, count, bias_flag, ctx.inv_h, ctx.world.contact_speed, math.EPSILON)
-        return
-    }
     inv_h = splat_w(ctx.inv_h)
     contact_speed = splat_w(0.0 - ctx.world.contact_speed)
     one = splat_w(1.0)
@@ -780,10 +657,6 @@ solve_wide_contacts(ctx: *StepContext, constraints: ptr, count: int, use_bias: b
 // unless it approached faster than the threshold with an impulse.
 apply_wide_restitution(ctx: *StepContext, constraints: ptr, count: int) {
     states = ctx.states
-    if g_native_lanes {
-        aephysics_wide_restitution(states, constraints, count, ctx.restitution_threshold)
-        return
-    }
     threshold = splat_w(ctx.restitution_threshold)
     zero = zero_w()
     index = 0
