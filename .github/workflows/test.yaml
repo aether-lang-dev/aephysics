@@ -5,7 +5,6 @@ on:
   push:
     branches:
       - main
-      - main
   pull_request:
 
 jobs:
@@ -16,28 +15,15 @@ jobs:
       - name: Checkout aephysics
         uses: actions/checkout@v4
 
-      # The toolchain is built from aether's HEAD with its own install.sh
-      # into ~/.aether (the org's `make install` wants /usr/local, which a
-      # runner may not write), and cached under the commit it was built from.
-      - name: Resolve the Aether version
-        id: aether
-        run: echo "sha=$(git ls-remote https://github.com/aether-lang-dev/aether.git HEAD | cut -f1)" >> "$GITHUB_OUTPUT"
-
-      - name: Cache the Aether toolchain
-        uses: actions/cache@v4
-        with:
-          path: ~/.aether
-          key: aether-${{ runner.os }}-${{ steps.aether.outputs.sha }}
-
-      - name: Install the Aether toolchain
+      # Tracking pin: 0.778.0, the floor shared by the whole Aether family.
+      # The complete suite passed with 0.778.0 on macOS arm64 on 2026-10-05.
+      # Linux remains verified by this job, not by that run.
+      # This is a reproducible bootstrap version, not a claimed API floor.
+      - name: Install the released Aether toolchain and aeb
         run: |
-          if [ -x "$HOME/.aether/bin/aetherc" ]; then
-            echo "Aether toolchain restored from cache; skipping the build."
-          else
-            git clone --depth 1 https://github.com/aether-lang-dev/aether.git "$RUNNER_TEMP/aether"
-            (cd "$RUNNER_TEMP/aether" && ./install.sh)
-          fi
-          echo "$HOME/.aether/bin" >> "$GITHUB_PATH"
+          curl -fsSL https://raw.githubusercontent.com/aether-lang-dev/aeb/main/get.sh \
+            | AE_PIN=0.778.0 AEB_REF=v0.325 sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Run the tests with ae
         run: scripts/test.sh

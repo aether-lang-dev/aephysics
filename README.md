@@ -70,6 +70,19 @@ Deliberate choices:
 
 ## Tests and benchmarks
 
+Install the released toolchain with the shared, version-pinned installer
+(the same bootstrap used by selaenium):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/aether-lang-dev/aeb/main/get.sh \
+  | AE_PIN=0.778.0 AEB_REF=v0.325 sh
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+This ensures `ae` 0.778.0 or newer and installs `aeb` v0.325 under
+`~/.local` (`PREFIX` overrides it), using release binaries where available.
+These bootstrap versions are separate from the project's minimum API floor.
+
 ```
 scripts/test.sh                 # builds and runs every tests/test_*.ae with ae; what CI runs
 scripts/fetch_references.sh     # Box3D and Jolt into reference/, built (needs cmake, ninja, gcc)
