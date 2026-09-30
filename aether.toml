@@ -1,6 +1,11 @@
 [package]
 name = "aephysics"
 description = "A rigid body physics engine in Aether"
+# What a consumer's search path gets: the root, since the modules import
+# each other as aephysics.<name> (aephysics/<name>/module.ae). A project
+# that names this package as a dependency, or patches it to a checkout
+# (ae3d keeps one under deps/), imports it with no --lib.
+modules = "."
 
 [build]
 # What the tests and benchmarks are built with: -O3 and a wider inlining
