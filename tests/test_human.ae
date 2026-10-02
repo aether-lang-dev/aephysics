@@ -19,6 +19,7 @@ import aephysics.physics_world
 extern calloc(count: int, size: int) -> ptr
 extern exit(code: int)
 extern free(p: ptr)
+extern atan2(y: float, x: float) -> float
 
 var failures = 0
 var checks = 0
@@ -278,6 +279,161 @@ test_driven_anchors() {
     dynamics.destroy_world(world_id)
 }
 
+// --- a shape fitted to a rig ------------------------------------------------------------------
+
+// The landmarks of a shape: heads, tails (Vec3[BONE_COUNT] each) and the
+// two toes (Vec3[2]), in one block of 2 * BONE_COUNT + 2.
+landmarks(shape: ptr) -> ptr {
+    block = calloc(2 * human.BONE_COUNT + 2, sizeof(Vec3))
+    v = block as Vec3[]
+    i = 0
+    while i < human.BONE_COUNT {
+        v[i] = human.human_shape_head(shape, i)
+        v[human.BONE_COUNT + i] = human.human_shape_tail(shape, i)
+        i = i + 1
+    }
+    v[2 * human.BONE_COUNT] = human.human_shape_toe(shape, human.BONE_CALF_L)
+    v[2 * human.BONE_COUNT + 1] = human.human_shape_toe(shape, human.BONE_CALF_R)
+    return block
+}
+
+near_vec(a: Vec3, b: Vec3, within: float) -> bool { return math.length(math.sub(a, b)) < within }
+
+// The angle between two lines, radians.
+angle_between(a: Vec3, b: Vec3) -> float {
+    return atan2(math.length(math.cross(a, b)), math.dot(a, b))
+}
+
+// A joint's rest angle in a shape: the bone's joint frame against its parent's.
+rest_angle(shape: ptr, index: int) -> Quat {
+    spec = human.spec_at(shape, index)
+    parent = human.spec_at(shape, spec.parent)
+    qa = math.mul_quat(parent.reference.q, spec.frame_a.q)
+    qb = math.mul_quat(spec.reference.q, spec.frame_b.q)
+    return math.inv_mul_quat(qa, qb)
+}
+
+same_rotation(a: Quat, b: Quat) -> bool { return math.abs_float(math.dot_quat(math.normalize_quat(a), math.normalize_quat(b))) > 0.999999 }
+
+// Fitted to its own landmarks, the reference's shape is the reference's
+// (its joints' frames to 10 um: the reference rounds them to one).
+test_fit_identity() {
+    shape = human.human_reference_shape()
+    reference = human.human_reference_shape()
+    block = landmarks(shape)
+    human.human_fit_shape(shape, block, block + human.BONE_COUNT * sizeof(Vec3), block + 2 * human.BONE_COUNT * sizeof(Vec3))
+    same = true
+    i = 0
+    while i < human.BONE_COUNT {
+        a = human.spec_at(shape, i)
+        b = human.spec_at(reference, i)
+        if !near_vec(a.reference.p, b.reference.p, 0.000001) || !same_rotation(a.reference.q, b.reference.q) { same = false }
+        if !near_vec(a.capsule.center1, b.capsule.center1, 0.000001) || !near_vec(a.capsule.center2, b.capsule.center2, 0.000001) { same = false }
+        if math.abs_float(a.capsule.radius - b.capsule.radius) > 0.000001 { same = false }
+        if a.has_foot && (!near_vec(a.foot.center1, b.foot.center1, 0.000001) || !near_vec(a.foot.center2, b.foot.center2, 0.000001)) { same = false }
+        if i > 0 && (!near_vec(a.frame_a.p, b.frame_a.p, 0.00001) || !same_rotation(a.frame_a.q, b.frame_a.q)) { same = false }
+        i = i + 1
+    }
+    ensure("fit: the reference fitted to its own landmarks is the reference", same)
+    free(block)
+    free(shape)
+    free(reference)
+}
+
+// A rig of the reference's size with the spine curved as MPFB's is (the
+// lower spine leaning 7.6 degrees forward, the chest 9 back, the neck's
+// base 14 cm forward of the chest's) and the left toe turned out 20
+// degrees: the fitted shape puts every joint at the rig's, runs every
+// bone along the rig's line, keeps every joint's rest angle, turns the
+// foot, and builds a figure whose joints start closed and which lands
+// in one piece.
+test_fit_curved() {
+    shape = human.human_reference_shape()
+    reference = human.human_reference_shape()
+    block = landmarks(reference)
+    v = block as Vec3[]
+    heads = block
+    tails = block + human.BONE_COUNT * sizeof(Vec3)
+    toes = block + 2 * human.BONE_COUNT * sizeof(Vec3)
+    tail_at = tails as Vec3[]
+    toe_at = toes as Vec3[]
+    // Forward: the way the toes point, level.
+    fl = math.sub(toe_at[0], tail_at[human.BONE_CALF_L])
+    fr = math.sub(toe_at[1], tail_at[human.BONE_CALF_R])
+    forward = math.normalize(math.vec3(fl.x + fr.x, 0.0, fl.z + fr.z))
+    side = math.cross(math.vec3(0.0, 1.0, 0.0), forward)
+    // The spine, curved: each segment's length kept, its line turned.
+    spine = v[human.BONE_SPINE_01]
+    lower = math.length(math.sub(v[human.BONE_SPINE_03], spine))
+    chest_at = math.mul_add(spine, lower, math.rotate_vector(math.make_quat_from_axis_angle(side, 0.1326), math.vec3(0.0, 1.0, 0.0)))
+    upper = math.length(math.sub(v[human.BONE_NECK], v[human.BONE_SPINE_03]))
+    neck_at = math.mul_add(math.mul_add(chest_at, upper, math.rotate_vector(math.make_quat_from_axis_angle(side, 0.0 - 0.157), math.vec3(0.0, 1.0, 0.0))), 0.14, forward)
+    moved = math.sub(neck_at, v[human.BONE_NECK])
+    v[human.BONE_SPINE_03] = chest_at
+    v[human.BONE_NECK] = neck_at
+    v[human.BONE_UPPER_ARM_L] = math.add(v[human.BONE_UPPER_ARM_L], moved)
+    v[human.BONE_UPPER_ARM_R] = math.add(v[human.BONE_UPPER_ARM_R], moved)
+    v[human.BONE_LOWER_ARM_L] = math.add(v[human.BONE_LOWER_ARM_L], moved)
+    v[human.BONE_LOWER_ARM_R] = math.add(v[human.BONE_LOWER_ARM_R], moved)
+    tail_at[human.BONE_SPINE_01] = chest_at
+    tail_at[human.BONE_SPINE_03] = neck_at
+    tail_at[human.BONE_NECK] = math.add(tail_at[human.BONE_NECK], moved)
+    tail_at[human.BONE_UPPER_ARM_L] = v[human.BONE_LOWER_ARM_L]
+    tail_at[human.BONE_UPPER_ARM_R] = v[human.BONE_LOWER_ARM_R]
+    tail_at[human.BONE_LOWER_ARM_L] = math.add(tail_at[human.BONE_LOWER_ARM_L], moved)
+    tail_at[human.BONE_LOWER_ARM_R] = math.add(tail_at[human.BONE_LOWER_ARM_R], moved)
+    // The left toe turned out about the shin.
+    shin = math.normalize(math.sub(tail_at[human.BONE_CALF_L], v[human.BONE_CALF_L]))
+    toe_at[0] = math.add(tail_at[human.BONE_CALF_L], math.rotate_vector(math.make_quat_from_axis_angle(shin, 0.349), math.sub(toe_at[0], tail_at[human.BONE_CALF_L])))
+    human.human_fit_shape(shape, heads, tails, toes)
+
+    worst_head = 0.0
+    worst_line = 0.0
+    worst_rest = 1.0
+    i = 0
+    while i < human.BONE_COUNT {
+        off = math.length(math.sub(human.human_shape_head(shape, i), v[i]))
+        if off > worst_head { worst_head = off }
+        line = angle_between(math.sub(human.human_shape_tail(shape, i), human.human_shape_head(shape, i)), math.sub(tail_at[i], v[i]))
+        if line > worst_line { worst_line = line }
+        if i > 0 {
+            d = math.abs_float(math.dot_quat(math.normalize_quat(rest_angle(shape, i)), math.normalize_quat(rest_angle(reference, i))))
+            if d < worst_rest { worst_rest = d }
+            // The joint's frame on the parent sits at the bone's head.
+            spec = human.spec_at(shape, i)
+            at = math.transform_point(human.spec_at(shape, spec.parent).reference, spec.frame_a.p)
+            off = math.length(math.sub(at, v[i]))
+            if off > worst_head { worst_head = off }
+        }
+        i = i + 1
+    }
+    ensure("fit: every joint at the rig's (${worst_head * 1000.0} mm off)", worst_head < 0.000001)
+    ensure("fit: every bone along the rig's line (${worst_line} rad off)", worst_line < 0.0001)
+    ensure("fit: every joint's rest angle kept (${worst_rest})", worst_rest > 0.999999)
+    ensure("fit: the chest's line runs forward to the neck's base as the rig's does", math.dot(math.sub(human.human_shape_tail(shape, human.BONE_SPINE_03), human.human_shape_head(shape, human.BONE_SPINE_03)), forward) > 0.05)
+    toe = math.sub(human.human_shape_toe(shape, human.BONE_CALF_L), tail_at[human.BONE_CALF_L])
+    want = math.sub(toe_at[0], tail_at[human.BONE_CALF_L])
+    toe_off = angle_between(math.sub(toe, math.mul_sv(math.dot(toe, shin), shin)), math.sub(want, math.mul_sv(math.dot(want, shin), shin)))
+    ensure("fit: the left foot turned out to the rig's toe (${toe_off} rad off)", toe_off < 0.001)
+    ensure("fit: the right foot as it was", near_vec(human.human_shape_toe(shape, human.BONE_CALF_R), toe_at[1], 0.000001))
+
+    // Built, its joints start closed and its bodies are where the shape put them.
+    world_id = world_with_ground()
+    h = Human { bones: null, filter_joints: null, filter_joint_count: 0, friction_torque: 0.0, is_spawned: false }
+    human.create_human_shaped(&h, world_id, Transform { p: math.vec3(0.0, 0.5, 0.0), q: math.make_quat_from_axis_angle(math.vec3(0.0, 1.0, 0.0), 0.7) }, shape, 5.0, 1.0, 0.7, 1, null)
+    ensure("fit: the curved figure's joints start closed (${worst_joint_separation(&h)})", worst_joint_separation(&h) < 0.001)
+    calf = human.bone_at(&h, human.BONE_CALF_L)
+    ensure("fit: a calf knows its shin from its foot", dynamics.shape_get_capsule(calf.shape_id).radius > dynamics.shape_get_capsule(calf.foot_shape_id).radius &&
+        dynamics.shape_is_valid(human.bone_at(&h, human.BONE_THIGH_L).foot_shape_id) == false)
+    steps(world_id, 600)
+    ensure("fit: the curved figure lands in one piece (${worst_joint_separation(&h)})", worst_joint_separation(&h) < 0.05)
+    human.destroy_human(&h)
+    dynamics.destroy_world(world_id)
+    free(block)
+    free(shape)
+    free(reference)
+}
+
 // The same figure dropped in two worlds lands bit for bit alike.
 drop_alone() -> ptr {
     world_id = world_with_ground()
@@ -315,6 +471,8 @@ main() {
     test_anchors()
     test_driven_anchors()
     test_alike()
+    test_fit_identity()
+    test_fit_curved()
     hull.destroy_hull(g_slab as *HullData)
     println("human: ${checks} checks")
     if failures == 0 {
