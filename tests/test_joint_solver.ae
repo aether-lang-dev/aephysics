@@ -484,6 +484,14 @@ test_prismatic() {
     small("slider: along the axis kept", state.linear_velocity.x - 1.0, 0.000001)
     small("slider: across removed", math.abs_float(state.linear_velocity.y) + math.abs_float(state.linear_velocity.z), 0.000001)
     small("slider: rotation removed", math.length(state.angular_velocity), 0.000001)
+    // The force and torque reported are what the solve applied to the unit
+    // cube (mass 1, inertia 1/6) over the step: the across velocity (0, 2, 3)
+    // removed is a force (0, -480, -720), the spin (1, 2, 3) removed a
+    // torque -(40, 80, 120); nothing along the axis.
+    force = joint_solver.joint_get_constraint_force(id)
+    small("slider: the force across the line, none along it (${force.x} ${force.y} ${force.z})", math.length(math.sub(force, math.vec3(0.0, 0.0 - 480.0, 0.0 - 720.0))), 0.001)
+    torque = joint_solver.joint_get_constraint_torque(id)
+    small("slider: the torque (${torque.x} ${torque.y} ${torque.z})", math.length(math.add(torque, math.vec3(40.0, 80.0, 120.0))), 0.001)
     joint_solver.prismatic_joint_enable_motor(id, true)
     joint_solver.prismatic_joint_set_motor_speed(id, 1.5)
     joint_solver.prismatic_joint_set_max_motor_force(id, 1000.0)
@@ -500,11 +508,29 @@ test_prismatic() {
     set_velocity(&f, math.vec3_zero(), math.vec3_zero())
     solve_biased(&f, id)
     ensure("slider limit: pushed back (${state.linear_velocity.x})", state.linear_velocity.x < 0.0 - 0.1)
+    ensure("slider limit: the upper limit's force points back (${joint_solver.joint_get_constraint_force(id).x})", joint_solver.joint_get_constraint_force(id).x < 0.0 - 1.0)
     // Sideways from the line, the biased solve pulls it back onto it.
     dynamics.body_set_transform(f.cube_id, math.vec3(0.0, 4.2, 0.0), math.quat_identity())
     set_velocity(&f, math.vec3_zero(), math.vec3_zero())
     solve_biased(&f, id)
     ensure("slider: pulled back onto the line (${state.linear_velocity.y})", state.linear_velocity.y < 0.0 - 0.1)
+    dynamics.destroy_joint(id, true)
+
+    // Frame A turned to slide along y: the force is across that line, and
+    // the torque is the world's (the angular impulse is gathered there).
+    dynamics.body_set_transform(f.cube_id, math.vec3(0.0, 4.0, 0.0), math.quat_identity())
+    tdef = dynamics.default_prismatic_joint_def()
+    common_frames(&f, &tdef.base)
+    tdef.base.local_frame_a.q = math.make_quat_from_axis_angle(math.vec3_axis_z(), 0.5 * math.PI)
+    tdef.base.local_frame_b.q = tdef.base.local_frame_a.q
+    tid = dynamics.create_prismatic_joint(f.world_id, &tdef)
+    set_velocity(&f, math.vec3(1.0, 2.0, 3.0), math.vec3(1.0, 2.0, 3.0))
+    solve_step(&f, tid)
+    small("slider, turned: along y kept", state.linear_velocity.y - 2.0, 0.000001)
+    force = joint_solver.joint_get_constraint_force(tid)
+    small("slider, turned: the force across y (${force.x} ${force.y} ${force.z})", math.length(math.sub(force, math.vec3(0.0 - 240.0, 0.0, 0.0 - 720.0))), 0.001)
+    torque = joint_solver.joint_get_constraint_torque(tid)
+    small("slider, turned: the torque in the world (${torque.x} ${torque.y} ${torque.z})", math.length(math.add(torque, math.vec3(40.0, 80.0, 120.0))), 0.001)
     dynamics.destroy_world(f.world_id)
 }
 
@@ -624,6 +650,18 @@ test_parallel_motor_wheel() {
     small("wheel: the spin speed read", joint_solver.wheel_joint_get_spin_speed(whid) - 6.0, 0.000001)
     small("wheel: off the line removed", math.abs_float(state.linear_velocity.y) + math.abs_float(state.linear_velocity.z), 0.000001)
     small("wheel: the spin torque (6/6 * 240)", joint_solver.wheel_joint_get_spin_torque(whid) - 240.0, 0.001)
+    // The force is the lateral velocity (0, 1, 1) removed, across the
+    // suspension's line (frame A's x); the torque is the spin's.
+    force = joint_solver.joint_get_constraint_force(whid)
+    small("wheel: the force across the suspension (${force.x} ${force.y} ${force.z})", math.length(math.sub(force, math.vec3(0.0, 0.0 - 240.0, 0.0 - 240.0))), 0.001)
+    torque = joint_solver.joint_get_constraint_torque(whid)
+    small("wheel: the torque, the spin's (${torque.x} ${torque.y} ${torque.z})", math.length(math.sub(torque, math.vec3(0.0, 0.0, 240.0))), 0.001)
+    // A warm start applies the spin impulse once, as the solve does: from
+    // rest, the unit cube (inertia 1/6) spins up by 6 x the impulse of 1.
+    set_velocity(&f, math.vec3_zero(), math.vec3_zero())
+    joint_solver.prepare_joint(sim(&f, whid), &f.ctx)
+    joint_solver.warm_start_joint(sim(&f, whid), &f.ctx)
+    small("wheel: the warm start spins it once (${state.angular_velocity.z})", state.angular_velocity.z - 6.0, 0.000001)
     // Steering to a target angle turns the wheel about the suspension axis.
     joint_solver.wheel_joint_enable_steering(whid, true)
     joint_solver.wheel_joint_set_target_steering_angle(whid, 0.3)
@@ -631,6 +669,7 @@ test_parallel_motor_wheel() {
     set_velocity(&f, math.vec3_zero(), math.vec3_zero())
     solve_step(&f, whid)
     ensure("wheel steering: turns about x (${state.angular_velocity.x})", math.abs_float(state.angular_velocity.x) > 0.01)
+    ensure("wheel steering: the torque carries the steering, not the spin alone (${joint_solver.joint_get_constraint_torque(whid).x})", math.abs_float(joint_solver.joint_get_constraint_torque(whid).x) > 1.0)
     dynamics.destroy_world(f.world_id)
 }
 

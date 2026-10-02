@@ -927,18 +927,22 @@ solve_prismatic_joint(base: *JointSim, ctx: *StepContext, use_bias: bool) {
     store_velocities(state_a, v_a, w_a, state_b, v_b, w_b)
 }
 
+// The force on B, as the solve applies it: the axial impulse (spring,
+// motor, and the limits, the upper pushing back) along frame A's x, where
+// the joint slides, and the perpendicular ones along its y and z. The
+// reference put the axial part on z and added the upper limit's impulse.
 get_prismatic_joint_force(w: *World, base: *JointSim) -> Vec3 {
     xf_a = dynamics.get_body_transform(w, base.body_id_a)
     j = dynamics.prismatic_joint_of(base)
-    impulse = math.vec3(j.perp_impulse.x, j.perp_impulse.y, j.motor_impulse + j.lower_impulse + j.upper_impulse + j.spring_impulse)
-    force = math.rotate_vector(base.local_frame_a.q, math.mul_sv(w.inv_h, impulse))
-    return math.rotate_vector(xf_a.q, force)
+    axial = j.spring_impulse + j.motor_impulse + j.lower_impulse - j.upper_impulse
+    impulse = math.vec3(axial, j.perp_impulse.x, j.perp_impulse.y)
+    return math.rotate_vector(math.mul_quat(xf_a.q, base.local_frame_a.q), math.mul_sv(w.inv_h, impulse))
 }
+// The torque on B: the angular impulse is gathered in world space (the
+// solve applies it as it is), so it is not turned by frame A as the
+// reference turns it.
 get_prismatic_joint_torque(w: *World, base: *JointSim) -> Vec3 {
-    xf_a = dynamics.get_body_transform(w, base.body_id_a)
-    j = dynamics.prismatic_joint_of(base)
-    torque = math.rotate_vector(base.local_frame_a.q, math.mul_sv(w.inv_h, j.angular_impulse))
-    return math.rotate_vector(xf_a.q, torque)
+    return math.mul_sv(w.inv_h, dynamics.prismatic_joint_of(base).angular_impulse)
 }
 
 prismatic_joint_enable_spring(id: JointId, flag: bool) {
@@ -1762,6 +1766,26 @@ prepare_wheel_joint(base: *JointSim, ctx: *StepContext) {
     }
 }
 
+// The angular impulse a wheel joint holds, as its solve applies it: the
+// spin motor's about B's z, and either the steering's (with the lock about
+// the axis across the spin and the suspension) or, unsteered, the lock
+// about A's x and y. The reference also adds the spin impulse about A's z
+// in front of the unsteered case, so a warm start pushed the wheel's spin
+// twice where the solve pushes it once; here it is applied once.
+wheel_angular_impulse(j: *WheelJoint, quat_a: Quat, quat_b: Quat, matrix_a: Matrix3, matrix_b: Matrix3) -> Vec3 {
+    spin_axis = matrix_b.cz
+    if j.enable_steering {
+        steer = steering_axis(matrix_a, matrix_b)
+        perp = math.cross(spin_axis, matrix_a.cx)
+        steering = j.steering_spring_impulse + j.lower_steering_impulse - j.upper_steering_impulse
+        return math.blend3(j.angular_impulse.x, perp, j.spin_impulse, spin_axis, steering, steer)
+    }
+    rel_q = math.inv_mul_quat(quat_a, quat_b)
+    perp_x = perp_axis(quat_a, rel_q, math.vec3_axis_x())
+    perp_y = perp_axis(quat_a, rel_q, math.vec3_axis_y())
+    return math.blend3(j.angular_impulse.x, perp_x, j.angular_impulse.y, perp_y, j.spin_impulse, spin_axis)
+}
+
 warm_start_wheel_joint(base: *JointSim, ctx: *StepContext) {
     j = dynamics.wheel_joint_of(base)
     state_a = state_of(ctx, j.index_a)
@@ -1784,19 +1808,7 @@ warm_start_wheel_joint(base: *JointSim, ctx: *StepContext) {
     linear = math.blend3(suspension, matrix_a.cx, j.linear_impulse.x, matrix_a.cy, j.linear_impulse.y, matrix_a.cz)
     angular_a = math.blend3(suspension, s_ax, j.linear_impulse.x, s_ay, j.linear_impulse.y, s_az)
     angular_b = math.blend3(suspension, s_bx, j.linear_impulse.x, s_by, j.linear_impulse.y, s_bz)
-    angular = math.mul_sv(j.spin_impulse, matrix_a.cz)
-    spin_axis = matrix_b.cz
-    if j.enable_steering {
-        steer = steering_axis(matrix_a, matrix_b)
-        perp = math.cross(spin_axis, matrix_a.cx)
-        steering = j.steering_spring_impulse + j.lower_steering_impulse - j.upper_steering_impulse
-        angular = math.blend3(j.angular_impulse.x, perp, j.spin_impulse, spin_axis, steering, steer)
-    } else {
-        rel_q = math.inv_mul_quat(quat_a, quat_b)
-        perp_x = perp_axis(quat_a, rel_q, math.vec3_axis_x())
-        perp_y = perp_axis(quat_a, rel_q, math.vec3_axis_y())
-        angular = math.add(angular, math.blend3(j.angular_impulse.x, perp_x, j.angular_impulse.y, perp_y, j.spin_impulse, spin_axis))
-    }
+    angular = wheel_angular_impulse(j, quat_a, quat_b, matrix_a, matrix_b)
     if (state_a.flags & dynamics.DYNAMIC_FLAG) != 0 {
         state_a.linear_velocity = math.mul_sub(state_a.linear_velocity, base.inv_mass_a, linear)
         state_a.angular_velocity = math.sub(state_a.angular_velocity, math.mul_mv(base.inv_inertia_a, math.add(angular_a, angular)))
@@ -1997,18 +2009,28 @@ solve_wheel_joint(base: *JointSim, ctx: *StepContext, use_bias: bool) {
     store_velocities(state_a, v_a, w_a, state_b, v_b, w_b)
 }
 
+// The force on B, as the solve applies it: the suspension's (its spring
+// and its limits, the upper pushing back) along frame A's x and the
+// lateral impulses along its y and z. The reference summed the lower
+// suspension LIMIT (a length) where its impulse belongs, put the
+// suspension on z and added the upper limit's impulse.
 get_wheel_joint_force(w: *World, base: *JointSim) -> Vec3 {
     xf_a = dynamics.get_body_transform(w, base.body_id_a)
     j = dynamics.wheel_joint_of(base)
-    // The reference sums the lower suspension limit here (its todo); kept as written.
-    impulse = math.vec3(j.linear_impulse.x, j.linear_impulse.y, j.lower_suspension_limit + j.upper_suspension_impulse + j.suspension_spring_impulse)
-    force = math.rotate_vector(base.local_frame_a.q, math.mul_sv(w.inv_h, impulse))
-    return math.rotate_vector(xf_a.q, force)
+    suspension = j.suspension_spring_impulse + j.lower_suspension_impulse - j.upper_suspension_impulse
+    impulse = math.vec3(suspension, j.linear_impulse.x, j.linear_impulse.y)
+    return math.rotate_vector(math.mul_quat(xf_a.q, base.local_frame_a.q), math.mul_sv(w.inv_h, impulse))
 }
+// The torque on B: the whole angular impulse (the lock or the steering,
+// and the spin), not the reference's spin alone about A's z.
 get_wheel_joint_torque(w: *World, base: *JointSim) -> Vec3 {
-    sim_a = dynamics.get_body_sim(w, dynamics.body_at(w, base.body_id_a))
-    matrix_a = math.make_matrix_from_quat(math.mul_quat(sim_a.transform.q, base.local_frame_a.q))
-    return math.mul_sv(w.inv_h * dynamics.wheel_joint_of(base).spin_impulse, matrix_a.cz)
+    xf_a = dynamics.get_body_transform(w, base.body_id_a)
+    xf_b = dynamics.get_body_transform(w, base.body_id_b)
+    quat_a = math.mul_quat(xf_a.q, base.local_frame_a.q)
+    quat_b = math.mul_quat(xf_b.q, base.local_frame_b.q)
+    if math.dot_quat(quat_a, quat_b) < 0.0 { quat_b = math.negate_quat(quat_b) }
+    angular = wheel_angular_impulse(dynamics.wheel_joint_of(base), quat_a, quat_b, math.make_matrix_from_quat(quat_a), math.make_matrix_from_quat(quat_b))
+    return math.mul_sv(w.inv_h, angular)
 }
 
 wheel_joint_enable_suspension(id: JointId, flag: bool) {
