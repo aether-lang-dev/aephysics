@@ -4706,6 +4706,8 @@ create_wheel_joint(world_id: WorldId, def: *WheelJointDef) -> JointId {
     w = joint_world(world_id, &def.base)
     if w == null { return null_joint_id() }
     if def.lower_suspension_limit > def.upper_suspension_limit { return null_joint_id() }
+    // Reversed steering limits would push the wheel both ways at once.
+    if def.lower_steering_limit > def.upper_steering_limit { return null_joint_id() }
     w.locked = true
     pair = create_joint(w, &def.base, JOINT_WHEEL)
     wheel = wheel_joint_of(pair.sim)
@@ -4955,16 +4957,7 @@ joint_get_linear_separation(id: JointId) -> float {
     }
     if kind == JOINT_PRISMATIC {
         pr = prismatic_joint_of(base)
-        axis_a = math.rotate_vector(xf_a.q, math.vec3_axis_x())
-        perp_a = math.perp(axis_a)
-        perpendicular = math.abs_float(math.dot(perp_a, dp))
-        limit = 0.0
-        if pr.enable_limit {
-            translation = math.dot(axis_a, dp)
-            if translation < pr.lower_translation { limit = pr.lower_translation - translation }
-            if pr.upper_translation < translation { limit = translation - pr.upper_translation }
-        }
-        return sqrt(perpendicular * perpendicular + limit * limit)
+        return line_separation(dp, slide_axis(xf_a, base), pr.enable_limit, pr.lower_translation, pr.upper_translation)
     }
     if kind == JOINT_REVOLUTE || kind == JOINT_SPHERICAL { return math.length(dp) }
     if kind == JOINT_WELD {
@@ -4973,18 +4966,29 @@ joint_get_linear_separation(id: JointId) -> float {
     }
     if kind == JOINT_WHEEL {
         wheel = wheel_joint_of(base)
-        axis_a = math.rotate_vector(xf_a.q, math.vec3_axis_x())
-        perp_a = math.perp(axis_a)
-        perpendicular = math.abs_float(math.dot(perp_a, dp))
-        limit = 0.0
-        if wheel.enable_suspension_limit {
-            translation = math.dot(axis_a, dp)
-            if translation < wheel.lower_suspension_limit { limit = wheel.lower_suspension_limit - translation }
-            if wheel.upper_suspension_limit < translation { limit = translation - wheel.upper_suspension_limit }
-        }
-        return sqrt(perpendicular * perpendicular + limit * limit)
+        return line_separation(dp, slide_axis(xf_a, base), wheel.enable_suspension_limit, wheel.lower_suspension_limit, wheel.upper_suspension_limit)
     }
     return 0.0
+}
+
+// The line a prismatic joint slides along and a wheel's suspension runs
+// along: frame A's x in the world, as the solver takes it.
+slide_axis(xf_a: Transform, base: *JointSim) -> Vec3 {
+    return math.rotate_vector(math.mul_quat(xf_a.q, base.local_frame_a.q), math.vec3_axis_x())
+}
+
+// How far the anchors are off their line: everything of `dp` across the
+// axis (both directions of the plane, in 3D) with what lies past a limit
+// along it.
+line_separation(dp: Vec3, axis: Vec3, enable_limit: bool, lower: float, upper: float) -> float {
+    translation = math.dot(axis, dp)
+    across = math.length_squared(math.mul_sub(dp, translation, axis))
+    limit = 0.0
+    if enable_limit {
+        if translation < lower { limit = lower - translation }
+        if upper < translation { limit = translation - upper }
+    }
+    return sqrt(across + limit * limit)
 }
 
 // The same as an angle (the wheel joint's is a todo in the reference: zero
