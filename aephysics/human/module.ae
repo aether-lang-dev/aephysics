@@ -31,7 +31,7 @@ exports (
     BONE_PELVIS, BONE_SPINE_01, BONE_SPINE_03, BONE_NECK, BONE_THIGH_L, BONE_CALF_L, BONE_THIGH_R, BONE_CALF_R,
     BONE_UPPER_ARM_L, BONE_LOWER_ARM_L, BONE_UPPER_ARM_R, BONE_LOWER_ARM_R, BONE_COUNT, FILTER_JOINT_COUNT,
     HumanBone, Human, BoneSpec, bone_at, filter_joint_at, spec_at,
-    human_reference_shape, human_shape_head, human_shape_tail, human_shape_toe, human_fit_shape, create_human_shaped,
+    human_reference_shape, human_chain_child, human_shape_head, human_shape_tail, human_shape_toe, human_fit_shape, create_human_shaped,
     create_human, destroy_human, human_set_velocity, human_apply_angular_impulse, human_set_joint_friction_torque,
     human_set_joint_spring_hertz, human_set_joint_damping_ratio, human_align_spring, human_create_motor_anchors,
     human_create_parallel_anchors, human_destroy_anchors, human_has_anchors, human_set_anchor_target, human_set_bullet
@@ -221,7 +221,7 @@ human_reference_shape() -> ptr {
 // A bone's next along the chain the figure is measured by -- the spine up
 // to the neck, each leg to its calf, each arm to its forearm -- or -1 for
 // the neck, the calves and the forearms, which end their chains.
-chain_child(index: int) -> int {
+human_chain_child(index: int) -> int {
     if index == BONE_PELVIS { return BONE_SPINE_01 }
     if index == BONE_SPINE_01 { return BONE_SPINE_03 }
     if index == BONE_SPINE_03 { return BONE_NECK }
@@ -240,7 +240,7 @@ human_shape_head(shape: ptr, index: int) -> Vec3 { return spec_at(shape, index).
 // capsule farther from its joint: a calf's at the ankle, a forearm's
 // past the wrist (it carries the hand), the neck's at the head's middle.
 human_shape_tail(shape: ptr, index: int) -> Vec3 {
-    child = chain_child(index)
+    child = human_chain_child(index)
     if child >= 0 { return spec_at(shape, child).reference.p }
     spec = spec_at(shape, index)
     far = spec.capsule.center1
