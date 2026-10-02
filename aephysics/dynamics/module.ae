@@ -113,6 +113,7 @@ exports (
     default_filter_joint_def, default_prismatic_joint_def, default_revolute_joint_def, default_spherical_joint_def,
     default_weld_joint_def, default_wheel_joint_def, null_joint_id,
     distance_joint_of, motor_joint_of, parallel_joint_of, prismatic_joint_of, revolute_joint_of, spherical_joint_of, weld_joint_of, wheel_joint_of,
+    set_spherical_cone_axis, spherical_cone_off_axis, clamp_spherical_cone, spherical_swing_angle,
     joint_is_valid, get_joint_full_id, make_joint_id, get_joint_sim, get_joint_sim_of_kind, joint_edge_next,
     create_distance_joint, create_motor_joint, create_filter_joint, create_parallel_joint, create_prismatic_joint,
     create_revolute_joint, create_spherical_joint, create_weld_joint, create_wheel_joint, destroy_joint, destroy_joint_internal,
@@ -183,7 +184,7 @@ const JOINT_SPHERICAL = 6
 const JOINT_WELD = 7
 const JOINT_WHEEL = 8
 const TIME_TO_SLEEP = 0.5
-const JOINT_DATA_BYTES = 544   // JointSim.data: room for the largest kind's data (the spherical joint's 520)
+const JOINT_DATA_BYTES = 544   // JointSim.data: room for the largest kind's data (the spherical joint's 544)
 // The shape kinds (the shape module's, restated).
 const KIND_SPHERE = 0
 const KIND_CAPSULE = 1
@@ -650,6 +651,7 @@ struct SphericalJointDef {
     target_rotation: Quat          // frame B relative to frame A
     enable_cone_limit: bool        // the cone about frame A's z axis
     cone_angle: float
+    cone_axis: Vec3                // the cone's centre in frame A: its z, the reference's, or any way off it
     enable_twist_limit: bool       // the twist about frame B's z axis
     lower_twist_angle: float
     upper_twist_angle: float
@@ -830,6 +832,7 @@ struct SphericalJoint {
     lower_twist_angle: float
     upper_twist_angle: float
     cone_angle: float
+    cone_axis: Vec3                // unit, in frame A
     target_rotation: Quat
     index_a: int
     index_b: int
@@ -4306,7 +4309,7 @@ default_revolute_joint_def() -> RevoluteJointDef {
 default_spherical_joint_def() -> SphericalJointDef {
     return SphericalJointDef { base: default_joint_def(), enable_spring: false, hertz: 0.0, damping_ratio: 0.0,
                                target_rotation: math.quat_identity(), enable_cone_limit: false, cone_angle: 0.0,
-                               enable_twist_limit: false, lower_twist_angle: 0.0, upper_twist_angle: 0.0, enable_motor: false,
+                               cone_axis: math.vec3_axis_z(), enable_twist_limit: false, lower_twist_angle: 0.0, upper_twist_angle: 0.0, enable_motor: false,
                                max_motor_torque: 0.0, motor_velocity: math.vec3_zero() }
 }
 
@@ -4637,13 +4640,15 @@ create_spherical_joint(world_id: WorldId, def: *SphericalJointDef) -> JointId {
     if w == null { return null_joint_id() }
     pi = math.PI
     if def.cone_angle < 0.0 || def.cone_angle > 0.99 * pi || math.is_valid_quat(def.target_rotation) == false { return null_joint_id() }
+    if math.is_valid_vec3(def.cone_axis) == false || math.length(def.cone_axis) < 0.001 { return null_joint_id() }
     w.locked = true
     pair = create_joint(w, &def.base, JOINT_SPHERICAL)
     s = spherical_joint_of(pair.sim)
     s.hertz = def.hertz
     s.damping_ratio = def.damping_ratio
     s.target_rotation = def.target_rotation
-    s.cone_angle = math.clamp_float(def.cone_angle, 0.0, 0.5 * pi)
+    set_spherical_cone_axis(s, def.cone_axis)
+    s.cone_angle = clamp_spherical_cone(s, def.cone_angle)
     lower = math.min_float(def.lower_twist_angle, def.upper_twist_angle)
     upper = math.max_float(def.lower_twist_angle, def.upper_twist_angle)
     s.lower_twist_angle = math.clamp_float(lower, 0.0 - 0.99 * pi, 0.99 * pi)
@@ -4656,6 +4661,30 @@ create_spherical_joint(world_id: WorldId, def: *SphericalJointDef) -> JointId {
     s.enable_motor = def.enable_motor
     w.locked = false
     return make_joint_id(w, pair.joint)
+}
+
+// A spherical joint's cone centred on `axis` (in frame A, made unit). Off
+// frame A's z it measures the swing as the angle from the centre to frame
+// B's z; on it the reference's swing, bit for bit.
+set_spherical_cone_axis(s: *SphericalJoint, axis: Vec3) { s.cone_axis = math.normalize(axis) }
+
+// Whether the cone's centre is off frame A's z (read from the axis: the
+// joint's data has no room left for a flag).
+spherical_cone_off_axis(s: *SphericalJoint) -> bool { return s.cone_axis.x != 0.0 || s.cone_axis.y != 0.0 || s.cone_axis.z <= 0.0 }
+
+// The reference bounds its cone at a right angle about frame A's z. A cone
+// centred off the rest, a shoulder's, reaches farther: to 0.8 pi, short of
+// the far pole where the swing's axis is lost.
+clamp_spherical_cone(s: *SphericalJoint, angle: float) -> float {
+    if spherical_cone_off_axis(s) { return math.clamp_float(angle, 0.0, 0.8 * math.PI) }
+    return math.clamp_float(angle, 0.0, 0.5 * math.PI)
+}
+
+// The swing a spherical joint's cone limits, from the frames' relative rotation.
+spherical_swing_angle(s: *SphericalJoint, rel_q: Quat) -> float {
+    if spherical_cone_off_axis(s) == false { return math.get_swing_angle(rel_q) }
+    b = math.rotate_vector(rel_q, math.vec3_axis_z())
+    return math.atan2_approx(math.length(math.cross(s.cone_axis, b)), math.dot(s.cone_axis, b))
 }
 
 create_weld_joint(world_id: WorldId, def: *WeldJointDef) -> JointId {
@@ -4880,7 +4909,7 @@ get_joint_reaction(w: *World, sim: *JointSim, inv_time_step: float) -> JointReac
         xf_b = get_body_transform(w, sim.body_id_b)
         q_a = math.mul_quat(xf_a.q, sim.local_frame_a.q)
         q_b = math.mul_quat(xf_b.q, sim.local_frame_b.q)
-        cone_axis = math.rotate_vector(q_a, math.vec3_axis_z())
+        cone_axis = math.rotate_vector(q_a, s.cone_axis)
         twist_axis = math.rotate_vector(q_b, math.vec3_axis_z())
         swing_axis = math.normalize(math.cross(cone_axis, twist_axis))
         impulse = math.add(s.spring_impulse, s.motor_impulse)
@@ -4986,7 +5015,7 @@ joint_get_angular_separation(id: JointId) -> float {
         s = spherical_joint_of(base)
         sum = 0.0
         if s.enable_cone_limit {
-            swing = math.get_swing_angle(rel_q)
+            swing = spherical_swing_angle(s, rel_q)
             sum = sum + math.max_float(0.0, swing - s.cone_angle)
         }
         if s.enable_twist_limit {

@@ -800,7 +800,7 @@ test_mesh_and_compound_contacts() {
     base = dynamics.create_body(world_id, &bdef)
     sdef = dynamics.default_shape_def()
     dynamics.create_compound_shape(base, &sdef, comp)
-    top = cube_at(world_id, math.vec3(14.0, 0.99, 0.0), false)
+    _top = cube_at(world_id, math.vec3(14.0, 0.99, 0.0), false)
     changed = step_contacts(w)
     ensure("compound: touching", changed == 1 && dynamics.world_contact_count(w) == 1)
     c = first_contact(w)
@@ -1038,6 +1038,17 @@ test_joint_kinds() {
     small("spherical: inside its limits", dynamics.joint_get_angular_separation(id), 0.000001)
     sdef.cone_angle = 0.0 - 1.0
     ensure("spherical: a negative cone is refused", dynamics.create_spherical_joint(f.world_id, &sdef).index1 == 0)
+    // Centred off frame A's z, the cone reaches to 0.8 pi; a zero centre is refused.
+    sdef.cone_angle = 3.0
+    sdef.cone_axis = math.vec3(0.0, 0.0 - 2.0, 2.0)
+    off_id = dynamics.create_spherical_joint(f.world_id, &sdef)
+    off = dynamics.spherical_joint_of(dynamics.get_joint_sim_of_kind(off_id, dynamics.JOINT_SPHERICAL))
+    small("spherical: an off-axis cone clamped to 0.8 pi", off.cone_angle - 0.8 * math.PI, 0.00001)
+    small("spherical: its centre made unit", math.length(off.cone_axis) - 1.0, 0.000001)
+    ensure("spherical: its centre off the axis", dynamics.spherical_cone_off_axis(off) && dynamics.spherical_cone_off_axis(sp) == false)
+    dynamics.destroy_joint(off_id, false)
+    sdef.cone_axis = math.vec3_zero()
+    ensure("spherical: a zero centre is refused", dynamics.create_spherical_joint(f.world_id, &sdef).index1 == 0)
     finish_joint("spherical", id, &f)
 
     // Weld: rigid unless a hertz is given.
