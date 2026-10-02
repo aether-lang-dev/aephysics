@@ -553,6 +553,12 @@ test_parallel_motor_wheel() {
     ensure("parallel: turns back about x (${state.angular_velocity.x})", state.angular_velocity.x < 0.0 - 0.01)
     small("parallel: the spin about z untouched", state.angular_velocity.z - 1.0, 0.01)
     ensure("parallel: a torque", math.length(joint_solver.joint_get_constraint_torque(pid)) > 0.0)
+    // Turned down to no torque, it lets go: the impulse it last applied is
+    // not warm-started into the next step.
+    joint_solver.parallel_joint_set_max_torque(pid, 0.0)
+    set_velocity(&f, math.vec3_zero(), math.vec3(0.0, 0.0, 1.0))
+    solve_step(&f, pid)
+    small("parallel: at a cap of zero, no torque left (${state.angular_velocity.x})", state.angular_velocity.x, 0.000001)
     dynamics.destroy_joint(pid, true)
     // Motor: the linear velocity target within its force; the angular target.
     mdef = dynamics.default_motor_joint_def()
