@@ -4898,25 +4898,21 @@ get_joint_reaction(w: *World, sim: *JointSim, inv_time_step: float) -> JointReac
         angular_impulse = math.length(math.add(m.angular_velocity_impulse, m.angular_spring_impulse))
     } else if kind == JOINT_PRISMATIC {
         pr = prismatic_joint_of(sim)
-        linear_impulse = math.length(math.vec3(pr.motor_impulse + pr.lower_impulse - pr.upper_impulse, pr.perp_impulse.x, pr.perp_impulse.y))
+        // Every impulse the warm start applies, the spring's among them.
+        linear_impulse = math.length(math.vec3(pr.spring_impulse + pr.motor_impulse + pr.lower_impulse - pr.upper_impulse, pr.perp_impulse.x, pr.perp_impulse.y))
         angular_impulse = math.length(pr.angular_impulse)
     } else if kind == JOINT_REVOLUTE {
         r = revolute_joint_of(sim)
         linear_impulse = math.length(r.linear_impulse)
-        angular_impulse = math.length(math.vec3(r.perp_impulse.x, r.perp_impulse.y, r.motor_impulse + r.lower_impulse - r.upper_impulse))
+        angular_impulse = math.length(math.vec3(r.perp_impulse.x, r.perp_impulse.y, r.spring_impulse + r.motor_impulse + r.lower_impulse - r.upper_impulse))
     } else if kind == JOINT_SPHERICAL {
+        // As the warm start applies it: the cone limit along -swing_axis,
+        // the twist limits along the twist's Jacobian.
         s = spherical_joint_of(sim)
         linear_impulse = math.length(s.linear_impulse)
-        xf_a = get_body_transform(w, sim.body_id_a)
-        xf_b = get_body_transform(w, sim.body_id_b)
-        q_a = math.mul_quat(xf_a.q, sim.local_frame_a.q)
-        q_b = math.mul_quat(xf_b.q, sim.local_frame_b.q)
-        cone_axis = math.rotate_vector(q_a, s.cone_axis)
-        twist_axis = math.rotate_vector(q_b, math.vec3_axis_z())
-        swing_axis = math.normalize(math.cross(cone_axis, twist_axis))
         impulse = math.add(s.spring_impulse, s.motor_impulse)
-        impulse = math.mul_add(impulse, s.lower_twist_impulse - s.upper_twist_impulse, twist_axis)
-        impulse = math.mul_add(impulse, s.swing_impulse, swing_axis)
+        impulse = math.mul_sub(impulse, s.swing_impulse, s.swing_axis)
+        impulse = math.mul_add(impulse, s.lower_twist_impulse - s.upper_twist_impulse, s.twist_jacobian)
         angular_impulse = math.length(impulse)
     } else if kind == JOINT_WELD {
         weld = weld_joint_of(sim)
@@ -4926,7 +4922,12 @@ get_joint_reaction(w: *World, sim: *JointSim, inv_time_step: float) -> JointReac
         wheel = wheel_joint_of(sim)
         axial = wheel.suspension_spring_impulse + wheel.lower_suspension_impulse - wheel.upper_suspension_impulse
         linear_impulse = sqrt(wheel.linear_impulse.x * wheel.linear_impulse.x + wheel.linear_impulse.y * wheel.linear_impulse.y + axial * axial)
-        angular_impulse = math.abs_float(wheel.spin_impulse)
+        // The spin with the lock (unsteered) or the steering, on their
+        // (orthogonal at rest) axes; the spin alone missed a wheel wrenched sideways.
+        lock_x = wheel.angular_impulse.x
+        lock_y = wheel.angular_impulse.y
+        if wheel.enable_steering { lock_y = wheel.steering_spring_impulse + wheel.lower_steering_impulse - wheel.upper_steering_impulse }
+        angular_impulse = sqrt(lock_x * lock_x + lock_y * lock_y + wheel.spin_impulse * wheel.spin_impulse)
     }
     return JointReaction { force: linear_impulse * inv_time_step, torque: angular_impulse * inv_time_step }
 }
