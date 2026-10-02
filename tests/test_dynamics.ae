@@ -1119,6 +1119,27 @@ test_joint_kinds() {
     whdef.lower_steering_limit = 0.5
     whdef.upper_steering_limit = 0.0 - 0.5
     ensure("wheel: reversed steering limits refused", dynamics.create_wheel_joint(f.world_id, &whdef).index1 == 0)
+    // Its angular separation (#64): free about B's z (the spin), locked
+    // about the rest; steered, also free about A's x within the limits (to
+    // atan2_approx's few milliradians, as the solver's limits read).
+    small("wheel: at rest, no angular separation", dynamics.joint_get_angular_separation(id), 0.000001)
+    dynamics.body_set_transform(f.body_id, math.vec3(0.0, 4.0, 0.0), math.make_quat_from_axis_angle(math.vec3_axis_z(), 1.0))
+    small("wheel: a spin is free", dynamics.joint_get_angular_separation(id), 0.000001)
+    dynamics.body_set_transform(f.body_id, math.vec3(0.0, 4.0, 0.0), math.make_quat_from_axis_angle(math.vec3_axis_y(), 0.2))
+    small("wheel: tilted 0.2 off its axle", dynamics.joint_get_angular_separation(id) - 0.2, 0.005)
+    steered = dynamics.wheel_joint_of(dynamics.get_joint_sim_of_kind(id, dynamics.JOINT_WHEEL))
+    steered.enable_steering = true
+    steered.enable_steering_limit = true
+    steered.lower_steering_limit = 0.0 - 0.3
+    steered.upper_steering_limit = 0.3
+    small("wheel, steered: leaning 0.2 toward the suspension", dynamics.joint_get_angular_separation(id) - 0.2, 0.005)
+    dynamics.body_set_transform(f.body_id, math.vec3(0.0, 4.0, 0.0), math.make_quat_from_axis_angle(math.vec3_axis_x(), 0.2))
+    small("wheel, steered: within its limits", dynamics.joint_get_angular_separation(id), 0.005)
+    dynamics.body_set_transform(f.body_id, math.vec3(0.0, 4.0, 0.0), math.make_quat_from_axis_angle(math.vec3_axis_x(), 0.4))
+    small("wheel, steered: 0.1 past its limit", dynamics.joint_get_angular_separation(id) - 0.1, 0.005)
+    steered.enable_steering = false
+    steered.enable_steering_limit = false
+    dynamics.body_set_transform(f.body_id, math.vec3(0.0, 4.0, 0.0), math.quat_identity())
     finish_joint("wheel", id, &f)
 
     // A joint needs two different valid bodies of one world.

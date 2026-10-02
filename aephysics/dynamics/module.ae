@@ -5039,7 +5039,32 @@ joint_get_angular_separation(id: JointId) -> float {
         if weld_joint_of(base).angular_hertz == 0.0 { return math.get_quat_angle(rel_q) }
         return 0.0
     }
+    if kind == JOINT_WHEEL { return wheel_angular_separation(wheel_joint_of(base), q_a, q_b, rel_q) }
     return 0.0
+}
+
+// A wheel's angular separation (a todo in the reference, which reads 0).
+// Unsteered, B turns only about its own z (the spin): the rest of the
+// frames' relative rotation is the error, as a hinge's is. Steered, it
+// also turns about A's x (the steering), so what is locked is B's spin
+// axis leaning toward A's x; past a steering limit, the excess adds.
+wheel_angular_separation(wheel: *WheelJoint, q_a: Quat, q_b: Quat, rel_q: Quat) -> float {
+    if wheel.enable_steering == false {
+        swing = rel_q
+        swing.z = 0.0
+        return math.get_quat_angle(swing)
+    }
+    matrix_a = math.make_matrix_from_quat(q_a)
+    matrix_b = math.make_matrix_from_quat(q_b)
+    toward = math.clamp_float(math.abs_float(math.dot(matrix_b.cz, matrix_a.cx)), 0.0, 1.0)
+    lean = math.atan2_approx(toward, sqrt(1.0 - toward * toward))
+    excess = 0.0
+    if wheel.enable_steering_limit {
+        angle = math.atan2_approx(0.0 - math.dot(matrix_b.cz, matrix_a.cy), math.dot(matrix_b.cz, matrix_a.cz))
+        if angle < wheel.lower_steering_limit { excess = wheel.lower_steering_limit - angle }
+        if wheel.upper_steering_limit < angle { excess = angle - wheel.upper_steering_limit }
+    }
+    return lean + excess
 }
 
 // Whether two bodies may collide: one must be dynamic and no joint
