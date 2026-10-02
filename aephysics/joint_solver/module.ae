@@ -698,12 +698,14 @@ solve_parallel_joint(base: *JointSim, ctx: *StepContext) {
     if (state_b.flags & dynamics.DYNAMIC_FLAG) != 0 { state_b.angular_velocity = w_b }
 }
 
+// Read without writing the joint (the reference stores the axes it
+// computes here; the next prepare recomputes them).
 get_parallel_joint_torque(w: *World, base: *JointSim) -> Vec3 {
     j = dynamics.parallel_joint_of(base)
     rel_q = math.inv_mul_quat(j.quat_a, j.quat_b)
-    j.perp_axis_x = perp_axis(j.quat_a, rel_q, math.vec3_axis_x())
-    j.perp_axis_y = perp_axis(j.quat_a, rel_q, math.vec3_axis_y())
-    return math.mul_sv(w.inv_h, math.blend2(j.perp_impulse.x, j.perp_axis_x, j.perp_impulse.y, j.perp_axis_y))
+    perp_x = perp_axis(j.quat_a, rel_q, math.vec3_axis_x())
+    perp_y = perp_axis(j.quat_a, rel_q, math.vec3_axis_y())
+    return math.mul_sv(w.inv_h, math.blend2(j.perp_impulse.x, perp_x, j.perp_impulse.y, perp_y))
 }
 
 parallel_joint_set_spring_hertz(id: JointId, value: float) {
@@ -1214,18 +1216,20 @@ solve_revolute_joint(base: *JointSim, ctx: *StepContext, use_bias: bool) {
 }
 
 get_revolute_joint_force(w: *World, base: *JointSim) -> Vec3 { return math.mul_sv(w.inv_h, dynamics.revolute_joint_of(base).linear_impulse) }
+// The torque on B, as the warm start applies it: the perpendicular lock
+// and the axial impulse (spring, motor, limits) about the hinge, once. The
+// reference adds the axial impulse a second time about the hinge's
+// current axis (a motor read twice its torque), and writes the joint's
+// perpendicular axes from the getter, which the next prepare recomputes
+// anyway; read here, nothing is written.
 get_revolute_joint_torque(w: *World, base: *JointSim) -> Vec3 {
-    xf_a = dynamics.get_body_transform(w, base.body_id_a)
     j = dynamics.revolute_joint_of(base)
-    axis = math.rotate_vector(xf_a.q, math.rotate_vector(base.local_frame_a.q, math.vec3_axis_z()))
     rel_q = math.inv_mul_quat(j.frame_a.q, j.frame_b.q)
-    j.perp_axis_x = perp_axis(j.frame_a.q, rel_q, math.vec3_axis_x())
-    j.perp_axis_y = perp_axis(j.frame_a.q, rel_q, math.vec3_axis_y())
+    perp_x = perp_axis(j.frame_a.q, rel_q, math.vec3_axis_x())
+    perp_y = perp_axis(j.frame_a.q, rel_q, math.vec3_axis_y())
     axial = j.spring_impulse + j.motor_impulse + j.lower_impulse - j.upper_impulse
-    angular = math.blend2(j.perp_impulse.x, j.perp_axis_x, j.perp_impulse.y, j.perp_axis_y)
-    angular = math.mul_add(angular, axial, j.rotation_axis_z)
-    impulse = math.mul_add(angular, axial, axis)
-    return math.mul_sv(w.inv_h, impulse)
+    angular = math.mul_add(math.blend2(j.perp_impulse.x, perp_x, j.perp_impulse.y, perp_y), axial, j.rotation_axis_z)
+    return math.mul_sv(w.inv_h, angular)
 }
 
 revolute_joint_enable_limit(id: JointId, flag: bool) {
@@ -1358,9 +1362,7 @@ warm_start_spherical_joint(base: *JointSim, ctx: *StepContext) {
     state_b = state_of(ctx, j.index_b)
     r_a = math.rotate_vector(state_a.delta_rotation, j.frame_a.p)
     r_b = math.rotate_vector(state_b.delta_rotation, j.frame_b.p)
-    angular = math.add(j.spring_impulse, j.motor_impulse)
-    angular = math.mul_sub(angular, j.swing_impulse, j.swing_axis)
-    angular = math.mul_add(angular, j.lower_twist_impulse - j.upper_twist_impulse, j.twist_jacobian)
+    angular = spherical_angular_impulse(j)
     v_a = math.mul_sub(state_a.linear_velocity, base.inv_mass_a, j.linear_impulse)
     w_a = math.sub(state_a.angular_velocity, math.mul_mv(base.inv_inertia_a, math.add(math.cross(r_a, j.linear_impulse), angular)))
     v_b = math.mul_add(state_b.linear_velocity, base.inv_mass_b, j.linear_impulse)
@@ -1468,19 +1470,19 @@ solve_spherical_joint(base: *JointSim, ctx: *StepContext, use_bias: bool) {
 }
 
 get_spherical_joint_force(w: *World, base: *JointSim) -> Vec3 { return math.mul_sv(w.inv_h, dynamics.spherical_joint_of(base).linear_impulse) }
+// The torque on B, as the warm start applies it: the spring and motor, the
+// cone limit pushing B back along -swing_axis, the twist limits along the
+// twist's Jacobian (the axes the prepare made, which the impulses were
+// gathered along). The reference added the swing impulse with the wrong
+// sign and the twist along B's bare z, so a cone limit holding a bone back
+// read as pushing it on.
 get_spherical_joint_torque(w: *World, base: *JointSim) -> Vec3 {
-    xf_a = dynamics.get_body_transform(w, base.body_id_a)
-    xf_b = dynamics.get_body_transform(w, base.body_id_b)
-    q_a = math.mul_quat(xf_a.q, base.local_frame_a.q)
-    q_b = math.mul_quat(xf_b.q, base.local_frame_b.q)
-    j = dynamics.spherical_joint_of(base)
-    cone_axis = math.rotate_vector(q_a, j.cone_axis)
-    twist_axis = math.rotate_vector(q_b, math.vec3_axis_z())
-    swing_axis = math.normalize(math.cross(cone_axis, twist_axis))
-    impulse = math.add(j.spring_impulse, j.motor_impulse)
-    impulse = math.mul_add(impulse, j.lower_twist_impulse - j.upper_twist_impulse, twist_axis)
-    impulse = math.mul_add(impulse, j.swing_impulse, swing_axis)
-    return math.mul_sv(w.inv_h, impulse)
+    return math.mul_sv(w.inv_h, spherical_angular_impulse(dynamics.spherical_joint_of(base)))
+}
+spherical_angular_impulse(j: *SphericalJoint) -> Vec3 {
+    angular = math.add(j.spring_impulse, j.motor_impulse)
+    angular = math.mul_sub(angular, j.swing_impulse, j.swing_axis)
+    return math.mul_add(angular, j.lower_twist_impulse - j.upper_twist_impulse, j.twist_jacobian)
 }
 
 // The relative rotation of the frames, B's polarity matched to A's.

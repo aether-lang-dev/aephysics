@@ -422,6 +422,9 @@ test_revolute() {
     solve_step(&f, id)
     small("hinge motor: at its speed", state.angular_velocity.z - 2.0, 0.000001)
     small("hinge motor: its torque (2/6 * 240)", joint_solver.revolute_joint_get_motor_torque(id) - 80.0, 0.001)
+    // The constraint torque carries the motor's once, about the hinge.
+    torque = joint_solver.joint_get_constraint_torque(id)
+    small("hinge motor: the constraint torque is the motor's (${torque.x} ${torque.y} ${torque.z})", math.length(math.sub(torque, math.vec3(0.0, 0.0, 80.0))), 0.001)
     joint_solver.revolute_joint_enable_motor(id, false)
     // The limit: within it a spin is speculative and free; the cube turned past it is pushed back.
     joint_solver.revolute_joint_enable_limit(id, true)
@@ -446,6 +449,11 @@ test_revolute() {
     set_velocity(&f, math.vec3_zero(), math.vec3_zero())
     solve_step(&f, id)
     ensure("hinge spring: turns back towards the target (${state.angular_velocity.z})", state.angular_velocity.z < 0.0)
+    // The joint events' reaction counts the spring's impulse (it left it out).
+    spring_torque = joint_solver.joint_get_constraint_torque(id).z
+    reaction = dynamics.get_joint_reaction(f.w, sim(&f, id), 240.0)
+    ensure("hinge spring: the constraint torque turns it back (${spring_torque})", spring_torque < 0.0 - 1.0)
+    small("hinge spring: the reaction's torque is the spring's (${reaction.torque})", reaction.torque - math.abs_float(spring_torque), 0.001)
     dynamics.destroy_world(f.world_id)
 }
 
@@ -560,6 +568,7 @@ test_spherical() {
     solve_biased(&f, id)
     ensure("cone: pushed back (${state.angular_velocity.x})", state.angular_velocity.x < 0.0 - 0.1)
     ensure("cone: the swing impulse", dynamics.spherical_joint_of(sim(&f, id)).swing_impulse > 0.0)
+    ensure("cone: the torque reported pushes back, as the limit does (${joint_solver.joint_get_constraint_torque(id).x})", joint_solver.joint_get_constraint_torque(id).x < 0.0 - 1.0)
     // A cone centred off frame A's z (0.8 about x): the rest lies outside
     // it and is pushed toward the centre, the centre is free, past it the
     // cube is pushed back.
