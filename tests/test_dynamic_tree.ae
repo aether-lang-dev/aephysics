@@ -592,6 +592,24 @@ test_ray_cast_aabb() {
     ensure("slab: from inside, enters at 0", hit && fractions[0] == 0.0)
     ensure("slab: from inside, leaves at the face", math.abs_float(fractions[1] - 0.5 / 3.5) < 0.000001)
     free(fractions_block)
+
+    // The traversal's slab test, against the ray's inverse direction.
+    lo = box.lower
+    up = box.upper
+    along_x = math.ray_inverse(math.vec3(6.0, 0.0, 0.0))
+    from_left = math.vec3(0.0 - 3.0, 0.0, 0.0)
+    ensure("slab overlap: a ray through the box", math.slab_overlap(lo, up, from_left, along_x, 1.0))
+    ensure("slab overlap: stopped short of it", math.slab_overlap(lo, up, from_left, along_x, 0.3) == false)
+    ensure("slab overlap: reaching its face", math.slab_overlap(lo, up, from_left, along_x, 2.0 / 6.0))
+    ensure("slab overlap: beside it, level with no axis", math.slab_overlap(lo, up, math.vec3(0.0 - 3.0, 2.0, 0.0), along_x, 1.0) == false)
+    ensure("slab overlap: along its face (an axis the ray does not move along, on the face)", math.slab_overlap(lo, up, math.vec3(0.0 - 3.0, 1.0, 1.0), along_x, 1.0))
+    ensure("slab overlap: going away", math.slab_overlap(lo, up, from_left, math.ray_inverse(math.vec3(0.0 - 6.0, 0.0, 0.0)), 1.0) == false)
+    ensure("slab overlap: starting inside", math.slab_overlap(lo, up, math.vec3(0.5, 0.5, 0.5), math.ray_inverse(math.vec3(0.0, 0.0, 4.0)), 1.0))
+    ensure("slab overlap: diagonal through a corner's neighbourhood", math.slab_overlap(lo, up, math.vec3(0.0 - 3.0, 0.0 - 3.0, 0.0), math.ray_inverse(math.vec3(6.0, 6.0, 0.0)), 1.0))
+    ensure("slab overlap: diagonal past the corner", math.slab_overlap(lo, up, math.vec3(0.0 - 3.0, 0.0 - 1.0, 0.0), math.ray_inverse(math.vec3(2.0, 4.0, 0.0)), 1.0) == false)
+    empty = math.aabb_empty()
+    ensure("slab overlap: an empty box is missed, whichever way", math.slab_overlap(empty.lower, empty.upper, from_left, along_x, 1.0) == false &&
+        math.slab_overlap(empty.lower, empty.upper, from_left, math.ray_inverse(math.vec3(0.0 - 1.0, 0.0 - 1.0, 0.0 - 1.0)), 1.0) == false)
 }
 
 main() {

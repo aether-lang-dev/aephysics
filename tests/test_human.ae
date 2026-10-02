@@ -20,6 +20,8 @@ extern calloc(count: int, size: int) -> ptr
 extern exit(code: int)
 extern free(p: ptr)
 extern atan2(y: float, x: float) -> float
+extern cos(x: float) -> float
+extern sin(x: float) -> float
 
 var failures = 0
 var checks = 0
@@ -104,6 +106,16 @@ test_build_and_fall() {
     ensure("built: seven spherical and four revolute joints (${spherical}, ${revolute})", spherical == 7 && revolute == 4)
     ensure("built: the pelvis has no joint", dynamics.joint_is_valid(human.bone_at(&h, human.BONE_PELVIS).joint_id) == false)
     ensure("built: the joints start closed", worst_joint_separation(&h) < 0.001)
+    // Read between the joints' frames (#61): the bodies' rotations differ by
+    // the frames' turn, but every joint starts inside its limits.
+    worst_angle = 0.0
+    i = 1
+    while i < human.BONE_COUNT {
+        a = dynamics.joint_get_angular_separation(human.bone_at(&h, i).joint_id)
+        if a > worst_angle { worst_angle = a }
+        i = i + 1
+    }
+    ensure("built: every joint inside its limits at the rest (${worst_angle} rad)", worst_angle < 0.001)
     // The bones' capsules are readable back, the calf's shin and foot among them.
     shapes_block = calloc(4, sizeof(ShapeId))
     shapes = shapes_block as ShapeId[]
@@ -183,10 +195,14 @@ test_build_and_fall() {
     dynamics.destroy_world(world_id)
 }
 
+// The reference's sample: its figure stands on its tight limits.
 test_align_spring() {
     world_id = world_with_ground()
     h = Human { bones: null, filter_joints: null, filter_joint_count: 0, friction_torque: 0.0, is_spawned: false }
-    human.create_human(&h, world_id, math.vec3(0.0, 0.05, 0.0), 5.0, 1.0, 0.7, 1, null)
+    shape = human.human_reference_shape()
+    human.human_tight_limits(shape)
+    human.create_human_shaped(&h, world_id, Transform { p: math.vec3(0.0, 0.05, 0.0), q: math.quat_identity() }, shape, 5.0, 1.0, 0.7, 1, null)
+    free(shape)
     human.human_align_spring(&h, world_id, ground_of(world_id), 25.0, 1.0)
     pelvis = human.bone_at(&h, human.BONE_PELVIS)
     ensure("align: the pelvis got its joint", dynamics.joint_is_valid(pelvis.joint_id))
@@ -464,6 +480,221 @@ test_alike() {
     free(pb_block)
 }
 
+// --- a body's reach -----------------------------------------------------------------------------
+
+// The figure's axes as human_anatomical_limits takes them: up from the
+// pelvis to the neck, forward the way the toes point, left from the
+// middle to the left shoulder.
+struct Axes {
+    up: Vec3
+    forward: Vec3
+    left: Vec3
+}
+
+figure_axes(shape: ptr) -> Axes {
+    up = math.normalize(math.sub(human.human_shape_head(shape, human.BONE_NECK), human.human_shape_head(shape, human.BONE_PELVIS)))
+    toes = math.add(math.sub(human.human_shape_toe(shape, human.BONE_CALF_L), human.human_shape_tail(shape, human.BONE_CALF_L)),
+                    math.sub(human.human_shape_toe(shape, human.BONE_CALF_R), human.human_shape_tail(shape, human.BONE_CALF_R)))
+    forward = math.normalize(math.sub(toes, math.mul_sv(math.dot(toes, up), up)))
+    return Axes { up: up, forward: forward, left: math.cross(up, forward) }
+}
+
+const REACH_FLEXION = 0
+const REACH_ABDUCTION = 1
+const REACH_EXTENSION = 2
+
+// An arm's side of the figure: from the chest's joint out to the shoulder's, level.
+arm_out(shape: ptr, axes: Axes, index: int) -> Vec3 {
+    out = math.sub(human.human_shape_head(shape, index), human.human_shape_head(shape, human.BONE_SPINE_03))
+    out = math.sub(out, math.mul_sv(math.dot(out, axes.up), axes.up))
+    return math.normalize(math.sub(out, math.mul_sv(math.dot(out, axes.forward), axes.forward)))
+}
+
+// Where an arm is asked to point, in the figure's space: `degrees` from
+// hanging down, ahead (flexion), out to its side (abduction) or back
+// (extension).
+reach_direction(axes: Axes, out: Vec3, kind: int, degrees: float) -> Vec3 {
+    a = degrees * math.DEG_TO_RAD
+    way = axes.forward
+    if kind == REACH_ABDUCTION { way = out }
+    if kind == REACH_EXTENSION { way = math.neg(axes.forward) }
+    return math.add(math.mul_sv(0.0 - cos(a), axes.up), math.mul_sv(sin(a), way))
+}
+
+// Both upper arms of a figure, standing weightless or lying prone on the
+// slab, sprung toward a reach for two seconds: the worse arm's angle from
+// the aim, degrees, measured against the chest as it ends up.
+reach(prone: bool, tight: bool, kind: int, degrees: float) -> float {
+    shape = human.human_reference_shape()
+    if tight { human.human_tight_limits(shape) }
+    axes = figure_axes(shape)
+    world_id = world_with_ground()
+    placement = Transform { p: math.vec3(0.0, 1.0, 0.0), q: math.quat_identity() }
+    if prone {
+        placement = Transform { p: math.vec3(0.0, 0.3, 0.0), q: math.compute_quat_between_unit_vectors(axes.forward, math.vec3(0.0, 0.0 - 1.0, 0.0)) }
+    } else {
+        physics_world.set_gravity(world_id, math.vec3_zero())
+    }
+    h = Human { bones: null, filter_joints: null, filter_joint_count: 0, friction_torque: 0.0, is_spawned: false }
+    human.create_human_shaped(&h, world_id, placement, shape, 0.5, 1.0, 0.7, 1, null)
+    if prone {
+        steps(world_id, 60)
+        // Lying on its chest, an arm sweeps out along the ground first, as
+        // a crawler's does: ahead of it is the ground.
+        spring_arms(&h, shape, axes, REACH_ABDUCTION, 90.0)
+        steps(world_id, 60)
+    }
+    aims = calloc(2, sizeof(Vec3))
+    aim = aims as Vec3[]
+    spring_arms(&h, shape, axes, kind, degrees)
+    k = 0
+    while k < 2 {
+        index = human.BONE_UPPER_ARM_L
+        if k == 1 { index = human.BONE_UPPER_ARM_R }
+        aim[k] = reach_direction(axes, arm_out(shape, axes, index), kind, degrees)
+        k = k + 1
+    }
+    steps(world_id, 120)
+    worst = 0.0
+    k = 0
+    while k < 2 {
+        index = human.BONE_UPPER_ARM_L
+        if k == 1 { index = human.BONE_UPPER_ARM_R }
+        spec = human.spec_at(shape, index)
+        parent = human.spec_at(shape, spec.parent)
+        bone = human.bone_at(&h, index)
+        rest = math.normalize(math.sub(human.human_shape_tail(shape, index), human.human_shape_head(shape, index)))
+        have = math.rotate_vector(dynamics.body_get_rotation(bone.body_id), math.inv_rotate_vector(spec.reference.q, rest))
+        want = math.rotate_vector(dynamics.body_get_rotation(human.bone_at(&h, spec.parent).body_id), math.inv_rotate_vector(parent.reference.q, aim[k]))
+        off = angle_between(have, want) * math.RAD_TO_DEG
+        if off > worst { worst = off }
+        k = k + 1
+    }
+    ensure("reach: the figure holds together (${worst_joint_separation(&h)})", worst_joint_separation(&h) < 0.02)
+    free(aims)
+    human.destroy_human(&h)
+    dynamics.destroy_world(world_id)
+    free(shape)
+    return worst
+}
+
+// Both upper arms sprung toward a reach: each joint's spring target the
+// rotation that turns the arm's line from its rest to the aim, least.
+spring_arms(h: *Human, shape: ptr, axes: Axes, kind: int, degrees: float) {
+    k = 0
+    while k < 2 {
+        index = human.BONE_UPPER_ARM_L
+        if k == 1 { index = human.BONE_UPPER_ARM_R }
+        aim = reach_direction(axes, arm_out(shape, axes, index), kind, degrees)
+        spec = human.spec_at(shape, index)
+        parent = human.spec_at(shape, spec.parent)
+        bone = human.bone_at(h, index)
+        rest = math.normalize(math.sub(human.human_shape_tail(shape, index), human.human_shape_head(shape, index)))
+        posed = math.mul_quat(math.compute_quat_between_unit_vectors(rest, aim), spec.reference.q)
+        target = math.inv_mul_quat(math.mul_quat(parent.reference.q, bone.local_frame_a.q), math.mul_quat(posed, bone.local_frame_b.q))
+        joint_solver.spherical_joint_set_target_rotation(bone.joint_id, math.normalize_quat(target))
+        joint_solver.spherical_joint_set_spring_hertz(bone.joint_id, 10.0)
+        joint_solver.spherical_joint_set_spring_damping_ratio(bone.joint_id, 1.0)
+        // A figure settled on the ground sleeps; a new target does not wake it.
+        dynamics.joint_wake_bodies(bone.joint_id)
+        k = k + 1
+    }
+}
+
+// Held to (#56): each arm reaches flexion 170, abduction 160 and
+// extension 45 degrees within 10, standing and prone; the reference's
+// tight cone stops the flexion short.
+test_reach() {
+    poses = 0
+    while poses < 2 {
+        prone = poses == 1
+        flexion = reach(prone, false, REACH_FLEXION, 170.0)
+        abduction = reach(prone, false, REACH_ABDUCTION, 160.0)
+        extension = reach(prone, false, REACH_EXTENSION, 45.0)
+        ensure("reach (prone ${prone}): flexion 170 within 10 degrees (${flexion})", flexion < 10.0)
+        ensure("reach (prone ${prone}): abduction 160 within 10 degrees (${abduction})", abduction < 10.0)
+        ensure("reach (prone ${prone}): extension 45 within 10 degrees (${extension})", extension < 10.0)
+        poses = poses + 1
+    }
+    tight = reach(false, true, REACH_FLEXION, 170.0)
+    ensure("reach: the tight preset stops a flexion of 170 short (${tight})", tight > 60.0)
+    // The tight preset is the reference's.
+    shape = human.human_reference_shape()
+    human.human_tight_limits(shape)
+    arm = human.spec_at(shape, human.BONE_UPPER_ARM_L)
+    knee = human.spec_at(shape, human.BONE_CALF_R)
+    ensure("tight: the reference's cone and hinge", arm.swing_degrees == 45.0 && arm.cone_axis.z == 1.0 && knee.lower_degrees == 0.0 - 30.0 && knee.upper_degrees == 30.0)
+    free(shape)
+}
+
+// A hinge sprung far past either end of its range, weightless: the bone's
+// bend from its parent's line, degrees, positive the way it flexes
+// (`toward`, in the figure's space: back for a knee, ahead for an elbow).
+hinge_driven(index: int, toward: Vec3, past_upper: bool) -> float {
+    shape = human.human_reference_shape()
+    world_id = world_with_ground()
+    physics_world.set_gravity(world_id, math.vec3_zero())
+    h = Human { bones: null, filter_joints: null, filter_joint_count: 0, friction_torque: 0.0, is_spawned: false }
+    human.create_human_shaped(&h, world_id, Transform { p: math.vec3(0.0, 1.0, 0.0), q: math.quat_identity() }, shape, 0.5, 1.0, 0.7, 1, null)
+    bone = human.bone_at(&h, index)
+    target = joint_solver.revolute_joint_get_lower_limit(bone.joint_id) - 0.3
+    if past_upper { target = joint_solver.revolute_joint_get_upper_limit(bone.joint_id) + 0.3 }
+    joint_solver.revolute_joint_set_target_angle(bone.joint_id, target)
+    joint_solver.revolute_joint_set_spring_hertz(bone.joint_id, 6.0)
+    joint_solver.revolute_joint_set_spring_damping_ratio(bone.joint_id, 1.0)
+    steps(world_id, 120)
+    spec = human.spec_at(shape, index)
+    parent = human.spec_at(shape, spec.parent)
+    parent_q = dynamics.body_get_rotation(human.bone_at(&h, spec.parent).body_id)
+    thigh = math.rotate_vector(parent_q, math.inv_rotate_vector(parent.reference.q, math.sub(human.human_shape_tail(shape, spec.parent), human.human_shape_head(shape, spec.parent))))
+    shin = math.rotate_vector(dynamics.body_get_rotation(bone.body_id), math.inv_rotate_vector(spec.reference.q, math.sub(human.human_shape_tail(shape, index), human.human_shape_head(shape, index))))
+    way = math.rotate_vector(parent_q, math.inv_rotate_vector(parent.reference.q, toward))
+    bend = angle_between(thigh, shin) * math.RAD_TO_DEG
+    if math.dot(math.sub(shin, math.mul_sv(math.dot(shin, math.normalize(thigh)), math.normalize(thigh))), way) < 0.0 { bend = 0.0 - bend }
+    human.destroy_human(&h)
+    dynamics.destroy_world(world_id)
+    free(shape)
+    return bend
+}
+
+// Knees and elbows straighten and stop there, and fold to their range.
+test_hinges() {
+    shape = human.human_reference_shape()
+    axes = figure_axes(shape)
+    free(shape)
+    back = math.neg(axes.forward)
+    // Which end is straight depends on the way the hinge's axis runs (the
+    // left knee's and the right's are mirrored): each is driven past both.
+    a = hinge_driven(human.BONE_CALF_L, back, false)
+    b = hinge_driven(human.BONE_CALF_L, back, true)
+    knee_straight = math.min_float(a, b)
+    knee_bent = math.max_float(a, b)
+    a = hinge_driven(human.BONE_CALF_R, back, false)
+    b = hinge_driven(human.BONE_CALF_R, back, true)
+    ensure("hinges: the right knee as the left (${a}, ${b})", math.abs_float(math.min_float(a, b) - knee_straight) < 3.0 && math.abs_float(math.max_float(a, b) - knee_bent) < 3.0)
+    a = hinge_driven(human.BONE_LOWER_ARM_R, axes.forward, false)
+    b = hinge_driven(human.BONE_LOWER_ARM_R, axes.forward, true)
+    elbow_straight = math.min_float(a, b)
+    elbow_bent = math.max_float(a, b)
+    ensure("hinges: a knee straightens and goes no further (${knee_straight})", knee_straight > 0.0 - 3.0 && knee_straight < 3.0)
+    ensure("hinges: a knee folds to 150 degrees (${knee_bent})", knee_bent > 140.0 && knee_bent < 153.0)
+    ensure("hinges: an elbow straightens and goes no further (${elbow_straight})", elbow_straight > 0.0 - 3.0 && elbow_straight < 5.0)
+    ensure("hinges: an elbow folds to 145 degrees (${elbow_bent})", elbow_bent > 135.0 && elbow_bent < 148.0)
+}
+
+// The soles grip (#59): a calf's foot at 0.9, its shin at 0.6.
+test_grip() {
+    world_id = world_with_ground()
+    h = Human { bones: null, filter_joints: null, filter_joint_count: 0, friction_torque: 0.0, is_spawned: false }
+    human.create_human(&h, world_id, math.vec3(0.0, 1.0, 0.0), 5.0, 1.0, 0.7, 1, null)
+    calf = human.bone_at(&h, human.BONE_CALF_R)
+    foot = dynamics.shape_get_surface_material(calf.foot_shape_id).friction
+    shin = dynamics.shape_get_surface_material(calf.shape_id).friction
+    ensure("grip: the sole at 0.9, the shin at 0.6 (${foot}, ${shin})", foot == 0.9 && shin == 0.6)
+    human.destroy_human(&h)
+    dynamics.destroy_world(world_id)
+}
+
 main() {
     g_slab = hull.make_box_hull(20.0, 1.0, 20.0) as ptr
     test_build_and_fall()
@@ -473,6 +704,9 @@ main() {
     test_alike()
     test_fit_identity()
     test_fit_curved()
+    test_reach()
+    test_hinges()
+    test_grip()
     hull.destroy_hull(g_slab as *HullData)
     println("human: ${checks} checks")
     if failures == 0 {

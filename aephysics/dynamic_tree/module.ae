@@ -961,8 +961,7 @@ tree_ray_cast(t: *DynamicTree, input: *RayCastInput, mask_bits: long, require_al
     p1 = input.origin
     d = input.translation
     max_fraction = input.max_fraction
-    p2 = math.mul_add(p1, max_fraction, d)
-    segment_box = AABB { lower: math.min_vec3(p1, p2), upper: math.max_vec3(p1, p2) }
+    inv = math.ray_inverse(d)
 
     stack_count = 1
     stack[0] = root_pair(nodes)
@@ -982,12 +981,7 @@ tree_ray_cast(t: *DynamicTree, input: *RayCastInput, mask_bits: long, require_al
         while i < 2 {
             index = pair + i
             i = i + 1
-            lo = nodes[index].aabb.lower
-            up = nodes[index].aabb.upper
-            if up.x < segment_box.lower.x || lo.x > segment_box.upper.x { continue }
-            if up.y < segment_box.lower.y || lo.y > segment_box.upper.y { continue }
-            if up.z < segment_box.lower.z || lo.z > segment_box.upper.z { continue }
-            if test_bounds_ray_overlap(lo, up, p1, d) == false { continue }
+            if math.slab_overlap(nodes[index].aabb.lower, nodes[index].aabb.upper, p1, inv, max_fraction) == false { continue }
             if hit_count == 0 { hit0 = index } else { hit1 = index }
             hit_count = hit_count + 1
         }
@@ -1017,11 +1011,7 @@ tree_ray_cast(t: *DynamicTree, input: *RayCastInput, mask_bits: long, require_al
                 value = visitor(&sub_input, proxy_id, p.user_data, context)
                 result.leaf_visits = result.leaf_visits + 1
                 if value == 0.0 { return result }
-                if 0.0 < value && value <= max_fraction {
-                    max_fraction = value
-                    p2 = math.mul_add(p1, max_fraction, d)
-                    segment_box = AABB { lower: math.min_vec3(p1, p2), upper: math.max_vec3(p1, p2) }
-                }
+                if 0.0 < value && value <= max_fraction { max_fraction = value }
             } else {
                 if stack_count < TREE_STACK_SIZE - 1 {
                     stack[stack_count] = left_child(flags)
@@ -1048,9 +1038,7 @@ tree_box_cast(t: *DynamicTree, input: *BoxCastInput, mask_bits: long, require_al
     extension = math.aabb_extents(origin_box)
     d = input.translation
     max_fraction = input.max_fraction
-    tr = math.mul_sv(max_fraction, d)
-    total_box = AABB { lower: math.min_vec3(origin_box.lower, math.add(origin_box.lower, tr)),
-                       upper: math.max_vec3(origin_box.upper, math.add(origin_box.upper, tr)) }
+    inv = math.ray_inverse(d)
 
     stack_count = 1
     stack[0] = root_pair(nodes)
@@ -1068,11 +1056,7 @@ tree_box_cast(t: *DynamicTree, input: *BoxCastInput, mask_bits: long, require_al
         while i < 2 {
             index = pair + i
             i = i + 1
-            n = nodes[index]
-            if math.aabb_overlaps(total_box, n.aabb) == false { continue }
-            lower = math.sub(n.aabb.lower, extension)
-            upper = math.add(n.aabb.upper, extension)
-            if test_bounds_ray_overlap(lower, upper, p1, d) == false { continue }
+            if math.slab_overlap(math.sub(nodes[index].aabb.lower, extension), math.add(nodes[index].aabb.upper, extension), p1, inv, max_fraction) == false { continue }
             if hit_count == 0 { hit0 = index } else { hit1 = index }
             hit_count = hit_count + 1
         }
@@ -1101,12 +1085,7 @@ tree_box_cast(t: *DynamicTree, input: *BoxCastInput, mask_bits: long, require_al
                 value = visitor(&sub_input, proxy_id, p.user_data, context)
                 result.leaf_visits = result.leaf_visits + 1
                 if value == 0.0 { return result }
-                if 0.0 < value && value < max_fraction {
-                    max_fraction = value
-                    tr = math.mul_sv(max_fraction, d)
-                    total_box = AABB { lower: math.min_vec3(origin_box.lower, math.add(origin_box.lower, tr)),
-                                       upper: math.max_vec3(origin_box.upper, math.add(origin_box.upper, tr)) }
-                }
+                if 0.0 < value && value < max_fraction { max_fraction = value }
             } else {
                 if stack_count < TREE_STACK_SIZE - 1 {
                     stack[stack_count] = left_child(n.flag_index)

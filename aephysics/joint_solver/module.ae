@@ -62,7 +62,7 @@ exports (
     revolute_joint_is_motor_enabled, revolute_joint_set_motor_speed, revolute_joint_get_motor_speed, revolute_joint_set_max_motor_torque,
     revolute_joint_get_max_motor_torque, revolute_joint_get_motor_torque,
     spherical_joint_enable_cone_limit, spherical_joint_is_cone_limit_enabled, spherical_joint_get_cone_limit, spherical_joint_set_cone_limit,
-    spherical_joint_get_cone_angle, spherical_joint_enable_twist_limit, spherical_joint_is_twist_limit_enabled,
+    spherical_joint_get_cone_angle, spherical_joint_set_cone_axis, spherical_joint_get_cone_axis, spherical_joint_enable_twist_limit, spherical_joint_is_twist_limit_enabled,
     spherical_joint_get_lower_twist_limit, spherical_joint_get_upper_twist_limit, spherical_joint_set_twist_limits,
     spherical_joint_get_twist_angle, spherical_joint_enable_spring, spherical_joint_is_spring_enabled, spherical_joint_set_target_rotation,
     spherical_joint_get_target_rotation, spherical_joint_set_spring_hertz, spherical_joint_get_spring_hertz,
@@ -1318,7 +1318,8 @@ prepare_spherical_joint(base: *JointSim, ctx: *StepContext) {
     cone_axis = math.rotate_vector(j.frame_a.q, math.vec3_axis_z())
     twist_axis = math.rotate_vector(j.frame_b.q, math.vec3_axis_z())
     if j.enable_cone_limit {
-        swing_axis = math.normalize(math.cross(cone_axis, twist_axis))
+        centre = math.rotate_vector(j.frame_a.q, j.cone_axis)
+        swing_axis = math.normalize(math.cross(centre, twist_axis))
         k = math.dot(swing_axis, math.mul_mv(inertia_sum, swing_axis))
         j.swing_mass = 0.0
         if k > 0.0 { j.swing_mass = 1.0 / k }
@@ -1427,7 +1428,7 @@ solve_spherical_joint(base: *JointSim, ctx: *StepContext, use_bias: bool) {
         w_b = math.mul_sub(w_b, delta, math.mul_mv(i_b, jacobian))
     }
     if j.enable_cone_limit && fixed_rotation == false {
-        swing = math.get_swing_angle(rel_q)
+        swing = dynamics.spherical_swing_angle(j, rel_q)
         swing_axis = j.swing_axis
         scales = limit_scales(base, ctx, j.cone_angle - swing, use_bias)
         cdot = math.dot(math.sub(w_a, w_b), swing_axis)
@@ -1468,10 +1469,10 @@ get_spherical_joint_torque(w: *World, base: *JointSim) -> Vec3 {
     xf_b = dynamics.get_body_transform(w, base.body_id_b)
     q_a = math.mul_quat(xf_a.q, base.local_frame_a.q)
     q_b = math.mul_quat(xf_b.q, base.local_frame_b.q)
-    cone_axis = math.rotate_vector(q_a, math.vec3_axis_z())
+    j = dynamics.spherical_joint_of(base)
+    cone_axis = math.rotate_vector(q_a, j.cone_axis)
     twist_axis = math.rotate_vector(q_b, math.vec3_axis_z())
     swing_axis = math.normalize(math.cross(cone_axis, twist_axis))
-    j = dynamics.spherical_joint_of(base)
     impulse = math.add(j.spring_impulse, j.motor_impulse)
     impulse = math.mul_add(impulse, j.lower_twist_impulse - j.upper_twist_impulse, twist_axis)
     impulse = math.mul_add(impulse, j.swing_impulse, swing_axis)
@@ -1505,8 +1506,19 @@ spherical_joint_set_cone_limit(id: JointId, angle: float) {
 spherical_joint_get_cone_angle(id: JointId) -> float {
     base = sim_of(id, dynamics.JOINT_SPHERICAL)
     if base == null { return 0.0 }
-    return math.get_swing_angle(spherical_relative_rotation(id, base))
+    return dynamics.spherical_swing_angle(dynamics.spherical_joint_of(base), spherical_relative_rotation(id, base))
 }
+// The cone's centre in frame A (z, the reference's, unless set off it); a
+// zero or invalid axis is ignored. The cone's angle is clamped again to the
+// bound the centre allows.
+spherical_joint_set_cone_axis(id: JointId, axis: Vec3) {
+    base = sim_of(id, dynamics.JOINT_SPHERICAL)
+    if base == null || math.is_valid_vec3(axis) == false || math.length(axis) < 0.001 { return }
+    j = dynamics.spherical_joint_of(base)
+    dynamics.set_spherical_cone_axis(j, axis)
+    j.cone_angle = dynamics.clamp_spherical_cone(j, j.cone_angle)
+}
+spherical_joint_get_cone_axis(id: JointId) -> Vec3 { return dynamics.spherical_joint_of(sim_of(id, dynamics.JOINT_SPHERICAL)).cone_axis }
 spherical_joint_enable_twist_limit(id: JointId, flag: bool) {
     base = sim_of(id, dynamics.JOINT_SPHERICAL)
     if base == null { return }
