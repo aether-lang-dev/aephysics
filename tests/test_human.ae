@@ -106,6 +106,16 @@ test_build_and_fall() {
     ensure("built: seven spherical and four revolute joints (${spherical}, ${revolute})", spherical == 7 && revolute == 4)
     ensure("built: the pelvis has no joint", dynamics.joint_is_valid(human.bone_at(&h, human.BONE_PELVIS).joint_id) == false)
     ensure("built: the joints start closed", worst_joint_separation(&h) < 0.001)
+    // Read between the joints' frames (#61): the bodies' rotations differ by
+    // the frames' turn, but every joint starts inside its limits.
+    worst_angle = 0.0
+    i = 1
+    while i < human.BONE_COUNT {
+        a = dynamics.joint_get_angular_separation(human.bone_at(&h, i).joint_id)
+        if a > worst_angle { worst_angle = a }
+        i = i + 1
+    }
+    ensure("built: every joint inside its limits at the rest (${worst_angle} rad)", worst_angle < 0.001)
     // The bones' capsules are readable back, the calf's shin and foot among them.
     shapes_block = calloc(4, sizeof(ShapeId))
     shapes = shapes_block as ShapeId[]

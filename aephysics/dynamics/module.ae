@@ -4987,14 +4987,20 @@ joint_get_linear_separation(id: JointId) -> float {
     return 0.0
 }
 
-// The same as an angle (the wheel joint's is a todo in the reference: zero here).
+// The same as an angle (the wheel joint's is a todo in the reference: zero
+// here), read between the joint's frames -- where its limits are -- not
+// between its bodies, whose rotations differ by the frames' turn: a weld
+// holding two turned bodies, or a ragdoll's joint at rest, reads nothing.
 joint_get_angular_separation(id: JointId) -> float {
     w = world_at(id.world0)
     j = get_joint_full_id(w, id)
     base = get_joint_sim(w, j)
     xf_a = get_body_transform(w, j.edge_a.body_id)
     xf_b = get_body_transform(w, j.edge_b.body_id)
-    rel_q = math.inv_mul_quat(xf_a.q, xf_b.q)
+    q_a = math.mul_quat(xf_a.q, base.local_frame_a.q)
+    q_b = math.mul_quat(xf_b.q, base.local_frame_b.q)
+    if math.dot_quat(q_a, q_b) < 0.0 { q_b = math.negate_quat(q_b) }
+    rel_q = math.inv_mul_quat(q_a, q_b)
     kind = j.kind
     if kind == JOINT_PARALLEL {
         rel_q.z = 0.0
