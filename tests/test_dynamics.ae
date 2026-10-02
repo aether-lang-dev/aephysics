@@ -999,9 +999,36 @@ test_joint_kinds() {
     pr = dynamics.prismatic_joint_of(dynamics.get_joint_sim_of_kind(id, dynamics.JOINT_PRISMATIC))
     ensure("prismatic: data", pr.lower_translation == 0.0 - 2.0 && pr.upper_translation == 2.0 && pr.enable_limit && pr.max_motor_force == 30.0)
     small("prismatic: at rest", dynamics.joint_get_linear_separation(id), 0.000001)
+    // Along the line within the limits it reads nothing; off it, the whole
+    // of the offset across the line (both directions of the plane).
+    dynamics.body_set_transform(f.body_id, math.vec3(1.5, 4.0, 0.0), math.quat_identity())
+    small("prismatic: slid within the limits", dynamics.joint_get_linear_separation(id), 0.000001)
+    dynamics.body_set_transform(f.body_id, math.vec3(0.0, 4.3, 0.4), math.quat_identity())
+    small("prismatic: off the line by 0.5 across it", dynamics.joint_get_linear_separation(id) - 0.5, 0.000001)
+    dynamics.body_set_transform(f.body_id, math.vec3(0.0, 4.0, 0.0), math.quat_identity())
     prdef.lower_translation = 3.0
     ensure("prismatic: reversed limits refused", dynamics.create_prismatic_joint(f.world_id, &prdef).index1 == 0)
     finish_joint("prismatic", id, &f)
+
+    // The line is frame A's x, not body A's: turned to run along y, a slide
+    // up it reads nothing and one along x reads its length.
+    f = joint_fixture()
+    prdef = dynamics.default_prismatic_joint_def()
+    common_frames(&prdef.base, &f)
+    prdef.base.local_frame_a.q = math.make_quat_from_axis_angle(math.vec3_axis_z(), 0.5 * math.PI)
+    prdef.base.local_frame_b.q = prdef.base.local_frame_a.q
+    prdef.enable_limit = true
+    prdef.lower_translation = 0.0 - 2.0
+    prdef.upper_translation = 2.0
+    id = dynamics.create_prismatic_joint(f.world_id, &prdef)
+    dynamics.body_set_transform(f.body_id, math.vec3(0.0, 5.5, 0.0), math.quat_identity())
+    small("prismatic, turned frame: up its line", dynamics.joint_get_linear_separation(id), 0.000001)
+    dynamics.body_set_transform(f.body_id, math.vec3(1.2, 4.0, 0.0), math.quat_identity())
+    small("prismatic, turned frame: across its line", dynamics.joint_get_linear_separation(id) - 1.2, 0.000001)
+    dynamics.body_set_transform(f.body_id, math.vec3(0.0, 7.0, 0.0), math.quat_identity())
+    small("prismatic, turned frame: a metre past its limit", dynamics.joint_get_linear_separation(id) - 1.0, 0.000001)
+    dynamics.body_set_transform(f.body_id, math.vec3(0.0, 4.0, 0.0), math.quat_identity())
+    finish_joint("prismatic, turned frame", id, &f)
 
     // Revolute: the angles clamp and order themselves.
     f = joint_fixture()
