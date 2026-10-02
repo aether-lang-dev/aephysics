@@ -716,9 +716,20 @@ parallel_joint_set_spring_damping_ratio(id: JointId, value: float) {
     if base != null { dynamics.parallel_joint_of(base).damping_ratio = value }
 }
 parallel_joint_get_spring_damping_ratio(id: JointId) -> float { return dynamics.parallel_joint_of(sim_of(id, dynamics.JOINT_PARALLEL)).damping_ratio }
+// A cap of zero or less is no torque at all. The solve is skipped then,
+// as the reference skips it, but the impulse the joint last applied stays
+// and is warm-started every sub-step after: the reference's
+// b3ParallelJoint_SetMaxTorque leaves it, and a joint turned down to zero
+// kept twisting its body by that impulse for as long as it lived (an ae3d
+// figure's pelvis anchor, let go as it fell, turned the lying figure's
+// pelvis and legs for good). Cleared here; nothing else differs from it.
 parallel_joint_set_max_torque(id: JointId, value: float) {
     base = sim_of(id, dynamics.JOINT_PARALLEL)
-    if base != null { dynamics.parallel_joint_of(base).max_torque = value }
+    if base != null {
+        j = dynamics.parallel_joint_of(base)
+        j.max_torque = value
+        if value <= 0.0 { j.perp_impulse = Vec2 { x: 0.0, y: 0.0 } }
+    }
 }
 parallel_joint_get_max_torque(id: JointId) -> float { return dynamics.parallel_joint_of(sim_of(id, dynamics.JOINT_PARALLEL)).max_torque }
 
