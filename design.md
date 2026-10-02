@@ -474,9 +474,24 @@ there and measured:
   express (a shove, a step's push-off).
 - **Determinism.** The falling ragdolls repeat bit for bit and match
   across platforms, so a behaviour's tests can pin outcomes.
+- **A figure fitted to a rig** (ae3d#529). The reference is one rig's
+  figure, straight up the spine; a rig whose spine curves, dressed in
+  it, asks the joints to hold a bend. `human_reference_shape` gives the
+  figure as data (a `BoneSpec` per bone), `human_fit_shape` moves every
+  joint to a rig's and turns every bone along the rig's line -- each
+  capsule stretched by the length its line measures (the neck and the
+  forearms carry the head and the hands past the rig's joints, so they
+  take their parent's), every radius by the figure's size, each foot
+  turned about its shin to the rig's toe -- and `create_human_shaped`
+  builds it anywhere. Each joint's frame on its parent turns with the
+  bone, so the rest angle its spring and limits are taken from is the
+  reference's: the rig's bind pose is the fitted figure's rest pose.
+  `create_human` is the reference's shape through the same path, bit
+  for bit what it was. A bone keeps its own capsule's id (`shape_id`)
+  and a calf its foot's (`foot_shape_id`), since a body lists its
+  shapes newest first and the calf's first is the foot.
 
-What is not there yet, and belongs to the ae3d epics: a skeleton-to-
-ragdoll builder (this figure's frames were measured from one rig), the
-per-step controller hook (a `before_step` callback so behaviours set
+What is not there yet, and belongs to the ae3d epics: the per-step
+controller hook (a `before_step` callback so behaviours set
 targets from the state the step will use), and the behaviours
 themselves.

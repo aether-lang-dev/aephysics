@@ -7,7 +7,9 @@
 // whose torque limit acts as joint friction; filter joints keep the
 // thighs from each other and the head from the shoulders. The bones'
 // reference frames and joint frames are the reference's, measured from
-// its rigged figure.
+// its rigged figure -- or a rig's: human_fit_shape puts the reference's
+// joints at a rig's and its lines along the rig's, so a figure whose
+// spine curves is built curved, standing in its bind pose.
 //
 // This is Box3D's shared/human.c (Erin Catto, MIT): CreateHuman is
 // create_human, Human_SetJointFrictionTorque is
@@ -28,7 +30,8 @@ import aephysics.joint_solver
 exports (
     BONE_PELVIS, BONE_SPINE_01, BONE_SPINE_03, BONE_NECK, BONE_THIGH_L, BONE_CALF_L, BONE_THIGH_R, BONE_CALF_R,
     BONE_UPPER_ARM_L, BONE_LOWER_ARM_L, BONE_UPPER_ARM_R, BONE_LOWER_ARM_R, BONE_COUNT, FILTER_JOINT_COUNT,
-    HumanBone, Human, bone_at, filter_joint_at,
+    HumanBone, Human, BoneSpec, bone_at, filter_joint_at, spec_at,
+    human_reference_shape, human_shape_head, human_shape_tail, human_shape_toe, human_fit_shape, create_human_shaped,
     create_human, destroy_human, human_set_velocity, human_apply_angular_impulse, human_set_joint_friction_torque,
     human_set_joint_spring_hertz, human_set_joint_damping_ratio, human_align_spring, human_create_motor_anchors,
     human_create_parallel_anchors, human_destroy_anchors, human_has_anchors, human_set_anchor_target, human_set_bullet
@@ -55,6 +58,9 @@ const FILTER_JOINT_COUNT = 3
 // One bone: its body, the joint to its parent, the anchor a pose drive
 // hangs it from, the joint's frames on parent and bone, the bone's
 // frame in the reference pose, and the joint's limits and friction.
+// Its own capsule (the shin's on a calf, which carries the foot too:
+// a body lists its shapes newest first, so the first it lists is the
+// foot) and the foot's, a null id on every other bone.
 struct HumanBone {
     body_id: BodyId
     joint_id: JointId
@@ -68,6 +74,8 @@ struct HumanBone {
     twist_limit: Vec2              // the twist's or the hinge's angles
     joint_friction: float          // this joint's share of the friction torque
     parent_index: int
+    shape_id: ShapeId              // the bone's own capsule
+    foot_shape_id: ShapeId         // a calf's foot; null on the rest
 }
 
 // The ragdoll: a heap block of bones and filter joints (create allocates, destroy frees).
@@ -86,8 +94,10 @@ transform_of(px: float, py: float, pz: float, qx: float, qy: float, qz: float, q
     return Transform { p: math.vec3(px, py, pz), q: math.quat_vs(math.vec3(qx, qy, qz), qs) }
 }
 
-// A bone's body and shape: the body at the reference frame offset by the
-// human's position, the capsule with its material; the joint data on the bone.
+// A bone as a figure's shape has it: its frame in the figure's own space
+// (the joint to its parent at the origin), its capsule in that frame and,
+// on a calf, its foot's; the joint's frames on parent and bone, limits
+// and friction; and the filter group, surface friction and density.
 struct BoneSpec {
     parent: int
     reference: Transform
@@ -100,35 +110,317 @@ struct BoneSpec {
     swing_degrees: float
     twist_degrees: float
     joint_friction: float
+    density: float                 // a scale on the default density
+    has_foot: bool
+    foot: Capsule
 }
 
-place_bone(h: *Human, world_id: WorldId, index: int, position: Vec3, spec: BoneSpec, user_data: ptr, group_index: int, density_scale: float) -> *HumanBone {
+// A figure's shape is BONE_COUNT BoneSpecs in one heap block: the
+// reference's from human_reference_shape, a rig's once human_fit_shape
+// has fitted it, and create_human_shaped builds either. The caller frees
+// it with free().
+spec_at(shape: ptr, index: int) -> *BoneSpec { return (shape + index * sizeof(BoneSpec)) as *BoneSpec }
+set_spec(shape: ptr, index: int, spec: BoneSpec) { (shape as BoneSpec[])[index] = spec }
+
+no_foot() -> Capsule { return manifold.capsule(math.vec3(0.0, 0.0, 0.0), math.vec3(0.0, 0.0, 0.0), 0.0) }
+
+// The reference's figure, bone by bone (its frames measured from the rig).
+human_reference_shape() -> ptr {
+    shape = calloc(BONE_COUNT, sizeof(BoneSpec))
+    no_joint = math.transform_identity()
+    set_spec(shape, BONE_PELVIS, BoneSpec {
+        parent: 0 - 1, reference: transform_of(0.0, 0.996219, 0.0 - 0.023868, 1.0, 0.0, 0.0, 0.0), group: 0, friction: 0.6,
+        capsule: manifold.capsule(math.vec3(0.04, 0.000001, 0.0), math.vec3(0.0 - 0.04, 0.0 - 0.000001, 0.0), 0.15),
+        joint_kind: dynamics.JOINT_PARALLEL, frame_a: no_joint, frame_b: no_joint, swing_degrees: 0.0, twist_degrees: 0.0, joint_friction: 1.0,
+        density: 1.0, has_foot: false, foot: no_foot() })
+    set_spec(shape, BONE_SPINE_01, BoneSpec {
+        parent: BONE_PELVIS, reference: transform_of(0.0, 1.017288, 0.0 - 0.024882, 1.0, 0.0, 0.0, 0.0), group: 0 - 1, friction: 0.5,
+        capsule: manifold.capsule(math.vec3(0.029876, 0.0 - 0.146581, 0.00626), math.vec3(0.0 - 0.029876, 0.0 - 0.146574, 0.00626), 0.145663),
+        joint_kind: dynamics.JOINT_SPHERICAL,
+        frame_a: transform_of(0.0, 0.0 - 0.021069, 0.001014, 0.0 - 0.642737, 0.0, 0.0, 0.0 - 0.766087),
+        frame_b: transform_of(0.0, 0.0, 0.0, 0.0 - 0.707107, 0.0, 0.0, 0.0 - 0.707107),
+        swing_degrees: 35.0, twist_degrees: 17.5, joint_friction: 1.0, density: 1.0, has_foot: false, foot: no_foot() })
+    set_spec(shape, BONE_SPINE_03, BoneSpec {
+        parent: BONE_SPINE_01, reference: transform_of(0.0, 1.267766, 0.0 - 0.02232, 1.0, 0.0, 0.0, 0.0), group: 0, friction: 0.5,
+        capsule: manifold.capsule(math.vec3(0.063996, 0.0 - 0.117434, 0.0 - 0.040199), math.vec3(0.0 - 0.063996, 0.0 - 0.117432, 0.0 - 0.040199), 0.165004),
+        joint_kind: dynamics.JOINT_SPHERICAL,
+        frame_a: transform_of(0.0, 0.0 - 0.250478, 0.0 - 0.002562, 0.0 - 0.642766, 0.0, 0.0, 0.0 - 0.766063),
+        frame_b: transform_of(0.0, 0.0, 0.0, 0.0 - 0.707107, 0.0, 0.0, 0.0 - 0.707107),
+        swing_degrees: 35.0, twist_degrees: 17.5, joint_friction: 1.0, density: 1.0, has_foot: false, foot: no_foot() })
+    set_spec(shape, BONE_NECK, BoneSpec {
+        parent: BONE_SPINE_03, reference: transform_of(0.0, 1.498783, 0.024462, 0.987879, 0.0, 0.0, 0.155228), group: 0, friction: 0.2,
+        capsule: manifold.capsule(math.vec3(0.0, 0.0 - 0.21234, 0.0), math.vec3(0.0, 0.0 - 0.08734, 0.0), 0.11),
+        joint_kind: dynamics.JOINT_SPHERICAL,
+        frame_a: transform_of(0.0, 0.0 - 0.231017, 0.0 - 0.046781, 0.0 - 0.516157, 0.0 - 0.000002, 0.000003, 0.0 - 0.856494),
+        frame_b: transform_of(0.0, 0.0, 0.0, 0.0 - 0.707108, 0.0 - 0.000002, 0.000002, 0.0 - 0.707106),
+        swing_degrees: 30.0, twist_degrees: 17.5, joint_friction: 1.0, density: 1.0, has_foot: false, foot: no_foot() })
+    set_spec(shape, BONE_THIGH_L, BoneSpec {
+        parent: BONE_PELVIS, reference: transform_of(0.092175, 0.971562, 0.0 - 0.011177, 0.471412, 0.52951, 0.0 - 0.499888, 0.0 - 0.497495), group: 0 - 1, friction: 0.6,
+        capsule: manifold.capsule(math.vec3(0.0 - 0.047269, 0.000001, 0.0), math.vec3(0.0 - 0.379769, 0.000005, 0.0), 0.091539),
+        joint_kind: dynamics.JOINT_SPHERICAL,
+        frame_a: transform_of(0.092175, 0.024656, 0.0 - 0.012691, 0.0 - 0.460186, 0.0 - 0.365368, 0.0 - 0.637662, 0.498118),
+        frame_b: transform_of(0.0, 0.0, 0.0, 0.0 - 0.499997, 0.0 - 0.500003, 0.500002, 0.499998),
+        swing_degrees: 30.0, twist_degrees: 10.0, joint_friction: 1.0, density: 1.0, has_foot: false, foot: no_foot() })
+    // The calves carry the shins at half density and the feet at full.
+    set_spec(shape, BONE_CALF_L, BoneSpec {
+        parent: BONE_THIGH_L, reference: transform_of(0.11872, 0.534541, 0.0 - 0.035362, 0.521188, 0.480597, 0.0 - 0.54638, 0.0 - 0.445935), group: 0, friction: 0.1,
+        capsule: manifold.capsule(math.vec3(0.0 - 0.445, 0.000001, 0.0), math.vec3(0.005, 0.0 - 0.000001, 0.0), 0.08),
+        joint_kind: dynamics.JOINT_REVOLUTE,
+        frame_a: transform_of(0.0 - 0.438494, 0.0 - 0.000175, 0.0, 0.344866, 0.0 - 0.938652, 0.000002, 0.0 - 0.000008),
+        frame_b: transform_of(0.0, 0.0, 0.0, 0.0 - 0.008182, 0.0 - 0.999967, 0.000001, 0.0 - 0.000007),
+        swing_degrees: 0.0, twist_degrees: 30.0, joint_friction: 1.0, density: 0.5,
+        has_foot: true, foot: manifold.capsule(math.vec3(0.0 - 0.456371, 0.129321, 0.000013), math.vec3(0.0 - 0.359977, 0.014394, 0.000013), 0.07) })
+    set_spec(shape, BONE_THIGH_R, BoneSpec {
+        parent: BONE_PELVIS, reference: transform_of(0.0 - 0.092175, 0.971562, 0.0 - 0.011177, 0.0 - 0.497495, 0.499888, 0.52951, 0.0 - 0.471412), group: 0 - 1, friction: 0.6,
+        capsule: manifold.capsule(math.vec3(0.047269, 0.0 - 0.000001, 0.0), math.vec3(0.379769, 0.0 - 0.000005, 0.0), 0.092587),
+        joint_kind: dynamics.JOINT_SPHERICAL,
+        frame_a: transform_of(0.0 - 0.092175, 0.024656, 0.0 - 0.012691, 0.380666, 0.491846, 0.488644, 0.0 - 0.611889),
+        frame_b: transform_of(0.0, 0.0, 0.0, 0.0 - 0.500002, 0.499998, 0.0 - 0.499998, 0.500002),
+        swing_degrees: 30.0, twist_degrees: 10.0, joint_friction: 1.0, density: 1.0, has_foot: false, foot: no_foot() })
+    set_spec(shape, BONE_CALF_R, BoneSpec {
+        parent: BONE_THIGH_R, reference: transform_of(0.0 - 0.11872, 0.534541, 0.0 - 0.035362, 0.0 - 0.445935, 0.54638, 0.480597, 0.0 - 0.521188), group: 0, friction: 0.1,
+        capsule: manifold.capsule(math.vec3(0.445, 0.0 - 0.000002, 0.000003), math.vec3(0.0 - 0.005, 0.0, 0.000003), 0.08),
+        joint_kind: dynamics.JOINT_REVOLUTE,
+        frame_a: transform_of(0.438494, 0.000175, 0.0, 0.000007, 0.000005, 0.0 - 0.34486, 0.0 - 0.938654),
+        frame_b: transform_of(0.0, 0.0, 0.0, 0.000006, 0.000005, 0.008188, 0.0 - 0.999966),
+        swing_degrees: 0.0, twist_degrees: 30.0, joint_friction: 1.0, density: 0.5,
+        has_foot: true, foot: manifold.capsule(math.vec3(0.369113, 0.0 - 0.00683, 0.000017), math.vec3(0.465507, 0.0 - 0.121757, 0.000017), 0.07) })
+    set_spec(shape, BONE_UPPER_ARM_L, BoneSpec {
+        parent: BONE_SPINE_03, reference: transform_of(0.185817, 1.44363, 0.031306, 0.56022, 0.0 - 0.307179, 0.366233, 0.0 - 0.676512), group: 0, friction: 0.6,
+        capsule: manifold.capsule(math.vec3(0.296038, 0.004386, 0.0 - 0.000794), math.vec3(0.0 - 0.016086, 0.004384, 0.0 - 0.016127), 0.065),
+        joint_kind: dynamics.JOINT_SPHERICAL,
+        frame_a: transform_of(0.185817, 0.0 - 0.175865, 0.0 - 0.053625, 0.0 - 0.559466, 0.0 - 0.213784, 0.0 - 0.670199, 0.438323),
+        frame_b: transform_of(0.0, 0.0, 0.0, 0.0 - 0.500953, 0.0 - 0.502617, 0.0 - 0.509318, 0.0 - 0.486844),
+        swing_degrees: 45.0, twist_degrees: 20.0, joint_friction: 0.8, density: 1.0, has_foot: false, foot: no_foot() })
+    set_spec(shape, BONE_LOWER_ARM_L, BoneSpec {
+        parent: BONE_UPPER_ARM_L, reference: transform_of(0.347683, 1.193455, 0.029378, 0.406736, 0.0 - 0.493012, 0.089135, 0.0 - 0.763911), group: 0, friction: 0.3,
+        capsule: manifold.capsule(math.vec3(0.312329, 0.0 - 0.008256, 0.0 - 0.016454), math.vec3(0.033153, 0.008259, 0.0 - 0.002741), 0.06),
+        joint_kind: dynamics.JOINT_REVOLUTE,
+        frame_a: transform_of(0.297979, 0.000361, 0.0, 0.916726, 0.399352, 0.000839, 0.0 - 0.011456),
+        frame_b: transform_of(0.0, 0.0, 0.0, 0.999922, 0.0 - 0.003857, 0.004659, 0.0 - 0.010908),
+        swing_degrees: 0.0, twist_degrees: 35.0, joint_friction: 0.06, density: 1.0, has_foot: false, foot: no_foot() })
+    set_spec(shape, BONE_UPPER_ARM_R, BoneSpec {
+        parent: BONE_SPINE_03, reference: transform_of(0.0 - 0.185817, 1.44363, 0.031306, 0.676512, 0.366233, 0.307179, 0.56022), group: 0, friction: 0.6,
+        capsule: manifold.capsule(math.vec3(0.0 - 0.300237, 0.0 - 0.000001, 0.0 - 0.000319), math.vec3(0.011887, 0.000001, 0.015013), 0.065),
+        joint_kind: dynamics.JOINT_SPHERICAL,
+        frame_a: transform_of(0.0 - 0.185817, 0.0 - 0.175865, 0.0 - 0.053625, 0.213793, 0.559449, 0.438334, 0.0 - 0.670204),
+        frame_b: transform_of(0.0, 0.0, 0.0, 0.0 - 0.509319, 0.486843, 0.500954, 0.0 - 0.502617),
+        swing_degrees: 45.0, twist_degrees: 20.0, joint_friction: 0.8, density: 1.0, has_foot: false, foot: no_foot() })
+    set_spec(shape, BONE_LOWER_ARM_R, BoneSpec {
+        parent: BONE_UPPER_ARM_R, reference: transform_of(0.0 - 0.347683, 1.193455, 0.029378, 0.763911, 0.089135, 0.493012, 0.406736), group: 0, friction: 0.3,
+        capsule: manifold.capsule(math.vec3(0.0 - 0.312649, 0.0 - 0.000003, 0.016471), math.vec3(0.0 - 0.032986, 0.0, 0.002732), 0.06),
+        joint_kind: dynamics.JOINT_REVOLUTE,
+        frame_a: transform_of(0.0 - 0.297979, 0.0 - 0.000361, 0.0, 0.0 - 0.405444, 0.914059, 0.010541, 0.000852),
+        frame_b: transform_of(0.0, 0.0, 0.0, 0.0 - 0.002794, 0.999936, 0.010042, 0.004364),
+        swing_degrees: 0.0, twist_degrees: 35.0, joint_friction: 0.06, density: 1.0, has_foot: false, foot: no_foot() })
+    return shape
+}
+
+// --- a shape's landmarks, and a shape fitted to a rig's --------------------------------------------
+
+// A bone's next along the chain the figure is measured by -- the spine up
+// to the neck, each leg to its calf, each arm to its forearm -- or -1 for
+// the neck, the calves and the forearms, which end their chains.
+chain_child(index: int) -> int {
+    if index == BONE_PELVIS { return BONE_SPINE_01 }
+    if index == BONE_SPINE_01 { return BONE_SPINE_03 }
+    if index == BONE_SPINE_03 { return BONE_NECK }
+    if index == BONE_THIGH_L { return BONE_CALF_L }
+    if index == BONE_THIGH_R { return BONE_CALF_R }
+    if index == BONE_UPPER_ARM_L { return BONE_LOWER_ARM_L }
+    if index == BONE_UPPER_ARM_R { return BONE_LOWER_ARM_R }
+    return 0 - 1
+}
+
+// A bone's head in the figure's space: its joint to its parent, its body's origin.
+human_shape_head(shape: ptr, index: int) -> Vec3 { return spec_at(shape, index).reference.p }
+
+// A bone's tail: where the line it is measured by ends -- its next
+// joint along the chain, or for a bone that ends one the end of its own
+// capsule farther from its joint: a calf's at the ankle, a forearm's
+// past the wrist (it carries the hand), the neck's at the head's middle.
+human_shape_tail(shape: ptr, index: int) -> Vec3 {
+    child = chain_child(index)
+    if child >= 0 { return spec_at(shape, child).reference.p }
+    spec = spec_at(shape, index)
+    far = spec.capsule.center1
+    if math.length(spec.capsule.center2) > math.length(far) { far = spec.capsule.center2 }
+    return math.transform_point(spec.reference, far)
+}
+
+// A calf's foot's toe end in the figure's space: the end of the foot's
+// capsule farther off the shin's line.
+human_shape_toe(shape: ptr, index: int) -> Vec3 {
+    spec = spec_at(shape, index)
+    return math.transform_point(spec.reference, foot_toe(spec))
+}
+
+foot_toe(spec: *BoneSpec) -> Vec3 {
+    axis = math.normalize(math.sub(spec.capsule.center2, spec.capsule.center1))
+    if off_line(spec.foot.center2, spec.capsule.center1, axis) > off_line(spec.foot.center1, spec.capsule.center1, axis) { return spec.foot.center2 }
+    return spec.foot.center1
+}
+
+off_line(p: Vec3, origin: Vec3, axis: Vec3) -> float {
+    d = math.sub(p, origin)
+    return math.length(math.sub(d, math.mul_sv(math.dot(d, axis), axis)))
+}
+
+// Whether a bone's tail measures its own length. The neck's capsule
+// carries the head and a forearm's the hand, past the joints a rig names
+// their tails by, so those two take their parent's scale; the pelvis's
+// line, two centimetres to the spine's joint, the figure's.
+measures_length(index: int) -> bool {
+    return index != BONE_PELVIS && index != BONE_NECK && index != BONE_LOWER_ARM_L && index != BONE_LOWER_ARM_R
+}
+
+// Shorter than this, a line has no direction to fit to.
+const LINE_MIN = 0.005
+
+// A shape fitted to a figure: every bone's joint put at `heads[i]` and
+// turned so its line runs to `tails[i]` (both Vec3[BONE_COUNT], in the
+// figure's space, landmarks as human_shape_head and human_shape_tail
+// name them), and so the rig's bind pose is the shape's rest pose.
+// A bone's capsule is stretched along its line by the length its tail
+// measures (by its parent's where it measures none), every radius by
+// the figure's size against the reference's; a calf's foot rides the
+// shin and, when `toes` (Vec3[2]: left, right) is not null, is turned
+// about the shin so its toe points the rig's way. Each joint's frame on
+// the parent turns with the bone, so the joint's rest angle -- what its
+// spring and its limits are taken from -- is what it was.
+human_fit_shape(shape: ptr, heads: ptr, tails: ptr, toes: ptr) {
+    head_at = heads as Vec3[]
+    tail_at = tails as Vec3[]
+    turns = calloc(BONE_COUNT, sizeof(Quat))
+    turn = turns as Quat[]
+    olds = calloc(BONE_COUNT, sizeof(Quat))
+    old = olds as Quat[]
+    units = calloc(BONE_COUNT, sizeof(Vec3))
+    unit = units as Vec3[]
+    scales = calloc(BONE_COUNT, 8)
+    scale = scales as float[]
+    reference_total = 0.0
+    fitted_total = 0.0
+    i = 0
+    while i < BONE_COUNT {
+        spec = spec_at(shape, i)
+        old[i] = spec.reference.q
+        line = math.sub(human_shape_tail(shape, i), spec.reference.p)
+        fitted = math.sub(tail_at[i], head_at[i])
+        reference_length = math.length(line)
+        fitted_length = math.length(fitted)
+        turn[i] = math.quat_identity()
+        unit[i] = math.vec3(0.0, 0.0, 0.0)
+        scale[i] = 0.0
+        if reference_length > LINE_MIN {
+            unit[i] = math.inv_rotate_vector(spec.reference.q, math.mul_sv(1.0 / reference_length, line))
+            if fitted_length > LINE_MIN {
+                turn[i] = math.compute_quat_between_unit_vectors(math.mul_sv(1.0 / reference_length, line), math.mul_sv(1.0 / fitted_length, fitted))
+                if measures_length(i) {
+                    scale[i] = fitted_length / reference_length
+                    reference_total = reference_total + reference_length
+                    fitted_total = fitted_total + fitted_length
+                }
+            }
+        }
+        i = i + 1
+    }
+    figure = 1.0
+    if reference_total > 0.0 { figure = fitted_total / reference_total }
+    // Parents come before children in the bones' order.
+    i = 0
+    while i < BONE_COUNT {
+        spec = spec_at(shape, i)
+        if scale[i] == 0.0 {
+            scale[i] = figure
+            if spec.parent >= 0 { scale[i] = scale[spec.parent] }
+        }
+        spec.reference = Transform { p: head_at[i], q: math.normalize_quat(math.mul_quat(turn[i], old[i])) }
+        spec.capsule = stretch(spec.capsule, unit[i], scale[i], figure)
+        if spec.has_foot { spec.foot = stretch(spec.foot, unit[i], scale[i], figure) }
+        if spec.parent >= 0 {
+            parent = spec_at(shape, spec.parent)
+            spec.frame_a.p = math.inv_rotate_vector(parent.reference.q, math.sub(head_at[i], head_at[spec.parent]))
+            spec.frame_a.q = math.normalize_quat(math.inv_mul_quat(parent.reference.q, math.mul_quat(turn[i], math.mul_quat(old[spec.parent], spec.frame_a.q))))
+        }
+        i = i + 1
+    }
+    if toes != null {
+        toe_at = toes as Vec3[]
+        point_foot(spec_at(shape, BONE_CALF_L), unit[BONE_CALF_L], toe_at[0], head_at[BONE_CALF_L])
+        point_foot(spec_at(shape, BONE_CALF_R), unit[BONE_CALF_R], toe_at[1], head_at[BONE_CALF_R])
+    }
+    free(turns)
+    free(olds)
+    free(units)
+    free(scales)
+}
+
+// A capsule stretched by `along` on the line through its body's origin
+// along `axis` (a unit vector, or zero for none), its radius by `girth`.
+stretch(c: Capsule, axis: Vec3, along: float, girth: float) -> Capsule {
+    c1 = math.mul_add(c.center1, (along - 1.0) * math.dot(c.center1, axis), axis)
+    c2 = math.mul_add(c.center2, (along - 1.0) * math.dot(c.center2, axis), axis)
+    return manifold.capsule(c1, c2, c.radius * girth)
+}
+
+// A calf's foot turned about the shin, so its toe, seen down the shin,
+// points where the rig's toe does.
+point_foot(spec: *BoneSpec, axis: Vec3, toe: Vec3, head: Vec3) {
+    if !spec.has_foot || math.length(axis) < 0.5 { return }
+    want = math.inv_rotate_vector(spec.reference.q, math.sub(toe, head))
+    have = foot_toe(spec)
+    want_flat = math.sub(want, math.mul_sv(math.dot(want, axis), axis))
+    have_flat = math.sub(have, math.mul_sv(math.dot(have, axis), axis))
+    if math.length(want_flat) < LINE_MIN || math.length(have_flat) < LINE_MIN { return }
+    q = math.compute_quat_between_unit_vectors(math.normalize(have_flat), math.normalize(want_flat))
+    spec.foot = manifold.capsule(math.rotate_vector(q, spec.foot.center1), math.rotate_vector(q, spec.foot.center2), spec.foot.radius)
+}
+
+// --- building one ----------------------------------------------------------------------------
+
+// A bone's body and shapes: the body at its frame placed by `placement`,
+// the capsule (and a calf's foot) with its material; the joint data on the bone.
+place_bone(h: *Human, world_id: WorldId, index: int, placement: Transform, spec: *BoneSpec, user_data: ptr, group_index: int) {
     bone = bone_at(h, index)
     bone.parent_index = spec.parent
     bone.reference_frame = spec.reference
     bdef = dynamics.default_body_def()
     bdef.kind = dynamics.BODY_DYNAMIC
     bdef.user_data = user_data
-    bdef.rotation = spec.reference.q
-    bdef.position = math.add(position, spec.reference.p)
+    bdef.rotation = math.mul_quat(placement.q, spec.reference.q)
+    bdef.position = math.transform_point(placement, spec.reference.p)
     bone.body_id = dynamics.create_body(world_id, &bdef)
     sdef = dynamics.default_shape_def()
-    sdef.density = sdef.density * density_scale
+    sdef.density = sdef.density * spec.density
     sdef.filter.group_index = spec.group * group_index
     sdef.base_material.friction = spec.friction
     sdef.base_material.rolling_resistance = 0.1
-    dynamics.create_capsule_shape(bone.body_id, &sdef, spec.capsule)
+    bone.shape_id = dynamics.create_capsule_shape(bone.body_id, &sdef, spec.capsule)
+    bone.foot_shape_id = dynamics.null_shape_id()
+    if spec.has_foot {
+        fdef = dynamics.default_shape_def()
+        fdef.base_material.friction = 0.1
+        fdef.base_material.rolling_resistance = 0.1
+        bone.foot_shape_id = dynamics.create_capsule_shape(bone.body_id, &fdef, spec.foot)
+    }
     bone.joint_kind = spec.joint_kind
     bone.local_frame_a = spec.frame_a
     bone.local_frame_b = spec.frame_b
     bone.swing_limit = spec.swing_degrees * math.DEG_TO_RAD
     bone.twist_limit = Vec2 { x: 0.0 - spec.twist_degrees * math.DEG_TO_RAD, y: spec.twist_degrees * math.DEG_TO_RAD }
     bone.joint_friction = spec.joint_friction
-    return bone
 }
 
-// The reference's figure, bone by bone (its frames measured from the rig).
+// The reference's figure standing at `position`.
 create_human(h: *Human, world_id: WorldId, position: Vec3, friction_torque: float, hertz: float, damping_ratio: float, group_index: int, user_data: ptr) {
+    shape = human_reference_shape()
+    create_human_shaped(h, world_id, Transform { p: position, q: math.quat_identity() }, shape, friction_torque, hertz, damping_ratio, group_index, user_data)
+    free(shape)
+}
+
+// A figure of a shape, its space put in the world by `placement`.
+create_human_shaped(h: *Human, world_id: WorldId, placement: Transform, shape: ptr, friction_torque: float, hertz: float, damping_ratio: float, group_index: int, user_data: ptr) {
     h.bones = calloc(BONE_COUNT, sizeof(HumanBone))
     h.filter_joints = calloc(FILTER_JOINT_COUNT, sizeof(JointId))
     i = 0
@@ -138,6 +430,8 @@ create_human(h: *Human, world_id: WorldId, position: Vec3, friction_torque: floa
         bone.anchor_id = dynamics.null_body_id()
         bone.joint_id = dynamics.null_joint_id()
         bone.anchor_joint_id = dynamics.null_joint_id()
+        bone.shape_id = dynamics.null_shape_id()
+        bone.foot_shape_id = dynamics.null_shape_id()
         bone.joint_friction = 1.0
         bone.parent_index = 0 - 1
         i = i + 1
@@ -149,93 +443,11 @@ create_human(h: *Human, world_id: WorldId, position: Vec3, friction_torque: floa
         i = i + 1
     }
     h.friction_torque = friction_torque
-    no_joint = math.transform_identity()
-
-    place_bone(h, world_id, BONE_PELVIS, position, BoneSpec {
-        parent: 0 - 1, reference: transform_of(0.0, 0.996219, 0.0 - 0.023868, 1.0, 0.0, 0.0, 0.0), group: 0, friction: 0.6,
-        capsule: manifold.capsule(math.vec3(0.04, 0.000001, 0.0), math.vec3(0.0 - 0.04, 0.0 - 0.000001, 0.0), 0.15),
-        joint_kind: dynamics.JOINT_PARALLEL, frame_a: no_joint, frame_b: no_joint, swing_degrees: 0.0, twist_degrees: 0.0, joint_friction: 1.0 },
-        user_data, group_index, 1.0)
-    place_bone(h, world_id, BONE_SPINE_01, position, BoneSpec {
-        parent: BONE_PELVIS, reference: transform_of(0.0, 1.017288, 0.0 - 0.024882, 1.0, 0.0, 0.0, 0.0), group: 0 - 1, friction: 0.5,
-        capsule: manifold.capsule(math.vec3(0.029876, 0.0 - 0.146581, 0.00626), math.vec3(0.0 - 0.029876, 0.0 - 0.146574, 0.00626), 0.145663),
-        joint_kind: dynamics.JOINT_SPHERICAL,
-        frame_a: transform_of(0.0, 0.0 - 0.021069, 0.001014, 0.0 - 0.642737, 0.0, 0.0, 0.0 - 0.766087),
-        frame_b: transform_of(0.0, 0.0, 0.0, 0.0 - 0.707107, 0.0, 0.0, 0.0 - 0.707107),
-        swing_degrees: 35.0, twist_degrees: 17.5, joint_friction: 1.0 }, user_data, group_index, 1.0)
-    place_bone(h, world_id, BONE_SPINE_03, position, BoneSpec {
-        parent: BONE_SPINE_01, reference: transform_of(0.0, 1.267766, 0.0 - 0.02232, 1.0, 0.0, 0.0, 0.0), group: 0, friction: 0.5,
-        capsule: manifold.capsule(math.vec3(0.063996, 0.0 - 0.117434, 0.0 - 0.040199), math.vec3(0.0 - 0.063996, 0.0 - 0.117432, 0.0 - 0.040199), 0.165004),
-        joint_kind: dynamics.JOINT_SPHERICAL,
-        frame_a: transform_of(0.0, 0.0 - 0.250478, 0.0 - 0.002562, 0.0 - 0.642766, 0.0, 0.0, 0.0 - 0.766063),
-        frame_b: transform_of(0.0, 0.0, 0.0, 0.0 - 0.707107, 0.0, 0.0, 0.0 - 0.707107),
-        swing_degrees: 35.0, twist_degrees: 17.5, joint_friction: 1.0 }, user_data, group_index, 1.0)
-    place_bone(h, world_id, BONE_NECK, position, BoneSpec {
-        parent: BONE_SPINE_03, reference: transform_of(0.0, 1.498783, 0.024462, 0.987879, 0.0, 0.0, 0.155228), group: 0, friction: 0.2,
-        capsule: manifold.capsule(math.vec3(0.0, 0.0 - 0.21234, 0.0), math.vec3(0.0, 0.0 - 0.08734, 0.0), 0.11),
-        joint_kind: dynamics.JOINT_SPHERICAL,
-        frame_a: transform_of(0.0, 0.0 - 0.231017, 0.0 - 0.046781, 0.0 - 0.516157, 0.0 - 0.000002, 0.000003, 0.0 - 0.856494),
-        frame_b: transform_of(0.0, 0.0, 0.0, 0.0 - 0.707108, 0.0 - 0.000002, 0.000002, 0.0 - 0.707106),
-        swing_degrees: 30.0, twist_degrees: 17.5, joint_friction: 1.0 }, user_data, group_index, 1.0)
-    place_bone(h, world_id, BONE_THIGH_L, position, BoneSpec {
-        parent: BONE_PELVIS, reference: transform_of(0.092175, 0.971562, 0.0 - 0.011177, 0.471412, 0.52951, 0.0 - 0.499888, 0.0 - 0.497495), group: 0 - 1, friction: 0.6,
-        capsule: manifold.capsule(math.vec3(0.0 - 0.047269, 0.000001, 0.0), math.vec3(0.0 - 0.379769, 0.000005, 0.0), 0.091539),
-        joint_kind: dynamics.JOINT_SPHERICAL,
-        frame_a: transform_of(0.092175, 0.024656, 0.0 - 0.012691, 0.0 - 0.460186, 0.0 - 0.365368, 0.0 - 0.637662, 0.498118),
-        frame_b: transform_of(0.0, 0.0, 0.0, 0.0 - 0.499997, 0.0 - 0.500003, 0.500002, 0.499998),
-        swing_degrees: 30.0, twist_degrees: 10.0, joint_friction: 1.0 }, user_data, group_index, 1.0)
-    // The calves carry the shins at half density and the feet at full.
-    calf_l = place_bone(h, world_id, BONE_CALF_L, position, BoneSpec {
-        parent: BONE_THIGH_L, reference: transform_of(0.11872, 0.534541, 0.0 - 0.035362, 0.521188, 0.480597, 0.0 - 0.54638, 0.0 - 0.445935), group: 0, friction: 0.1,
-        capsule: manifold.capsule(math.vec3(0.0 - 0.445, 0.000001, 0.0), math.vec3(0.005, 0.0 - 0.000001, 0.0), 0.08),
-        joint_kind: dynamics.JOINT_REVOLUTE,
-        frame_a: transform_of(0.0 - 0.438494, 0.0 - 0.000175, 0.0, 0.344866, 0.0 - 0.938652, 0.000002, 0.0 - 0.000008),
-        frame_b: transform_of(0.0, 0.0, 0.0, 0.0 - 0.008182, 0.0 - 0.999967, 0.000001, 0.0 - 0.000007),
-        swing_degrees: 0.0, twist_degrees: 30.0, joint_friction: 1.0 }, user_data, group_index, 0.5)
-    add_foot(calf_l, manifold.capsule(math.vec3(0.0 - 0.456371, 0.129321, 0.000013), math.vec3(0.0 - 0.359977, 0.014394, 0.000013), 0.07))
-    place_bone(h, world_id, BONE_THIGH_R, position, BoneSpec {
-        parent: BONE_PELVIS, reference: transform_of(0.0 - 0.092175, 0.971562, 0.0 - 0.011177, 0.0 - 0.497495, 0.499888, 0.52951, 0.0 - 0.471412), group: 0 - 1, friction: 0.6,
-        capsule: manifold.capsule(math.vec3(0.047269, 0.0 - 0.000001, 0.0), math.vec3(0.379769, 0.0 - 0.000005, 0.0), 0.092587),
-        joint_kind: dynamics.JOINT_SPHERICAL,
-        frame_a: transform_of(0.0 - 0.092175, 0.024656, 0.0 - 0.012691, 0.380666, 0.491846, 0.488644, 0.0 - 0.611889),
-        frame_b: transform_of(0.0, 0.0, 0.0, 0.0 - 0.500002, 0.499998, 0.0 - 0.499998, 0.500002),
-        swing_degrees: 30.0, twist_degrees: 10.0, joint_friction: 1.0 }, user_data, group_index, 1.0)
-    calf_r = place_bone(h, world_id, BONE_CALF_R, position, BoneSpec {
-        parent: BONE_THIGH_R, reference: transform_of(0.0 - 0.11872, 0.534541, 0.0 - 0.035362, 0.0 - 0.445935, 0.54638, 0.480597, 0.0 - 0.521188), group: 0, friction: 0.1,
-        capsule: manifold.capsule(math.vec3(0.445, 0.0 - 0.000002, 0.000003), math.vec3(0.0 - 0.005, 0.0, 0.000003), 0.08),
-        joint_kind: dynamics.JOINT_REVOLUTE,
-        frame_a: transform_of(0.438494, 0.000175, 0.0, 0.000007, 0.000005, 0.0 - 0.34486, 0.0 - 0.938654),
-        frame_b: transform_of(0.0, 0.0, 0.0, 0.000006, 0.000005, 0.008188, 0.0 - 0.999966),
-        swing_degrees: 0.0, twist_degrees: 30.0, joint_friction: 1.0 }, user_data, group_index, 0.5)
-    add_foot(calf_r, manifold.capsule(math.vec3(0.369113, 0.0 - 0.00683, 0.000017), math.vec3(0.465507, 0.0 - 0.121757, 0.000017), 0.07))
-    place_bone(h, world_id, BONE_UPPER_ARM_L, position, BoneSpec {
-        parent: BONE_SPINE_03, reference: transform_of(0.185817, 1.44363, 0.031306, 0.56022, 0.0 - 0.307179, 0.366233, 0.0 - 0.676512), group: 0, friction: 0.6,
-        capsule: manifold.capsule(math.vec3(0.296038, 0.004386, 0.0 - 0.000794), math.vec3(0.0 - 0.016086, 0.004384, 0.0 - 0.016127), 0.065),
-        joint_kind: dynamics.JOINT_SPHERICAL,
-        frame_a: transform_of(0.185817, 0.0 - 0.175865, 0.0 - 0.053625, 0.0 - 0.559466, 0.0 - 0.213784, 0.0 - 0.670199, 0.438323),
-        frame_b: transform_of(0.0, 0.0, 0.0, 0.0 - 0.500953, 0.0 - 0.502617, 0.0 - 0.509318, 0.0 - 0.486844),
-        swing_degrees: 45.0, twist_degrees: 20.0, joint_friction: 0.8 }, user_data, group_index, 1.0)
-    place_bone(h, world_id, BONE_LOWER_ARM_L, position, BoneSpec {
-        parent: BONE_UPPER_ARM_L, reference: transform_of(0.347683, 1.193455, 0.029378, 0.406736, 0.0 - 0.493012, 0.089135, 0.0 - 0.763911), group: 0, friction: 0.3,
-        capsule: manifold.capsule(math.vec3(0.312329, 0.0 - 0.008256, 0.0 - 0.016454), math.vec3(0.033153, 0.008259, 0.0 - 0.002741), 0.06),
-        joint_kind: dynamics.JOINT_REVOLUTE,
-        frame_a: transform_of(0.297979, 0.000361, 0.0, 0.916726, 0.399352, 0.000839, 0.0 - 0.011456),
-        frame_b: transform_of(0.0, 0.0, 0.0, 0.999922, 0.0 - 0.003857, 0.004659, 0.0 - 0.010908),
-        swing_degrees: 0.0, twist_degrees: 35.0, joint_friction: 0.06 }, user_data, group_index, 1.0)
-    place_bone(h, world_id, BONE_UPPER_ARM_R, position, BoneSpec {
-        parent: BONE_SPINE_03, reference: transform_of(0.0 - 0.185817, 1.44363, 0.031306, 0.676512, 0.366233, 0.307179, 0.56022), group: 0, friction: 0.6,
-        capsule: manifold.capsule(math.vec3(0.0 - 0.300237, 0.0 - 0.000001, 0.0 - 0.000319), math.vec3(0.011887, 0.000001, 0.015013), 0.065),
-        joint_kind: dynamics.JOINT_SPHERICAL,
-        frame_a: transform_of(0.0 - 0.185817, 0.0 - 0.175865, 0.0 - 0.053625, 0.213793, 0.559449, 0.438334, 0.0 - 0.670204),
-        frame_b: transform_of(0.0, 0.0, 0.0, 0.0 - 0.509319, 0.486843, 0.500954, 0.0 - 0.502617),
-        swing_degrees: 45.0, twist_degrees: 20.0, joint_friction: 0.8 }, user_data, group_index, 1.0)
-    place_bone(h, world_id, BONE_LOWER_ARM_R, position, BoneSpec {
-        parent: BONE_UPPER_ARM_R, reference: transform_of(0.0 - 0.347683, 1.193455, 0.029378, 0.763911, 0.089135, 0.493012, 0.406736), group: 0, friction: 0.3,
-        capsule: manifold.capsule(math.vec3(0.0 - 0.312649, 0.0 - 0.000003, 0.016471), math.vec3(0.0 - 0.032986, 0.0, 0.002732), 0.06),
-        joint_kind: dynamics.JOINT_REVOLUTE,
-        frame_a: transform_of(0.0 - 0.297979, 0.0 - 0.000361, 0.0, 0.0 - 0.405444, 0.914059, 0.010541, 0.000852),
-        frame_b: transform_of(0.0, 0.0, 0.0, 0.0 - 0.002794, 0.999936, 0.010042, 0.004364),
-        swing_degrees: 0.0, twist_degrees: 35.0, joint_friction: 0.06 }, user_data, group_index, 1.0)
+    i = 0
+    while i < BONE_COUNT {
+        place_bone(h, world_id, i, placement, spec_at(shape, i), user_data, group_index)
+        i = i + 1
+    }
 
     // The joints: a spring toward the reference pose when asked, the
     // motor's torque limit as friction, the limits as the rig allows.
@@ -286,13 +498,6 @@ create_human(h: *Human, world_id: WorldId, position: Vec3, friction_torque: floa
     add_filter(h, world_id, BONE_NECK, BONE_UPPER_ARM_L)
     add_filter(h, world_id, BONE_NECK, BONE_UPPER_ARM_R)
     h.is_spawned = true
-}
-
-add_foot(calf: *HumanBone, foot: Capsule) {
-    sdef = dynamics.default_shape_def()
-    sdef.base_material.friction = 0.1
-    sdef.base_material.rolling_resistance = 0.1
-    dynamics.create_capsule_shape(calf.body_id, &sdef, foot)
 }
 
 add_filter(h: *Human, world_id: WorldId, a: int, b: int) {
