@@ -4706,6 +4706,8 @@ create_wheel_joint(world_id: WorldId, def: *WheelJointDef) -> JointId {
     w = joint_world(world_id, &def.base)
     if w == null { return null_joint_id() }
     if def.lower_suspension_limit > def.upper_suspension_limit { return null_joint_id() }
+    // Reversed steering limits would push the wheel both ways at once.
+    if def.lower_steering_limit > def.upper_steering_limit { return null_joint_id() }
     w.locked = true
     pair = create_joint(w, &def.base, JOINT_WHEEL)
     wheel = wheel_joint_of(pair.sim)
