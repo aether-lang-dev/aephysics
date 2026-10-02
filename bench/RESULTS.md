@@ -93,16 +93,20 @@ by a random metre and a partial rebuild. The same random sequence on both.
 | insert 10,000 | **5.0 ms** | 9.4 |
 | 100 full rebuilds | 46 | **42** |
 | 100,000 box queries | 12.5 | **11.9** |
-| 10,000 ray casts | 13.4 | **7.2** |
+| 10,000 ray casts | **6.9** (13.4 before the slab test) | 7.2 |
 | 10 x enlarge all | **2.5** | 2.9 |
 | 10 x partial rebuild | 5.9 | **5.0** |
 
 Both report 3,965 query hits, 1,950 ray hits, height 17 and area ratio
-63.45: the trees are the same tree. The ray cast is where the reference's
-SSE2 box tests and 24-byte float boxes show against the port's scalar
-tests and 48-byte double boxes; that is the number for the native wide
-path to beat, if the whole-step benchmark says the tree's ray cast
-matters.
+63.45: the trees are the same tree. The ray cast was 1.9x here while it
+tested each node as the reference does -- the segment's box, then the
+three edge axes -- in scalar doubles against the reference's SSE2. It now
+takes the slab test (`math.slab_overlap`) against the ray's inverse
+direction, worked out once per ray: one pass, exact as the pair it
+replaces, with the near and far faces picked by the ray's signs so a
+tree's empty sibling box is still missed. 13.6 ms to 6.9 on the same
+run (aephysics#11), at the reference's figure; the box cast takes the
+same test on the node boxes grown by the cast box.
 
 ## hull
 
@@ -266,7 +270,10 @@ reference's SIMD box-triangle test against the scalar one -- false
 positives the query permits). The build is 1.2-1.5x, with the welding
 map and the edge map through core's LongMap; the traversals are 1.7-2x,
 the reference's SIMD box tests against scalar ones on 48-byte double
-boxes, the same gap the dynamic tree's ray cast showed.
+boxes, the same gap the dynamic tree's ray cast showed. With the slab
+test in the traversal (aephysics#11) the 100,000 rays went from 11.7 ms
+to 8.9 in one run on the current toolchain (the table's 20.8 is from an
+older one; the reference was not run again), the same hits and sum.
 
 ## height_field
 
@@ -354,7 +361,10 @@ nothing shows the time in `dynamic_tree.tree_ray_cast` itself (77 ms
 for 520,000 leaf visits), not in the children -- the tree layer showed
 the same cast at 1.9x on a sparser scene, the reference's SIMD slab
 test against scalar doubles. The traversal is the place to profile
-(aephysics#11). The compound is 379 KB here against 231 KB there: the
+(aephysics#11). On the current toolchain the rays were down to 39.5 ms,
+and the slab test in the traversal takes them to 27.3 (the shape casts
+7.6 to 7.0) with the same hits and sums; the reference was not run
+again. The compound is 379 KB here against 231 KB there: the
 tree's nodes and proxies are our wider doubles and longs, and the
 block carries the traversal stack.
 

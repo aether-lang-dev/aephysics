@@ -1312,8 +1312,7 @@ ray_cast_mesh(sh: Mesh, origin: Vec3, translation: Vec3, max_fraction: float) ->
     ccw = scale.x * scale.y * scale.z > 0.0
     ray_start = math.mul(inv, origin)
     ray_delta = math.mul(inv, translation)
-    ray_end = math.mul_add(ray_start, max_fraction, ray_delta)
-    ray_box = AABB { lower: math.min_vec3(ray_start, ray_end), upper: math.max_vec3(ray_start, ray_end) }
+    ray_inv = math.ray_inverse(ray_delta)
     scratch_ready()
     stack = traversal_stack() as int[]
     tri = triangle_points() as Vec3[]
@@ -1323,7 +1322,7 @@ ray_cast_mesh(sh: Mesh, origin: Vec3, translation: Vec3, max_fraction: float) ->
     index = 0
     while true {
         n = nodes[index]
-        if math.aabb_overlaps(node_aabb(n), ray_box) && dynamic_tree_ray_test(n.lower, n.upper, ray_start, ray_delta) {
+        if math.slab_overlap(n.lower, n.upper, ray_start, ray_inv, best.fraction) {
             if is_leaf(n) {
                 i = 0
                 while i < n.count_or_offset {
@@ -1337,8 +1336,6 @@ ray_cast_mesh(sh: Mesh, origin: Vec3, translation: Vec3, max_fraction: float) ->
                         best.triangle_index = triangle_index
                         best.material_index = materials[triangle_index]
                         best.hit = true
-                        ray_end = math.mul_add(ray_start, alpha, ray_delta)
-                        ray_box = AABB { lower: math.min_vec3(ray_start, ray_end), upper: math.max_vec3(ray_start, ray_end) }
                     }
                     i = i + 1
                 }
@@ -1362,29 +1359,6 @@ ray_cast_mesh(sh: Mesh, origin: Vec3, translation: Vec3, max_fraction: float) ->
     return best
 }
 
-// The edge-separation test of a segment against a box, as the dynamic tree's.
-dynamic_tree_ray_test(lower: Vec3, upper: Vec3, ray_start: Vec3, ray_delta: Vec3) -> bool {
-    cx = 0.5 * (lower.x + upper.x)
-    cy = 0.5 * (lower.y + upper.y)
-    cz = 0.5 * (lower.z + upper.z)
-    ex = upper.x - cx
-    ey = upper.y - cy
-    ez = upper.z - cz
-    sx = ray_start.x - cx
-    sy = ray_start.y - cy
-    sz = ray_start.z - cz
-    dx = ray_delta.x
-    dy = ray_delta.y
-    dz = ray_delta.z
-    adx = math.abs_float(dx)
-    ady = math.abs_float(dy)
-    adz = math.abs_float(dz)
-    if math.abs_float(dy * sz - dz * sy) > ady * ez + adz * ey { return false }
-    if math.abs_float(dz * sx - dx * sz) > adz * ex + adx * ez { return false }
-    if math.abs_float(dx * sy - dy * sx) > adx * ey + ady * ex { return false }
-    return true
-}
-
 // A proxy swept through the mesh: the nearest hit among the front-facing
 // triangles its swept box reaches.
 shape_cast_mesh(sh: Mesh, proxy: ShapeProxy, translation: Vec3, max_fraction: float, can_encroach: bool) -> CastOutput {
@@ -1404,8 +1378,7 @@ shape_cast_mesh(sh: Mesh, proxy: ShapeProxy, translation: Vec3, max_fraction: fl
     ccw = scale.x * scale.y * scale.z > 0.0
     inv_start = math.mul(inv, ray_start)
     inv_delta = math.mul(inv, ray_delta)
-    inv_end = math.mul_add(inv_start, max_fraction, inv_delta)
-    inv_box = AABB { lower: math.min_vec3(inv_start, inv_end), upper: math.max_vec3(inv_start, inv_end) }
+    inv_inv = math.ray_inverse(inv_delta)
     inv_extent = math.mul(abs_inv, extents)
     scratch_ready()
     stack = traversal_stack() as int[]
@@ -1416,10 +1389,7 @@ shape_cast_mesh(sh: Mesh, proxy: ShapeProxy, translation: Vec3, max_fraction: fl
     index = 0
     while true {
         n = nodes[index]
-        node_lower = math.sub(n.lower, inv_extent)
-        node_upper = math.add(n.upper, inv_extent)
-        node_box = AABB { lower: node_lower, upper: node_upper }
-        if math.aabb_overlaps(node_box, inv_box) && dynamic_tree_ray_test(node_lower, node_upper, inv_start, inv_delta) {
+        if math.slab_overlap(math.sub(n.lower, inv_extent), math.add(n.upper, inv_extent), inv_start, inv_inv, best.fraction) {
             if is_leaf(n) {
                 i = 0
                 while i < n.count_or_offset {
@@ -1446,8 +1416,6 @@ shape_cast_mesh(sh: Mesh, proxy: ShapeProxy, translation: Vec3, max_fraction: fl
                                 best.material_index = materials[triangle_index]
                                 ray_end = math.mul_add(ray_start, best.fraction, ray_delta)
                                 ray_box = AABB { lower: math.min_vec3(ray_start, ray_end), upper: math.max_vec3(ray_start, ray_end) }
-                                inv_end = math.mul_add(inv_start, best.fraction, inv_delta)
-                                inv_box = AABB { lower: math.min_vec3(inv_start, inv_end), upper: math.max_vec3(inv_start, inv_end) }
                             }
                         }
                     }
