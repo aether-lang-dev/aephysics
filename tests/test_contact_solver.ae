@@ -152,7 +152,8 @@ test_normal() {
     prepare(&s)
     cc = contact_solver.contact_constraint_at(s.constraints, 0)
     m = contact_solver.manifold_constraint_at(cc.constraints, 0)
-    small("relative velocity recorded", contact_solver.constraint_point_at(m, 0).relative_velocity + 2.0, 0.000001)
+    // The approach is sampled only for restitution or hit events (Box3D's prepare): none here.
+    small("no restitution, no relative velocity", contact_solver.constraint_point_at(m, 0).relative_velocity, 0.000001)
     i = 0
     while i < 8 { solve(&s, true); i = i + 1 }
     ensure("falling stopped, pushed out gently (${state.linear_velocity.y})", state.linear_velocity.y > 0.0 && state.linear_velocity.y < 0.3)
@@ -201,6 +202,14 @@ test_normal() {
     gap = dynamics.manifold_point_at(dynamics.manifold_at(s.contact, 0), 0).separation
     ensure("speculative: a gap of about a centimetre", gap > 0.009 && gap < 0.012)
     small("speculative: falls the gap in the sub-step", state.linear_velocity.y + gap * 240.0, 0.01)
+    finish(&s)
+    // With restitution the approach is recorded for the bounce.
+    s = scene(0.6, 0.5, false)
+    state = cube_state(&s)
+    state.linear_velocity = math.vec3(0.0, 0.0 - 2.0, 0.0)
+    prepare(&s)
+    m = contact_solver.manifold_constraint_at(contact_solver.contact_constraint_at(s.constraints, 0).constraints, 0)
+    small("restitution: relative velocity recorded", contact_solver.constraint_point_at(m, 0).relative_velocity + 2.0, 0.000001)
     finish(&s)
 }
 

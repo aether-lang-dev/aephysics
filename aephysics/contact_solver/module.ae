@@ -232,7 +232,9 @@ prepare_contact(ctx: *StepContext, c: *Contact, cc: *ContactConstraint, manifold
     cc.inv_mass_a = m_a
     cc.inv_inertia_b = i_b
     cc.inv_mass_b = m_b
-    cc.rolling_mass = math.invert_matrix(math.add_mm(i_a, i_b))
+    // The solve reads the rolling mass only with rolling resistance.
+    cc.rolling_mass = math.mat3_zero()
+    if c.rolling_resistance > 0.0 { cc.rolling_mass = math.invert_matrix(math.add_mm(i_a, i_b)) }
     cc.softness = ctx.contact_softness
     if (c.flags & dynamics.CONTACT_STATIC) != 0 { cc.softness = ctx.static_softness }
     cc.friction = c.friction
@@ -240,6 +242,10 @@ prepare_contact(ctx: *StepContext, c: *Contact, cc: *ContactConstraint, manifold
     note_restitution(ctx, c.restitution)
     cc.rolling_resistance = c.rolling_resistance
     cc.constraints = manifolds
+    // The normal velocity before the solve is for restitution and hit
+    // events only: sampled only for a contact with either, as the wide
+    // prepare does (Box3D's prepare); zero else.
+    sample_velocity = c.restitution > 0.0 || (c.flags & dynamics.SIM_ENABLE_HIT_EVENT) != 0
     manifold_index = 0
     while manifold_index < manifold_count {
         manifold = dynamics.manifold_at(c, manifold_index)
@@ -275,9 +281,12 @@ prepare_contact(ctx: *StepContext, c: *Contact, cc: *ContactConstraint, manifold
             k_normal = m_a + m_b + math.dot(rn_a, math.mul_mv(i_a, rn_a)) + math.dot(rn_b, math.mul_mv(i_b, rn_b))
             cp.normal_mass = 0.0
             if k_normal > 0.0 { cp.normal_mass = 1.0 / k_normal }
-            vr_a = math.add(v_a, math.cross(w_a, r_a))
-            vr_b = math.add(v_b, math.cross(w_b, r_b))
-            cp.relative_velocity = math.dot(normal, math.sub(vr_b, vr_a))
+            cp.relative_velocity = 0.0
+            if sample_velocity {
+                vr_a = math.add(v_a, math.cross(w_a, r_a))
+                vr_b = math.add(v_b, math.cross(w_b, r_b))
+                cp.relative_velocity = math.dot(normal, math.sub(vr_b, vr_a))
+            }
             // The friction centre decays with separation: far speculative
             // points only matter for continuous collision, and near points
             // that touch on and off must move it smoothly.
