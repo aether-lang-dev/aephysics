@@ -1937,7 +1937,7 @@ create_sphere_shape(body_id: BodyId, def: *ShapeDef, s: Sphere) -> ShapeId { ret
 create_capsule_shape(body_id: BodyId, def: *ShapeDef, c: Capsule) -> ShapeId { return create_shape(body_id, def, shape.capsule_shape(c, def.density)) }
 create_hull_shape(body_id: BodyId, def: *ShapeDef, h: *HullData) -> ShapeId { return create_shape(body_id, def, shape.hull_shape(h, def.density)) }
 create_mesh_shape(body_id: BodyId, def: *ShapeDef, m: *MeshData, scale: Vec3) -> ShapeId {
-    return create_shape(body_id, def, shape.mesh_shape(mesh.mesh(m, scale), math.max_int(def.material_count, 1)))
+    return create_shape(body_id, def, shape.mesh_shape(mesh.mesh(m, math.safe_scale(scale)), math.max_int(def.material_count, 1)))
 }
 create_height_field_shape(body_id: BodyId, def: *ShapeDef, h: *HeightFieldData) -> ShapeId {
     return create_shape(body_id, def, shape.height_field_shape(h, math.max_int(def.material_count, 1)))
@@ -2079,7 +2079,7 @@ shape_get_height_field(id: ShapeId) -> *HeightFieldData { return get_shape_full_
 shape_set_sphere(id: ShapeId, s: Sphere) { change_shape_geometry(id, shape.sphere_shape(s, 0.0)) }
 shape_set_capsule(id: ShapeId, c: Capsule) { change_shape_geometry(id, shape.capsule_shape(c, 0.0)) }
 shape_set_hull(id: ShapeId, h: *HullData) { change_shape_geometry(id, shape.hull_shape(h, 0.0)) }
-shape_set_mesh(id: ShapeId, m: *MeshData, scale: Vec3) { change_shape_geometry(id, shape.mesh_shape(mesh.mesh(m, scale), 1)) }
+shape_set_mesh(id: ShapeId, m: *MeshData, scale: Vec3) { change_shape_geometry(id, shape.mesh_shape(mesh.mesh(m, math.safe_scale(scale)), 1)) }
 
 change_shape_geometry(id: ShapeId, geometry: Shape) {
     w = world_at(id.world0)
@@ -3671,6 +3671,7 @@ update_contact(w: *World, c: *Contact, shape_a: *WorldShape, local_center_a: Vec
                local_center_b: Vec3, xf_b: Transform, is_fast: bool) -> bool {
     child_scratch_ready()
     touching = false
+    convex = true                  // a mesh or height field contact has no pre-solve, as the reference's has none
     kind_a = shape_a.geometry.kind
     if kind_a == KIND_COMPOUND {
         child = compound.get_compound_child(shape_a.geometry.compound, c.child_index)
@@ -3700,6 +3701,7 @@ update_contact(w: *World, c: *Contact, shape_a: *WorldShape, local_center_a: Vec
             map[2] = child.material_index2
             map[3] = child.material_index3
             touching = update_mesh_contact(w, c, child_geometry, shape_a, material_map(), xf_child, shape_b, xf_b, is_fast)
+            convex = false
             set_hit_event_flag(c, touching, shape_a.flags, shape_b.flags)
         } else {
             cg = shape.sphere_shape(child.sphere, 0.0)
@@ -3725,9 +3727,23 @@ update_contact(w: *World, c: *Contact, shape_a: *WorldShape, local_center_a: Vec
         }
     } else if kind_a == KIND_MESH || kind_a == KIND_HEIGHT_FIELD {
         touching = update_mesh_contact(w, c, &shape_a.geometry, shape_a, null, xf_a, shape_b, xf_b, is_fast)
+        convex = false
         set_hit_event_flag(c, touching, shape_a.flags, shape_b.flags)
     } else {
         touching = update_convex_contact(w, c, &shape_a.geometry, shape_a.material, shape_a.flags, xf_a, &shape_b.geometry, shape_b.material, shape_b.flags, xf_b, false)
+    }
+    // The pre-solve callback on a convex contact that wants it
+    // (b3UpdateConvexContact): its first point in the world and the
+    // normal; false disables the contact for this step -- the one-way
+    // platform. The callback runs on the collide pass's workers.
+    if touching && convex && w.has_pre_solve && (c.flags & SIM_ENABLE_PRE_SOLVE_EVENTS) != 0 {
+        pre_solve = w.pre_solve
+        m = manifold_at(c, 0)
+        point = math.add(xf_a.p, manifold_point_at(m, 0).anchor_a)
+        if pre_solve(make_shape_id(w, shape_a), make_shape_id(w, shape_b), point, m.normal, w.pre_solve_context) == false {
+            free_manifolds(w, c)
+            touching = false
+        }
     }
     if touching {
         center_a = math.rotate_vector(xf_a.q, local_center_a)
@@ -4806,6 +4822,16 @@ destroy_contacts_between_bodies(w: *World, body_a: *Body, body_b: *Body) {
 }
 
 // A joint sim zeroed in a colour of the graph; its index in the joint.
+// A new sim's joint and bodies, named before anything can move it: a
+// merge of two sleeping sets finds each sim's joint by its id to fix the
+// joint's set and index, so a sim still reading joint 0 would repoint
+// joint 0 and leave its own joint at the destroyed set.
+name_joint_sim(sim: *JointSim, j: *Joint) {
+    sim.joint_id = j.joint_id
+    sim.body_id_a = j.edge_a.body_id
+    sim.body_id_b = j.edge_b.body_id
+}
+
 create_joint_in_graph(w: *World, j: *Joint) -> *JointSim {
     body_a = body_at(w, j.edge_a.body_id)
     body_b = body_at(w, j.edge_b.body_id)
@@ -4814,6 +4840,7 @@ create_joint_in_graph(w: *World, j: *Joint) -> *JointSim {
     index = basics.buffer_push(&color.joint_sims)
     sim = joint_sim_at(&color.joint_sims, index)
     memset(sim as ptr, 0, sizeof(JointSim))
+    name_joint_sim(sim, j)
     j.color_index = color_index
     j.local_index = index
     return sim
@@ -4827,6 +4854,7 @@ create_joint_in_set(w: *World, set_index: int, j: *Joint) -> *JointSim {
     index = basics.buffer_push(&set.joint_sims)
     sim = joint_sim_at(&set.joint_sims, index)
     memset(sim as ptr, 0, sizeof(JointSim))
+    name_joint_sim(sim, j)
     return sim
 }
 

@@ -309,14 +309,13 @@ set_maximum_linear_speed(id: WorldId, speed: float) {
     if w != null { w.max_linear_speed = speed }
 }
 get_maximum_linear_speed(id: WorldId) -> float { return dynamics.get_world(id.index1 - 1).max_linear_speed }
+// Gravity and the user data change even mid-step, from a callback, as the reference's do (no lock).
 set_gravity(id: WorldId, gravity: Vec3) {
-    w = world_of(id)
-    if w != null { w.gravity = gravity }
+    if dynamics.world_is_valid(id) { dynamics.get_world(id.index1 - 1).gravity = gravity }
 }
 get_gravity(id: WorldId) -> Vec3 { return dynamics.get_world(id.index1 - 1).gravity }
 set_user_data(id: WorldId, data: ptr) {
-    w = world_of(id)
-    if w != null { w.user_data = data }
+    if dynamics.world_is_valid(id) { dynamics.get_world(id.index1 - 1).user_data = data }
 }
 get_user_data(id: WorldId) -> ptr { return dynamics.get_world(id.index1 - 1).user_data }
 set_friction_callback(id: WorldId, callback_fn: fn(float, long, float, long) -> float) {
