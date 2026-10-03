@@ -273,7 +273,10 @@ the reference's SIMD box tests against scalar ones on 48-byte double
 boxes, the same gap the dynamic tree's ray cast showed. With the slab
 test in the traversal (aephysics#11) the 100,000 rays went from 11.7 ms
 to 8.9 in one run on the current toolchain (the table's 20.8 is from an
-older one; the reference was not run again), the same hits and sum.
+older one; the reference was not run again), the same hits and sum. The
+sphere shape casts take a closed form for a triangle against a point
+(Real-Time Collision Detection 5.1.5) in place of GJK since then: 22.4 ms
+to 11.6, under the reference's 14.3, the same hits and sum.
 
 ## height_field
 
@@ -303,6 +306,12 @@ straddled cell on top of distance's 1.3-1.5x; the overlap 1.85x. The
 field is 4.2 MB here against 1.3 MB there: the reference packs 16-bit
 heights and 8-bit materials and flags, which Aether cannot yet address,
 so they are ints.
+
+The shape casts and overlaps meet each straddled cell's triangles with a
+sphere's centre, and that pair takes a closed form (Real-Time Collision
+Detection 5.1.5) in place of GJK since: on the current toolchain the
+10,000 casts went from 42.3 ms to 20.1 (the reference's 23.5) and the
+overlaps from 3.5 to 2.0 (its 2.0), the same hits and sums.
 
 ## shape
 

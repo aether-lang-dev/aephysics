@@ -333,10 +333,52 @@ test_segment_closed_form() {
     free(points_block)
 }
 
+// The closed form for a triangle against a point, either way round, against
+// GJK (through its debug path): 3,000 points around a triangle, every
+// region (its vertices, edges and face, both sides), under rotations, with
+// radii; the same distances, normals, points and kind of simplex.
+test_triangle_closed_form() {
+    trail_block = calloc(64, sizeof(Simplex))
+    points_block = calloc(4, sizeof(Vec3))
+    p = points_block as Vec3[]
+    p[0] = math.vec3(0.0, 0.0, 0.0)
+    p[1] = math.vec3(2.0, 0.1, 0.0)
+    p[2] = math.vec3(0.3, 1.7, 0.2)
+    worst = 0.0
+    kinds_differ = 0
+    k = 0
+    while k < 3000 {
+        t = (k as float) * 0.618
+        p[3] = math.vec3(3.0 * sin(t) + 0.8, 3.0 * cos(1.7 * t) + 0.6, 1.5 * sin(2.3 * t))
+        q = math.make_quat_from_axis_angle(math.normalize(math.vec3(1.0, 2.0, 3.0)), 0.3 * t)
+        xf = Transform { p: math.vec3(0.2 * sin(t), 0.1, 0.3 * cos(t)), q: q }
+        triangle = distance.shape_proxy(points_block, 3, 0.05)
+        point = distance.shape_proxy(points_block + 3 * sizeof(Vec3), 1, 0.1)
+        input = DistanceInput { proxy_a: triangle, proxy_b: point, transform: xf, use_radii: (k % 3) != 0 }
+        if k % 2 == 1 { input = DistanceInput { proxy_a: point, proxy_b: triangle, transform: xf, use_radii: (k % 3) != 0 } }
+        fast_cache = distance.empty_cache()
+        gjk_cache = distance.empty_cache()
+        fast = distance.shape_distance(&input, &fast_cache, null, 0)
+        gjk = distance.shape_distance(&input, &gjk_cache, trail_block, 64)
+        off = math.abs_float(fast.distance - gjk.distance)
+        off = math.max_float(off, math.length(math.sub(fast.point_a, gjk.point_a)))
+        off = math.max_float(off, math.length(math.sub(fast.point_b, gjk.point_b)))
+        if fast.distance > 0.001 { off = math.max_float(off, math.length(math.sub(fast.normal, gjk.normal))) }
+        if off > worst { worst = off }
+        if fast_cache.count != gjk_cache.count && fast.distance > 0.001 { kinds_differ = kinds_differ + 1 }
+        k = k + 1
+    }
+    ensure("triangle closed form: agrees with GJK on 3,000 points (worst ${worst})", worst < 0.000001)
+    ensure("triangle closed form: the same kind of simplex (${kinds_differ} differ)", kinds_differ == 0)
+    free(trail_block)
+    free(points_block)
+}
+
 main() {
     before = basics.alloc_count()
     test_reference()
     test_segment_closed_form()
+    test_triangle_closed_form()
     test_rounded()
     test_sweep_and_cache()
     test_toi_rotating()
