@@ -1,0 +1,169 @@
+// The world's queries against brute force: 300 bodies of every kind (static,
+// kinematic, dynamic; spheres, capsules, boxes; turned every way) stepped a
+// second and a half so the trees, the fat bounds and the sleeping sets have
+// moved; then the closest hit of 3,000 rays, the overlaps of 1,500 spheres
+// and the closest hit of 1,500 sphere and capsule casts, each through the
+// world (its trees, its filters) and again against every shape by hand.
+// They agree, hit for hit, fraction for fraction.
+import std.string
+import aephysics.math
+import aephysics.hull
+import aephysics.distance
+import aephysics.manifold
+import aephysics.shape
+import aephysics.dynamics
+import aephysics.physics_world
+
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+extern sin(x: float) -> float
+extern cos(x: float) -> float
+extern exit(code: int)
+
+var g_seed = 12345
+rand01() -> float {
+    g_seed = (g_seed * 1103515245 + 12345) % 2147483647
+    if g_seed < 0 { g_seed = 0 - g_seed }
+    return (g_seed as float) / 2147483647.0
+}
+range(lo: float, hi: float) -> float { return lo + (hi - lo) * rand01() }
+
+var g_overlap_count = 0
+count_overlap(id: ShapeId, context: ptr) -> bool {
+    g_overlap_count = g_overlap_count + 1
+    return true
+}
+
+var g_cast_best = 2.0
+closest_cast(id: ShapeId, point: Vec3, normal: Vec3, fraction: float, material: long, triangle: int, child: int, context: ptr) -> float {
+    if fraction == 0.0 { return 0.0 - 1.0 }
+    if fraction < g_cast_best { g_cast_best = fraction }
+    return fraction
+}
+
+main() {
+    box = hull.make_box_hull(0.5, 0.3, 0.8)
+    wdef = dynamics.default_world_def()
+    world_id = dynamics.create_world(&wdef)
+    n = 300
+    shapes_block = calloc(n, sizeof(ShapeId))
+    shapes = shapes_block as ShapeId[]
+    i = 0
+    while i < n {
+        bdef = dynamics.default_body_def()
+        k = i % 4
+        if k == 0 { bdef.kind = dynamics.BODY_STATIC } else if k == 3 { bdef.kind = dynamics.BODY_KINEMATIC } else { bdef.kind = dynamics.BODY_DYNAMIC }
+        bdef.position = math.vec3(range(0.0 - 20.0, 20.0), range(0.0 - 5.0, 15.0), range(0.0 - 20.0, 20.0))
+        bdef.rotation = math.make_quat_from_axis_angle(math.normalize(math.vec3(range(0.0 - 1.0, 1.0), range(0.0 - 1.0, 1.0), range(0.1, 1.0))), range(0.0, 6.0))
+        if bdef.kind == dynamics.BODY_KINEMATIC { bdef.linear_velocity = math.vec3(range(0.0 - 3.0, 3.0), 0.0, range(0.0 - 3.0, 3.0)) }
+        body = dynamics.create_body(world_id, &bdef)
+        sdef = dynamics.default_shape_def()
+        s = i % 3
+        if s == 0 { shapes[i] = dynamics.create_sphere_shape(body, &sdef, manifold.sphere(math.vec3(range(0.0 - 0.3, 0.3), 0.0, 0.0), range(0.2, 1.0))) }
+        if s == 1 { shapes[i] = dynamics.create_capsule_shape(body, &sdef, manifold.capsule(math.vec3(0.0 - 0.6, 0.0, 0.0), math.vec3(0.6, 0.1, 0.0), range(0.2, 0.6))) }
+        if s == 2 { shapes[i] = dynamics.create_hull_shape(body, &sdef, box) }
+        i = i + 1
+    }
+    // Moved: trees updated, fat bounds enlarged, some asleep.
+    step = 0
+    while step < 90 {
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        step = step + 1
+    }
+    filter = shape.default_query_filter()
+    ray_bad = 0
+    ray_hits = 0
+    r = 0
+    while r < 3000 {
+        origin = math.vec3(range(0.0 - 25.0, 25.0), range(0.0 - 8.0, 20.0), range(0.0 - 25.0, 25.0))
+        translation = math.vec3(range(0.0 - 30.0, 30.0), range(0.0 - 20.0, 20.0), range(0.0 - 30.0, 30.0))
+        got = physics_world.cast_ray_closest(world_id, origin, translation, filter)
+        best = 2.0
+        j = 0
+        while j < n {
+            out = physics_world.shape_ray_cast(shapes[j], origin, translation)
+            if out.hit && out.fraction > 0.0 && out.fraction < best { best = out.fraction }
+            j = j + 1
+        }
+        expected = best < 2.0
+        if expected { ray_hits = ray_hits + 1 }
+        if got.hit != expected || (expected && math.abs_float(got.fraction - best) > 0.000001) {
+            ray_bad = ray_bad + 1
+            if ray_bad <= 5 { println("RAY MISMATCH r ${r}: world hit ${got.hit} f ${got.fraction} brute ${expected} f ${best}") }
+        }
+        r = r + 1
+    }
+    println("rays: ${ray_hits} hits of 3000, ${ray_bad} mismatches")
+
+    point_block = calloc(1, sizeof(Vec3))
+    overlap_bad = 0
+    total = 0
+    o = 0
+    while o < 1500 {
+        origin = math.vec3(range(0.0 - 22.0, 22.0), range(0.0 - 6.0, 16.0), range(0.0 - 22.0, 22.0))
+        radius = range(0.1, 1.5)
+        (point_block as Vec3[])[0] = math.vec3_zero()
+        proxy = distance.shape_proxy(point_block, 1, radius)
+        g_overlap_count = 0
+        physics_world.overlap_shape(world_id, origin, proxy, filter, count_overlap, null)
+        brute = 0
+        j = 0
+        while j < n {
+            w = dynamics.get_world(world_id.index1 - 1)
+            ws = dynamics.get_shape_full_id(w, shapes[j])
+            bt = dynamics.get_body_transform(w, ws.body_id)
+            rel = Transform { p: math.sub(bt.p, origin), q: bt.q }
+            if shape.overlap_shape(&ws.geometry, rel, proxy) { brute = brute + 1 }
+            j = j + 1
+        }
+        total = total + brute
+        if brute != g_overlap_count {
+            overlap_bad = overlap_bad + 1
+            if overlap_bad <= 5 { println("OVERLAP MISMATCH o ${o}: world ${g_overlap_count} brute ${brute} at ${origin.x} ${origin.y} ${origin.z} r ${radius}") }
+        }
+        o = o + 1
+    }
+    println("overlaps: ${total} found by brute force, ${overlap_bad} mismatches")
+
+    // Shape casts: the closest hit of a sphere or capsule swept through the world.
+    cast_block = calloc(2, sizeof(Vec3))
+    cast_bad = 0
+    cast_hits = 0
+    c = 0
+    while c < 1500 {
+        origin = math.vec3(range(0.0 - 22.0, 22.0), range(0.0 - 6.0, 16.0), range(0.0 - 22.0, 22.0))
+        translation = math.vec3(range(0.0 - 20.0, 20.0), range(0.0 - 10.0, 10.0), range(0.0 - 20.0, 20.0))
+        cp = cast_block as Vec3[]
+        cp[0] = math.vec3_zero()
+        cp[1] = math.vec3(range(0.0 - 0.8, 0.8), range(0.0 - 0.8, 0.8), range(0.0 - 0.8, 0.8))
+        count = 1 + c % 2
+        proxy = distance.shape_proxy(cast_block, count, range(0.1, 0.6))
+        g_cast_best = 2.0
+        physics_world.cast_shape(world_id, origin, proxy, translation, filter, closest_cast, null)
+        best = 2.0
+        j = 0
+        while j < n {
+            w = dynamics.get_world(world_id.index1 - 1)
+            ws = dynamics.get_shape_full_id(w, shapes[j])
+            bt = dynamics.get_body_transform(w, ws.body_id)
+            rel = Transform { p: math.sub(bt.p, origin), q: bt.q }
+            out = shape.shape_cast_shape(&ws.geometry, rel, proxy, translation, 1.0, false)
+            if out.hit && out.fraction > 0.0 && out.fraction < best { best = out.fraction }
+            j = j + 1
+        }
+        if best < 2.0 { cast_hits = cast_hits + 1 }
+        if (g_cast_best < 2.0) != (best < 2.0) || (best < 2.0 && math.abs_float(g_cast_best - best) > 0.00001) {
+            cast_bad = cast_bad + 1
+            if cast_bad <= 5 { println("CAST MISMATCH c ${c}: world ${g_cast_best} brute ${best} count ${count}") }
+        }
+        c = c + 1
+    }
+    println("shape casts: ${cast_hits} hits of 1500, ${cast_bad} mismatches")
+    dynamics.destroy_world(world_id)
+    hull.destroy_hull(box)
+    if ray_bad + overlap_bad + cast_bad > 0 || ray_hits < 100 || total < 50 || cast_hits < 100 {
+        println("world_queries: FAIL")
+        exit(1)
+    }
+    println("world_queries: all checks passed")
+}

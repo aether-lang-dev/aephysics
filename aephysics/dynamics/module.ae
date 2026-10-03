@@ -5955,6 +5955,22 @@ sensor_scratch_ready() {
 // proxy in the sensor's frame against the sensor's geometry.
 overlap_sensor(sensor_shape: *WorldShape, sensor_transform: Transform, visitor: *WorldShape, visitor_transform: Transform) -> bool {
     sensor_scratch_ready()
+    // A hull visitor against a round sensor: asked the other way round, so
+    // the hull's face planes can answer most of it without GJK (overlap is
+    // symmetric; both sides test the same slop).
+    sensor_kind = sensor_shape.geometry.kind
+    if visitor.geometry.kind == KIND_HULL && (sensor_kind == KIND_SPHERE || sensor_kind == KIND_CAPSULE) {
+        sensor_proxy = shape.make_shape_proxy(&sensor_shape.geometry)
+        to_visitor = math.inv_mul_transforms(visitor_transform, sensor_transform)
+        local = sensor_points() as Vec3[]
+        sensor_at_points = sensor_proxy.points as Vec3[]
+        k = 0
+        while k < sensor_proxy.count {
+            local[k] = math.transform_point(to_visitor, sensor_at_points[k])
+            k = k + 1
+        }
+        return hull.overlap_hull(visitor.geometry.hull, math.transform_identity(), distance.shape_proxy(sensor_points(), sensor_proxy.count, sensor_proxy.radius))
+    }
     proxy = shape.make_shape_proxy(&visitor.geometry)
     relative = math.inv_mul_transforms(sensor_transform, visitor_transform)
     count = math.min_int(proxy.count, distance.MAX_SHAPE_CAST_POINTS)
