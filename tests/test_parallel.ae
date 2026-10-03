@@ -144,7 +144,17 @@ main() {
     r = run_range(s, 10000, 16)
     ensure("10,000 items in blocks of 16: every item once", every_item_once(r))
     ensure("10,000 items: the callback's worker is the thread's", r.worker_index_agreed)
-    ensure("10,000 items: more than one worker took blocks (${workers_used(r)})", workers_used(r) >= 2)
+    // Whether a pool thread wakes before the main thread has taken every
+    // block is the system's scheduling: on a loaded machine the main thread
+    // can finish alone (it failed one run in four under load). The pool
+    // joining in is what is held, so a run where it did not is tried again.
+    attempts = 1
+    while workers_used(r) < 2 && attempts < 8 {
+        free_range(r)
+        r = run_range(s, 10000, 16)
+        attempts = attempts + 1
+    }
+    ensure("10,000 items: more than one worker took blocks (${workers_used(r)}, in ${attempts} runs)", workers_used(r) >= 2)
     ensure("10,000 items: blocks of 16 until the count bounds them (${r.smallest_block}, ${r.largest_block})", r.largest_block >= 16 && r.largest_block <= 10000)
     ensure("10,000 items: the block count parallel_for reports is the range over the largest block (${r.block_count})", r.block_count == (10000 + r.largest_block - 1) / r.largest_block)
     free_range(r)

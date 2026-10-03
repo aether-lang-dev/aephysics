@@ -10,6 +10,7 @@ import std.string
 import aephysics.math
 import aephysics.basics
 import aephysics.hull
+import aephysics.distance
 
 extern calloc(count: int, size: int) -> ptr
 extern exit(code: int)
@@ -704,6 +705,39 @@ test_hull_2d() {
     free(h40)
 }
 
+// overlap_hull's face planes (a separating plane, or a point inside every
+// plane) against GJK's distance: 4,000 points and segments with radii
+// around a box turned every way, inside it, through it, grazing it and far
+// off; the same answer every time.
+test_overlap_planes() {
+    box = hull.make_box_hull(0.7, 0.4, 0.5)
+    points_block = calloc(2, sizeof(Vec3))
+    p = points_block as Vec3[]
+    disagree = 0
+    overlaps = 0
+    k = 0
+    while k < 4000 {
+        t = (k as float) * 0.37
+        q = math.make_quat_from_axis_angle(math.normalize(math.vec3(1.0, 2.0, 3.0)), t)
+        at = Transform { p: math.vec3(0.3 * sin(t), 0.2, 0.1 * cos(t)), q: q }
+        scale = 0.3 + 1.6 * math.abs_float(sin(1.7 * t))
+        p[0] = math.vec3(scale * sin(2.1 * t), scale * cos(1.3 * t), scale * sin(0.9 * t))
+        p[1] = math.add(p[0], math.vec3(0.5 * cos(t), 0.4 * sin(2.0 * t), 0.3))
+        proxy = distance.shape_proxy(points_block, 1 + k % 2, 0.05 + 0.2 * math.abs_float(cos(3.1 * t)))
+        quick = hull.overlap_hull(box, at, proxy)
+        input = DistanceInput { proxy_a: hull.hull_proxy(box), proxy_b: proxy, transform: math.inv_mul_transforms(at, math.transform_identity()), use_radii: true }
+        cache = distance.empty_cache()
+        exact = distance.shape_distance(&input, &cache, null, 0).distance < 0.1 * math.LINEAR_SLOP
+        if quick != exact { disagree = disagree + 1 }
+        if exact { overlaps = overlaps + 1 }
+        k = k + 1
+    }
+    ensure("overlap planes: the same answer as GJK on 4,000 proxies (${disagree} differ)", disagree == 0)
+    ensure("overlap planes: both answers among them (${overlaps} overlap)", overlaps > 400 && overlaps < 3600)
+    free(points_block)
+    hull.destroy_hull(box)
+}
+
 main() {
     before = basics.alloc_count()
     test_cube()
@@ -713,6 +747,7 @@ main() {
     test_redundant_input()
     test_clone()
     test_cylinder()
+    test_overlap_planes()
     test_sphere_reduction()
     test_sphere_stress()
     test_merge_churn_stress()

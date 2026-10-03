@@ -1906,8 +1906,33 @@ hull_proxy(h: *HullData) -> ShapeProxy {
 // Whether the hull, under its transform, comes within the overlap slop
 // of a proxy given in world space.
 overlap_hull(h: *HullData, shape_transform: Transform, proxy: ShapeProxy) -> bool {
-    input = DistanceInput { proxy_a: hull_proxy(h), proxy_b: proxy,
-                            transform: math.inv_mul_transforms(shape_transform, math.transform_identity()), use_radii: true }
+    relative = math.inv_mul_transforms(shape_transform, math.transform_identity())
+    // The face planes first, for a proxy of a few points: one with every
+    // point beyond it by more than the radius (and the slop) separates
+    // them -- the commonest answer for shapes whose bounds overlap, and
+    // exact, since the distance is at least that; a lone point inside
+    // every plane is inside the hull. GJK settles what is left.
+    if proxy.count <= 8 {
+        planes = hull_planes(h)
+        points = proxy.points as Vec3[]
+        reach = proxy.radius + 0.1 * math.LINEAR_SLOP
+        inside = proxy.count == 1
+        f = 0
+        while f < h.face_count {
+            nearest = math.MAX_FLOAT
+            i = 0
+            while i < proxy.count {
+                gap = math.plane_separation(planes[f], math.transform_point(relative, points[i]))
+                if gap < nearest { nearest = gap }
+                i = i + 1
+            }
+            if nearest > reach { return false }
+            if nearest > 0.0 { inside = false }
+            f = f + 1
+        }
+        if inside { return true }
+    }
+    input = DistanceInput { proxy_a: hull_proxy(h), proxy_b: proxy, transform: relative, use_radii: true }
     cache = distance.empty_cache()
     output = distance.shape_distance(&input, &cache, null, 0)
     return output.distance < 0.1 * math.LINEAR_SLOP
