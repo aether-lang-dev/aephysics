@@ -32,12 +32,6 @@ exports (
     prepare_wide_contacts, prepare_wide_range, zero_wide_tail, warm_start_wide_contacts, solve_wide_contacts, apply_wide_restitution, store_wide_impulses, store_wide_range
 )
 
-// libm's single-precision square root: what a lane's square root is four
-// of, since std.lanes has none (aether#2158).
-extern sqrtf(x: f32) -> f32
-sqrt_f32(x: f32) -> f32 { return sqrtf(x) }
-extern memset(p: ptr, value: int, count: int) -> ptr
-
 const WIDTH = 4
 const NULL_INDEX = 0 - 1
 
@@ -96,49 +90,18 @@ struct PtrW {
     w: ptr
 }
 
-// A lane of a wide value, read by index and written through its
-// address: the prepare and the store work a contact at a time, where
-// the stages between them work four.
+// A lane of a wide value, read by index: the store works a contact at
+// a time, where the stages before it work four.
 lane(f: f32x4, index: int) -> float { return (lanes.lane4(f, index as long)) as float }
-
-set_lane(f: ptr, index: int, value: float) {
-    cells = f as f32[]
-    cells[index] = value as f32
-}
 
 int_lane(v: *IntW, index: int) -> int {
     lanes = (v as ptr) as int[]
     return lanes[index]
 }
 
-set_int_lane(v: *IntW, index: int, value: int) {
-    lanes = (v as ptr) as int[]
-    lanes[index] = value
-}
-
 ptr_lane(v: *PtrW, index: int) -> ptr {
     lanes = (v as ptr) as ptr[]
     return lanes[index]
-}
-
-set_ptr_lane(v: *PtrW, index: int, value: ptr) {
-    lanes = (v as ptr) as ptr[]
-    lanes[index] = value
-}
-
-set_vec3_lane(v: *Vec3W, index: int, value: Vec3) {
-    set_lane((&v.x) as ptr, index, value.x)
-    set_lane((&v.y) as ptr, index, value.y)
-    set_lane((&v.z) as ptr, index, value.z)
-}
-
-set_sym3_lane(m: *SymMatrix3W, index: int, value: Matrix3) {
-    set_lane((&m.cxx) as ptr, index, value.cx.x)
-    set_lane((&m.cxy) as ptr, index, value.cx.y)
-    set_lane((&m.cxz) as ptr, index, value.cx.z)
-    set_lane((&m.cyy) as ptr, index, value.cy.y)
-    set_lane((&m.cyz) as ptr, index, value.cy.z)
-    set_lane((&m.czz) as ptr, index, value.cz.z)
 }
 
 zero_w() -> f32x4 { return lanes.splat4(0.0) }
@@ -148,13 +111,9 @@ add_w(a: f32x4, b: f32x4) -> f32x4 { return a + b }
 sub_w(a: f32x4, b: f32x4) -> f32x4 { return a - b }
 mul_w(a: f32x4, b: f32x4) -> f32x4 { return a * b }
 div_w(a: f32x4, b: f32x4) -> f32x4 { return a / b }
-// libm has no lane square root and std.lanes exposes none, so this is
-// four of them (aether#2158); the solve reaches it twice, on the
-// friction and rolling clamps.
-sqrt_w(a: f32x4) -> f32x4 {
-    return lanes.f32x4(sqrt_f32(lanes.lane4(a, 0)), sqrt_f32(lanes.lane4(a, 1)),
-                       sqrt_f32(lanes.lane4(a, 2)), sqrt_f32(lanes.lane4(a, 3)))
-}
+// One instruction, and exact: an IEEE square root is correctly rounded,
+// so it is the four scalar roots (std.lanes.sqrt4, aether#2158).
+sqrt_w(a: f32x4) -> f32x4 { return lanes.sqrt4(a) }
 // a + b * c, as two operations: a fused multiply-add would differ from the scalar path.
 mul_add_w(a: f32x4, b: f32x4, c: f32x4) -> f32x4 { return a + b * c }
 min_w(a: f32x4, b: f32x4) -> f32x4 { return lanes.min4(a, b) }
@@ -251,6 +210,7 @@ struct WideConstraint {
     impulse_scale: f32x4
     restitution: f32x4
     manifolds: PtrW                // *Manifold per lane, null in a spare lane
+    hit_lanes: int                 // bit l: lane l's contact wants hit events
     point0: WideConstraintPoint
     point1: WideConstraintPoint
     point2: WideConstraintPoint
@@ -328,177 +288,318 @@ scatter_bodies(states: ptr, indices: *IntW, body: *BodyStateW) {
 
 // --- the stages ----------------------------------------------------------------------------------------------
 
-// One convex contact into its lane (b3PrepareContacts_Convex's lane body).
-prepare_lane(ctx: *StepContext, c: *Contact, constraint: *WideConstraint, l: int) {
-    warm_start_scale = 0.0
-    if ctx.enable_warm_starting { warm_start_scale = 1.0 }
-    inv_tau = 1.0 / dynamics.SPECULATIVE_DISTANCE
-    manifold = dynamics.manifold_at(c, 0)
-    index_a = c.body_sim_index_a
-    index_b = c.body_sim_index_b
-    set_int_lane(&constraint.index_a, l, index_a + 1)
-    set_int_lane(&constraint.index_b, l, index_b + 1)
-    set_ptr_lane(&constraint.manifolds, l, manifold as ptr)
-    m_a = 0.0
-    i_a = math.mat3_zero()
-    v_a = math.vec3_zero()
-    w_a = math.vec3_zero()
-    if index_a != NULL_INDEX {
-        sim_a = contact_solver.sim_at(ctx.sims, index_a)
-        m_a = sim_a.inv_mass
-        i_a = sim_a.inv_inertia_world
-        state_a = contact_solver.state_at(ctx.states, index_a)
-        v_a = state_a.linear_velocity
-        w_a = state_a.angular_velocity
+// A zeroed block the size of the largest of a contact, a manifold and a
+// body record: what a spare lane and a static body gather from, so the
+// prepare reads four lanes without a branch per field (the reference's
+// b3_zeroContact, b3_zeroManifold and b3_zeroBodySim). Made before any
+// worker runs (zero_wide_tail), never written and never freed: a static,
+// so it is outside the counted allocator.
+extern calloc(count: int, size: int) -> ptr
+var g_zero_record: ptr = null
+
+zero_record() -> ptr {
+    if g_zero_record == null {
+        g_zero_record = calloc(1, math.max_int(math.max_int(sizeof(Contact), sizeof(Manifold)), sizeof(BodySim)))
     }
-    m_b = 0.0
-    i_b = math.mat3_zero()
-    v_b = math.vec3_zero()
-    w_b = math.vec3_zero()
-    if index_b != NULL_INDEX {
-        sim_b = contact_solver.sim_at(ctx.sims, index_b)
-        m_b = sim_b.inv_mass
-        i_b = sim_b.inv_inertia_world
-        state_b = contact_solver.state_at(ctx.states, index_b)
-        v_b = state_b.linear_velocity
-        w_b = state_b.angular_velocity
+    return g_zero_record
+}
+
+f4(a: float, b: float, c: float, d: float) -> f32x4 { return lanes.f32x4(a as f32, b as f32, c as f32, d as f32) }
+
+// The contact of a lane: index `index` of the colour's convex contacts, or
+// the zero record for a spare lane past `end`.
+lane_contact(ctx: *StepContext, color: *GraphColor, index: int, end: int) -> *Contact {
+    if index >= end { return zero_record() as *Contact }
+    return dynamics.contact_at(ctx.world, basics.ints_get(&color.convex_contacts, index))
+}
+
+// A lane's manifold, null for a spare lane.
+lane_manifold(c: *Contact) -> *Manifold {
+    if (c as ptr) == zero_record() { return null }
+    return dynamics.manifold_at(c, 0)
+}
+
+// The manifold a lane gathers from: its own, or the zero record.
+gather_manifold(m: *Manifold) -> *Manifold {
+    if m == null { return zero_record() as *Manifold }
+    return m
+}
+
+// A lane's body index base 1, 0 for a static body or a spare lane.
+lane_index1(c: *Contact, index: int) -> int {
+    if (c as ptr) == zero_record() { return 0 }
+    return index + 1
+}
+
+// Lane l's bit when its contact wants hit events (a spare lane's flags are zero).
+hit_bit(c: *Contact, l: int) -> int {
+    if (c.flags & dynamics.SIM_ENABLE_HIT_EVENT) != 0 { return 1 << l }
+    return 0
+}
+
+lane_sim(ctx: *StepContext, index1: int) -> *BodySim {
+    if index1 == 0 { return zero_record() as *BodySim }
+    return contact_solver.sim_at(ctx.sims, index1 - 1)
+}
+
+lane_softness(ctx: *StepContext, index_a1: int, index_b1: int) -> Softness {
+    if index_a1 == 0 || index_b1 == 0 { return ctx.static_softness }
+    return ctx.contact_softness
+}
+
+// Four bodies' inverse world inertias, the upper triangles.
+gather_inertia(s0: *BodySim, s1: *BodySim, s2: *BodySim, s3: *BodySim) -> SymMatrix3W {
+    return SymMatrix3W {
+        cxx: f4(s0.inv_inertia_world.cx.x, s1.inv_inertia_world.cx.x, s2.inv_inertia_world.cx.x, s3.inv_inertia_world.cx.x),
+        cxy: f4(s0.inv_inertia_world.cx.y, s1.inv_inertia_world.cx.y, s2.inv_inertia_world.cx.y, s3.inv_inertia_world.cx.y),
+        cxz: f4(s0.inv_inertia_world.cx.z, s1.inv_inertia_world.cx.z, s2.inv_inertia_world.cx.z, s3.inv_inertia_world.cx.z),
+        cyy: f4(s0.inv_inertia_world.cy.y, s1.inv_inertia_world.cy.y, s2.inv_inertia_world.cy.y, s3.inv_inertia_world.cy.y),
+        cyz: f4(s0.inv_inertia_world.cy.z, s1.inv_inertia_world.cy.z, s2.inv_inertia_world.cy.z, s3.inv_inertia_world.cy.z),
+        czz: f4(s0.inv_inertia_world.cz.z, s1.inv_inertia_world.cz.z, s2.inv_inertia_world.cz.z, s3.inv_inertia_world.cz.z)
     }
-    set_lane((&constraint.inv_mass_a) as ptr, l, m_a)
-    set_lane((&constraint.inv_mass_b) as ptr, l, m_b)
-    set_sym3_lane(&constraint.inv_inertia_a, l, i_a)
-    set_sym3_lane(&constraint.inv_inertia_b, l, i_b)
-    soft = ctx.contact_softness
-    if index_a == NULL_INDEX || index_b == NULL_INDEX { soft = ctx.static_softness }
-    normal = manifold.normal
-    tangent1 = math.perp(normal)
-    tangent2 = math.cross(tangent1, normal)
-    set_vec3_lane(&constraint.normal, l, normal)
-    set_vec3_lane(&constraint.tangent1, l, tangent1)
-    set_vec3_lane(&constraint.tangent2, l, tangent2)
-    set_lane((&constraint.friction) as ptr, l, c.friction)
-    set_lane((&constraint.restitution) as ptr, l, c.restitution)
-    set_lane((&constraint.rolling_resistance) as ptr, l, c.rolling_resistance)
-    set_lane((&constraint.tangent_velocity1) as ptr, l, math.dot(c.tangent_velocity, tangent1))
-    set_lane((&constraint.tangent_velocity2) as ptr, l, math.dot(c.tangent_velocity, tangent2))
-    set_lane((&constraint.bias_rate) as ptr, l, soft.bias_rate)
-    set_lane((&constraint.mass_scale) as ptr, l, soft.mass_scale)
-    set_lane((&constraint.impulse_scale) as ptr, l, soft.impulse_scale)
-    point_count = manifold.point_count
-    set_int_lane(&constraint.point_counts, l, point_count)
-    center_a = math.vec3_zero()
-    center_b = math.vec3_zero()
-    total_weight = 0.0
+}
+
+gather_vec3(a: Vec3, b: Vec3, c: Vec3, d: Vec3) -> Vec3W {
+    return Vec3W { x: f4(a.x, b.x, c.x, d.x), y: f4(a.y, b.y, c.y, d.y), z: f4(a.z, b.z, c.z, d.z) }
+}
+
+add_sym_w(a: SymMatrix3W, b: SymMatrix3W) -> SymMatrix3W {
+    return SymMatrix3W { cxx: add_w(a.cxx, b.cxx), cxy: add_w(a.cxy, b.cxy), cxz: add_w(a.cxz, b.cxz),
+                         cyy: add_w(a.cyy, b.cyy), cyz: add_w(a.cyz, b.cyz), czz: add_w(a.czz, b.czz) }
+}
+
+// The inverse of a symmetric matrix by its cofactors, zero where singular (b3InvertSymW).
+invert_sym_w(m: SymMatrix3W) -> SymMatrix3W {
+    cxx = sub_w(mul_w(m.cyy, m.czz), mul_w(m.cyz, m.cyz))
+    cxy = sub_w(mul_w(m.cxz, m.cyz), mul_w(m.cxy, m.czz))
+    cxz = sub_w(mul_w(m.cxy, m.cyz), mul_w(m.cxz, m.cyy))
+    cyy = sub_w(mul_w(m.cxx, m.czz), mul_w(m.cxz, m.cxz))
+    cyz = sub_w(mul_w(m.cxy, m.cxz), mul_w(m.cxx, m.cyz))
+    czz = sub_w(mul_w(m.cxx, m.cyy), mul_w(m.cxy, m.cxy))
+    det = add_w(mul_w(m.cxx, cxx), add_w(mul_w(m.cxy, cxy), mul_w(m.cxz, cxz)))
+    valid = greater_w(lanes.abs4(det), splat_w(1000.0 * math.TINY_F32))
+    inv_det = blend_w(zero_w(), div_w(splat_w(1.0), det), valid)
+    return SymMatrix3W { cxx: mul_w(inv_det, cxx), cxy: mul_w(inv_det, cxy), cxz: mul_w(inv_det, cxz),
+                         cyy: mul_w(inv_det, cyy), cyz: mul_w(inv_det, cyz), czz: mul_w(inv_det, czz) }
+}
+
+// A unit vector perpendicular to each lane's, math.perp's choice per
+// lane; zero for a zero lane (b3PerpW).
+perp_w(a: Vec3W) -> Vec3W {
+    zero = zero_w()
+    half = splat_w(0.5)
+    mask = or_w(greater_w(neg_w(half), a.x), greater_w(a.x, half))
+    p = Vec3W { x: blend_w(zero, a.y, mask), y: blend_w(a.z, neg_w(a.x), mask), z: blend_w(neg_w(a.y), zero, mask) }
+    length_squared = dot_w(p, p)
+    valid = greater_w(length_squared, splat_w(1000.0 * math.TINY_F32))
+    s = blend_w(zero, div_w(splat_w(1.0), lanes.sqrt4(length_squared)), valid)
+    return mul_sv_w(s, p)
+}
+
+// One manifold point of the four lanes' manifolds.
+gather_point(m0: *Manifold, m1: *Manifold, m2: *Manifold, m3: *Manifold, index: int) -> WideConstraintPoint {
+    p0 = dynamics.manifold_point_at(m0, index)
+    p1 = dynamics.manifold_point_at(m1, index)
+    p2 = dynamics.manifold_point_at(m2, index)
+    p3 = dynamics.manifold_point_at(m3, index)
+    zero = zero_w()
+    return WideConstraintPoint {
+        anchor_a: gather_vec3(p0.anchor_a, p1.anchor_a, p2.anchor_a, p3.anchor_a),
+        anchor_b: gather_vec3(p0.anchor_b, p1.anchor_b, p2.anchor_b, p3.anchor_b),
+        base_separation: f4(p0.separation, p1.separation, p2.separation, p3.separation),
+        normal_impulse: f4(p0.normal_impulse, p1.normal_impulse, p2.normal_impulse, p3.normal_impulse),
+        total_normal_impulse: zero, normal_mass: zero, lever_arm: zero, relative_velocity: zero
+    }
+}
+
+blend_vec3_w(a: Vec3W, b: Vec3W, m: i32x4) -> Vec3W {
+    return Vec3W { x: blend_w(a.x, b.x, m), y: blend_w(a.y, b.y, m), z: blend_w(a.z, b.z, m) }
+}
+
+// One slot's four convex contacts gathered into lanes and prepared four
+// at a time (b3PrepareContacts_Convex): the contacts at `slot * WIDTH`
+// on, a lane past `end` spare and zero throughout.
+prepare_wide_slot(ctx: *StepContext, color: *GraphColor, slot: int, end: int) {
+    c = wide_constraint_at(color.wide_constraints, slot)
+    first = slot * WIDTH
+    k0 = lane_contact(ctx, color, first, end)
+    k1 = lane_contact(ctx, color, first + 1, end)
+    k2 = lane_contact(ctx, color, first + 2, end)
+    k3 = lane_contact(ctx, color, first + 3, end)
+    c.manifolds = PtrW { x: lane_manifold(k0) as ptr, y: lane_manifold(k1) as ptr, z: lane_manifold(k2) as ptr, w: lane_manifold(k3) as ptr }
+    m0 = gather_manifold(c.manifolds.x as *Manifold)
+    m1 = gather_manifold(c.manifolds.y as *Manifold)
+    m2 = gather_manifold(c.manifolds.z as *Manifold)
+    m3 = gather_manifold(c.manifolds.w as *Manifold)
+    c.index_a = IntW { x: lane_index1(k0, k0.body_sim_index_a), y: lane_index1(k1, k1.body_sim_index_a),
+                       z: lane_index1(k2, k2.body_sim_index_a), w: lane_index1(k3, k3.body_sim_index_a) }
+    c.index_b = IntW { x: lane_index1(k0, k0.body_sim_index_b), y: lane_index1(k1, k1.body_sim_index_b),
+                       z: lane_index1(k2, k2.body_sim_index_b), w: lane_index1(k3, k3.body_sim_index_b) }
+    c.point_counts = IntW { x: m0.point_count, y: m1.point_count, z: m2.point_count, w: m3.point_count }
+    // The store reads this rather than go back out to the contacts.
+    c.hit_lanes = hit_bit(k0, 0) | hit_bit(k1, 1) | hit_bit(k2, 2) | hit_bit(k3, 3)
+
+    sa0 = lane_sim(ctx, c.index_a.x)
+    sa1 = lane_sim(ctx, c.index_a.y)
+    sa2 = lane_sim(ctx, c.index_a.z)
+    sa3 = lane_sim(ctx, c.index_a.w)
+    sb0 = lane_sim(ctx, c.index_b.x)
+    sb1 = lane_sim(ctx, c.index_b.y)
+    sb2 = lane_sim(ctx, c.index_b.z)
+    sb3 = lane_sim(ctx, c.index_b.w)
+    m_a = f4(sa0.inv_mass, sa1.inv_mass, sa2.inv_mass, sa3.inv_mass)
+    m_b = f4(sb0.inv_mass, sb1.inv_mass, sb2.inv_mass, sb3.inv_mass)
+    i_a = gather_inertia(sa0, sa1, sa2, sa3)
+    i_b = gather_inertia(sb0, sb1, sb2, sb3)
+    c.inv_mass_a = m_a
+    c.inv_mass_b = m_b
+    c.inv_inertia_a = i_a
+    c.inv_inertia_b = i_b
+
+    soft0 = lane_softness(ctx, c.index_a.x, c.index_b.x)
+    soft1 = lane_softness(ctx, c.index_a.y, c.index_b.y)
+    soft2 = lane_softness(ctx, c.index_a.z, c.index_b.z)
+    soft3 = lane_softness(ctx, c.index_a.w, c.index_b.w)
+    c.bias_rate = f4(soft0.bias_rate, soft1.bias_rate, soft2.bias_rate, soft3.bias_rate)
+    c.mass_scale = f4(soft0.mass_scale, soft1.mass_scale, soft2.mass_scale, soft3.mass_scale)
+    c.impulse_scale = f4(soft0.impulse_scale, soft1.impulse_scale, soft2.impulse_scale, soft3.impulse_scale)
+    c.friction = f4(k0.friction, k1.friction, k2.friction, k3.friction)
+    c.restitution = f4(k0.restitution, k1.restitution, k2.restitution, k3.restitution)
+    c.rolling_resistance = f4(k0.rolling_resistance, k1.rolling_resistance, k2.rolling_resistance, k3.rolling_resistance)
+
+    zero = zero_w()
+    one = splat_w(1.0)
+    warm_start_scale = zero
+    if ctx.enable_warm_starting { warm_start_scale = one }
+    normal = gather_vec3(m0.normal, m1.normal, m2.normal, m3.normal)
+    tangent1 = perp_w(normal)
+    tangent2 = cross_w(tangent1, normal)
+    c.normal = normal
+    c.tangent1 = tangent1
+    c.tangent2 = tangent2
+    tangent_velocity = gather_vec3(k0.tangent_velocity, k1.tangent_velocity, k2.tangent_velocity, k3.tangent_velocity)
+    c.tangent_velocity1 = dot_w(tangent_velocity, tangent1)
+    c.tangent_velocity2 = dot_w(tangent_velocity, tangent2)
+    friction_impulse = gather_vec3(m0.friction_impulse, m1.friction_impulse, m2.friction_impulse, m3.friction_impulse)
+    c.friction_impulse = Vec2W { x: mul_w(warm_start_scale, dot_w(friction_impulse, tangent1)),
+                                 y: mul_w(warm_start_scale, dot_w(friction_impulse, tangent2)) }
+    c.twist_impulse = mul_w(warm_start_scale, f4(m0.twist_impulse, m1.twist_impulse, m2.twist_impulse, m3.twist_impulse))
+    c.rolling_impulse = mul_sv_w(warm_start_scale, gather_vec3(m0.rolling_impulse, m1.rolling_impulse, m2.rolling_impulse, m3.rolling_impulse))
+
+    // The normal velocity before the solve, for restitution and the
+    // manifold's record, needs the bodies' velocities.
+    b_a = gather_bodies(ctx.states, &c.index_a)
+    b_b = gather_bodies(ctx.states, &c.index_b)
+    inv_tau = splat_w(1.0 / dynamics.SPECULATIVE_DISTANCE)
+    two = splat_w(2.0)
+    min_weight = splat_w(contact_solver.MIN_FRICTION_WEIGHT)
+    point_counts = f4(c.point_counts.x as float, c.point_counts.y as float, c.point_counts.z as float, c.point_counts.w as float)
+    zero_v = Vec3W { x: zero, y: zero, z: zero }
+    center_a = zero_v
+    center_b = zero_v
+    total_weight = zero
     point_index = 0
-    while point_index < point_count {
-        mp = dynamics.manifold_point_at(manifold, point_index)
-        cp = wide_point_at(constraint, point_index)
-        r_a = mp.anchor_a
-        r_b = mp.anchor_b
-        s = mp.separation
-        // The friction centre decays with separation (the scalar prepare says why).
-        weight = math.clamp_float(2.0 - s * inv_tau, contact_solver.MIN_FRICTION_WEIGHT, 1.0)
-        center_a = math.mul_add(center_a, weight, r_a)
-        center_b = math.mul_add(center_b, weight, r_b)
-        total_weight = total_weight + weight
-        set_vec3_lane(&cp.anchor_a, l, r_a)
-        set_vec3_lane(&cp.anchor_b, l, r_b)
-        set_lane((&cp.base_separation) as ptr, l, s - math.dot(math.sub(r_b, r_a), normal))
-        set_lane((&cp.normal_impulse) as ptr, l, warm_start_scale * mp.normal_impulse)
-        set_lane((&cp.total_normal_impulse) as ptr, l, 0.0)
-        rn_a = math.cross(r_a, normal)
-        rn_b = math.cross(r_b, normal)
-        k_normal = m_a + m_b + math.dot(rn_a, math.mul_mv(i_a, rn_a)) + math.dot(rn_b, math.mul_mv(i_b, rn_b))
-        normal_mass = 0.0
-        if k_normal > 0.0 { normal_mass = 1.0 / k_normal }
-        set_lane((&cp.normal_mass) as ptr, l, normal_mass)
-        vr_a = math.add(v_a, math.cross(w_a, r_a))
-        vr_b = math.add(v_b, math.cross(w_b, r_b))
-        set_lane((&cp.relative_velocity) as ptr, l, math.dot(normal, math.sub(vr_b, vr_a)))
-        point_index = point_index + 1
-    }
-    inv_weight = 1.0 / total_weight
-    center_a = math.mul_sv(inv_weight, center_a)
-    center_b = math.mul_sv(inv_weight, center_b)
-    set_vec3_lane(&constraint.center_a, l, center_a)
-    set_vec3_lane(&constraint.center_b, l, center_b)
-    point_index = 0
-    while point_index < point_count {
-        mp = dynamics.manifold_point_at(manifold, point_index)
-        set_lane((&wide_point_at(constraint, point_index).lever_arm) as ptr, l, math.distance(mp.anchor_a, center_a))
-        point_index = point_index + 1
-    }
-    rt_a1 = math.cross(center_a, tangent1)
-    rt_a2 = math.cross(center_a, tangent2)
-    rt_b1 = math.cross(center_b, tangent1)
-    rt_b2 = math.cross(center_b, tangent2)
-    kxx = m_a + m_b + math.dot(rt_a1, math.mul_mv(i_a, rt_a1)) + math.dot(rt_b1, math.mul_mv(i_b, rt_b1))
-    kyy = m_a + m_b + math.dot(rt_a2, math.mul_mv(i_a, rt_a2)) + math.dot(rt_b2, math.mul_mv(i_b, rt_b2))
-    kxy = math.dot(rt_a1, math.mul_mv(i_a, rt_a2)) + math.dot(rt_b1, math.mul_mv(i_b, rt_b2))
-    k = Matrix2 { cx: Vec2 { x: kxx, y: kxy }, cy: Vec2 { x: kxy, y: kyy } }
-    tangent_mass = math.invert2(k)
-    set_lane((&constraint.tangent_mass.cxx) as ptr, l, tangent_mass.cx.x)
-    set_lane((&constraint.tangent_mass.cxy) as ptr, l, tangent_mass.cx.y)
-    set_lane((&constraint.tangent_mass.cyy) as ptr, l, tangent_mass.cy.y)
-    set_lane((&constraint.friction_impulse.x) as ptr, l, warm_start_scale * math.dot(manifold.friction_impulse, tangent1))
-    set_lane((&constraint.friction_impulse.y) as ptr, l, warm_start_scale * math.dot(manifold.friction_impulse, tangent2))
-    k_twist = math.dot(normal, math.mul_mv(math.add_mm(i_a, i_b), normal))
-    twist_mass = 0.0
-    if k_twist > 0.0 { twist_mass = 1.0 / k_twist }
-    set_lane((&constraint.twist_mass) as ptr, l, twist_mass)
-    set_lane((&constraint.twist_impulse) as ptr, l, warm_start_scale * manifold.twist_impulse)
-    set_sym3_lane(&constraint.rolling_mass, l, math.invert_matrix(math.add_mm(i_a, i_b)))
-    set_vec3_lane(&constraint.rolling_impulse, l, math.mul_sv(warm_start_scale, manifold.rolling_impulse))
-    // The points the manifold lacks are zero: nothing reaches the bodies through them.
-    point_index = point_count
     while point_index < dynamics.MAX_MANIFOLD_POINTS {
-        cp = wide_point_at(constraint, point_index)
-        set_vec3_lane(&cp.anchor_a, l, math.vec3_zero())
-        set_vec3_lane(&cp.anchor_b, l, math.vec3_zero())
-        set_lane((&cp.base_separation) as ptr, l, 0.0)
-        set_lane((&cp.normal_impulse) as ptr, l, 0.0)
-        set_lane((&cp.total_normal_impulse) as ptr, l, 0.0)
-        set_lane((&cp.normal_mass) as ptr, l, 0.0)
-        set_lane((&cp.relative_velocity) as ptr, l, 0.0)
-        set_lane((&cp.lever_arm) as ptr, l, 0.0)
+        // A point the lane's manifold lacks is zero: nothing reaches the bodies through it.
+        has_point = greater_w(point_counts, splat_w(point_index as float))
+        g = gather_point(m0, m1, m2, m3, point_index)
+        r_a = blend_vec3_w(zero_v, g.anchor_a, has_point)
+        r_b = blend_vec3_w(zero_v, g.anchor_b, has_point)
+        s = blend_w(zero, g.base_separation, has_point)
+        // The friction centre decays with separation (the scalar prepare says why).
+        weight = blend_w(zero, min_w(max_w(sub_w(two, mul_w(s, inv_tau)), min_weight), one), has_point)
+        center_a = mul_add_sv_w(center_a, weight, r_a)
+        center_b = mul_add_sv_w(center_b, weight, r_b)
+        total_weight = add_w(total_weight, weight)
+        cp = wide_point_at(c, point_index)
+        cp.anchor_a = r_a
+        cp.anchor_b = r_b
+        cp.base_separation = sub_w(s, dot_w(sub_v_w(r_b, r_a), normal))
+        cp.normal_impulse = mul_w(warm_start_scale, blend_w(zero, g.normal_impulse, has_point))
+        cp.total_normal_impulse = zero
+        rn_a = cross_w(r_a, normal)
+        rn_b = cross_w(r_b, normal)
+        k_normal = add_w(add_w(add_w(m_a, m_b), dot_w(rn_a, mul_mv_w(i_a, rn_a))), dot_w(rn_b, mul_mv_w(i_b, rn_b)))
+        valid = lanes.mask_and(greater_w(k_normal, zero), has_point)
+        cp.normal_mass = blend_w(zero, div_w(one, k_normal), valid)
+        vr_a = add_v_w(b_a.v, cross_w(b_a.w, r_a))
+        vr_b = add_v_w(b_b.v, cross_w(b_b.w, r_b))
+        cp.relative_velocity = blend_w(zero, dot_w(normal, sub_v_w(vr_b, vr_a)), has_point)
         point_index = point_index + 1
+    }
+    inv_weight = blend_w(zero, div_w(one, total_weight), greater_w(total_weight, zero))
+    center_a = mul_sv_w(inv_weight, center_a)
+    center_b = mul_sv_w(inv_weight, center_b)
+    c.center_a = center_a
+    c.center_b = center_b
+    point_index = 0
+    while point_index < dynamics.MAX_MANIFOLD_POINTS {
+        cp = wide_point_at(c, point_index)
+        has_point = greater_w(point_counts, splat_w(point_index as float))
+        d = sub_v_w(cp.anchor_a, center_a)
+        cp.lever_arm = blend_w(zero, lanes.sqrt4(dot_w(d, d)), has_point)
+        point_index = point_index + 1
+    }
+
+    rt_a1 = cross_w(center_a, tangent1)
+    rt_a2 = cross_w(center_a, tangent2)
+    rt_b1 = cross_w(center_b, tangent1)
+    rt_b2 = cross_w(center_b, tangent2)
+    i_rt_a1 = mul_mv_w(i_a, rt_a1)
+    i_rt_a2 = mul_mv_w(i_a, rt_a2)
+    i_rt_b1 = mul_mv_w(i_b, rt_b1)
+    i_rt_b2 = mul_mv_w(i_b, rt_b2)
+    kxx = add_w(add_w(add_w(m_a, m_b), dot_w(rt_a1, i_rt_a1)), dot_w(rt_b1, i_rt_b1))
+    kyy = add_w(add_w(add_w(m_a, m_b), dot_w(rt_a2, i_rt_a2)), dot_w(rt_b2, i_rt_b2))
+    kxy = add_w(dot_w(rt_a1, i_rt_a2), dot_w(rt_b1, i_rt_b2))
+    det = sub_w(mul_w(kxx, kyy), mul_w(kxy, kxy))
+    inv_det = blend_w(zero, div_w(one, det), greater_w(lanes.abs4(det), splat_w(1000.0 * math.TINY_F32)))
+    c.tangent_mass = SymMatrix2W { cxx: mul_w(inv_det, kyy), cxy: neg_w(mul_w(inv_det, kxy)), cyy: mul_w(inv_det, kxx) }
+
+    i_ab = add_sym_w(i_a, i_b)
+    k_twist = dot_w(normal, mul_mv_w(i_ab, normal))
+    c.twist_mass = blend_w(zero, div_w(one, k_twist), greater_w(k_twist, zero))
+    // The solve reads the rolling mass only where there is rolling resistance.
+    if all_zero_w(c.rolling_resistance) {
+        c.rolling_mass = SymMatrix3W { cxx: zero, cxy: zero, cxz: zero, cyy: zero, cyz: zero, czz: zero }
+    } else {
+        c.rolling_mass = invert_sym_w(i_ab)
     }
 }
 
 // A colour's convex contacts into its wide constraints, four to a slot
-// in the order of the colour's array; the tail slot's spare lanes zeroed.
+// in the order of the colour's array.
 prepare_wide_contacts(ctx: *StepContext, color: *GraphColor) {
-    count = color.convex_contacts.count
-    if count == 0 { return }
-    base = color.wide_constraints
-    if count % WIDTH != 0 {
-        memset(base + (color.wide_constraint_count - 1) * sizeof(WideConstraint), 0, sizeof(WideConstraint))
-    }
-    prepare_wide_range(ctx, color, 0, count)
+    prepare_wide_range(ctx, color, 0, color.convex_contacts.count)
 }
 
-// A block [start, end) of a colour's convex contacts into their lanes;
-// the tail slot's spare lanes were zeroed (zero_wide_tail) before any
-// block ran.
+// A block [start, end) of a colour's convex contacts into their slots:
+// `start` begins a slot, and `end` ends one or is the colour's count.
 prepare_wide_range(ctx: *StepContext, color: *GraphColor, start: int, end: int) {
     w = ctx.world
-    base = color.wide_constraints
     i = start
     while i < end {
-        // The contacts to come and their manifolds fetched ahead.
-        if i + 8 < end { native.prefetch(dynamics.contact_at(w, basics.ints_get(&color.convex_contacts, i + 8)) as ptr) }
-        if i + 4 < end { native.prefetch(dynamics.contact_at(w, basics.ints_get(&color.convex_contacts, i + 4)).manifolds) }
-        c = dynamics.contact_at(w, basics.ints_get(&color.convex_contacts, i))
-        prepare_lane(ctx, c, wide_constraint_at(base, i / WIDTH), i % WIDTH)
-        i = i + 1
+        // The slots to come: the contacts two ahead, the manifolds one ahead.
+        j = i + 2 * WIDTH
+        while j < end && j < i + 3 * WIDTH {
+            native.prefetch(dynamics.contact_at(w, basics.ints_get(&color.convex_contacts, j)) as ptr)
+            j = j + 1
+        }
+        j = i + WIDTH
+        while j < end && j < i + 2 * WIDTH {
+            native.prefetch(dynamics.contact_at(w, basics.ints_get(&color.convex_contacts, j)).manifolds)
+            j = j + 1
+        }
+        prepare_wide_slot(ctx, color, i / WIDTH, end)
+        i = i + WIDTH
     }
 }
 
-// The tail slot's spare lanes zeroed, before the blocks fill it.
+// Before any block runs: the zero record a spare lane gathers from made,
+// so no worker races to make it. (A slot writes every lane, spare ones
+// included, so there is no tail to clear.)
 zero_wide_tail(color: *GraphColor) {
-    count = color.convex_contacts.count
-    if count > 0 && count % WIDTH != 0 {
-        memset(color.wide_constraints + (color.wide_constraint_count - 1) * sizeof(WideConstraint), 0, sizeof(WideConstraint))
-    }
+    if color.convex_contacts.count > 0 { zero_record() }
 }
 
 // Last step's impulses applied before solving (b3WarmStartContacts_Convex).
@@ -718,6 +819,15 @@ store_wide_range(ctx: *StepContext, color: *GraphColor, start: int, end: int, hi
     while i < end {
         c = wide_constraint_at(color.wide_constraints, i / WIDTH)
         l = i % WIDTH
+        // The next slot's manifolds, which nothing has touched since the
+        // collide pass, fetched while this slot's are written.
+        if l == 0 && i + WIDTH < end {
+            next = wide_constraint_at(color.wide_constraints, i / WIDTH + 1)
+            native.prefetch(next.manifolds.x)
+            native.prefetch(next.manifolds.y)
+            native.prefetch(next.manifolds.z)
+            native.prefetch(next.manifolds.w)
+        }
         m = ptr_lane(&c.manifolds, l) as *Manifold
         f1 = lane(c.friction_impulse.x, l)
         f2 = lane(c.friction_impulse.y, l)
@@ -736,12 +846,12 @@ store_wide_range(ctx: *StepContext, color: *GraphColor, start: int, end: int, hi
             mp.normal_velocity = lane(cp.relative_velocity, l)
             point_index = point_index + 1
         }
-        contact = dynamics.contact_at(w, basics.ints_get(&color.convex_contacts, i))
-        if (contact.flags & dynamics.SIM_ENABLE_HIT_EVENT) != 0 {
+        if (c.hit_lanes & (1 << l)) != 0 {
             point_index = 0
             while point_index < point_count {
                 mp = dynamics.manifold_point_at(m, point_index)
                 if mp.normal_velocity < neg_threshold && mp.total_normal_impulse > 0.0 {
+                    contact = dynamics.contact_at(w, basics.ints_get(&color.convex_contacts, i))
                     basics.bitset_set_grow(hit_bits, contact.contact_id)
                     has_hits = true
                     break
