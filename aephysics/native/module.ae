@@ -9,7 +9,8 @@
 exports (
     MAX_WORKERS, worker_index, set_worker_index, yield_thread, pause, processor_count, scratch,
     atomic_load, atomic_store, atomic_add, atomic_or, atomic_cas,
-    semaphore_new, semaphore_free, semaphore_wait, semaphore_signal
+    semaphore_new, semaphore_free, semaphore_wait, semaphore_signal,
+    name_copy, name_text, name_free
 )
 
 // The most workers a world can have: every module's scratch is a block
@@ -30,6 +31,15 @@ extern aephysics_semaphore_new(initial: int) -> ptr
 extern aephysics_semaphore_free(s: ptr)
 extern aephysics_semaphore_wait(s: ptr)
 extern aephysics_semaphore_signal(s: ptr, count: int)
+extern aephysics_name_copy(s: string) -> ptr
+extern aephysics_name_text(name: ptr) -> string
+extern free(p: ptr)
+
+// A name the world keeps: a plain copy of `s` (null for none), its text
+// (empty for none), and its release.
+name_copy(s: string) -> ptr { return aephysics_name_copy(s) }
+name_text(name: ptr) -> string { return aephysics_name_text(name) }
+name_free(name: ptr) { if name != null { free(name) } }
 
 // The worker the calling thread is running as: 0 on the main thread
 // outside a task, the task's worker inside one. Every module's scratch

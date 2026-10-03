@@ -31,6 +31,23 @@
 #include <unistd.h>
 #endif
 
+// --- names ----------------------------------------------------------------------------------------------------
+
+// A body's or shape's name, kept as a plain C copy the world owns and frees
+// (free()): Aether cannot hold on to a string it did not make without the
+// runtime reclaiming it, and frees only what carries its own header, so a
+// plain buffer handed back is read as a literal and left alone.
+void *aephysics_name_copy(const char *s)
+{
+    if (s == NULL) return NULL;
+    size_t n = strlen(s);
+    char *copy = (char *)malloc(n + 1);
+    if (copy != NULL) memcpy(copy, s, n + 1);
+    return copy;
+}
+
+const char *aephysics_name_text(const void *name) { return name != NULL ? (const char *)name : ""; }
+
 // --- threads --------------------------------------------------------------------------------------------------
 
 // Which worker the calling thread is, set by the task running on it: the
