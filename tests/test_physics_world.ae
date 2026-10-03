@@ -137,6 +137,119 @@ test_contact_events() {
     hull.destroy_hull(ground_box)
 }
 
+// The pre-solve callback on an ordinary contact (b3UpdateConvexContact):
+// a platform whose callback says no is passed through, the one-way
+// platform; one that says yes holds the box. It was consulted only by the
+// continuous sweep, so a box falling at normal speed landed either way.
+var g_pre_solve_answer = false
+var g_pre_solve_calls = 0
+
+pre_solve_answer(shape_a: ShapeId, shape_b: ShapeId, point: Vec3, normal: Vec3, context: ptr) -> bool {
+    g_pre_solve_calls = g_pre_solve_calls + 1
+    return g_pre_solve_answer
+}
+
+pre_solve_drop(answer: bool) -> float {
+    g_pre_solve_answer = answer
+    g_pre_solve_calls = 0
+    wdef = dynamics.default_world_def()
+    world_id = dynamics.create_world(&wdef)
+    physics_world.set_pre_solve_callback(world_id, pre_solve_answer, null)
+    gdef = dynamics.default_body_def()
+    platform = dynamics.create_body(world_id, &gdef)
+    slab = hull.make_box_hull(4.0, 0.1, 4.0)
+    gsdef = dynamics.default_shape_def()
+    gsdef.enable_pre_solve_events = true
+    dynamics.create_hull_shape(platform, &gsdef, slab)
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.position = math.vec3(0.0, 1.0, 0.0)
+    box_body = dynamics.create_body(world_id, &bdef)
+    cube = hull.make_box_hull(0.25, 0.25, 0.25)
+    sdef = dynamics.default_shape_def()
+    dynamics.create_hull_shape(box_body, &sdef, cube)
+    i = 0
+    while i < 90 {
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        i = i + 1
+    }
+    y = dynamics.body_get_position(box_body).y
+    dynamics.destroy_world(world_id)
+    hull.destroy_hull(slab)
+    hull.destroy_hull(cube)
+    return y
+}
+
+test_pre_solve() {
+    through = pre_solve_drop(false)
+    ensure("pre-solve: consulted (${g_pre_solve_calls})", g_pre_solve_calls > 0)
+    ensure("pre-solve: no passes the box through (y ${through})", through < 0.0 - 1.0)
+    held = pre_solve_drop(true)
+    ensure("pre-solve: yes holds the box (y ${held})", held > 0.3 && held < 0.4)
+}
+
+// A mesh flattened by a zero scale is clamped to the smallest scale (the
+// reference's b3SafeScale) rather than divided by: a ray down onto it
+// hits, where it used to miss.
+test_mesh_scale() {
+    wdef = dynamics.default_world_def()
+    world_id = dynamics.create_world(&wdef)
+    grid = mesh.create_grid_mesh(8, 8, 1.0, 1, true)
+    bdef = dynamics.default_body_def()
+    ground = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    flat = dynamics.create_mesh_shape(ground, &sdef, grid, math.vec3(1.0, 0.0, 1.0))
+    out = physics_world.shape_ray_cast(flat, math.vec3(0.3, 5.0, 0.2), math.vec3(0.0, 0.0 - 10.0, 0.0))
+    ensure("mesh scale: a ray hits the flattened mesh (${out.hit}, ${out.fraction})", out.hit && math.abs_float(out.fraction - 0.5) < 0.01 && out.normal.y > 0.99)
+    dynamics.shape_set_mesh(flat, grid, math.vec3(1.0, 0.0, 1.0))
+    out = physics_world.shape_ray_cast(flat, math.vec3(0.3, 5.0, 0.2), math.vec3(0.0, 0.0 - 10.0, 0.0))
+    ensure("mesh scale: and once set again", out.hit && math.abs_float(out.fraction - 0.5) < 0.01)
+    dynamics.destroy_world(world_id)
+    mesh.destroy_mesh(grid)
+}
+
+// The step a body falls asleep, its move event says so (b3TrySleepIsland);
+// it used to read false on every event, so a sync that drops sleeping
+// bodies never saw one go.
+test_fell_asleep() {
+    wdef = dynamics.default_world_def()
+    world_id = dynamics.create_world(&wdef)
+    w = dynamics.get_world(world_id.index1 - 1)
+    gdef = dynamics.default_body_def()
+    gdef.position = math.vec3(0.0, 0.0 - 0.5, 0.0)
+    ground = dynamics.create_body(world_id, &gdef)
+    slab = hull.make_box_hull(4.0, 0.5, 4.0)
+    sdef = dynamics.default_shape_def()
+    dynamics.create_hull_shape(ground, &sdef, slab)
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.position = math.vec3(0.0, 0.3, 0.0)
+    box_body = dynamics.create_body(world_id, &bdef)
+    cube = hull.make_box_hull(0.25, 0.25, 0.25)
+    dynamics.create_hull_shape(box_body, &sdef, cube)
+    slept_step = 0 - 1
+    reported = false
+    i = 0
+    while i < 600 && slept_step < 0 {
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        if dynamics.body_is_awake(box_body) == false {
+            slept_step = i
+            j = 0
+            while j < dynamics.world_body_move_event_count(w) {
+                event = dynamics.world_body_move_event(w, j)
+                if event.body_id.index1 == box_body.index1 && event.fell_asleep { reported = true }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    ensure("fell asleep: the box slept (step ${slept_step})", slept_step >= 0)
+    ensure("fell asleep: that step's move event says so", reported)
+    dynamics.destroy_world(world_id)
+    hull.destroy_hull(slab)
+    hull.destroy_hull(cube)
+}
+
 test_hit_events() {
     wdef = dynamics.default_world_def()
     wdef.hit_event_threshold = 1.0
@@ -615,6 +728,9 @@ main() {
     test_hello_world()
     test_contact_events()
     test_hit_events()
+    test_pre_solve()
+    test_mesh_scale()
+    test_fell_asleep()
     test_continuous_move_event()
     test_sensor_stepped()
     test_explosion()

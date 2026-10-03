@@ -1385,6 +1385,49 @@ test_body_setters() {
     dynamics.destroy_world(world_id)
 }
 
+// A joint between two sleeping sets, when joint 0 is someone else's: the
+// merge moves the smaller set's sims and fixes each one's joint by the
+// id in the sim, so the new sim must carry its own id by then.
+test_joint_merge() {
+    world_id = slab_world()
+    w = dynamics.get_world(world_id.index1 - 1)
+    // Joint 0: an awake cube held to the slab.
+    held = cube_at(world_id, math.vec3(0.0 - 8.0, 0.49, 0.0), false)
+    hdef = dynamics.default_weld_joint_def()
+    hdef.base.body_id_a = dynamics.make_body_id(w, 0)
+    hdef.base.body_id_b = held
+    first = dynamics.create_weld_joint(world_id, &hdef)
+    first_joint = dynamics.get_joint_full_id(w, first)
+    first_set = first_joint.set_index
+    first_local = first_joint.local_index
+    // A pair asleep in one set, then a lone cube asleep in a later one.
+    left1 = cube_at(world_id, math.vec3(0.0, 0.49, 0.0), false)
+    left2 = cube_at(world_id, math.vec3(2.0, 0.49, 0.0), false)
+    pdef = dynamics.default_distance_joint_def()
+    pdef.base.body_id_a = left1
+    pdef.base.body_id_b = left2
+    pdef.length = 2.0
+    dynamics.create_distance_joint(world_id, &pdef)
+    lone = cube_at(world_id, math.vec3(6.0, 0.49, 0.0), false)
+    pair_body = dynamics.get_body_full_id(w, left1)
+    lone_body = dynamics.get_body_full_id(w, lone)
+    ensure("merge: the pair asleep", dynamics.try_sleep_island(w, pair_body.island_id))
+    ensure("merge: the lone cube asleep", dynamics.try_sleep_island(w, lone_body.island_id))
+    ensure("merge: the lone cube's set is the later, smaller one", lone_body.set_index > pair_body.set_index)
+    ddef = dynamics.default_distance_joint_def()
+    ddef.base.body_id_a = lone
+    ddef.base.body_id_b = left1
+    ddef.length = 6.0
+    rope = dynamics.create_distance_joint(world_id, &ddef)
+    rope_joint = dynamics.get_joint_full_id(w, rope)
+    ensure("merge: one sleeping set", lone_body.set_index == pair_body.set_index && rope_joint.set_index == pair_body.set_index)
+    ensure("merge: the new joint's sim is its own", dynamics.get_joint_sim(w, rope_joint).joint_id == rope_joint.joint_id)
+    first_joint = dynamics.get_joint_full_id(w, first)
+    ensure("merge: joint 0 untouched (set ${first_joint.set_index}, index ${first_joint.local_index})", first_joint.set_index == first_set && first_joint.local_index == first_local)
+    ensure("merge: valid", joints_valid(world_id))
+    dynamics.destroy_world(world_id)
+}
+
 test_joint_sets() {
     // Two overlapping cubes touch; a joint that forbids their collision
     // destroys the contact and the broad phase makes no new one; letting
@@ -1649,6 +1692,7 @@ main() {
     test_mesh_and_compound_contacts()
     test_joint_kinds()
     test_joint_sets()
+    test_joint_merge()
     test_body_setters()
     test_shape_filter()
     test_shape_api()
