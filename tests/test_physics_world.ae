@@ -250,6 +250,36 @@ test_fell_asleep() {
     hull.destroy_hull(cube)
 }
 
+// A static shape made to touch a resting body, then the static tree
+// rebuilt before the step: the full build keeps the new proxy's moved
+// flag (Box3D 79fc559), so the pair is still found.
+test_rebuilt_static_pairs() {
+    wdef = dynamics.default_world_def()
+    world_id = dynamics.create_world(&wdef)
+    w = dynamics.get_world(world_id.index1 - 1)
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.gravity_scale = 0.0
+    bdef.position = math.vec3(0.0, 0.5, 0.0)
+    box_body = dynamics.create_body(world_id, &bdef)
+    cube = hull.make_box_hull(0.5, 0.5, 0.5)
+    sdef = dynamics.default_shape_def()
+    dynamics.create_hull_shape(box_body, &sdef, cube)
+    physics_world.step(world_id, 1.0 / 60.0, 4)
+    physics_world.step(world_id, 1.0 / 60.0, 4)
+    gdef = dynamics.default_body_def()
+    gdef.position = math.vec3(0.0, 0.0 - 0.49, 0.0)
+    ground = dynamics.create_body(world_id, &gdef)
+    slab = hull.make_box_hull(4.0, 0.5, 4.0)
+    dynamics.create_hull_shape(ground, &sdef, slab)
+    physics_world.rebuild_static_tree(world_id)
+    physics_world.step(world_id, 1.0 / 60.0, 4)
+    ensure("rebuilt static tree: the new pair found (${dynamics.world_contact_count(w)} contacts)", dynamics.world_contact_count(w) == 1)
+    dynamics.destroy_world(world_id)
+    hull.destroy_hull(cube)
+    hull.destroy_hull(slab)
+}
+
 test_hit_events() {
     wdef = dynamics.default_world_def()
     wdef.hit_event_threshold = 1.0
@@ -766,6 +796,7 @@ main() {
     test_pre_solve()
     test_mesh_scale()
     test_fell_asleep()
+    test_rebuilt_static_pairs()
     test_continuous_move_event()
     test_continuous_gravity()
     test_sensor_stepped()
