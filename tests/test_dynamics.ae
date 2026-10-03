@@ -1195,6 +1195,75 @@ test_shape_filter() {
     dynamics.destroy_world(world_id)
 }
 
+// The shape API the reference has beyond creation: a ball's geometry
+// changed in place drops its contact and pairs under its new size and
+// kind; its friction and restitution, events and mass read and set; the
+// closest point on a shape and on a body to a target.
+test_shape_api() {
+    world_id = slab_world()
+    w = dynamics.get_world(world_id.index1 - 1)
+    bdef = dynamic_body_def()
+    bdef.position = math.vec3(0.0, 0.49, 0.0)
+    ball = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    sdef.density = 2.0
+    id = dynamics.create_sphere_shape(ball, &sdef, manifold.sphere(math.vec3_zero(), 0.5))
+    step_contacts(w)
+    ensure("shape api: the ball rests on the slab", dynamics.world_contact_count(w) == 1)
+    // Shrunk to a pebble, it no longer reaches the slab.
+    dynamics.shape_set_sphere(id, manifold.sphere(math.vec3_zero(), 0.1))
+    ensure("shape api: shrunk, its contact dropped at once (${dynamics.world_contact_count(w)})", dynamics.world_contact_count(w) == 0)
+    ensure("shape api: the new radius kept, the density too", dynamics.shape_get_sphere(id).radius == 0.1 && dynamics.shape_get_density(id) == 2.0)
+    step_contacts(w)
+    ensure("shape api: a pebble 0.39 up pairs with nothing (${dynamics.world_contact_count(w)})", dynamics.world_contact_count(w) == 0)
+    // A capsule lying on the slab instead: it pairs again.
+    dynamics.shape_set_capsule(id, manifold.capsule(math.vec3(0.0 - 0.5, 0.0, 0.0), math.vec3(0.5, 0.0, 0.0), 0.5))
+    step_contacts(w)
+    ensure("shape api: a capsule now, resting on the slab (${dynamics.world_contact_count(w)})", dynamics.shape_get_type(id) == shape.SHAPE_CAPSULE && dynamics.world_contact_count(w) == 1)
+    ensure("shape api: valid", all_valid(world_id))
+    dynamics.shape_set_sphere(id, manifold.sphere(math.vec3_zero(), 0.5))
+    // Materials, events.
+    dynamics.shape_set_friction(id, 0.25)
+    dynamics.shape_set_restitution(id, 0.5)
+    ensure("shape api: friction and restitution", dynamics.shape_get_friction(id) == 0.25 && dynamics.shape_get_restitution(id) == 0.5)
+    m = dynamics.shape_get_mesh_surface_material(id, 0)
+    ensure("shape api: the first material is the shape's", m.friction == 0.25)
+    dynamics.shape_enable_pre_solve_events(id, true)
+    ensure("shape api: pre-solve events on", dynamics.shape_are_pre_solve_events_enabled(id))
+    dynamics.body_enable_hit_events(ball, true)
+    ensure("shape api: hit events on through the body", dynamics.shape_are_hit_events_enabled(id))
+    dynamics.body_enable_hit_events(ball, false)
+    ensure("shape api: and off", dynamics.shape_are_hit_events_enabled(id) == false)
+    // Its mass alone: 2 x 4/3 pi 0.5^3.
+    small("shape api: the ball's mass", dynamics.shape_compute_mass_data(id).mass - 2.0 * 4.0 / 3.0 * math.PI * 0.125, 0.0001)
+    // Closest points, on the surface; a target inside is its own.
+    p = dynamics.shape_get_closest_point(id, math.vec3(3.0, 0.49, 0.0))
+    ensure("shape api: the closest point on the ball's surface (${p.x} ${p.y} ${p.z})", math.length(math.sub(p, math.vec3(0.5, 0.49, 0.0))) < 0.0001)
+    inside = dynamics.shape_get_closest_point(id, math.vec3(0.1, 0.5, 0.0))
+    ensure("shape api: a target inside is its own closest point", math.length(math.sub(inside, math.vec3(0.1, 0.5, 0.0))) < 0.0001)
+    // The body's flags after creation: recycling switched off reaches the
+    // contact it already has, and back on.
+    step_contacts(w)
+    resting = first_contact(w)
+    ensure("shape api: the resting contact recycles", resting != null && (resting.flags & dynamics.CONTACT_RECYCLE) != 0)
+    dynamics.body_enable_contact_recycling(ball, false)
+    ensure("shape api: recycling off, on the contact too", dynamics.body_is_contact_recycling_enabled(ball) == false && (resting.flags & dynamics.CONTACT_RECYCLE) == 0)
+    dynamics.body_enable_contact_recycling(ball, true)
+    ensure("shape api: recycling back on", (resting.flags & dynamics.CONTACT_RECYCLE) != 0)
+    contacts_block = calloc(4, sizeof(ContactData))
+    found = dynamics.shape_get_contact_data(id, contacts_block as ContactData[], 4)
+    ensure("shape api: the ball's one touching contact, by shape (${found})", found == 1 && dynamics.shape_get_contact_capacity(id) >= 1)
+    free(contacts_block)
+    dynamics.body_allow_fast_rotation(ball, true)
+    dynamics.body_set_safety_factor(ball, 0.25)
+    ensure("shape api: fast rotation and the safety factor", dynamics.body_is_fast_rotation_allowed(ball) && dynamics.body_get_safety_factor(ball) == 0.25 &&
+        (dynamics.get_body_sim(w, dynamics.get_body_full_id(w, ball)).flags & dynamics.ALLOW_FAST_ROTATION) != 0)
+    near = dynamics.body_get_closest_point(ball, math.vec3(0.0, 0.49, 0.0 - 4.0))
+    small("shape api: the body's closest point, 3.5 off", near.distance - 3.5, 0.0001)
+    ensure("shape api: on the ball's surface", math.length(math.sub(near.point, math.vec3(0.0, 0.49, 0.0 - 0.5))) < 0.0001)
+    dynamics.destroy_world(world_id)
+}
+
 // The reference's TestCreateJointClearsContacts and the sets' bookkeeping.
 test_joint_sets() {
     // Two overlapping cubes touch; a joint that forbids their collision
@@ -1461,6 +1530,7 @@ main() {
     test_joint_kinds()
     test_joint_sets()
     test_shape_filter()
+    test_shape_api()
     test_sensors()
     hull.destroy_hull(g_cube as *HullData)
     hull.destroy_hull(g_slab as *HullData)

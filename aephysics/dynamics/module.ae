@@ -90,6 +90,13 @@ exports (
     shape_get_aabb, shape_get_type, shape_get_density, shape_set_density, shape_get_filter, shape_set_filter,
     shape_get_surface_material, shape_set_surface_material, shape_get_material_count, shape_is_sensor,
     shape_set_user_data, shape_get_user_data, shape_get_flags, shape_get_sphere, shape_get_capsule, shape_get_hull, shape_get_mesh_data,
+    shape_get_mesh, shape_get_height_field, shape_set_sphere, shape_set_capsule, shape_set_hull, shape_set_mesh,
+    shape_get_friction, shape_set_friction, shape_get_restitution, shape_set_restitution,
+    shape_get_mesh_surface_material, shape_set_mesh_material, shape_enable_pre_solve_events, shape_are_pre_solve_events_enabled,
+    shape_compute_mass_data, body_enable_hit_events, reset_shape_proxy,
+    ClosestPoint, shape_get_closest_point, body_get_closest_point,
+    body_allow_fast_rotation, body_is_fast_rotation_allowed, body_enable_contact_recycling, body_is_contact_recycling_enabled,
+    body_set_safety_factor, body_get_safety_factor, shape_get_contact_data,
     create_island, destroy_island, validate_island, create_solver_set, destroy_solver_set, wake_solver_set,
     validate_solver_sets, get_solver_set, get_island, world_island_count, world_solver_set_count,
     body_sim_at, body_state_at, island_sim_at, world_shape_at, island_at, solver_set_at, body_at,
@@ -1198,6 +1205,7 @@ reserve_scratch() {
     contact_scratch_ready()
     child_scratch_ready()
     sensor_scratch_ready()
+    closest_target()
     manifold.reserve_scratch()
     triangle_manifold.reserve_scratch()
     mesh.reserve_scratch()
@@ -2028,6 +2036,131 @@ shape_get_sphere(id: ShapeId) -> Sphere { return get_shape_full_id(world_at(id.w
 shape_get_capsule(id: ShapeId) -> Capsule { return get_shape_full_id(world_at(id.world0), id).geometry.capsule }
 shape_get_hull(id: ShapeId) -> *HullData { return get_shape_full_id(world_at(id.world0), id).geometry.hull }
 shape_get_mesh_data(id: ShapeId) -> *MeshData { return get_shape_full_id(world_at(id.world0), id).geometry.mesh.data }
+shape_get_mesh(id: ShapeId) -> Mesh { return get_shape_full_id(world_at(id.world0), id).geometry.mesh }
+shape_get_height_field(id: ShapeId) -> *HeightFieldData { return get_shape_full_id(world_at(id.world0), id).geometry.height_field }
+
+// --- a shape's geometry changed after creation (b3Shape_SetSphere and its siblings) ---------------
+
+// The shape takes the new geometry in place, keeping its density, filter,
+// materials and flags: its centroid and margin recomputed, its contacts
+// destroyed (its bodies woken, to react to it) and its proxy made anew.
+// The body's mass is the caller's to update (body_apply_mass_from_shapes),
+// as in the reference. A compound or height field (static-only shapes) is
+// not changed, nor changed into.
+shape_set_sphere(id: ShapeId, s: Sphere) { change_shape_geometry(id, shape.sphere_shape(s, 0.0)) }
+shape_set_capsule(id: ShapeId, c: Capsule) { change_shape_geometry(id, shape.capsule_shape(c, 0.0)) }
+shape_set_hull(id: ShapeId, h: *HullData) { change_shape_geometry(id, shape.hull_shape(h, 0.0)) }
+shape_set_mesh(id: ShapeId, m: *MeshData, scale: Vec3) { change_shape_geometry(id, shape.mesh_shape(mesh.mesh(m, scale), 1)) }
+
+change_shape_geometry(id: ShapeId, geometry: Shape) {
+    w = world_at(id.world0)
+    if w.locked { return }
+    s = get_shape_full_id(w, id)
+    if s.geometry.kind == KIND_COMPOUND || s.geometry.kind == KIND_HEIGHT_FIELD { return }
+    density = s.geometry.density
+    s.geometry = geometry
+    s.geometry.density = density
+    s.geometry.material_count = s.material_count
+    s.local_centroid = shape.get_shape_centroid(&s.geometry)
+    s.aabb_margin = compute_shape_margin(&s.geometry)
+    reset_shape_proxy(w, s, true, true)
+}
+
+// The first material's friction and restitution (b3Shape_SetFriction and
+// its siblings); a contact takes them on its next update.
+shape_get_friction(id: ShapeId) -> float { return get_shape_full_id(world_at(id.world0), id).material.friction }
+shape_set_friction(id: ShapeId, friction: float) {
+    m = shape_get_surface_material(id)
+    m.friction = friction
+    shape_set_surface_material(id, m)
+}
+shape_get_restitution(id: ShapeId) -> float { return get_shape_full_id(world_at(id.world0), id).material.restitution }
+shape_set_restitution(id: ShapeId, restitution: float) {
+    m = shape_get_surface_material(id)
+    m.restitution = restitution
+    shape_set_surface_material(id, m)
+}
+
+// A mesh's materials by index (b3Shape_SetMeshMaterial): the first is the
+// shape's material; an index out of range is ignored.
+shape_get_mesh_surface_material(id: ShapeId, index: int) -> SurfaceMaterial {
+    s = get_shape_full_id(world_at(id.world0), id)
+    if s.materials == null || index <= 0 || index >= s.material_count { return s.material }
+    materials = s.materials as SurfaceMaterial[]
+    return materials[index]
+}
+shape_set_mesh_material(id: ShapeId, m: SurfaceMaterial, index: int) {
+    s = get_shape_full_id(world_at(id.world0), id)
+    if index < 0 || index >= s.material_count { return }
+    if index == 0 {
+        shape_set_surface_material(id, m)
+        return
+    }
+    materials = s.materials as SurfaceMaterial[]
+    materials[index] = m
+}
+
+// Pre-solve events on a shape after its creation; a contact takes the flag when it is made.
+shape_enable_pre_solve_events(id: ShapeId, flag: bool) {
+    s = get_shape_full_id(world_at(id.world0), id)
+    if flag { s.flags = s.flags | SHAPE_ENABLE_PRE_SOLVE_EVENTS } else { s.flags = s.flags & (0 - 1 - SHAPE_ENABLE_PRE_SOLVE_EVENTS) }
+}
+shape_are_pre_solve_events_enabled(id: ShapeId) -> bool { return (get_shape_full_id(world_at(id.world0), id).flags & SHAPE_ENABLE_PRE_SOLVE_EVENTS) != 0 }
+
+// The mass a shape alone gives (b3Shape_ComputeMassData).
+shape_compute_mass_data(id: ShapeId) -> MassData { return shape.compute_shape_mass(&get_shape_full_id(world_at(id.world0), id).geometry) }
+
+// The point of a convex shape (sphere, capsule, hull) closest to a world
+// target, on its surface, in the world; the target itself when inside (b3Shape_GetClosestPoint).
+shape_get_closest_point(id: ShapeId, target: Vec3) -> Vec3 {
+    w = world_at(id.world0)
+    s = get_shape_full_id(w, id)
+    return closest_on_shape(s, get_body_transform(w, s.body_id), target).point
+}
+
+// The closest point on a body's convex shapes to a world target and how far
+// it is (b3Body_GetClosestPoint, which reads the shapes without their radii:
+// a sphere's centre, not its surface; here the radii are counted, so the
+// point is on the surface). No convex shape gives the body's origin and the
+// largest float.
+body_get_closest_point(id: BodyId, target: Vec3) -> ClosestPoint {
+    w = world_at(id.world0)
+    t = get_body_transform(w, id.index1 - 1)
+    best = ClosestPoint { point: t.p, distance: math.MAX_FLOAT }
+    shape_id = get_body_full_id(w, id).head_shape_id
+    while shape_id != NULL_INDEX {
+        s = world_shape_at(w, shape_id)
+        shape_id = s.next_shape_id
+        found = closest_on_shape(s, t, target)
+        if found.distance < best.distance { best = found }
+    }
+    return best
+}
+
+struct ClosestPoint {
+    point: Vec3
+    distance: float
+}
+
+var g_closest_target: ptr = null   // Vec3, the query's one point
+closest_target() -> ptr {
+    if g_closest_target == null { g_closest_target = basics.alloc(native.MAX_WORKERS * sizeof(Vec3)) }
+    return native.scratch(g_closest_target, sizeof(Vec3))
+}
+
+closest_on_shape(s: *WorldShape, t: Transform, target: Vec3) -> ClosestPoint {
+    kind = s.geometry.kind
+    if kind != KIND_SPHERE && kind != KIND_CAPSULE && kind != KIND_HULL { return ClosestPoint { point: t.p, distance: math.MAX_FLOAT } }
+    block = closest_target()
+    (block as Vec3[])[0] = math.inv_transform_point(t, target)
+    input = DistanceInput { proxy_a: shape.make_shape_proxy(&s.geometry), proxy_b: distance.shape_proxy(block, 1, 0.0),
+                            transform: math.transform_identity(), use_radii: true }
+    cache = distance.empty_cache()
+    output = distance.shape_distance(&input, &cache, null, 0)
+    point = output.point_a
+    if output.distance == 0.0 { point = (block as Vec3[])[0] }
+    return ClosestPoint { point: math.transform_point(t, point), distance: output.distance }
+}
 
 // --- mass ---------------------------------------------------------------------------------------------------
 
@@ -2320,6 +2453,49 @@ body_is_bullet(id: BodyId) -> bool {
     w = body_world(id)
     return (get_body_full_id(w, id).flags & IS_BULLET) != 0
 }
+
+// A body flag set after creation, the solver's copies kept in step.
+set_body_flag(id: BodyId, bit: int, flag: bool) {
+    w = body_world(id)
+    if w == null { return }
+    body = get_body_full_id(w, id)
+    if flag { body.flags = body.flags | bit } else { body.flags = body.flags & (0 - 1 - bit) }
+    sync_body_flags(w, body)
+}
+
+// Fast rotation (b3Body_AllowFastRotation): a body allowed it is not capped
+// at the angular speed that keeps a step's turn small.
+body_allow_fast_rotation(id: BodyId, flag: bool) { set_body_flag(id, ALLOW_FAST_ROTATION, flag) }
+body_is_fast_rotation_allowed(id: BodyId) -> bool { return (get_body_full_id(body_world(id), id).flags & ALLOW_FAST_ROTATION) != 0 }
+
+// Contact recycling (b3Body_EnableContactRecycling): a resting contact's
+// manifold reused while the bodies barely move. A contact takes the flag
+// when it is made, so the body's contacts are brought in line here (the
+// reference's setter leaves them: one switched off went on recycling).
+body_enable_contact_recycling(id: BodyId, flag: bool) {
+    set_body_flag(id, ENABLE_CONTACT_RECYCLING, flag)
+    w = body_world(id)
+    if w == null { return }
+    body = get_body_full_id(w, id)
+    key = body.head_contact_key
+    while key != NULL_INDEX {
+        c = contact_at(w, key >> 1)
+        key = contact_edge_next(w, key)
+        both = (body_at(w, world_shape_at(w, c.shape_id_a).body_id).flags & ENABLE_CONTACT_RECYCLING) != 0 &&
+               (body_at(w, world_shape_at(w, c.shape_id_b).body_id).flags & ENABLE_CONTACT_RECYCLING) != 0
+        if both { c.flags = c.flags | CONTACT_RECYCLE } else { c.flags = c.flags & (0 - 1 - CONTACT_RECYCLE) }
+    }
+}
+body_is_contact_recycling_enabled(id: BodyId) -> bool { return (get_body_full_id(body_world(id), id).flags & ENABLE_CONTACT_RECYCLING) != 0 }
+
+// The share of its smallest extent a body may move in a step before the
+// continuous pass sweeps it (b3Body_SetSafetyFactor).
+body_set_safety_factor(id: BodyId, factor: float) {
+    w = body_world(id)
+    if w == null { return }
+    get_body_full_id(w, id).safety_factor = factor
+}
+body_get_safety_factor(id: BodyId) -> float { return get_body_full_id(body_world(id), id).safety_factor }
 
 body_set_angular_velocity(id: BodyId, v: Vec3) {
     w = body_world(id)
@@ -5547,6 +5723,16 @@ shape_enable_contact_events(id: ShapeId, flag: bool) {
     if flag { s.flags = s.flags | SHAPE_ENABLE_CONTACT_EVENTS } else { s.flags = s.flags & (0 - 1 - SHAPE_ENABLE_CONTACT_EVENTS) }
 }
 shape_are_contact_events_enabled(id: ShapeId) -> bool { return (get_shape_full_id(world_at(id.world0), id).flags & SHAPE_ENABLE_CONTACT_EVENTS) != 0 }
+// Hit events on every shape of a body (b3Body_EnableHitEvents).
+body_enable_hit_events(id: BodyId, flag: bool) {
+    w = world_at(id.world0)
+    shape_id = get_body_full_id(w, id).head_shape_id
+    while shape_id != NULL_INDEX {
+        s = world_shape_at(w, shape_id)
+        if flag { s.flags = s.flags | SHAPE_ENABLE_HIT_EVENTS } else { s.flags = s.flags & (0 - 1 - SHAPE_ENABLE_HIT_EVENTS) }
+        shape_id = s.next_shape_id
+    }
+}
 shape_enable_hit_events(id: ShapeId, flag: bool) {
     s = get_shape_full_id(world_at(id.world0), id)
     if flag { s.flags = s.flags | SHAPE_ENABLE_HIT_EVENTS } else { s.flags = s.flags & (0 - 1 - SHAPE_ENABLE_HIT_EVENTS) }
@@ -5581,6 +5767,27 @@ shape_get_contact_capacity(id: ShapeId) -> int {
     s = get_shape_full_id(w, id)
     if s.sensor_index != NULL_INDEX { return 0 }
     return body_at(w, s.body_id).contact_count
+}
+
+// The touching contacts of one shape (b3Shape_GetContactData): its body's,
+// those that involve it; none for a sensor.
+shape_get_contact_data(id: ShapeId, data: ContactData[], capacity: int) -> int {
+    w = world_at(id.world0)
+    if w.locked { return 0 }
+    s = get_shape_full_id(w, id)
+    if s.sensor_index != NULL_INDEX { return 0 }
+    key = body_at(w, s.body_id).head_contact_key
+    count = 0
+    while key != NULL_INDEX && count < capacity {
+        c = contact_at(w, key >> 1)
+        if (c.shape_id_a == s.id || c.shape_id_b == s.id) && (c.flags & CONTACT_TOUCHING) != 0 {
+            data[count] = ContactData { contact_id: make_contact_id(w, c), shape_id_a: make_shape_id(w, world_shape_at(w, c.shape_id_a)),
+                                        shape_id_b: make_shape_id(w, world_shape_at(w, c.shape_id_b)), manifolds: c.manifolds, manifold_count: c.manifold_count }
+            count = count + 1
+        }
+        key = contact_edge_next(w, key)
+    }
+    return count
 }
 
 // A sensor hit found by the continuous pass, kept until the next overlap pass.
