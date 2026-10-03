@@ -4409,6 +4409,18 @@ struct CollideTask {
     indices: ptr                   // int[], the contacts of the pass
 }
 
+// The lines of a shape and of a body the collide pass reads: a shape's
+// body id and its bounds, a body's set and index and its kind.
+prefetch_shape(s: *WorldShape) {
+    native.prefetch(s as ptr)
+    native.prefetch((&s.fat_aabb) as ptr)
+}
+
+prefetch_body(b: *Body) {
+    native.prefetch(b as ptr)
+    native.prefetch((&b.kind) as ptr)
+}
+
 collide_range(start: int, end: int, worker: int, context: ptr) {
     task = context as *CollideTask
     indices = task.indices as int[]
@@ -4418,8 +4430,21 @@ collide_range(start: int, end: int, worker: int, context: ptr) {
         // The contacts to come and their manifolds fetched ahead, as the
         // reference's narrow phase does: each pass's first touch of a
         // contact and of its separately allocated manifold missed the cache.
+        // Further in, what a contact leads to: its shapes (their bounds
+        // are what the pass reads first) four ahead, the contact fetched
+        // by then, and their bodies two ahead, the shapes fetched by then.
         if i + 8 < end { native.prefetch(contact_at(w, indices[i + 8]) as ptr) }
-        if i + 4 < end { native.prefetch(contact_at(w, indices[i + 4]).manifolds) }
+        if i + 4 < end {
+            ahead = contact_at(w, indices[i + 4])
+            native.prefetch(ahead.manifolds)
+            prefetch_shape(world_shape_at(w, ahead.shape_id_a))
+            prefetch_shape(world_shape_at(w, ahead.shape_id_b))
+        }
+        if i + 2 < end {
+            near = contact_at(w, indices[i + 2])
+            prefetch_body(body_at(w, world_shape_at(w, near.shape_id_a).body_id))
+            prefetch_body(body_at(w, world_shape_at(w, near.shape_id_b).body_id))
+        }
         collide_contact(w, indices[i])
         i = i + 1
     }

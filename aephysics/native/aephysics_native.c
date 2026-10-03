@@ -4,11 +4,11 @@
 //
 // The threads' side of aephysics.parallel and the solver's stages: a
 // thread-local worker index (Aether has no thread-local variables), a
-// yield and a pause, the processor count, atomic operations on an int
-// in place (std.sync's atomics are cells of their own; the solver's
-// blocks and the tree's nodes carry theirs in the struct, as the
-// reference does), and a counting semaphore the scheduler's threads wait
-// on between steps.
+// yield, the processor count, and a counting semaphore the scheduler's
+// threads wait on between steps. The atomics on an int in place
+// (std.sync's atomics are cells of their own; the solver's blocks and
+// the tree's nodes carry theirs in the struct, as the reference does),
+// the pause and the prefetch are in aephysics_inline.h, inlined.
 //
 // The contact solver's lanes lived here too, as GCC vector code, while
 // Aether had no lane type. It has std.lanes now, the module's lanes are
@@ -30,21 +30,6 @@
 #include <semaphore.h>
 #include <unistd.h>
 #endif
-
-// --- prefetch -------------------------------------------------------------------------------------------------
-
-// A hint to fetch the cache line at `p` ahead of its use (the reference's
-// narrow phase and contact prepare prefetch the contacts to come); Aether
-// has no prefetch of its own. A null or stale pointer is harmless: a
-// prefetch never faults.
-void aephysics_prefetch(const void *p)
-{
-#if defined(__GNUC__) || defined(__clang__)
-    __builtin_prefetch(p, 0, 3);
-#else
-    (void)p;
-#endif
-}
 
 // --- names ----------------------------------------------------------------------------------------------------
 
@@ -165,24 +150,5 @@ void aephysics_semaphore_signal(void *s, int count)
 }
 #endif
 
-// A spin's pause: the processor's hint that the thread is waiting.
-void aephysics_pause(void)
-{
-#if defined(__x86_64__) || defined(__i386__)
-    __builtin_ia32_pause();
-#elif defined(__aarch64__)
-    __asm__ __volatile__("yield");
-#endif
-}
-
-// Atomics on an int in place, sequentially consistent like the
-// reference's C11 atomics: the load and store, fetch-add and fetch-or
-// (the value before), and compare-and-swap (whether it swapped).
-int aephysics_atomic_load(int *p) { return __atomic_load_n(p, __ATOMIC_SEQ_CST); }
-void aephysics_atomic_store(int *p, int value) { __atomic_store_n(p, value, __ATOMIC_SEQ_CST); }
-int aephysics_atomic_add(int *p, int value) { return __atomic_fetch_add(p, value, __ATOMIC_SEQ_CST); }
-int aephysics_atomic_or(int *p, int value) { return __atomic_fetch_or(p, value, __ATOMIC_SEQ_CST); }
-int aephysics_atomic_cas(int *p, int expected, int desired)
-{
-    return __atomic_compare_exchange_n(p, &expected, desired, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
-}
+// The prefetch, the pause and the atomics are static inline in
+// aephysics_inline.h, so the generated C inlines them.
