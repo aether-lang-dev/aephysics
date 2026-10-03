@@ -1,0 +1,131 @@
+// Joints hold whatever their frames: revolute, spherical, weld, prismatic
+// and wheel joints between a static body and a box, each with its frames
+// turned every way on both bodies and placed so they meet, 60 of each kind
+// for two seconds under gravity. Every joint's linear and angular
+// separation (between its frames) stays within 2 cm and 0.02 rad -- the
+// solver honours the frames, and the readouts measure them (a free hinge
+// that had swung half round once read as torn: aephysics#82).
+import std.string
+import aephysics.math
+import aephysics.hull
+import aephysics.dynamics
+import aephysics.physics_world
+
+extern sin(x: float) -> float
+extern cos(x: float) -> float
+extern exit(code: int)
+
+var g_seed = 4242
+rand01() -> float {
+    g_seed = (g_seed * 1103515245 + 12345) % 2147483647
+    if g_seed < 0 { g_seed = 0 - g_seed }
+    return (g_seed as float) / 2147483647.0
+}
+range(lo: float, hi: float) -> float { return lo + (hi - lo) * rand01() }
+random_quat() -> Quat { return math.make_quat_from_axis_angle(math.normalize(math.vec3(range(0.0 - 1.0, 1.0), range(0.0 - 1.0, 1.0), range(0.1, 1.0))), range(0.0, 6.2)) }
+
+const KIND_COUNT = 5
+var g_failed = false
+
+// One trial: a static body and a box joined with frames turned every way,
+// placed so the frames meet; two seconds of gravity; the worst separations.
+trial(kind: int, box: *HullData, worst: *Vec2) {
+    wdef = dynamics.default_world_def()
+    world_id = dynamics.create_world(&wdef)
+    adef = dynamics.default_body_def()
+    adef.position = math.vec3(0.0, 5.0, 0.0)
+    adef.rotation = random_quat()
+    a = dynamics.create_body(world_id, &adef)
+    frame_a = Transform { p: math.vec3(range(0.0 - 0.5, 0.5), range(0.0 - 0.5, 0.5), range(0.0 - 0.5, 0.5)), q: random_quat() }
+    frame_b = Transform { p: math.vec3(range(0.0 - 0.5, 0.5), range(0.0 - 0.5, 0.5), range(0.0 - 0.5, 0.5)), q: random_quat() }
+    // B placed so its frame lands on A's: world_b = world_frame_a * inv(frame_b).
+    world_frame_a = math.mul_transforms(Transform { p: adef.position, q: adef.rotation }, frame_a)
+    world_b = math.mul_transforms(world_frame_a, math.invert_transform(frame_b))
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.position = world_b.p
+    bdef.rotation = world_b.q
+    b = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    dynamics.create_hull_shape(b, &sdef, box)
+    id = dynamics.null_joint_id()
+    if kind == 0 {
+        d = dynamics.default_revolute_joint_def()
+        d.base.body_id_a = a
+        d.base.body_id_b = b
+        d.base.local_frame_a = frame_a
+        d.base.local_frame_b = frame_b
+        id = dynamics.create_revolute_joint(world_id, &d)
+    }
+    if kind == 1 {
+        d = dynamics.default_spherical_joint_def()
+        d.base.body_id_a = a
+        d.base.body_id_b = b
+        d.base.local_frame_a = frame_a
+        d.base.local_frame_b = frame_b
+        id = dynamics.create_spherical_joint(world_id, &d)
+    }
+    if kind == 2 {
+        d = dynamics.default_weld_joint_def()
+        d.base.body_id_a = a
+        d.base.body_id_b = b
+        d.base.local_frame_a = frame_a
+        d.base.local_frame_b = frame_b
+        id = dynamics.create_weld_joint(world_id, &d)
+    }
+    if kind == 3 {
+        d = dynamics.default_prismatic_joint_def()
+        d.base.body_id_a = a
+        d.base.body_id_b = b
+        d.base.local_frame_a = frame_a
+        d.base.local_frame_b = frame_b
+        d.enable_limit = true
+        d.lower_translation = 0.0 - 20.0
+        d.upper_translation = 20.0
+        id = dynamics.create_prismatic_joint(world_id, &d)
+    }
+    if kind == 4 {
+        d = dynamics.default_wheel_joint_def()
+        d.base.body_id_a = a
+        d.base.body_id_b = b
+        d.base.local_frame_a = frame_a
+        d.base.local_frame_b = frame_b
+        d.enable_suspension_spring = false
+        d.enable_suspension_limit = true
+        d.lower_suspension_limit = 0.0 - 20.0
+        d.upper_suspension_limit = 20.0
+        id = dynamics.create_wheel_joint(world_id, &d)
+    }
+    step = 0
+    while step < 120 {
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        lin = dynamics.joint_get_linear_separation(id)
+        ang = dynamics.joint_get_angular_separation(id)
+        if lin > worst.x { worst.x = lin }
+        if ang > worst.y { worst.y = ang }
+        step = step + 1
+    }
+    dynamics.destroy_world(world_id)
+}
+
+main() {
+    box = hull.make_box_hull(0.3, 0.2, 0.4)
+    kind = 0
+    while kind < KIND_COUNT {
+        worst = Vec2 { x: 0.0, y: 0.0 }
+        t = 0
+        while t < 60 {
+            trial(kind, box, &worst)
+            t = t + 1
+        }
+        println("joint_frames: kind ${kind} worst linear separation ${worst.x} m, worst angular ${worst.y} rad")
+        if worst.x > 0.02 || worst.y > 0.02 { g_failed = true }
+        kind = kind + 1
+    }
+    hull.destroy_hull(box)
+    if g_failed {
+        println("joint_frames: FAIL")
+        exit(1)
+    }
+    println("joint_frames: all checks passed")
+}
