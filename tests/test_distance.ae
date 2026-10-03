@@ -374,11 +374,69 @@ test_triangle_closed_form() {
     free(points_block)
 }
 
+// The closed form for a triangle against a segment (aephysics#73), either
+// way round, against GJK through its debug path: 3,000 segments around a
+// triangle -- above its face, past its edges and corners, crossing it,
+// tilted every way -- under rotations, with radii. The same distances,
+// normals and points; the same kind of simplex where the closest pair is
+// one (a segment parallel to the face has many, and GJK and the closed
+// form may each pick another).
+test_segment_triangle_closed_form() {
+    trail_block = calloc(64, sizeof(Simplex))
+    points_block = calloc(5, sizeof(Vec3))
+    p = points_block as Vec3[]
+    p[0] = math.vec3(0.0, 0.0, 0.0)
+    p[1] = math.vec3(2.0, 0.1, 0.0)
+    p[2] = math.vec3(0.3, 1.7, 0.2)
+    worst = 0.0
+    kinds_differ = 0
+    overlaps = 0
+    k = 0
+    while k < 3000 {
+        t = (k as float) * 0.618
+        centre = math.vec3(2.5 * sin(t) + 0.8, 2.5 * cos(1.7 * t) + 0.6, 1.2 * sin(2.3 * t))
+        half = math.mul_sv(0.4 + 0.5 * math.abs_float(sin(0.9 * t)), math.normalize(math.vec3(sin(1.1 * t), cos(0.7 * t), sin(1.3 * t) + 0.3 * cos(t))))
+        p[3] = math.sub(centre, half)
+        p[4] = math.add(centre, half)
+        q = math.make_quat_from_axis_angle(math.normalize(math.vec3(1.0, 2.0, 3.0)), 0.3 * t)
+        xf = Transform { p: math.vec3(0.2 * sin(t), 0.1, 0.3 * cos(t)), q: q }
+        triangle = distance.shape_proxy(points_block, 3, 0.05)
+        segment = distance.shape_proxy(points_block + 3 * sizeof(Vec3), 2, 0.1)
+        input = DistanceInput { proxy_a: triangle, proxy_b: segment, transform: xf, use_radii: (k % 3) != 0 }
+        if k % 2 == 1 { input = DistanceInput { proxy_a: segment, proxy_b: triangle, transform: xf, use_radii: (k % 3) != 0 } }
+        fast_cache = distance.empty_cache()
+        gjk_cache = distance.empty_cache()
+        fast = distance.shape_distance(&input, &fast_cache, null, 0)
+        gjk = distance.shape_distance(&input, &gjk_cache, trail_block, 64)
+        off = math.abs_float(fast.distance - gjk.distance)
+        // Points and normals where the closest pair is unique: away from
+        // touching, and the segment not parallel to the face.
+        seg_dir = math.normalize(math.sub(p[4], p[3]))
+        face = math.normalize(math.cross(math.sub(p[1], p[0]), math.sub(p[2], p[0])))
+        unique = math.abs_float(math.dot(seg_dir, face)) > 0.05
+        if fast.distance > 0.001 && unique {
+            off = math.max_float(off, math.length(math.sub(fast.point_a, gjk.point_a)))
+            off = math.max_float(off, math.length(math.sub(fast.point_b, gjk.point_b)))
+            off = math.max_float(off, math.length(math.sub(fast.normal, gjk.normal)))
+            if fast_cache.count != gjk_cache.count { kinds_differ = kinds_differ + 1 }
+        }
+        if gjk.distance == 0.0 { overlaps = overlaps + 1 }
+        if off > worst { worst = off }
+        k = k + 1
+    }
+    ensure("segment-triangle closed form: agrees with GJK on 3,000 segments (worst ${worst})", worst < 0.00001)
+    ensure("segment-triangle closed form: the same kind of simplex (${kinds_differ} differ)", kinds_differ == 0)
+    ensure("segment-triangle closed form: overlaps among them (${overlaps})", overlaps > 10)
+    free(trail_block)
+    free(points_block)
+}
+
 main() {
     before = basics.alloc_count()
     test_reference()
     test_segment_closed_form()
     test_triangle_closed_form()
+    test_segment_triangle_closed_form()
     test_rounded()
     test_sweep_and_cache()
     test_toi_rotating()

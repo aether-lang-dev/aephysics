@@ -497,10 +497,15 @@ overlap_output(s: Simplex, iteration: int, simplex_index: int) -> DistanceOutput
 shape_distance(input: *DistanceInput, cache: *SimplexCache, simplexes: ptr, simplex_capacity: int) -> DistanceOutput {
     if simplexes == null {
         if input.proxy_a.count <= 2 && input.proxy_b.count <= 2 { return segment_proxy_distance(input, cache) }
-        // A triangle (a mesh's or a height field's) against a sphere's centre.
-        if (input.proxy_a.count == 3 && input.proxy_b.count == 1) || (input.proxy_a.count == 1 && input.proxy_b.count == 3) {
+        // A triangle (a mesh's or a height field's) against a sphere's centre or a capsule's axis.
+        if (input.proxy_a.count == 3 && input.proxy_b.count <= 2) || (input.proxy_a.count <= 2 && input.proxy_b.count == 3) {
             found = DistanceOutput { point_a: math.vec3_zero(), point_b: math.vec3_zero(), normal: math.vec3_zero(), distance: 0.0, iterations: 0, simplex_count: 0 }
-            if triangle_point_distance(input, cache, &found) { return found }
+            // The point case kept small: it is the commonest (spheres on meshes and fields).
+            if input.proxy_a.count == 1 || input.proxy_b.count == 1 {
+                if triangle_point_distance(input, cache, &found) { return found }
+            } else if triangle_proxy_distance(input, cache, &found) {
+                return found
+            }
         }
     }
     xf = input.transform
@@ -728,125 +733,255 @@ segment_proxy_distance(input: *DistanceInput, cache: *SimplexCache) -> DistanceO
     return output
 }
 
-// A triangle against a point, either way round, in closed form: the
-// point's Voronoi region of the triangle (Real-Time Collision Detection
-// 5.1.5) gives the closest point and the feature it lies on, a vertex,
-// an edge or the face, and the cache is written as GJK leaves it for that
-// feature (one, two or three entries). False for a degenerate triangle,
-// which GJK takes. The result goes in `out`.
-triangle_point_distance(input: *DistanceInput, cache: *SimplexCache, out: *DistanceOutput) -> bool {
+// A triangle (a mesh's or a height field's) against a point or a segment
+// (a sphere's centre, a capsule's axis), either way round, in closed form.
+// Against a point: the point's Voronoi region of the triangle (Real-Time
+// Collision Detection 5.1.5). Against a segment: an overlap when it
+// crosses the triangle, else the nearest of its two ends against the
+// triangle and the segment against the triangle's three edges
+// (math.segment_distance). The cache is written as GJK leaves it for the
+// features the closest points lie on, since the time of impact builds its
+// separating axis from it. False for a degenerate triangle, which GJK
+// takes. The result goes in `out`. aephysics#73.
+triangle_proxy_distance(input: *DistanceInput, cache: *SimplexCache, out: *DistanceOutput) -> bool {
     xf = input.transform
     triangle_is_a = input.proxy_a.count == 3
     tri = input.proxy_a
-    pt = input.proxy_b
+    other = input.proxy_b
     if triangle_is_a == false {
         tri = input.proxy_b
-        pt = input.proxy_a
+        other = input.proxy_a
     }
     // Everything in A's frame.
     t0 = proxy_point(tri, 0)
     t1 = proxy_point(tri, 1)
     t2 = proxy_point(tri, 2)
-    p = proxy_point(pt, 0)
+    s0 = proxy_point(other, 0)
+    s1 = s0
     if triangle_is_a {
-        p = math.transform_point(xf, p)
+        s0 = math.transform_point(xf, s0)
+        s1 = s0
+        if other.count == 2 { s1 = math.transform_point(xf, proxy_point(other, 1)) }
     } else {
+        if other.count == 2 { s1 = proxy_point(other, 1) }
         t0 = math.transform_point(xf, t0)
         t1 = math.transform_point(xf, t1)
         t2 = math.transform_point(xf, t2)
     }
-    ab = math.sub(t1, t0)
-    ac = math.sub(t2, t0)
-    normal_area = math.cross(ab, ac)
+    normal_area = math.cross(math.sub(t1, t0), math.sub(t2, t0))
+    if math.dot(normal_area, normal_area) < 1000.0 * FLOAT_MIN { return false }
+
+    // The closest pair: the point on the triangle and the triangle's
+    // vertices its feature spans (fa: -1 unused), the point on the other
+    // proxy and its vertices (fs).
+    near = closest_on_triangle(s0, t0, t1, t2)
+    on_tri = near.point
+    on_other = s0
+    fa0 = near.f0
+    fa1 = near.f1
+    fa2 = near.f2
+    fs0 = 0
+    fs1 = 0 - 1
+    if other.count == 2 {
+        // Crossing the triangle: an overlap, as GJK reports it (no normal, the cache left).
+        side0 = math.dot(normal_area, math.sub(s0, t0))
+        side1 = math.dot(normal_area, math.sub(s1, t0))
+        if ((side0 <= 0.0 && side1 >= 0.0) || (side0 >= 0.0 && side1 <= 0.0)) && side0 != side1 {
+            x = math.mul_add(s0, side0 / (side0 - side1), math.sub(s1, s0))
+            hit = closest_on_triangle(x, t0, t1, t2)
+            miss = math.sub(hit.point, x)
+            // Inside: the face's region, or on an edge to rounding.
+            scale = 1.0 + math.dot(x, x)
+            if hit.f2 >= 0 || math.dot(miss, miss) < FLOAT_EPSILON * FLOAT_EPSILON * scale {
+                write_output(out, input, x, x, false)
+                return true
+            }
+        }
+        best = math.sub(on_tri, on_other)
+        best_sq = math.dot(best, best)
+        end1 = closest_on_triangle(s1, t0, t1, t2)
+        gap = math.sub(end1.point, s1)
+        if math.dot(gap, gap) < best_sq {
+            best_sq = math.dot(gap, gap)
+            on_tri = end1.point
+            on_other = s1
+            fa0 = end1.f0
+            fa1 = end1.f1
+            fa2 = end1.f2
+            fs0 = 1
+        }
+        e = 0
+        while e < 3 {
+            i = e
+            j = (e + 1) % 3
+            edge = math.segment_distance(feature_point(i, t0, t1, t2), feature_point(j, t0, t1, t2), s0, s1)
+            gap = math.sub(edge.point1, edge.point2)
+            if math.dot(gap, gap) < best_sq {
+                best_sq = math.dot(gap, gap)
+                on_tri = edge.point1
+                on_other = edge.point2
+                fa0 = i
+                fa1 = 0 - 1
+                fa2 = 0 - 1
+                if edge.fraction1 >= 1.0 { fa0 = j } else if edge.fraction1 > 0.0 { fa1 = j }
+                fs0 = 0
+                fs1 = 0 - 1
+                if edge.fraction2 >= 1.0 { fs0 = 1 } else if edge.fraction2 > 0.0 { fs1 = 1 }
+            }
+            e = e + 1
+        }
+    }
+
+    // The cache: pairs of (triangle vertex, other vertex).
+    tri_count = 1
+    if fa2 >= 0 { tri_count = 3 } else if fa1 >= 0 { tri_count = 2 }
+    pairs_t = fa0
+    count = 1
+    ta1 = 0
+    sb1 = 0
+    ta2 = 0
+    sb2 = 0
+    sb0 = fs0
+    if fs1 < 0 {
+        // One vertex of the other: every triangle vertex of the feature with it.
+        count = tri_count
+        ta1 = math.max_int(fa1, 0)
+        sb1 = fs0
+        ta2 = math.max_int(fa2, 0)
+        sb2 = fs0
+    } else if tri_count == 1 {
+        // A triangle vertex against the segment's inside.
+        count = 2
+        sb0 = 0
+        ta1 = fa0
+        sb1 = 1
+    } else {
+        // Two edges: the triangle GJK ends on, two vertices each side.
+        count = 3
+        sb0 = 0
+        ta1 = fa1
+        sb1 = 0
+        ta2 = fa0
+        sb2 = 1
+    }
+    if triangle_is_a {
+        set_cache(cache, count, pairs_t, sb0, ta1, sb1, ta2, sb2)
+    } else {
+        set_cache(cache, count, sb0, pairs_t, sb1, ta1, sb2, ta2)
+    }
+    cache.metric = 0.0
+    if count > 1 {
+        w0 = math.sub(feature_point(sb0, s0, s1, s1), feature_point(pairs_t, t0, t1, t2))
+        w1 = math.sub(feature_point(sb1, s0, s1, s1), feature_point(ta1, t0, t1, t2))
+        if count == 2 {
+            cache.metric = math.distance(w0, w1)
+        } else {
+            w2 = math.sub(feature_point(sb2, s0, s1, s1), feature_point(ta2, t0, t1, t2))
+            cache.metric = math.length(math.cross(math.sub(w1, w0), math.sub(w2, w0))) / 2.0
+        }
+    }
+
+    if triangle_is_a { write_output(out, input, on_tri, on_other, true) } else { write_output(out, input, on_other, on_tri, true) }
+    return true
+}
+
+// A triangle against a point, either way round: the point's region of the
+// triangle and its cache, without the segment's machinery. False for a
+// degenerate triangle.
+triangle_point_distance(input: *DistanceInput, cache: *SimplexCache, out: *DistanceOutput) -> bool {
+    xf = input.transform
+    triangle_is_a = input.proxy_a.count == 3
+    tri = input.proxy_a
+    p = math.transform_point(xf, proxy_point(input.proxy_b, 0))
+    t0 = proxy_point(tri, 0)
+    t1 = proxy_point(tri, 1)
+    t2 = proxy_point(tri, 2)
+    if triangle_is_a == false {
+        tri = input.proxy_b
+        p = proxy_point(input.proxy_a, 0)
+        t0 = math.transform_point(xf, proxy_point(tri, 0))
+        t1 = math.transform_point(xf, proxy_point(tri, 1))
+        t2 = math.transform_point(xf, proxy_point(tri, 2))
+    }
+    normal_area = math.cross(math.sub(t1, t0), math.sub(t2, t0))
     area_sq = math.dot(normal_area, normal_area)
     if area_sq < 1000.0 * FLOAT_MIN { return false }
+    near = closest_on_triangle(p, t0, t1, t2)
+    count = 1
+    if near.f2 >= 0 { count = 3 } else if near.f1 >= 0 { count = 2 }
+    if triangle_is_a {
+        set_cache(cache, count, near.f0, 0, math.max_int(near.f1, 0), 0, math.max_int(near.f2, 0), 0)
+    } else {
+        set_cache(cache, count, 0, near.f0, 0, math.max_int(near.f1, 0), 0, math.max_int(near.f2, 0))
+    }
+    cache.metric = 0.0
+    if count == 2 { cache.metric = math.distance(feature_point(near.f0, t0, t1, t2), feature_point(near.f1, t0, t1, t2)) }
+    if count == 3 { cache.metric = sqrt(area_sq) / 2.0 }
+    if triangle_is_a { write_output(out, input, near.point, p, true) } else { write_output(out, input, p, near.point, true) }
+    return true
+}
 
-    // The region: f0/f1/f2 the triangle's vertices it spans (-1 unused).
-    closest = t0
-    f0 = 0
-    f1 = 0 - 1
-    f2 = 0 - 1
+// The closest point of a non-degenerate triangle to `p` and the triangle's
+// vertices the feature it lies on spans: one (a vertex), two (an edge) or
+// all three (the face); unused ones -1.
+struct TriangleFeature {
+    point: Vec3
+    f0: int
+    f1: int
+    f2: int
+}
+
+closest_on_triangle(p: Vec3, t0: Vec3, t1: Vec3, t2: Vec3) -> TriangleFeature {
+    ab = math.sub(t1, t0)
+    ac = math.sub(t2, t0)
     ap = math.sub(p, t0)
     d1 = math.dot(ab, ap)
     d2 = math.dot(ac, ap)
+    if d1 <= 0.0 && d2 <= 0.0 { return TriangleFeature { point: t0, f0: 0, f1: 0 - 1, f2: 0 - 1 } }
     bp = math.sub(p, t1)
     d3 = math.dot(ab, bp)
     d4 = math.dot(ac, bp)
+    if d3 >= 0.0 && d4 <= d3 { return TriangleFeature { point: t1, f0: 1, f1: 0 - 1, f2: 0 - 1 } }
+    vc = d1 * d4 - d3 * d2
+    if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 { return TriangleFeature { point: math.mul_add(t0, d1 / (d1 - d3), ab), f0: 0, f1: 1, f2: 0 - 1 } }
     cp = math.sub(p, t2)
     d5 = math.dot(ab, cp)
     d6 = math.dot(ac, cp)
-    vc = d1 * d4 - d3 * d2
+    if d6 >= 0.0 && d5 <= d6 { return TriangleFeature { point: t2, f0: 2, f1: 0 - 1, f2: 0 - 1 } }
     vb = d5 * d2 - d1 * d6
+    if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 { return TriangleFeature { point: math.mul_add(t0, d2 / (d2 - d6), ac), f0: 0, f1: 2, f2: 0 - 1 } }
     va = d3 * d6 - d5 * d4
-    if d1 <= 0.0 && d2 <= 0.0 {
-        closest = t0
-    } else if d3 >= 0.0 && d4 <= d3 {
-        closest = t1
-        f0 = 1
-    } else if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
-        closest = math.mul_add(t0, d1 / (d1 - d3), ab)
-        f1 = 1
-    } else if d6 >= 0.0 && d5 <= d6 {
-        closest = t2
-        f0 = 2
-    } else if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {
-        closest = math.mul_add(t0, d2 / (d2 - d6), ac)
-        f1 = 2
-    } else if va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0 {
-        closest = math.mul_add(t1, (d4 - d3) / ((d4 - d3) + (d5 - d6)), math.sub(t2, t1))
-        f0 = 1
-        f1 = 2
-    } else {
-        denom = va + vb + vc
-        if math.abs_float(denom) < 1000.0 * FLOAT_MIN { return false }
-        inv = 1.0 / denom
-        closest = math.add(t0, math.add(math.mul_sv(vb * inv, ab), math.mul_sv(vc * inv, ac)))
-        f1 = 1
-        f2 = 2
+    if va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0 {
+        return TriangleFeature { point: math.mul_add(t1, (d4 - d3) / ((d4 - d3) + (d5 - d6)), math.sub(t2, t1)), f0: 1, f1: 2, f2: 0 - 1 }
     }
+    inv = 1.0 / (va + vb + vc)
+    return TriangleFeature { point: math.add(t0, math.add(math.mul_sv(vb * inv, ab), math.mul_sv(vc * inv, ac))), f0: 0, f1: 1, f2: 2 }
+}
 
-    // The cache: the triangle's vertices on its side, the point's index 0 on the other.
-    count = 1
-    if f2 >= 0 { count = 3 } else if f1 >= 0 { count = 2 }
-    t_a = triangle_is_a
-    if t_a {
-        set_cache(cache, count, f0, 0, math.max_int(f1, 0), 0, math.max_int(f2, 0), 0)
-    } else {
-        set_cache(cache, count, 0, f0, 0, math.max_int(f1, 0), 0, math.max_int(f2, 0))
-    }
-    cache.metric = 0.0
-    if count == 2 { cache.metric = math.distance(feature_point(f0, t0, t1, t2), feature_point(f1, t0, t1, t2)) }
-    if count == 3 { cache.metric = sqrt(area_sq) / 2.0 }
-
-    point_a = closest
-    point_b = p
-    if t_a == false {
-        point_a = p
-        point_b = closest
-    }
-    output = DistanceOutput { point_a: point_a, point_b: point_b, normal: math.vec3_zero(), distance: 0.0, iterations: 1, simplex_count: 0 }
+// The output of a closed form from its closest points on A and B: the
+// distance and normal from A to B, the radii applied when asked; touching
+// cores (or `separate` false, an overlap) give no normal and no radii, as GJK's overlap.
+write_output(out: *DistanceOutput, input: *DistanceInput, point_a: Vec3, point_b: Vec3, separate: bool) {
+    out.point_a = point_a
+    out.point_b = point_b
+    out.normal = math.vec3_zero()
+    out.distance = 0.0
+    out.iterations = 1
+    out.simplex_count = 0
     gap = math.sub(point_b, point_a)
     gap_sq = math.dot(gap, gap)
-    if gap_sq >= 1000.0 * FLOAT_MIN {
-        length = sqrt(gap_sq)
-        normal = math.mul_sv(1.0 / length, gap)
-        output.distance = length
-        output.normal = normal
-        if input.use_radii {
-            r_a = input.proxy_a.radius
-            r_b = input.proxy_b.radius
-            output.distance = math.max_float(0.0, length - r_a - r_b)
-            output.point_a = math.add(output.point_a, math.mul_sv(r_a, normal))
-            output.point_b = math.sub(output.point_b, math.mul_sv(r_b, normal))
-        }
+    if separate == false || gap_sq < 1000.0 * FLOAT_MIN { return }
+    length = sqrt(gap_sq)
+    normal = math.mul_sv(1.0 / length, gap)
+    out.distance = length
+    out.normal = normal
+    if input.use_radii {
+        r_a = input.proxy_a.radius
+        r_b = input.proxy_b.radius
+        out.distance = math.max_float(0.0, length - r_a - r_b)
+        out.point_a = math.add(point_a, math.mul_sv(r_a, normal))
+        out.point_b = math.sub(point_b, math.mul_sv(r_b, normal))
     }
-    out.point_a = output.point_a
-    out.point_b = output.point_b
-    out.normal = output.normal
-    out.distance = output.distance
-    out.iterations = output.iterations
-    out.simplex_count = 0
-    return true
 }
 
 feature_point(index: int, t0: Vec3, t1: Vec3, t2: Vec3) -> Vec3 {
