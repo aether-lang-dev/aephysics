@@ -492,12 +492,89 @@ test_query_and_overlap() {
     mesh.destroy_mesh(grid)
 }
 
+// The tree's casts against a brute force over every triangle: a wave mesh
+// at a plain and at a mirroring scale, 1,500 rays and 1,500 sphere and
+// capsule casts at slants through ray_cast_mesh and shape_cast_mesh (the
+// slab-tested traversal, the closed forms of the distance), and the same
+// rays and casts against each triangle by hand (front faces only, as the
+// cast keeps them). The same hits and fractions.
+test_brute_force_casts() {
+    wave = mesh.create_wave_mesh(24, 24, 0.5, 0.4, 0.3, 0.7)
+    points_block = calloc(2, sizeof(Vec3))
+    p = points_block as Vec3[]
+    tri_block = calloc(3, sizeof(Vec3))
+    tri = tri_block as Vec3[]
+    ray_bad = 0
+    cast_bad = 0
+    ray_hits = 0
+    cast_hits = 0
+    pass = 0
+    while pass < 2 {
+        scale = math.vec3(1.0, 1.0, 1.0)
+        if pass == 1 { scale = math.vec3(0.0 - 1.2, 0.8, 1.1) }
+        sh = mesh.mesh(wave, scale)
+        k = 0
+        while k < 1500 {
+            t = (k as float) * 0.731
+            origin = math.vec3(5.0 * sin(t), 2.5 + 0.8 * cos(1.3 * t), 5.0 * cos(0.7 * t))
+            translation = math.vec3(1.5 * sin(2.1 * t), 0.0 - 4.5, 1.5 * cos(1.7 * t))
+            // The ray, through the tree and by hand.
+            got = mesh.ray_cast_mesh(sh, origin, translation, 1.0)
+            best = 2.0
+            i = 0
+            while i < wave.triangle_count {
+                tr = mesh.get_mesh_triangle(sh, i)
+                alpha = mesh.intersect_ray_triangle(origin, translation, tr.v1, tr.v2, tr.v3)
+                if alpha < best { best = alpha }
+                i = i + 1
+            }
+            // intersect_ray_triangle answers 1 for a miss: a hit is short of it.
+            hit = best < 1.0
+            if hit { ray_hits = ray_hits + 1 }
+            if got.hit != hit || (hit && math.abs_float(got.fraction - best) > 0.000001) { ray_bad = ray_bad + 1 }
+            // A sphere or a capsule swept along the same path.
+            p[0] = origin
+            p[1] = math.add(origin, math.vec3(0.6 * cos(t), 0.2 * sin(t), 0.6 * sin(t)))
+            count = 1 + k % 2
+            proxy = distance.shape_proxy(points_block, count, 0.25)
+            cast = mesh.shape_cast_mesh(sh, proxy, translation, 1.0, false)
+            centre = math.mul_sv(0.5, math.add(p[0], p[count - 1]))
+            best = 2.0
+            i = 0
+            while i < wave.triangle_count {
+                tr = mesh.get_mesh_triangle(sh, i)
+                if math.signed_volume(tr.v1, tr.v2, tr.v3, centre) >= 0.0 {
+                    tri[0] = tr.v1
+                    tri[1] = tr.v2
+                    tri[2] = tr.v3
+                    pair = ShapeCastPairInput { proxy_a: distance.shape_proxy(tri_block, 3, 0.0), proxy_b: proxy, transform: math.transform_identity(),
+                                                translation_b: translation, max_fraction: 1.0, can_encroach: false }
+                    out = distance.shape_cast(&pair)
+                    if out.hit && out.fraction < best { best = out.fraction }
+                }
+                i = i + 1
+            }
+            hit = best <= 1.0
+            if hit { cast_hits = cast_hits + 1 }
+            if cast.hit != hit || (hit && math.abs_float(cast.fraction - best) > 0.0001) { cast_bad = cast_bad + 1 }
+            k = k + 1
+        }
+        pass = pass + 1
+    }
+    ensure("brute force: rays match on the plain and mirrored mesh (${ray_bad} of 3000 differ, ${ray_hits} hits)", ray_bad == 0 && ray_hits > 1000)
+    ensure("brute force: sphere and capsule casts match (${cast_bad} of 3000 differ, ${cast_hits} hits)", cast_bad == 0 && cast_hits > 1000)
+    free(points_block)
+    free(tri_block)
+    mesh.destroy_mesh(wave)
+}
+
 main() {
     before = basics.alloc_count()
     test_valley()
     test_creators()
     test_ray_casts()
     test_query_and_overlap()
+    test_brute_force_casts()
     // The module's scratch stays allocated: three blocks.
     ensure("every other counted allocation was freed", basics.alloc_count() == before + 3)
 

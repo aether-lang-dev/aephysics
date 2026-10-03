@@ -788,6 +788,74 @@ test_field() {
     free_defs(d)
 }
 
+// The compound's tree against a brute force over its children: 60
+// capsules, turned hulls and spheres scattered with a box mesh among
+// them, 3,000 rays through ray_cast_compound (the slab-tested tree) and
+// the same rays into each child's frame by hand. The same hits, fractions
+// and children.
+test_brute_force_rays() {
+    mat = material.default_surface_material()
+    box = hull.make_box_hull(0.4, 0.3, 0.5)
+    md = mesh.create_box_mesh(math.vec3_zero(), math.vec3(0.6, 0.6, 0.6), false)
+    mats = calloc(1, sizeof(SurfaceMaterial))
+    (mats as SurfaceMaterial[])[0] = mat
+    d = make_defs(20, 20, 1, 20)
+    capsules = d.capsules as CompoundCapsuleDef[]
+    hulls = d.hulls as CompoundHullDef[]
+    spheres = d.spheres as CompoundSphereDef[]
+    i = 0
+    while i < 20 {
+        t = (i as float) * 1.37
+        at = math.vec3(4.0 * sin(t), 2.0 * cos(1.9 * t), 4.0 * cos(0.6 * t))
+        capsules[i] = compound.compound_capsule_def(manifold.capsule(at, math.add(at, math.vec3(0.8 * cos(t), 0.3, 0.5 * sin(t))), 0.2 + 0.1 * math.abs_float(sin(3.0 * t))), mat)
+        hulls[i] = compound.compound_hull_def(box, Transform { p: math.vec3(4.0 * cos(1.3 * t), 2.0 * sin(2.3 * t), 4.0 * sin(0.8 * t)),
+                                                               q: math.make_quat_from_axis_angle(math.normalize(math.vec3(1.0, 2.0, 3.0)), t) }, mat)
+        spheres[i] = compound.compound_sphere_def(manifold.sphere(math.vec3(4.0 * sin(2.1 * t), 2.0 * sin(t), 4.0 * cos(1.4 * t)), 0.3 + 0.2 * math.abs_float(cos(t))), mat)
+        i = i + 1
+    }
+    meshes = d.meshes as CompoundMeshDef[]
+    meshes[0] = compound.compound_mesh_def(md, Transform { p: math.vec3(0.0, 0.5, 0.0), q: math.make_quat_from_axis_angle(math.vec3_axis_y(), 0.4) }, math.vec3_one(), mats, 1)
+    c = compound.create_compound(&d.def)
+    children = compound.compound_child_count(c)
+    bad = 0
+    hits = 0
+    k = 0
+    while k < 3000 {
+        t = (k as float) * 0.513
+        origin = math.vec3(7.0 * sin(t), 4.0 * cos(1.1 * t), 7.0 * cos(0.9 * t))
+        translation = math.sub(math.vec3(3.0 * sin(2.3 * t), 1.5 * cos(t), 3.0 * cos(1.7 * t)), origin)
+        got = compound.ray_cast_compound(c, origin, translation, 1.0)
+        best = 2.0
+        best_child = 0 - 1
+        j = 0
+        while j < children {
+            child = compound.get_compound_child(c, j)
+            o = math.inv_transform_point(child.transform, origin)
+            dir = math.inv_rotate_vector(child.transform.q, translation)
+            out = distance.empty_cast_output()
+            if child.kind == shape.SHAPE_CAPSULE { out = capsule.ray_cast_capsule(child.capsule, o, dir, 1.0) }
+            if child.kind == shape.SHAPE_HULL { out = hull.ray_cast_hull(child.hull, o, dir, 1.0) }
+            if child.kind == shape.SHAPE_MESH { out = mesh.ray_cast_mesh(child.mesh, o, dir, 1.0) }
+            if child.kind == shape.SHAPE_SPHERE { out = sphere.ray_cast_sphere(child.sphere, o, dir, 1.0) }
+            if out.hit && out.fraction < best {
+                best = out.fraction
+                best_child = j
+            }
+            j = j + 1
+        }
+        hit = best_child >= 0
+        if hit { hits = hits + 1 }
+        if got.hit != hit || (hit && (math.abs_float(got.fraction - best) > 0.000001 || got.child_index != best_child)) { bad = bad + 1 }
+        k = k + 1
+    }
+    ensure("brute force: compound rays match child by child (${bad} of 3000 differ, ${hits} hits)", bad == 0 && hits > 300)
+    compound.destroy_compound(c)
+    free_defs(d)
+    free(mats)
+    mesh.destroy_mesh(md)
+    hull.destroy_hull(box)
+}
+
 main() {
     before = basics.alloc_count()
     test_create()
@@ -799,6 +867,7 @@ main() {
     test_query_and_mover()
     test_through_shape()
     test_field()
+    test_brute_force_rays()
     // The scratch stays allocated: compound's three blocks, mesh's three, sphere's two, shape's one.
     ensure("every other counted allocation was freed (${basics.alloc_count() - before})", basics.alloc_count() == before + 9)
 
