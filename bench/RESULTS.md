@@ -333,6 +333,14 @@ radii, where the box-against-box work of the distance layer sat at
 1.3-1.5x; the radius handling in `distance.shape_cast` and
 `shape_distance` is the place to profile (aephysics#9).
 
+Since aephysics#9's fix, proxies of one or two points (spheres' centres,
+capsules' segments) take a closed form (`math.segment_distance`) in place
+of GJK, the cache written as GJK leaves it for the time of impact. On the
+current toolchain, same run, same hits and sums: the 100,000 shape casts
+went from 32.5 ms to 18.6 (the reference's 18.0) and the overlaps from
+13.7 to 8.6 (1.46x the reference's 5.9). A test holds the closed form to
+GJK on 2,000 pairs to 1e-6.
+
 ## compound
 
 `bench/compound.ae` and `bench/compound_box3d.c`: a compound of 2,000
