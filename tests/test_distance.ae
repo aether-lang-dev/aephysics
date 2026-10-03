@@ -292,9 +292,51 @@ test_hull_queries() {
     hull.destroy_hull(h)
 }
 
+// The closed form for proxies of one or two points (aephysics#9) against
+// GJK itself (a debug trail sends the query down GJK's path): 2,000 pairs
+// of points and segments in every combination, under a rotation, with
+// radii; the distances, normals and closest points agree, and so does the
+// kind of simplex each leaves for the time of impact.
+test_segment_closed_form() {
+    trail_block = calloc(64, sizeof(Simplex))
+    points_block = calloc(4, sizeof(Vec3))
+    p = points_block as Vec3[]
+    worst = 0.0
+    kinds_differ = 0
+    k = 0
+    while k < 2000 {
+        t = (k as float) * 0.7071
+        p[0] = math.vec3(sin(t), cos(1.3 * t), sin(0.7 * t))
+        p[1] = math.vec3(sin(t) + 1.5 * cos(2.1 * t), cos(1.3 * t) + 1.0, sin(1.9 * t))
+        p[2] = math.vec3(0.5 * cos(t), sin(2.3 * t), cos(0.3 * t))
+        p[3] = math.vec3(0.5 * cos(t) - 1.2 * sin(t), sin(2.3 * t) + 0.8 * cos(t), cos(0.3 * t) + 1.1)
+        count_a = 1 + k % 2
+        count_b = 1 + (k / 2) % 2
+        input = DistanceInput { proxy_a: distance.shape_proxy(points_block, count_a, 0.1), proxy_b: distance.shape_proxy(points_block + 2 * sizeof(Vec3), count_b, 0.2),
+                                transform: Transform { p: math.vec3(2.0 * sin(0.37 * t), 0.5, 1.0 * cos(0.21 * t)), q: math.make_quat_from_axis_angle(math.normalize(math.vec3(1.0, 2.0, 3.0)), t) },
+                                use_radii: (k % 3) != 0 }
+        fast_cache = distance.empty_cache()
+        gjk_cache = distance.empty_cache()
+        fast = distance.shape_distance(&input, &fast_cache, null, 0)
+        gjk = distance.shape_distance(&input, &gjk_cache, trail_block, 64)
+        off = math.abs_float(fast.distance - gjk.distance)
+        off = math.max_float(off, math.length(math.sub(fast.point_a, gjk.point_a)))
+        off = math.max_float(off, math.length(math.sub(fast.point_b, gjk.point_b)))
+        if fast.distance > 0.001 { off = math.max_float(off, math.length(math.sub(fast.normal, gjk.normal))) }
+        if off > worst { worst = off }
+        if fast_cache.count != gjk_cache.count && fast.distance > 0.001 { kinds_differ = kinds_differ + 1 }
+        k = k + 1
+    }
+    ensure("closed form: agrees with GJK on 2,000 pairs (worst ${worst})", worst < 0.000001)
+    ensure("closed form: the same kind of simplex for the time of impact (${kinds_differ} differ)", kinds_differ == 0)
+    free(trail_block)
+    free(points_block)
+}
+
 main() {
     before = basics.alloc_count()
     test_reference()
+    test_segment_closed_form()
     test_rounded()
     test_sweep_and_cache()
     test_toi_rotating()
