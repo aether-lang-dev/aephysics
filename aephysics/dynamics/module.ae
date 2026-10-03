@@ -4412,9 +4412,15 @@ struct CollideTask {
 collide_range(start: int, end: int, worker: int, context: ptr) {
     task = context as *CollideTask
     indices = task.indices as int[]
+    w = task.w
     i = start
     while i < end {
-        collide_contact(task.w, indices[i])
+        // The contacts to come and their manifolds fetched ahead, as the
+        // reference's narrow phase does: each pass's first touch of a
+        // contact and of its separately allocated manifold missed the cache.
+        if i + 8 < end { native.prefetch(contact_at(w, indices[i + 8]) as ptr) }
+        if i + 4 < end { native.prefetch(contact_at(w, indices[i + 4]).manifolds) }
+        collide_contact(w, indices[i])
         i = i + 1
     }
 }
