@@ -301,7 +301,7 @@ grow_bounds(w: *World, s: *WorldShape, sim: *BodySim, is_bullet: bool) {
 // shapes, the body advanced to it (its move event corrected), the
 // bounds recomputed at the impact pose and the proxies grown; the
 // sensor hits sooner than the solid hit kept for the sensors.
-solve_continuous(w: *World, sim_index: int) {
+solve_continuous(w: *World, sim_index: int, dt: float) {
     continuous_buffers_ready()
     awake = dynamics.get_solver_set(w, dynamics.AWAKE_SET)
     fast_sim = dynamics.body_sim_at(awake, sim_index)
@@ -345,6 +345,15 @@ solve_continuous(w: *World, sim_index: int) {
         fast_sim.center = center
         fast_sim.rotation0 = q
         fast_sim.center0 = center
+        // The time lost to the impact is gravity the body never fell through
+        // (current Box3D's b3SolveContinuous; other forces are ignored): its
+        // share of the velocity taken back, on the axes not locked.
+        state = dynamics.body_state_at(awake, sim_index)
+        dv = math.mul_sv(0.0 - (1.0 - ctx.fraction) * dt * fast_sim.gravity_scale, w.gravity)
+        if (state.flags & dynamics.LOCK_LINEAR_X) != 0 { dv.x = 0.0 }
+        if (state.flags & dynamics.LOCK_LINEAR_Y) != 0 { dv.y = 0.0 }
+        if (state.flags & dynamics.LOCK_LINEAR_Z) != 0 { dv.z = 0.0 }
+        state.linear_velocity = math.add(state.linear_velocity, dv)
         dynamics.body_move_event_at(w, sim_index).transform = t
         shape_id = fast_body.head_shape_id
         while shape_id != NULL_INDEX {
@@ -454,7 +463,7 @@ finalize_range(start: int, end: int, worker: int, context: ptr) {
                 if (sim.flags & dynamics.IS_BULLET) != 0 {
                     bullets[native.atomic_add((&task.bullet_count) as ptr, 1)] = sim_index
                 } else {
-                    solve_continuous(w, sim_index)
+                    solve_continuous(w, sim_index, time_step)
                 }
             } else {
                 sim.center0 = sim.center
@@ -1338,7 +1347,7 @@ bullet_range(start: int, end: int, worker: int, context: ptr) {
     bullets = ctx.bullet_bodies as int[]
     i = start
     while i < end {
-        solve_continuous(ctx.world, bullets[i])
+        solve_continuous(ctx.world, bullets[i], ctx.dt)
         i = i + 1
     }
 }

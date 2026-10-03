@@ -486,10 +486,6 @@ prepare_wide_slot(ctx: *StepContext, color: *GraphColor, slot: int, end: int) {
     c.twist_impulse = mul_w(warm_start_scale, f4(m0.twist_impulse, m1.twist_impulse, m2.twist_impulse, m3.twist_impulse))
     c.rolling_impulse = mul_sv_w(warm_start_scale, gather_vec3(m0.rolling_impulse, m1.rolling_impulse, m2.rolling_impulse, m3.rolling_impulse))
 
-    // The normal velocity before the solve, for restitution and the
-    // manifold's record, needs the bodies' velocities.
-    b_a = gather_bodies(ctx.states, &c.index_a)
-    b_b = gather_bodies(ctx.states, &c.index_b)
     inv_tau = splat_w(1.0 / dynamics.SPECULATIVE_DISTANCE)
     two = splat_w(2.0)
     min_weight = splat_w(contact_solver.MIN_FRICTION_WEIGHT)
@@ -522,10 +518,25 @@ prepare_wide_slot(ctx: *StepContext, color: *GraphColor, slot: int, end: int) {
         k_normal = add_w(add_w(add_w(m_a, m_b), dot_w(rn_a, mul_mv_w(i_a, rn_a))), dot_w(rn_b, mul_mv_w(i_b, rn_b)))
         valid = lanes.mask_and(greater_w(k_normal, zero), has_point)
         cp.normal_mass = blend_w(zero, div_w(one, k_normal), valid)
-        vr_a = add_v_w(b_a.v, cross_w(b_a.w, r_a))
-        vr_b = add_v_w(b_b.v, cross_w(b_b.w, r_b))
-        cp.relative_velocity = blend_w(zero, dot_w(normal, sub_v_w(vr_b, vr_a)), has_point)
+        cp.relative_velocity = zero
         point_index = point_index + 1
+    }
+    // The normal velocity before the solve is for restitution and hit
+    // events only (b3PrepareContacts_Convex): sampled, with the bodies'
+    // velocities gathered for it, only when a lane has either; zero else,
+    // as a manifold's normal velocity is without them.
+    if c.hit_lanes != 0 || all_zero_w(c.restitution) == false {
+        b_a = gather_bodies(ctx.states, &c.index_a)
+        b_b = gather_bodies(ctx.states, &c.index_b)
+        point_index = 0
+        while point_index < dynamics.MAX_MANIFOLD_POINTS {
+            cp = wide_point_at(c, point_index)
+            has_point = greater_w(point_counts, splat_w(point_index as float))
+            vr_a = add_v_w(b_a.v, cross_w(b_a.w, cp.anchor_a))
+            vr_b = add_v_w(b_b.v, cross_w(b_b.w, cp.anchor_b))
+            cp.relative_velocity = blend_w(zero, dot_w(normal, sub_v_w(vr_b, vr_a)), has_point)
+            point_index = point_index + 1
+        }
     }
     inv_weight = blend_w(zero, div_w(one, total_weight), greater_w(total_weight, zero))
     center_a = mul_sv_w(inv_weight, center_a)

@@ -299,6 +299,41 @@ test_hit_events() {
     hull.destroy_hull(ground_box)
 }
 
+// A time of impact takes back the gravity of the time it lost: a ball at
+// 120 m/s reaching a wall a third of the way through a step has fallen
+// for that third, not the whole step (current Box3D's b3SolveContinuous).
+test_continuous_gravity() {
+    wdef = dynamics.default_world_def()
+    world_id = dynamics.create_world(&wdef)
+    physics_world.enable_continuous(world_id, true)
+    g = physics_world.get_gravity(world_id).y
+    wall_def = dynamics.default_body_def()
+    wall = dynamics.create_body(world_id, &wall_def)
+    wall_box = hull.make_box_hull(0.1, 5.0, 5.0)
+    sdef = dynamics.default_shape_def()
+    dynamics.create_hull_shape(wall, &sdef, wall_box)
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.position = math.vec3(3.0, 0.0, 0.0)
+    bdef.linear_velocity = math.vec3(0.0 - 120.0, 0.0, 0.0)
+    ball = dynamics.create_body(world_id, &bdef)
+    sdef.density = 1.0
+    dynamics.create_sphere_shape(ball, &sdef, manifold.sphere(math.vec3_zero(), 0.25))
+    dt = 1.0 / 60.0
+    // A free step, then the step that reaches the wall.
+    physics_world.step(world_id, dt, 4)
+    free_dv = dynamics.body_get_linear_velocity(ball).y
+    vy0 = free_dv
+    physics_world.step(world_id, dt, 4)
+    x = dynamics.body_get_position(ball).x
+    dv = dynamics.body_get_linear_velocity(ball).y - vy0
+    ensure("continuous gravity: the free step fell a whole step (${free_dv})", math.abs_float(free_dv - g * dt) < 0.0001)
+    ensure("continuous gravity: stopped at the wall (${x})", 0.2 < x && x < 0.5)
+    ensure("continuous gravity: fell only until the impact (${dv} of ${g * dt})", dv < 0.0 && dv > 0.6 * g * dt)
+    dynamics.destroy_world(world_id)
+    hull.destroy_hull(wall_box)
+}
+
 test_continuous_move_event() {
     wdef = dynamics.default_world_def()
     world_id = dynamics.create_world(&wdef)
@@ -732,6 +767,7 @@ main() {
     test_mesh_scale()
     test_fell_asleep()
     test_continuous_move_event()
+    test_continuous_gravity()
     test_sensor_stepped()
     test_explosion()
     test_body_queries()
