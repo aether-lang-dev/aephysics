@@ -97,6 +97,7 @@ exports (
     ClosestPoint, shape_get_closest_point, body_get_closest_point,
     body_allow_fast_rotation, body_is_fast_rotation_allowed, body_enable_contact_recycling, body_is_contact_recycling_enabled,
     body_set_safety_factor, body_get_safety_factor, shape_get_contact_data,
+    shape_apply_wind, AIR_DENSITY, body_get_world, shape_get_world,
     create_island, destroy_island, validate_island, create_solver_set, destroy_solver_set, wake_solver_set,
     validate_solver_sets, get_solver_set, get_island, world_island_count, world_solver_set_count,
     body_sim_at, body_state_at, island_sim_at, world_shape_at, island_at, solver_set_at, body_at,
@@ -2106,6 +2107,104 @@ shape_enable_pre_solve_events(id: ShapeId, flag: bool) {
     if flag { s.flags = s.flags | SHAPE_ENABLE_PRE_SOLVE_EVENTS } else { s.flags = s.flags & (0 - 1 - SHAPE_ENABLE_PRE_SOLVE_EVENTS) }
 }
 shape_are_pre_solve_events_enabled(id: ShapeId) -> bool { return (get_shape_full_id(world_at(id.world0), id).flags & SHAPE_ENABLE_PRE_SOLVE_EVENTS) != 0 }
+
+// --- wind (b3Shape_ApplyWind) ----------------------------------------------------------------------
+
+// The force and torque a wind (a velocity, m/s) puts on a dynamic body's
+// convex shape, added to the body's for the next step: the drag of air
+// (1.225 kg/m^3) on the area the shape presents to the relative wind, the
+// shape's own velocity scaled by `drag` taken off the wind, the speed
+// capped at `max_speed`; capsules and hull faces add `lift` across the
+// flow. A hull is taken face by face, each facing the wind adding its
+// triangles' push at their centres. A sleeping body is woken when `wake`
+// says so and left alone otherwise; other kinds of shape take no wind.
+const AIR_DENSITY = 1.225
+
+shape_apply_wind(id: ShapeId, wind: Vec3, drag: float, lift: float, max_speed: float, wake: bool) {
+    w = world_at(id.world0)
+    if w.locked { return }
+    s = get_shape_full_id(w, id)
+    kind = s.geometry.kind
+    if kind != KIND_SPHERE && kind != KIND_CAPSULE && kind != KIND_HULL { return }
+    body = body_at(w, s.body_id)
+    if body.kind != BODY_DYNAMIC || body.set_index == DISABLED_SET { return }
+    if body.set_index >= FIRST_SLEEPING_SET && wake == false { return }
+    if body.set_index != AWAKE_SET { wake_body(w, body) }
+    sim = get_body_sim(w, body)
+    state = get_body_state(w, body)
+    q = sim.transform.q
+    force = math.vec3_zero()
+    torque = math.vec3_zero()
+    if kind == KIND_SPHERE || kind == KIND_CAPSULE {
+        lever = math.rotate_vector(q, math.sub(s.local_centroid, sim.local_center))
+        relative = math.mul_sub(wind, drag, math.add(state.linear_velocity, math.cross(state.angular_velocity, lever)))
+        speed = math.length(relative)
+        direction = math.normalize(relative)
+        speed = math.min_float(speed, max_speed)
+        if kind == KIND_SPHERE {
+            r = s.geometry.sphere.radius
+            force = math.mul_sv(0.5 * AIR_DENSITY * math.PI * r * r * speed * speed, direction)
+            torque = math.cross(lever, force)
+        } else {
+            c = s.geometry.capsule
+            d = math.rotate_vector(q, math.sub(c.center2, c.center1))
+            r = c.radius
+            area = math.PI * r * r + 2.0 * r * math.length(math.cross(d, direction))
+            e = math.normalize(d)
+            // The side's normal facing the wind, and the flow across it.
+            normal = math.sub(math.mul_sv(math.dot(direction, e), e), direction)
+            lift_direction = math.cross(math.cross(normal, direction), direction)
+            force = math.mul_sv(0.5 * AIR_DENSITY * area * speed * speed, math.mul_add(direction, lift, lift_direction))
+            torque = math.cross(math.mul_add(lever, r, normal), force)
+        }
+    } else {
+        h = s.geometry.hull
+        points = hull.hull_points(h)
+        edges = hull.hull_edges(h)
+        planes = hull.hull_planes(h)
+        faces = hull.hull_faces(h)
+        m = math.make_matrix_from_quat(q)
+        f = 0
+        while f < h.face_count {
+            e1 = faces[f]
+            e2 = edges[e1].next
+            e3 = edges[e2].next
+            p1 = points[edges[e1].origin]
+            p2 = points[edges[e2].origin]
+            v1 = math.mul_mv(m, p1)
+            v2 = math.mul_mv(m, p2)
+            normal = math.mul_mv(m, planes[f].normal)
+            // The face as a fan of triangles from its first vertex.
+            while e3 != e1 {
+                p3 = points[edges[e3].origin]
+                v3 = math.mul_mv(m, p3)
+                centre = math.mul_sv(1.0 / 3.0, math.add(p1, math.add(p2, p3)))
+                lever = math.mul_mv(m, math.sub(centre, sim.local_center))
+                relative = math.mul_sub(wind, drag, math.add(state.linear_velocity, math.cross(state.angular_velocity, lever)))
+                speed = math.length(relative)
+                direction = math.normalize(relative)
+                if math.dot(normal, direction) < 0.0 - math.EPSILON {
+                    area = 0.0 - 0.5 * math.dot(math.cross(math.sub(v2, v1), math.sub(v3, v1)), direction)
+                    lift_direction = math.cross(math.cross(normal, direction), direction)
+                    speed = math.min_float(speed, max_speed)
+                    push = math.mul_sv(0.5 * AIR_DENSITY * area * speed * speed, math.mul_add(direction, lift, lift_direction))
+                    force = math.add(force, push)
+                    torque = math.add(torque, math.cross(lever, push))
+                }
+                p2 = p3
+                v2 = v3
+                e3 = edges[e3].next
+            }
+            f = f + 1
+        }
+    }
+    sim.force = math.add(sim.force, force)
+    sim.torque = math.add(sim.torque, torque)
+}
+
+// The world a body or shape belongs to, as an id (b3Body_GetWorld, b3Shape_GetWorld).
+body_get_world(id: BodyId) -> WorldId { return WorldId { index1: id.world0 + 1, generation: world_at(id.world0).generation } }
+shape_get_world(id: ShapeId) -> WorldId { return WorldId { index1: id.world0 + 1, generation: world_at(id.world0).generation } }
 
 // The mass a shape alone gives (b3Shape_ComputeMassData).
 shape_compute_mass_data(id: ShapeId) -> MassData { return shape.compute_shape_mass(&get_shape_full_id(world_at(id.world0), id).geometry) }
