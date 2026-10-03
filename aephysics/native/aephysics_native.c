@@ -31,6 +31,21 @@
 #include <unistd.h>
 #endif
 
+// --- prefetch -------------------------------------------------------------------------------------------------
+
+// A hint to fetch the cache line at `p` ahead of its use (the reference's
+// narrow phase and contact prepare prefetch the contacts to come); Aether
+// has no prefetch of its own. A null or stale pointer is harmless: a
+// prefetch never faults.
+void aephysics_prefetch(const void *p)
+{
+#if defined(__GNUC__) || defined(__clang__)
+    __builtin_prefetch(p, 0, 3);
+#else
+    (void)p;
+#endif
+}
+
 // --- names ----------------------------------------------------------------------------------------------------
 
 // A body's or shape's name, kept as a plain C copy the world owns and frees

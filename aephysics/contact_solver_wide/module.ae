@@ -21,6 +21,7 @@
 import std.lanes
 import std.string
 import aephysics.math
+import aephysics.native
 import aephysics.basics
 import aephysics.dynamics
 import aephysics.contact_solver
@@ -483,6 +484,9 @@ prepare_wide_range(ctx: *StepContext, color: *GraphColor, start: int, end: int) 
     base = color.wide_constraints
     i = start
     while i < end {
+        // The contacts to come and their manifolds fetched ahead.
+        if i + 8 < end { native.prefetch(dynamics.contact_at(w, basics.ints_get(&color.convex_contacts, i + 8)) as ptr) }
+        if i + 4 < end { native.prefetch(dynamics.contact_at(w, basics.ints_get(&color.convex_contacts, i + 4)).manifolds) }
         c = dynamics.contact_at(w, basics.ints_get(&color.convex_contacts, i))
         prepare_lane(ctx, c, wide_constraint_at(base, i / WIDTH), i % WIDTH)
         i = i + 1
