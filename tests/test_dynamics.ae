@@ -1317,6 +1317,74 @@ test_shape_api() {
 }
 
 // The reference's TestCreateJointClearsContacts and the sets' bookkeeping.
+// The body setters held to the reference's body.c, each where it had
+// drifted: a joint with no dynamic body re-enabled into the static set,
+// the sim's own flags kept through a setter, motion locks that stop the
+// axis and leave a custom mass alone, a body put to sleep on request, a
+// repeated sleep disable that does not wake, a disabled body's bounds
+// moved with it.
+test_body_setters() {
+    world_id = slab_world()
+    w = dynamics.get_world(world_id.index1 - 1)
+    slab_id = dynamics.make_body_id(w, 0)
+    kdef = dynamics.default_body_def()
+    kdef.kind = dynamics.BODY_KINEMATIC
+    kdef.position = math.vec3(0.0, 3.0, 0.0)
+    kinematic = dynamics.create_body(world_id, &kdef)
+    jdef = dynamics.default_weld_joint_def()
+    jdef.base.body_id_a = slab_id
+    jdef.base.body_id_b = kinematic
+    weld = dynamics.create_weld_joint(world_id, &jdef)
+    ensure("setters: a kinematic body's joint to the slab is static", dynamics.get_joint_full_id(w, weld).set_index == dynamics.STATIC_SET)
+    dynamics.body_disable(kinematic)
+    dynamics.body_enable(kinematic)
+    joint = dynamics.get_joint_full_id(w, weld)
+    ensure("setters: still static once re-enabled (set ${joint.set_index})", joint.set_index == dynamics.STATIC_SET && joint.island_id == dynamics.NULL_INDEX)
+    ensure("setters: valid after enable", joints_valid(world_id))
+
+    cube = cube_at(world_id, math.vec3(3.0, 0.49, 0.0), false)
+    cube_body = dynamics.get_body_full_id(w, cube)
+    sim = dynamics.get_body_sim(w, cube_body)
+    sim.flags = sim.flags | dynamics.IS_FAST
+    dynamics.body_set_bullet(cube, true)
+    ensure("setters: a setter keeps the sim's fast flag", (sim.flags & dynamics.IS_FAST) != 0 && (sim.flags & dynamics.IS_BULLET) != 0)
+    sim.flags = sim.flags & (0 - 1 - dynamics.IS_FAST)
+    dynamics.body_set_bullet(cube, false)
+
+    md = dynamics.body_get_mass_data(cube)
+    md.mass = 10.0
+    dynamics.body_set_mass_data(cube, md)
+    dynamics.body_set_linear_velocity(cube, math.vec3(5.0, 1.0, 0.0))
+    dynamics.body_set_angular_velocity(cube, math.vec3(1.0, 2.0, 3.0))
+    dynamics.body_set_motion_locks(cube, MotionLocks { linear_x: true, linear_y: false, linear_z: false, angular_x: false, angular_y: false, angular_z: true })
+    v = dynamics.body_get_linear_velocity(cube)
+    av = dynamics.body_get_angular_velocity(cube)
+    ensure("setters: a lock keeps a custom mass (${dynamics.body_get_mass(cube)})", dynamics.body_get_mass(cube) == 10.0)
+    ensure("setters: a locked axis stops at once", v.x == 0.0 && v.y == 1.0 && av.z == 0.0 && av.x == 1.0 && av.y == 2.0)
+    dynamics.body_set_motion_locks(cube, MotionLocks { linear_x: false, linear_y: false, linear_z: false, angular_x: false, angular_y: false, angular_z: false })
+
+    dynamics.body_set_awake(cube, false)
+    ensure("setters: put to sleep on request", dynamics.body_is_awake(cube) == false && cube_body.set_index >= dynamics.FIRST_SLEEPING_SET)
+    ensure("setters: valid asleep", joints_valid(world_id))
+    dynamics.body_enable_sleep(cube, false)
+    ensure("setters: disabling sleep wakes", dynamics.body_is_awake(cube))
+    dynamics.body_set_awake(cube, false)
+    dynamics.body_enable_sleep(cube, false)
+    ensure("setters: disabling it again leaves it asleep", dynamics.body_is_awake(cube) == false)
+
+    // Disabling the last body of a sleeping set destroys the set rather than leak it.
+    sets_before = dynamics.world_solver_set_count(w)
+    dynamics.body_disable(cube)
+    ensure("setters: the emptied sleeping set destroyed (${sets_before} -> ${dynamics.world_solver_set_count(w)})", dynamics.world_solver_set_count(w) == sets_before - 1)
+    ensure("setters: valid disabled from asleep", joints_valid(world_id))
+    dynamics.body_set_transform(cube, math.vec3(20.0, 5.0, 0.0), math.quat_identity())
+    box = dynamics.body_compute_aabb(cube)
+    ensure("setters: a disabled body's bounds move with it", box.lower.x > 19.0 && box.upper.x < 21.0 && box.lower.y > 4.0)
+    dynamics.body_enable(cube)
+    ensure("setters: valid at the end", joints_valid(world_id))
+    dynamics.destroy_world(world_id)
+}
+
 test_joint_sets() {
     // Two overlapping cubes touch; a joint that forbids their collision
     // destroys the contact and the broad phase makes no new one; letting
@@ -1581,6 +1649,7 @@ main() {
     test_mesh_and_compound_contacts()
     test_joint_kinds()
     test_joint_sets()
+    test_body_setters()
     test_shape_filter()
     test_shape_api()
     test_sensors()

@@ -6,6 +6,7 @@
 // The contact lanes in the same file are declared by
 // aephysics.contact_solver_wide, which owns them.
 @source("aephysics_native.c")
+@c_include("aephysics_inline.h")
 exports (
     MAX_WORKERS, worker_index, set_worker_index, yield_thread, pause, processor_count, scratch,
     atomic_load, atomic_store, atomic_add, atomic_or, atomic_cas,
@@ -21,17 +22,17 @@ extern aephysics_worker_index() -> int
 extern aephysics_set_worker_index(index: int)
 extern aephysics_yield()
 extern aephysics_processor_count() -> int
-extern aephysics_pause()
-extern aephysics_atomic_load(p: ptr) -> int
-extern aephysics_atomic_store(p: ptr, value: int)
-extern aephysics_atomic_add(p: ptr, value: int) -> int
-extern aephysics_atomic_or(p: ptr, value: int) -> int
-extern aephysics_atomic_cas(p: ptr, expected: int, desired: int) -> int
+extern aephysics_pause() @c_import
+extern aephysics_atomic_load(p: ptr) -> int @c_import
+extern aephysics_atomic_store(p: ptr, value: int) @c_import
+extern aephysics_atomic_add(p: ptr, value: int) -> int @c_import
+extern aephysics_atomic_or(p: ptr, value: int) -> int @c_import
+extern aephysics_atomic_cas(p: ptr, expected: int, desired: int) -> int @c_import
 extern aephysics_semaphore_new(initial: int) -> ptr
 extern aephysics_semaphore_free(s: ptr)
 extern aephysics_semaphore_wait(s: ptr)
 extern aephysics_semaphore_signal(s: ptr, count: int)
-extern aephysics_prefetch(p: ptr)
+extern aephysics_prefetch(p: ptr) @c_import
 extern aephysics_name_copy(s: string) -> ptr
 extern aephysics_name_text(name: ptr) -> string
 extern free(p: ptr)

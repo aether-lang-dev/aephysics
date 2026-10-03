@@ -1634,10 +1634,13 @@ get_body_state(w: *World, body: *Body) -> *BodyState {
 get_body_transform(w: *World, body_id: int) -> Transform { return get_body_sim(w, body_at(w, body_id)).transform }
 make_body_id(w: *World, body_id: int) -> BodyId { return BodyId { index1: body_id + 1, world0: w.world_id, generation: body_at(w, body_id).generation } }
 
-// The body's flags onto its sim and state, never the transient ones.
+// The body's flags onto its sim and state, never the transient ones,
+// keeping the flags only the sim holds: fast, which the next collide
+// pass reads to keep a fast pair off recycling, and had a time of impact.
 sync_body_flags(w: *World, body: *Body) {
     flags = body.flags & (0 - 1 - BODY_TRANSIENT_FLAGS)
-    get_body_sim(w, body).flags = flags
+    sim = get_body_sim(w, body)
+    sim.flags = (sim.flags & (IS_FAST | HAD_TIME_OF_IMPACT)) | flags
     state = get_body_state(w, body)
     if state != null { state.flags = flags }
 }
@@ -2439,8 +2442,15 @@ body_set_transform(id: BodyId, position: Vec3, rotation: Quat) {
     shape_id = body.head_shape_id
     while shape_id != NULL_INDEX {
         s = world_shape_at(w, shape_id)
-        if s.proxy_key != NULL_INDEX {
-            update_shape_aabbs(s, sim.transform, body.kind)
+        // A disabled body's shapes have no proxy, but their bounds move
+        // with it. The proxy moves only when the new bounds leave the old
+        // fat ones, as the reference's does: a body moved a little every
+        // frame is not taken out of the tree and put back each time.
+        old_fat = s.fat_aabb
+        update_shape_aabbs(s, sim.transform, body.kind)
+        if math.aabb_contains(old_fat, s.aabb) {
+            s.fat_aabb = old_fat
+        } else if s.proxy_key != NULL_INDEX {
             broad_phase.broad_phase_move_proxy(&w.broad_phase, s.proxy_key, s.fat_aabb)
         }
         shape_id = s.next_shape_id
@@ -2764,17 +2774,28 @@ body_set_sleep_threshold(id: BodyId, threshold: float) { get_body_full_id(body_w
 body_get_shape_count(id: BodyId) -> int { return get_body_full_id(body_world(id), id).shape_count }
 body_get_flags(id: BodyId) -> int { return get_body_full_id(body_world(id), id).flags }
 
-// Waking a sleeping body (putting one to sleep needs the island's sleep test, with the solver).
+// Waking a sleeping body, or putting an awake one's island to sleep now
+// (b3Body_SetAwake): split first if a constraint left it, so only what
+// is still connected sleeps.
 body_set_awake(id: BodyId, awake: bool) {
     w = body_world(id)
     if w.locked { return }
+    w.locked = true
     body = get_body_full_id(w, id)
-    if awake { wake_body(w, body) }
+    if awake {
+        wake_body(w, body)
+    } else if body.set_index == AWAKE_SET && body.island_id != NULL_INDEX {
+        if island_at(w, body.island_id).constraint_remove_count > 0 { split_island(w, body.island_id) }
+        try_sleep_island(w, body.island_id)
+    }
+    w.locked = false
 }
 
 body_enable_sleep(id: BodyId, enable: bool) {
     w = body_world(id)
     body = get_body_full_id(w, id)
+    // Unchanged is nothing to do: a repeated disable does not wake the body.
+    if enable == ((body.flags & ENABLE_SLEEP) != 0) { return }
     if enable {
         body.flags = body.flags | ENABLE_SLEEP
     } else {
@@ -2794,11 +2815,24 @@ body_set_motion_locks(id: BodyId, locks: MotionLocks) {
     if locks.angular_x { flags = flags | LOCK_ANGULAR_X }
     if locks.angular_y { flags = flags | LOCK_ANGULAR_Y }
     if locks.angular_z { flags = flags | LOCK_ANGULAR_Z }
-    if flags != body.flags {
-        body.flags = flags
-        sync_body_flags(w, body)
-        update_body_mass_data(w, body)
+    if flags == body.flags { return }
+    fixed_before = (body.flags & FIXED_ROTATION) == FIXED_ROTATION
+    fixed_after = (flags & FIXED_ROTATION) == FIXED_ROTATION
+    body.flags = flags
+    sync_body_flags(w, body)
+    // A locked axis stops now, not after the next step's positions.
+    state = get_body_state(w, body)
+    if state != null {
+        if locks.linear_x { state.linear_velocity.x = 0.0 }
+        if locks.linear_y { state.linear_velocity.y = 0.0 }
+        if locks.linear_z { state.linear_velocity.z = 0.0 }
+        if locks.angular_x { state.angular_velocity.x = 0.0 }
+        if locks.angular_y { state.angular_velocity.y = 0.0 }
+        if locks.angular_z { state.angular_velocity.z = 0.0 }
     }
+    // Only fixing or freeing the rotation changes the mass (its inertia);
+    // any other lock leaves the mass alone, a custom one included.
+    if fixed_before != fixed_after { update_body_mass_data(w, body) }
 }
 
 body_get_motion_locks(id: BodyId) -> MotionLocks {
@@ -4409,6 +4443,18 @@ struct CollideTask {
     indices: ptr                   // int[], the contacts of the pass
 }
 
+// The lines of a shape and of a body the collide pass reads: a shape's
+// body id and its bounds, a body's set and index and its kind.
+prefetch_shape(s: *WorldShape) {
+    native.prefetch(s as ptr)
+    native.prefetch((&s.fat_aabb) as ptr)
+}
+
+prefetch_body(b: *Body) {
+    native.prefetch(b as ptr)
+    native.prefetch((&b.kind) as ptr)
+}
+
 collide_range(start: int, end: int, worker: int, context: ptr) {
     task = context as *CollideTask
     indices = task.indices as int[]
@@ -4418,8 +4464,21 @@ collide_range(start: int, end: int, worker: int, context: ptr) {
         // The contacts to come and their manifolds fetched ahead, as the
         // reference's narrow phase does: each pass's first touch of a
         // contact and of its separately allocated manifold missed the cache.
+        // Further in, what a contact leads to: its shapes (their bounds
+        // are what the pass reads first) four ahead, the contact fetched
+        // by then, and their bodies two ahead, the shapes fetched by then.
         if i + 8 < end { native.prefetch(contact_at(w, indices[i + 8]) as ptr) }
-        if i + 4 < end { native.prefetch(contact_at(w, indices[i + 4]).manifolds) }
+        if i + 4 < end {
+            ahead = contact_at(w, indices[i + 4])
+            native.prefetch(ahead.manifolds)
+            prefetch_shape(world_shape_at(w, ahead.shape_id_a))
+            prefetch_shape(world_shape_at(w, ahead.shape_id_b))
+        }
+        if i + 2 < end {
+            near = contact_at(w, indices[i + 2])
+            prefetch_body(body_at(w, world_shape_at(w, near.shape_id_a).body_id))
+            prefetch_body(body_at(w, world_shape_at(w, near.shape_id_b).body_id))
+        }
         collide_contact(w, indices[i])
         i = i + 1
     }
@@ -5695,7 +5754,13 @@ body_disable(id: BodyId) {
         }
     }
     remove_body_from_island(w, body)
+    source_index = body.set_index
     transfer_body(w, disabled, set, body)
+    // A sleeping set left empty (its last body disabled, its island gone
+    // with it) is nothing anyone will wake: destroyed, not leaked.
+    if source_index >= FIRST_SLEEPING_SET && set.body_sims.count == 0 && set.island_sims.count == 0 && set.joint_sims.count == 0 && set.contact_indices.count == 0 {
+        destroy_solver_set(w, source_index)
+    }
     w.locked = false
 }
 
@@ -5727,8 +5792,10 @@ body_enable(id: BodyId) {
         body_a = body_at(w, j.edge_a.body_id)
         body_b = body_at(w, j.edge_b.body_id)
         if body_a.set_index == DISABLED_SET || body_b.set_index == DISABLED_SET { continue }
+        // A joint with no dynamic body is static, as create_joint makes it:
+        // a kinematic body is in the awake set but never solved against.
         joint_set_id = body_a.set_index
-        if body_a.set_index == STATIC_SET && body_b.set_index == STATIC_SET { joint_set_id = STATIC_SET }
+        if body_a.kind != BODY_DYNAMIC && body_b.kind != BODY_DYNAMIC { joint_set_id = STATIC_SET }
         else if body_a.set_index == STATIC_SET { joint_set_id = body_b.set_index }
         transfer_joint(w, solver_set_at(w, joint_set_id), disabled, j)
         if joint_set_id != STATIC_SET { link_joint(w, j) }

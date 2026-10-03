@@ -23,7 +23,8 @@ cflags="$(sed -n 's/^cflags = "\(.*\)"/\1/p' aether.toml)"
 includes="$(ae cflags | tr ' ' '\n' | grep '^-[Ifw]' | tr '\n' ' ')"
 libs="$(ae cflags | tr ' ' '\n' | grep '^-[Ll]' | tr '\n' ' ')"
 AETHER_LIB_DIR="$root" aetherc "$source" "$out/$name.c" >"$out/$name.log" 2>&1 || { cat "$out/$name.log"; exit 1; }
-gcc $cflags -g $includes -c "$out/$name.c" -o "$out/$name.o" 2>>"$out/$name.log" || { cat "$out/$name.log"; exit 1; }
+# aephysics.native's @c_include header, which ae build finds beside the module.
+gcc $cflags -g $includes -Iaephysics/native -c "$out/$name.c" -o "$out/$name.o" 2>>"$out/$name.log" || { cat "$out/$name.log"; exit 1; }
 gcc $cflags -g -c aephysics/native/aephysics_native.c -o "$out/lanes.o" || exit 1
 gcc -O2 -c tools/sampler.c -o "$out/sampler.o" || exit 1
 gcc "$out/$name.o" "$out/lanes.o" "$out/sampler.o" -o "$out/$name.exe" $libs || exit 1
