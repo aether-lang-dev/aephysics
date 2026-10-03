@@ -219,6 +219,20 @@ prepare_distance_joint(base: *JointSim, ctx: *StepContext) {
         j.upper_impulse = 0.0
         j.motor_impulse = 0.0
     }
+    // The warm start applies every impulse; the solve updates only those
+    // of the parts it runs. An impulse whose part will not run this step
+    // (a limit or motor switched off, the limits and motor of a rigid rod,
+    // a spring of no stiffness) is dropped here, or it would be warm-started
+    // every sub-step for as long as the part stays off -- a disabled limit
+    // that was pushing went on pushing for good. The reference's setters
+    // leave them.
+    soft = j.enable_spring && (j.min_length < j.max_length || j.enable_limit == false)
+    if soft == false || j.enable_limit == false {
+        j.lower_impulse = 0.0
+        j.upper_impulse = 0.0
+    }
+    if soft == false || j.enable_motor == false { j.motor_impulse = 0.0 }
+    if soft && j.hertz <= 0.0 { j.impulse = 0.0 }
 }
 
 warm_start_distance_joint(base: *JointSim, ctx: *StepContext) {
@@ -2104,7 +2118,12 @@ wheel_joint_enable_steering(id: JointId, flag: bool) {
     if base == null { return }
     j = dynamics.wheel_joint_of(base)
     if j.enable_steering != flag {
+        // The steering's own impulses go too, or a wheel steered again
+        // would be warm-started with what it held when steering stopped.
         j.angular_impulse = Vec2 { x: 0.0, y: 0.0 }
+        j.steering_spring_impulse = 0.0
+        j.lower_steering_impulse = 0.0
+        j.upper_steering_impulse = 0.0
         j.enable_steering = flag
     }
 }
