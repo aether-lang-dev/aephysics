@@ -472,6 +472,24 @@ prepare_motor_joint(base: *JointSim, ctx: *StepContext) {
         j.linear_spring_impulse = math.vec3_zero()
         j.angular_spring_impulse = math.vec3_zero()
     }
+    // The warm start applies all four impulses; the solve runs a part only
+    // with a cap above zero (and a spring only with a stiffness). A part
+    // switched off kept its impulse, and the warm start pushed with it every
+    // sub-step for as long as the joint lived: a bone let go of by zeroing
+    // its anchor's caps never hung (aephysics#76). Here a part that will not
+    // run drops its impulse, and one that will is held to its cap now, so a
+    // lowered cap is not overshot by the warm start either.
+    j.angular_spring_impulse = capped_impulse(j.angular_spring_impulse, j.max_spring_torque > 0.0 && j.angular_hertz > 0.0, ctx.h * j.max_spring_torque)
+    j.angular_velocity_impulse = capped_impulse(j.angular_velocity_impulse, j.max_velocity_torque > 0.0, ctx.h * j.max_velocity_torque)
+    j.linear_spring_impulse = capped_impulse(j.linear_spring_impulse, j.max_spring_force > 0.0 && j.linear_hertz > 0.0, ctx.h * j.max_spring_force)
+    j.linear_velocity_impulse = capped_impulse(j.linear_velocity_impulse, j.max_velocity_force > 0.0, ctx.h * j.max_velocity_force)
+}
+
+// An accumulated impulse kept only while its part runs, and within its cap.
+capped_impulse(impulse: Vec3, runs: bool, max_impulse: float) -> Vec3 {
+    if runs == false { return math.vec3_zero() }
+    if math.length_squared(impulse) > max_impulse * max_impulse { return math.mul_sv(max_impulse, math.normalize(impulse)) }
+    return impulse
 }
 
 warm_start_motor_joint(base: *JointSim, ctx: *StepContext) {
