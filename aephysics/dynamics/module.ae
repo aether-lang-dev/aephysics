@@ -1968,7 +1968,47 @@ shape_set_density(id: ShapeId, density: float, update_body_mass: bool) {
     if update_body_mass { update_body_mass_data(w, body_at(w, s.body_id)) }
 }
 shape_get_filter(id: ShapeId) -> Filter { return get_shape_full_id(world_at(id.world0), id).filter }
-shape_set_filter(id: ShapeId, filter: Filter) { get_shape_full_id(world_at(id.world0), id).filter = filter }
+// A new filter takes effect at once, as the reference's b3Shape_SetFilter
+// has it: the shape's contacts are destroyed (its bodies woken), so a pair
+// the filter now forbids stops colliding; its proxy is moved, so the pairs
+// are tried again under the new filter on the next step; and when the
+// category bits change it is made anew, since the tree keeps them for the
+// queries. (Setting the field alone left forbidden contacts touching, never
+// paired shapes the filter now allows, and queried the old category.)
+// Sensor overlaps follow on the next step.
+shape_set_filter(id: ShapeId, filter: Filter) {
+    w = world_at(id.world0)
+    if w.locked { return }
+    s = get_shape_full_id(w, id)
+    old = s.filter
+    if filter.category_bits == old.category_bits && filter.mask_bits == old.mask_bits && filter.group_index == old.group_index { return }
+    s.filter = filter
+    reset_shape_proxy(w, s, true, filter.category_bits != old.category_bits)
+}
+
+// A shape's contacts destroyed and its proxy refreshed at the body's
+// transform: made anew (`remake`, for new category bits) or moved, either
+// way flagged so the broad phase pairs it again (the reference's b3ResetProxy).
+reset_shape_proxy(w: *World, s: *WorldShape, wake_bodies: bool, remake: bool) {
+    w.locked = true
+    destroy_shape_contacts(w, s, wake_bodies)
+    body = body_at(w, s.body_id)
+    t = get_body_transform(w, s.body_id)
+    if s.proxy_key != NULL_INDEX {
+        kind = broad_phase.proxy_type(s.proxy_key)
+        update_shape_aabbs(s, t, kind)
+        if remake {
+            broad_phase.broad_phase_destroy_proxy(&w.broad_phase, s.proxy_key)
+            s.proxy_key = broad_phase.broad_phase_create_proxy(&w.broad_phase, kind, s.fat_aabb, s.filter.category_bits, s.id, true)
+        } else {
+            broad_phase.broad_phase_move_proxy(&w.broad_phase, s.proxy_key, s.fat_aabb)
+        }
+    } else {
+        // A disabled body's shape: its bounds kept current for when it returns.
+        update_shape_aabbs(s, t, body.kind)
+    }
+    w.locked = false
+}
 shape_get_surface_material(id: ShapeId) -> SurfaceMaterial { return get_shape_full_id(world_at(id.world0), id).material }
 shape_set_surface_material(id: ShapeId, m: SurfaceMaterial) {
     s = get_shape_full_id(world_at(id.world0), id)
