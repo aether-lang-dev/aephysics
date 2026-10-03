@@ -37,7 +37,8 @@ exports (
     contact_hit_event_count, contact_hit_event, sensor_begin_event_count, sensor_begin_event, sensor_end_event_count, sensor_end_event,
     joint_event_count, joint_event,
     enable_sleeping, is_sleeping_enabled, enable_warm_starting, is_warm_starting_enabled, enable_continuous, is_continuous_enabled,
-    enable_speculative, set_restitution_threshold, get_restitution_threshold, set_hit_event_threshold, get_hit_event_threshold,
+    enable_speculative, set_restitution_threshold, get_restitution_threshold, set_restitution_iterations, get_restitution_iterations,
+    enable_restitution_propagation, is_restitution_propagation_enabled, set_hit_event_threshold, get_hit_event_threshold,
     set_contact_tuning, set_contact_recycle_distance, get_contact_recycle_distance, set_maximum_linear_speed, get_maximum_linear_speed,
     set_gravity, get_gravity, set_user_data, get_user_data, set_friction_callback, set_restitution_callback,
     set_custom_filter_callback, set_pre_solve_callback, get_awake_body_count, get_counters, get_bounds, rebuild_static_tree,
@@ -161,6 +162,7 @@ step(id: WorldId, time_step: float, sub_step_count: int) {
     ctx.contact_softness = dynamics.make_soft(contact_hertz, w.contact_damping_ratio, ctx.h)
     ctx.static_softness = dynamics.make_soft(2.0 * contact_hertz, 0.5 * w.contact_damping_ratio, ctx.h)
     ctx.restitution_threshold = w.restitution_threshold
+    ctx.any_restitution = 0
     ctx.max_linear_velocity = w.max_linear_speed
     ctx.enable_warm_starting = w.enable_warm_starting
     t2 = os.now_monotonic_ns()
@@ -287,6 +289,18 @@ set_restitution_threshold(id: WorldId, value: float) {
     if w != null { w.restitution_threshold = math.clamp_float(value, 0.0, math.MAX_FLOAT) }
 }
 get_restitution_threshold(id: WorldId) -> float { return dynamics.get_world(id.index1 - 1).restitution_threshold }
+// The restitution passes after the sub-steps (0 to 63; Box3D's b3World_SetRestitutionIterations).
+set_restitution_iterations(id: WorldId, count: int) {
+    w = world_of(id)
+    if w != null { w.restitution_iterations = math.clamp_int(count, 0, dynamics.MAX_RESTITUTION_ITERATIONS) }
+}
+get_restitution_iterations(id: WorldId) -> int { return dynamics.get_world(id.index1 - 1).restitution_iterations }
+// Whether the restitution passes reach contacts without restitution too, so a bounce carries through a stack.
+enable_restitution_propagation(id: WorldId, flag: bool) {
+    w = world_of(id)
+    if w != null { w.enable_restitution_propagation = flag }
+}
+is_restitution_propagation_enabled(id: WorldId) -> bool { return dynamics.get_world(id.index1 - 1).enable_restitution_propagation }
 set_hit_event_threshold(id: WorldId, value: float) {
     w = world_of(id)
     if w != null { w.hit_event_threshold = math.clamp_float(value, 0.0, math.MAX_FLOAT) }

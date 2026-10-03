@@ -58,7 +58,7 @@ exports (
     WorldDef, BodyDef, ShapeDef, MotionLocks, WorldId, BodyId, ShapeId,
     World, Body, BodySim, BodyState, WorldShape, Contact, ContactEdge, Joint, JointEdge,
     SolverSet, Island, IslandSim, ContactLink, JointLink,
-    NULL_INDEX, MAX_WORLDS, STATIC_SET, DISABLED_SET, AWAKE_SET, FIRST_SLEEPING_SET, SPECULATIVE_DISTANCE,
+    NULL_INDEX, MAX_WORLDS, STATIC_SET, DISABLED_SET, AWAKE_SET, FIRST_SLEEPING_SET, SPECULATIVE_DISTANCE, MAX_RESTITUTION_ITERATIONS,
     BODY_STATIC, BODY_KINEMATIC, BODY_DYNAMIC,
     LOCK_LINEAR_X, LOCK_LINEAR_Y, LOCK_LINEAR_Z, LOCK_ANGULAR_X, LOCK_ANGULAR_Y, LOCK_ANGULAR_Z,
     IS_FAST, IS_BULLET, IS_SPEED_CAPPED, HAD_TIME_OF_IMPACT, ALLOW_FAST_ROTATION, ENLARGE_BOUNDS,
@@ -159,6 +159,7 @@ const BODY_STATIC = 0
 const BODY_KINEMATIC = 1
 const BODY_DYNAMIC = 2
 const SPECULATIVE_DISTANCE = 0.02
+const MAX_RESTITUTION_ITERATIONS = 63
 const MAX_AABB_MARGIN = 0.05
 const AABB_MARGIN_FRACTION = 0.125
 const CONTACT_RECYCLE_DISTANCE = 0.05
@@ -237,6 +238,8 @@ struct WorldDef {
     gravity: Vec3
     hit_event_threshold: float     // the approach speed that makes a hit event
     restitution_threshold: float   // the approach speed under which there is no bounce
+    restitution_iterations: int    // the restitution passes after the sub-steps, 0 to 63
+    enable_restitution_propagation: bool // restitution passes reach contacts without restitution too
     contact_speed: float           // the push-out speed
     contact_hertz: float           // the contact spring
     contact_damping_ratio: float
@@ -328,6 +331,7 @@ default_restitution(restitution_a: float, user_a: long, restitution_b: float, us
 
 default_world_def() -> WorldDef {
     return WorldDef { gravity: math.vec3(0.0, 0.0 - 10.0, 0.0), hit_event_threshold: 1.0, restitution_threshold: 1.0, contact_speed: 3.0,
+                      restitution_iterations: 2, enable_restitution_propagation: false,
                       contact_hertz: 30.0, contact_damping_ratio: 10.0, maximum_linear_speed: 400.0,
                       friction_callback: default_friction, restitution_callback: default_restitution,
                       enable_sleep: true, enable_continuous: true, static_body_count: 0, dynamic_body_count: 0,
@@ -1176,6 +1180,8 @@ struct World {
     gravity: Vec3
     hit_event_threshold: float
     restitution_threshold: float
+    restitution_iterations: int
+    enable_restitution_propagation: bool
     max_linear_speed: float
     contact_speed: float
     contact_hertz: float
@@ -1384,6 +1390,8 @@ create_world(def: *WorldDef) -> WorldId {
     w.gravity = def.gravity
     w.hit_event_threshold = def.hit_event_threshold
     w.restitution_threshold = def.restitution_threshold
+    w.restitution_iterations = math.clamp_int(def.restitution_iterations, 0, MAX_RESTITUTION_ITERATIONS)
+    w.enable_restitution_propagation = def.enable_restitution_propagation
     w.max_linear_speed = def.maximum_linear_speed
     w.contact_speed = def.contact_speed
     w.contact_hertz = def.contact_hertz

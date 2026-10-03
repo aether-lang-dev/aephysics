@@ -280,6 +280,105 @@ test_rebuilt_static_pairs() {
     hull.destroy_hull(slab)
 }
 
+// A ball of the given restitution dropped from 2 m onto a slab under the
+// world's restitution settings: the highest it rises after its first bounce.
+bounce_peak(restitution: float, iterations: int) -> float {
+    wdef = dynamics.default_world_def()
+    wdef.restitution_iterations = iterations
+    world_id = dynamics.create_world(&wdef)
+    gdef = dynamics.default_body_def()
+    gdef.position = math.vec3(0.0, 0.0 - 0.5, 0.0)
+    ground = dynamics.create_body(world_id, &gdef)
+    slab = hull.make_box_hull(4.0, 0.5, 4.0)
+    gsdef = dynamics.default_shape_def()
+    gsdef.base_material.restitution = restitution
+    dynamics.create_hull_shape(ground, &gsdef, slab)
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.position = math.vec3(0.0, 2.5, 0.0)
+    ball = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    sdef.base_material.restitution = restitution
+    dynamics.create_sphere_shape(ball, &sdef, manifold.sphere(math.vec3_zero(), 0.5))
+    bounced = false
+    peak = 0.0
+    i = 0
+    while i < 240 {
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        v = dynamics.body_get_linear_velocity(ball)
+        y = dynamics.body_get_position(ball).y - 0.5
+        if bounced == false && v.y > 0.0 { bounced = true }
+        if bounced && y > peak { peak = y }
+        i = i + 1
+    }
+    dynamics.destroy_world(world_id)
+    hull.destroy_hull(slab)
+    return peak
+}
+
+// The restitution of Box3D main: passes the world sets (two by default),
+// a Poisson impulse that never adds energy, propagation on request; and
+// the pushing pass no longer counted in the total impulse.
+test_restitution() {
+    full = bounce_peak(1.0, 2)
+    ensure("restitution: a perfect bounce gains nothing (peak ${full} of 2)", full <= 2.0 + 0.02 && full > 1.8)
+    half = bounce_peak(0.5, 2)
+    ensure("restitution: half restitution rises a quarter (${half})", half > 0.4 && half < 0.6)
+    unbounced = bounce_peak(1.0, 0)
+    ensure("restitution: no passes, no bounce (${unbounced})", unbounced < 0.1)
+
+    wdef = dynamics.default_world_def()
+    ensure("restitution: two passes by default", wdef.restitution_iterations == 2 && wdef.enable_restitution_propagation == false)
+    world_id = dynamics.create_world(&wdef)
+    physics_world.set_restitution_iterations(world_id, 100)
+    ensure("restitution: passes clamped to 63", physics_world.get_restitution_iterations(world_id) == 63)
+    physics_world.set_restitution_iterations(world_id, 0 - 3)
+    ensure("restitution: and to 0", physics_world.get_restitution_iterations(world_id) == 0)
+    physics_world.enable_restitution_propagation(world_id, true)
+    ensure("restitution: propagation on", physics_world.is_restitution_propagation_enabled(world_id))
+    dynamics.destroy_world(world_id)
+
+    // A resting cube's total impulse is a step's weight: the relaxed passes'
+    // impulse summed over the sub-steps, the pushing passes not counted.
+    wdef = dynamics.default_world_def()
+    world_id = dynamics.create_world(&wdef)
+    gdef = dynamics.default_body_def()
+    gdef.position = math.vec3(0.0, 0.0 - 0.5, 0.0)
+    ground = dynamics.create_body(world_id, &gdef)
+    slab = hull.make_box_hull(4.0, 0.5, 4.0)
+    sdef = dynamics.default_shape_def()
+    dynamics.create_hull_shape(ground, &sdef, slab)
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.position = math.vec3(0.0, 0.5, 0.0)
+    cube_body = dynamics.create_body(world_id, &bdef)
+    cube = hull.make_box_hull(0.5, 0.5, 0.5)
+    dynamics.create_hull_shape(cube_body, &sdef, cube)
+    i = 0
+    while i < 60 {
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        i = i + 1
+    }
+    data_block = calloc(4, sizeof(ContactData))
+    data = data_block as ContactData[]
+    count = dynamics.body_get_contact_data(cube_body, data, 4)
+    total = 0.0
+    if count == 1 {
+        m = data[0].manifolds as *Manifold
+        j = 0
+        while j < m.point_count {
+            total = total + dynamics.manifold_point_at(m, j).total_normal_impulse
+            j = j + 1
+        }
+    }
+    weight = dynamics.body_get_mass(cube_body) * 10.0 / 60.0
+    ensure("restitution: a resting cube's total impulse is a step's weight (${total} of ${weight})", count == 1 && math.abs_float(total - weight) < 0.1 * weight)
+    free(data_block)
+    dynamics.destroy_world(world_id)
+    hull.destroy_hull(slab)
+    hull.destroy_hull(cube)
+}
+
 test_hit_events() {
     wdef = dynamics.default_world_def()
     wdef.hit_event_threshold = 1.0
@@ -797,6 +896,7 @@ main() {
     test_mesh_scale()
     test_fell_asleep()
     test_rebuilt_static_pairs()
+    test_restitution()
     test_continuous_move_event()
     test_continuous_gravity()
     test_sensor_stepped()

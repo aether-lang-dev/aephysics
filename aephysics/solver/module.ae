@@ -91,7 +91,8 @@ stage_report() {
 const NULL_INDEX = 0 - 1
 const MAX_ROTATION = 0.78539816339744830962   // a quarter turn per step at most
 const GYROSCOPIC_ITERATIONS = 1
-const RESTITUTION_ITERATIONS = 1
+// The restitution passes a world makes by default; each world sets its own (WorldDef.restitution_iterations).
+const RESTITUTION_ITERATIONS = 2
 
 // Whether a colour's convex contacts go through the wide solver (the
 // reference's way) or the scalar one with the mesh contacts; the
@@ -986,9 +987,15 @@ orchestrate(sc: *SolverContext) {
     }
     stage_index = stage_index + 1 + active + active + 1 + active
 
-    // Restitution.
+    // Restitution, unless no prepared contact has any and none propagates
+    // (Box3D main): then its stages are passed over, unposted.
+    restitution_passes = ctx.world.restitution_iterations
+    if ctx.world.enable_restitution_propagation == false && native.atomic_load((&ctx.any_restitution) as ptr) == 0 {
+        stage_index = stage_index + restitution_passes * active
+        restitution_passes = 0
+    }
     iteration = 0
-    while iteration < RESTITUTION_ITERATIONS {
+    while iteration < restitution_passes {
         contact_solver.apply_restitution(ctx, overflow.contact_constraints, overflow.contact_constraint_count)
         c = 0
         while c < active {
@@ -1119,7 +1126,7 @@ solve(w: *World, ctx: *StepContext) {
     wide_blocks = basics.stack_alloc(stack, wide_block_count * sizeof(SolverBlock))
     contact_blocks = basics.stack_alloc(stack, contact_block_count * sizeof(SolverBlock))
     // Per sub-step: integrate velocities, warm start, solve, integrate positions, relax; then restitution and the stores.
-    stage_count = 3 + (1 + active_count + active_count + 1 + active_count) + RESTITUTION_ITERATIONS * active_count + 2
+    stage_count = 3 + (1 + active_count + active_count + 1 + active_count) + w.restitution_iterations * active_count + 2
     stages = basics.stack_alloc(stack, stage_count * sizeof(SolverStage))
 
     init_blocks(body_blocks, body_dim, awake_body_count, BLOCK_BODY, NULL_INDEX)
@@ -1155,7 +1162,7 @@ solve(w: *World, ctx: *StepContext) {
     stage = init_color_stages(stage, STAGE_SOLVE, 1, colors_block, active_count)
     stage = init_stage(stage, STAGE_INTEGRATE_POSITIONS, body_blocks, body_dim.count, NULL_INDEX)
     stage = init_color_stages(stage, STAGE_RELAX, 1, colors_block, active_count)
-    stage = init_color_stages(stage, STAGE_RESTITUTION, RESTITUTION_ITERATIONS, colors_block, active_count)
+    stage = init_color_stages(stage, STAGE_RESTITUTION, w.restitution_iterations, colors_block, active_count)
     stage = init_stage(stage, STAGE_STORE_WIDE, wide_blocks, wide_block_count, NULL_INDEX)
     stage = init_stage(stage, STAGE_STORE_CONTACTS, contact_blocks, contact_block_count, NULL_INDEX)
 

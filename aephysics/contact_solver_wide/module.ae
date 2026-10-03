@@ -177,6 +177,7 @@ struct WideConstraintPoint {
     normal_mass: f32x4
     lever_arm: f32x4
     relative_velocity: f32x4
+    restitution_impulse: f32x4     // what the restitution passes added beyond the approach
 }
 
 // Four convex contacts' constraints (b3ContactConstraintWide): the body
@@ -408,7 +409,7 @@ gather_point(m0: *Manifold, m1: *Manifold, m2: *Manifold, m3: *Manifold, index: 
         anchor_b: gather_vec3(p0.anchor_b, p1.anchor_b, p2.anchor_b, p3.anchor_b),
         base_separation: f4(p0.separation, p1.separation, p2.separation, p3.separation),
         normal_impulse: f4(p0.normal_impulse, p1.normal_impulse, p2.normal_impulse, p3.normal_impulse),
-        total_normal_impulse: zero, normal_mass: zero, lever_arm: zero, relative_velocity: zero
+        total_normal_impulse: zero, normal_mass: zero, lever_arm: zero, relative_velocity: zero, restitution_impulse: zero
     }
 }
 
@@ -466,6 +467,7 @@ prepare_wide_slot(ctx: *StepContext, color: *GraphColor, slot: int, end: int) {
     c.friction = f4(k0.friction, k1.friction, k2.friction, k3.friction)
     c.restitution = f4(k0.restitution, k1.restitution, k2.restitution, k3.restitution)
     c.rolling_resistance = f4(k0.rolling_resistance, k1.rolling_resistance, k2.rolling_resistance, k3.rolling_resistance)
+    if all_zero_w(c.restitution) == false { contact_solver.note_restitution(ctx, 1.0) }
 
     zero = zero_w()
     one = splat_w(1.0)
@@ -513,6 +515,7 @@ prepare_wide_slot(ctx: *StepContext, color: *GraphColor, slot: int, end: int) {
         cp.base_separation = sub_w(s, dot_w(sub_v_w(r_b, r_a), normal))
         cp.normal_impulse = mul_w(warm_start_scale, blend_w(zero, g.normal_impulse, has_point))
         cp.total_normal_impulse = zero
+        cp.restitution_impulse = zero
         rn_a = cross_w(r_a, normal)
         rn_b = cross_w(r_b, normal)
         k_normal = add_w(add_w(add_w(m_a, m_b), dot_w(rn_a, mul_mv_w(i_a, rn_a))), dot_w(rn_b, mul_mv_w(i_b, rn_b)))
@@ -702,7 +705,9 @@ solve_wide_contacts(ctx: *StepContext, constraints: ptr, count: int, use_bias: b
             new_impulse = max_w(sub_w(cp.normal_impulse, neg_impulse), zero)
             delta_impulse = sub_w(new_impulse, cp.normal_impulse)
             cp.normal_impulse = new_impulse
-            cp.total_normal_impulse = add_w(cp.total_normal_impulse, new_impulse)
+            // The pushing pass is not counted: the total is what the relaxed
+            // passes and restitution applied (Box3D's push/solve).
+            if use_bias == false { cp.total_normal_impulse = add_w(cp.total_normal_impulse, new_impulse) }
             total_normal_impulse = add_w(total_normal_impulse, new_impulse)
             total_twist_limit = add_w(total_twist_limit, mul_w(cp.lever_arm, new_impulse))
             p = mul_sv_w(delta_impulse, c.normal)
@@ -768,39 +773,53 @@ solve_wide_contacts(ctx: *StepContext, constraints: ptr, count: int, use_bias: b
     }
 }
 
-// The bounce (b3ApplyRestitution_Convex): a slot with no restitution
-// in any lane is skipped; in the rest, a lane's point gets a zero mass
-// unless it approached faster than the threshold with an impulse.
+// The bounce (b3ApplyRestitution_Convex, Box3D main), four contacts at a
+// time: one pass of the world's restitution iterations, the scalar
+// apply_restitution's rule per lane. With propagation off, a slot with no
+// restitution in any lane is skipped and a lane without restitution gets
+// no impulse; with it on, every lane keeps its contact from closing.
 apply_wide_restitution(ctx: *StepContext, constraints: ptr, count: int) {
     states = ctx.states
-    threshold = splat_w(ctx.restitution_threshold)
+    inv_h = splat_w(ctx.inv_h)
+    neg_threshold = splat_w(0.0 - ctx.restitution_threshold)
     zero = zero_w()
+    propagate = ctx.world.enable_restitution_propagation
     index = 0
     while index < count {
         c = wide_constraint_at(constraints, index)
-        if all_zero_w(c.restitution) == false {
+        if propagate || all_zero_w(c.restitution) == false {
             point_count = max_point_count(c)
             b_a = gather_bodies(states, &c.index_a)
             b_b = gather_bodies(states, &c.index_b)
-            no_restitution = equals_w(c.restitution, zero)
+            has_restitution = greater_w(c.restitution, zero)
+            dp = sub_v_w(b_b.dp, b_a.dp)
             point_index = 0
             while point_index < point_count {
                 cp = wide_point_at(c, point_index)
-                slow = greater_w(add_w(cp.relative_velocity, threshold), zero)
-                untouched = equals_w(cp.total_normal_impulse, zero)
-                skip = or_w(or_w(slow, untouched), no_restitution)
-                mass = blend_w(cp.normal_mass, zero, skip)
                 r_a = cp.anchor_a
                 r_b = cp.anchor_b
+                normal_mass = cp.normal_mass
+                if propagate == false { normal_mass = blend_w(zero, cp.normal_mass, has_restitution) }
+                compression = sub_w(cp.total_normal_impulse, cp.restitution_impulse)
+                armed = lanes.mask_and(lanes.mask_and(has_restitution, greater_w(neg_threshold, cp.relative_velocity)), greater_w(compression, zero))
+                ds = add_v_w(dp, sub_v_w(rotate_vector_w(b_b.dq, r_b), rotate_vector_w(b_a.dq, r_a)))
+                s = add_w(dot_w(c.normal, ds), cp.base_separation)
+                spec_bias = max_w(zero, mul_w(s, inv_h))
+                velocity_bias = blend_w(spec_bias, mul_w(c.restitution, cp.relative_velocity), armed)
                 vr_a = add_v_w(b_a.v, cross_w(b_a.w, r_a))
                 vr_b = add_v_w(b_b.v, cross_w(b_b.w, r_b))
                 vn = dot_w(sub_v_w(vr_b, vr_a), c.normal)
-                neg_impulse = mul_w(mass, add_w(vn, mul_w(c.restitution, cp.relative_velocity)))
+                neg_impulse = mul_w(normal_mass, add_w(vn, velocity_bias))
                 new_impulse = max_w(sub_w(cp.normal_impulse, neg_impulse), zero)
-                delta_impulse = sub_w(new_impulse, cp.normal_impulse)
-                cp.normal_impulse = new_impulse
-                cp.total_normal_impulse = add_w(cp.total_normal_impulse, delta_impulse)
-                p = mul_sv_w(delta_impulse, c.normal)
+                impulse = sub_w(new_impulse, cp.normal_impulse)
+                approach = min_w(max_w(neg_w(mul_w(normal_mass, vn)), zero), max_w(impulse, zero))
+                // Poisson's kinetic restitution: no energy gained.
+                allowance = sub_w(mul_w(c.restitution, add_w(compression, approach)), cp.restitution_impulse)
+                impulse = blend_w(impulse, min_w(impulse, add_w(approach, max_w(allowance, zero))), armed)
+                cp.normal_impulse = add_w(cp.normal_impulse, impulse)
+                cp.restitution_impulse = add_w(cp.restitution_impulse, sub_w(impulse, approach))
+                cp.total_normal_impulse = add_w(cp.total_normal_impulse, impulse)
+                p = mul_sv_w(impulse, c.normal)
                 b_a.w = mul_sub_mv_w(b_a.w, c.inv_inertia_a, cross_w(r_a, p))
                 b_a.v = mul_sub_sv_w(b_a.v, c.inv_mass_a, p)
                 b_b.w = mul_add_mv_w(b_b.w, c.inv_inertia_b, cross_w(r_b, p))
