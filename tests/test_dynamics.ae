@@ -1044,6 +1044,22 @@ test_joint_kinds() {
     ensure("revolute: upper ordered", r.upper_angle == 1.0)
     small("revolute: target clamped", r.target_angle - math.PI, 0.00001)
     small("revolute: no separation at rest", dynamics.joint_get_linear_separation(id) + dynamics.joint_get_angular_separation(id), 0.000001)
+    // A free turn about the hinge is no error however far (it read up to
+    // pi after half a turn); a tilt off the hinge is; past a limit the excess adds.
+    // Nearly half a turn round the hinge with a two-milliradian tilt (as a
+    // stepped joint carries): the tilt alone is the error.
+    turned = math.mul_quat(math.make_quat_from_axis_angle(math.vec3_axis_z(), 3.12), math.make_quat_from_axis_angle(math.vec3_axis_x(), 0.002))
+    dynamics.body_set_transform(f.body_id, math.vec3(0.0, 4.0, 0.0), turned)
+    small("revolute: nearly half a turn round the hinge, only the tilt reads (${dynamics.joint_get_angular_separation(id)})", dynamics.joint_get_angular_separation(id) - 0.002, 0.001)
+    dynamics.body_set_transform(f.body_id, math.vec3(0.0, 4.0, 0.0), math.make_quat_from_axis_angle(math.vec3_axis_x(), 0.2))
+    small("revolute: tilted 0.2 off the hinge", dynamics.joint_get_angular_separation(id) - 0.2, 0.005)
+    r.enable_limit = true
+    r.lower_angle = 0.0 - 1.0
+    r.upper_angle = 1.0
+    dynamics.body_set_transform(f.body_id, math.vec3(0.0, 4.0, 0.0), math.make_quat_from_axis_angle(math.vec3_axis_z(), 1.5))
+    small("revolute: half a radian past its limit", dynamics.joint_get_angular_separation(id) - 0.5, 0.005)
+    r.enable_limit = false
+    dynamics.body_set_transform(f.body_id, math.vec3(0.0, 4.0, 0.0), math.quat_identity())
     finish_joint("revolute", id, &f)
 
     // Spherical: the cone clamps to a half turn.

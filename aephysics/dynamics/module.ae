@@ -5368,20 +5368,24 @@ joint_get_angular_separation(id: JointId) -> float {
     if math.dot_quat(q_a, q_b) < 0.0 { q_b = math.negate_quat(q_b) }
     rel_q = math.inv_mul_quat(q_a, q_b)
     kind = j.kind
-    if kind == JOINT_PARALLEL {
-        rel_q.z = 0.0
-        return math.get_quat_angle(rel_q)
-    }
+    // A turn about the frames' z that the joint leaves free is not error:
+    // the error is the swing, the angle between the frames' z axes. (The
+    // reference zeroes the relative rotation's z and takes the angle of
+    // what is left; after half a turn about z what is left is near zero
+    // all round and its angle reads up to pi -- a free hinge that had swung
+    // round read as torn.)
+    if kind == JOINT_PARALLEL { return math.get_swing_angle(rel_q) }
     if kind == JOINT_PRISMATIC { return math.get_quat_angle(rel_q) }
     if kind == JOINT_REVOLUTE {
         r = revolute_joint_of(base)
+        error = math.get_swing_angle(rel_q)
         if r.enable_limit {
+            // Past a limit, the excess of the hinge's angle adds.
             angle = math.get_twist_angle(rel_q)
-            if angle < r.lower_angle { return math.get_quat_angle(rel_q) }
-            if r.upper_angle < angle { return math.get_quat_angle(rel_q) }
+            if angle < r.lower_angle { error = error + (r.lower_angle - angle) }
+            if r.upper_angle < angle { error = error + (angle - r.upper_angle) }
         }
-        rel_q.z = 0.0
-        return math.get_quat_angle(rel_q)
+        return error
     }
     if kind == JOINT_SPHERICAL {
         s = spherical_joint_of(base)
@@ -5411,11 +5415,7 @@ joint_get_angular_separation(id: JointId) -> float {
 // also turns about A's x (the steering), so what is locked is B's spin
 // axis leaning toward A's x; past a steering limit, the excess adds.
 wheel_angular_separation(wheel: *WheelJoint, q_a: Quat, q_b: Quat, rel_q: Quat) -> float {
-    if wheel.enable_steering == false {
-        swing = rel_q
-        swing.z = 0.0
-        return math.get_quat_angle(swing)
-    }
+    if wheel.enable_steering == false { return math.get_swing_angle(rel_q) }
     matrix_a = math.make_matrix_from_quat(q_a)
     matrix_b = math.make_matrix_from_quat(q_b)
     toward = math.clamp_float(math.abs_float(math.dot(matrix_b.cz, matrix_a.cx)), 0.0, 1.0)
