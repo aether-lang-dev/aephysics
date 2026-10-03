@@ -1258,6 +1258,26 @@ test_shape_api() {
     dynamics.body_set_safety_factor(ball, 0.25)
     ensure("shape api: fast rotation and the safety factor", dynamics.body_is_fast_rotation_allowed(ball) && dynamics.body_get_safety_factor(ball) == 0.25 &&
         (dynamics.get_body_sim(w, dynamics.get_body_full_id(w, ball)).flags & dynamics.ALLOW_FAST_ROTATION) != 0)
+    // Wind (#68): 10 m/s at the ball (r 0.5) pushes 0.5 x 1.225 x pi 0.25 x 100;
+    // at a unit cube, only the face toward it, 0.5 x 1.225 x 1 x 100, square on.
+    ball_sim = dynamics.get_body_sim(w, dynamics.get_body_full_id(w, ball))
+    before = ball_sim.force
+    dynamics.shape_apply_wind(id, math.vec3(10.0, 0.0, 0.0), 1.0, 0.0, 100.0, true)
+    pushed = math.sub(ball_sim.force, before)
+    small("wind: the ball's drag (${pushed.x})", pushed.x - 0.5 * dynamics.AIR_DENSITY * math.PI * 0.25 * 100.0, 0.0001)
+    small("wind: along the wind only", math.abs_float(pushed.y) + math.abs_float(pushed.z), 0.000001)
+    cube = cube_at(world_id, math.vec3(5.0, 2.0, 0.0), false)
+    cube_shapes = calloc(1, sizeof(ShapeId))
+    dynamics.body_get_shapes(cube, cube_shapes as ShapeId[], 1)
+    cube_sim = dynamics.get_body_sim(w, dynamics.get_body_full_id(w, cube))
+    force_before = cube_sim.force
+    torque_before = cube_sim.torque
+    dynamics.shape_apply_wind((cube_shapes as ShapeId[])[0], math.vec3(10.0, 0.0, 0.0), 1.0, 0.0, 100.0, true)
+    cube_push = math.sub(cube_sim.force, force_before)
+    small("wind: the cube's face toward it, square on (${cube_push.x} ${cube_push.y} ${cube_push.z})", math.length(math.sub(cube_push, math.vec3(0.5 * dynamics.AIR_DENSITY * 100.0, 0.0, 0.0))), 0.0001)
+    small("wind: no turn on a face met square", math.length(math.sub(cube_sim.torque, torque_before)), 0.0001)
+    free(cube_shapes)
+    ensure("shape api: the world getters", dynamics.world_is_valid(dynamics.body_get_world(ball)) && dynamics.shape_get_world(id).index1 == world_id.index1)
     near = dynamics.body_get_closest_point(ball, math.vec3(0.0, 0.49, 0.0 - 4.0))
     small("shape api: the body's closest point, 3.5 off", near.distance - 3.5, 0.0001)
     ensure("shape api: on the ball's surface", math.length(math.sub(near.point, math.vec3(0.0, 0.49, 0.0 - 0.5))) < 0.0001)
