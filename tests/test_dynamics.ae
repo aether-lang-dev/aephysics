@@ -1154,6 +1154,47 @@ test_joint_kinds() {
     dynamics.destroy_world(f.world_id)
 }
 
+var g_tree_hits = 0
+count_tree_hit(proxy_id: int, user_data: long, context: ptr) -> bool {
+    g_tree_hits = g_tree_hits + 1
+    return true
+}
+
+// A shape's filter set takes effect at once: two cubes touching each other
+// and the slab; one given a category the others do not collide with loses
+// its contacts and pairs no more, the tree queries it under its new
+// category, and its old filter back brings the contacts back.
+test_shape_filter() {
+    world_id = slab_world()
+    w = dynamics.get_world(world_id.index1 - 1)
+    _a = cube_at(world_id, math.vec3(0.0, 0.49, 0.0), false)
+    b = cube_at(world_id, math.vec3(0.5, 0.49, 0.0), false)
+    step_contacts(w)
+    ensure("filter: three contacts before", dynamics.world_contact_count(w) == 3)
+    shapes_block = calloc(2, sizeof(ShapeId))
+    shapes = shapes_block as ShapeId[]
+    dynamics.body_get_shapes(b, shapes, 2)
+    old = dynamics.shape_get_filter(shapes[0])
+    apart = old
+    apart.category_bits = 2 as long
+    apart.mask_bits = (0 - 1 - 1) as long
+    dynamics.shape_set_filter(shapes[0], apart)
+    ensure("filter: its contacts destroyed at once (${dynamics.world_contact_count(w)})", dynamics.world_contact_count(w) == 1)
+    step_contacts(w)
+    ensure("filter: no pair under the new filter (${dynamics.world_contact_count(w)})", dynamics.world_contact_count(w) == 1)
+    g_tree_hits = 0
+    box = AABB { lower: math.vec3(0.0 - 5.0, 0.0 - 5.0, 0.0 - 5.0), upper: math.vec3(5.0, 5.0, 5.0) }
+    dynamic_tree.tree_query(broad_phase.broad_phase_tree(&w.broad_phase, dynamics.BODY_DYNAMIC), box, 2 as long, false, count_tree_hit, null)
+    ensure("filter: the tree queries it under its new category (${g_tree_hits})", g_tree_hits == 1)
+    ensure("filter: valid", all_valid(world_id))
+    dynamics.shape_set_filter(shapes[0], old)
+    step_contacts(w)
+    ensure("filter: its old filter back, colliding again (${dynamics.world_contact_count(w)})", dynamics.world_contact_count(w) == 3)
+    ensure("filter: valid after", all_valid(world_id))
+    free(shapes_block)
+    dynamics.destroy_world(world_id)
+}
+
 // The reference's TestCreateJointClearsContacts and the sets' bookkeeping.
 test_joint_sets() {
     // Two overlapping cubes touch; a joint that forbids their collision
@@ -1419,6 +1460,7 @@ main() {
     test_mesh_and_compound_contacts()
     test_joint_kinds()
     test_joint_sets()
+    test_shape_filter()
     test_sensors()
     hull.destroy_hull(g_cube as *HullData)
     hull.destroy_hull(g_slab as *HullData)
