@@ -381,8 +381,17 @@ test_distance() {
     set_velocity(&f, math.vec3(0.0, 0.0 - 1.0, 0.0), math.vec3_zero())
     solve_step(&f, id)
     small("limit: inward passes (a metre of room)", state.linear_velocity.y + 1.0, 0.000001)
-    // The motor: pulls in at its speed within its force.
+    // A limit switched off while it pushes leaves no push behind: the
+    // next step's warm start applies nothing (a spring of no stiffness, no motor).
+    set_velocity(&f, math.vec3(0.0, 1.0, 0.0), math.vec3_zero())
+    solve_step(&f, id)
+    ensure("limit: pushing at the maximum (${d.upper_impulse})", d.upper_impulse > 0.1)
     joint_solver.distance_joint_enable_limit(id, false)
+    set_velocity(&f, math.vec3_zero(), math.vec3_zero())
+    joint_solver.prepare_joint(sim(&f, id), &f.ctx)
+    joint_solver.warm_start_joint(sim(&f, id), &f.ctx)
+    small("limit off: no push left in the warm start (${state.linear_velocity.y})", state.linear_velocity.y, 0.000001)
+    // The motor: pulls in at its speed within its force.
     joint_solver.distance_joint_enable_motor(id, true)
     joint_solver.distance_joint_set_motor_speed(id, 0.0 - 0.5)
     joint_solver.distance_joint_set_max_motor_force(id, 1000.0)
