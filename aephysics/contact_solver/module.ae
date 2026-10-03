@@ -21,12 +21,13 @@
 import std.string
 import aephysics.math
 import aephysics.basics
+import aephysics.native
 import aephysics.dynamics
 
 exports (
     StepContext, ManifoldConstraintPoint, ManifoldConstraint, ContactConstraint,
     MIN_FRICTION_WEIGHT,
-    default_step_context, contact_constraint_at, manifold_constraint_at, constraint_point_at, state_at, sim_at, dummy_state,
+    default_step_context, contact_constraint_at, manifold_constraint_at, constraint_point_at, state_at, sim_at, dummy_state, note_restitution,
     prepare_contact, prepare_contacts, prepare_contacts_range, warm_start_contacts, solve_contacts, apply_restitution, store_impulses,
     color_constraint_counts, count_color_constraints
 )
@@ -60,6 +61,7 @@ struct StepContext {
     awake_contact_count: int
     active_color_count: int
     enable_warm_starting: bool
+    any_restitution: int           // set by a prepare that met a contact with restitution
 }
 
 default_step_context(w: *World) -> StepContext {
@@ -67,7 +69,8 @@ default_step_context(w: *World) -> StepContext {
     return StepContext { dt: 0.0, inv_dt: 0.0, h: 0.0, inv_h: 0.0, sub_step_count: 1, contact_softness: zero, static_softness: zero,
                          restitution_threshold: w.restitution_threshold, max_linear_velocity: w.max_linear_speed, world: w,
                          states: null, sims: null, enlarged_shapes: null, enlarged_shape_count: 0, bullet_bodies: null, bullet_body_count: 0,
-                         awake_contact_indices: null, awake_contact_count: 0, active_color_count: 0, enable_warm_starting: w.enable_warm_starting }
+                         awake_contact_indices: null, awake_contact_count: 0, active_color_count: 0, enable_warm_starting: w.enable_warm_starting,
+                         any_restitution: 0 }
 }
 
 // One manifold point's constraint: the anchors relative to the centres
@@ -81,6 +84,7 @@ struct ManifoldConstraintPoint {
     relative_velocity: float       // the normal velocity before the solve, for restitution
     normal_impulse: float
     total_normal_impulse: float
+    restitution_impulse: float     // what the restitution passes added beyond the approach
     normal_mass: float
     lever_arm: float
 }
@@ -136,6 +140,12 @@ state_at(base: ptr, index: int) -> *BodyState { return (base + index * sizeof(Bo
 sim_at(base: ptr, index: int) -> *BodySim { return (base + index * sizeof(BodySim)) as *BodySim }
 
 var g_dummy: ptr = null   // BodyState: a static body's, identity, never written
+
+// The step met a contact with restitution: its restitution passes run.
+// Many prepare blocks may say so at once; they all say the same.
+note_restitution(ctx: *StepContext, restitution: float) {
+    if restitution > 0.0 && ctx.any_restitution == 0 { native.atomic_store((&ctx.any_restitution) as ptr, 1) }
+}
 
 dummy_state() -> *BodyState {
     if g_dummy == null {
@@ -227,6 +237,7 @@ prepare_contact(ctx: *StepContext, c: *Contact, cc: *ContactConstraint, manifold
     if (c.flags & dynamics.CONTACT_STATIC) != 0 { cc.softness = ctx.static_softness }
     cc.friction = c.friction
     cc.restitution = c.restitution
+    note_restitution(ctx, c.restitution)
     cc.rolling_resistance = c.rolling_resistance
     cc.constraints = manifolds
     manifold_index = 0
@@ -256,6 +267,7 @@ prepare_contact(ctx: *StepContext, c: *Contact, cc: *ContactConstraint, manifold
             cp.base_separation = s - math.dot(math.sub(cp.r_b, cp.r_a), normal)
             cp.normal_impulse = warm_start_scale * mp.normal_impulse
             cp.total_normal_impulse = 0.0
+            cp.restitution_impulse = 0.0
             r_a = cp.r_a
             r_b = cp.r_b
             rn_a = math.cross(r_a, normal)
@@ -459,7 +471,9 @@ solve_contacts(ctx: *StepContext, constraints: ptr, count: int, use_bias: bool) 
                 new_impulse = math.max_float(cp.normal_impulse + delta_impulse, 0.0)
                 delta_impulse = new_impulse - cp.normal_impulse
                 cp.normal_impulse = new_impulse
-                cp.total_normal_impulse = cp.total_normal_impulse + new_impulse
+                // The pushing pass is not counted: the total is what the
+                // relaxed passes and restitution applied (Box3D's push/solve).
+                if use_bias == false { cp.total_normal_impulse = cp.total_normal_impulse + new_impulse }
                 total_normal_impulse = total_normal_impulse + new_impulse
                 total_twist_limit = total_twist_limit + cp.lever_arm * cp.normal_impulse
                 p = math.mul_sv(delta_impulse, normal)
@@ -530,26 +544,36 @@ solve_contacts(ctx: *StepContext, constraints: ptr, count: int, use_bias: bool) 
     }
 }
 
-// The bounce: points that approached faster than the threshold and
-// carried an impulse get their approach velocity reflected by the
-// restitution.
+// The bounce (b3ApplyRestitution_Mesh, Box3D main): one pass of the
+// world's restitution iterations. A point is armed when its contact has
+// restitution, it approached faster than the threshold, and it is still
+// in compression (its relaxed impulse beyond what restitution added);
+// then its target is the approach reflected by the restitution, and the
+// impulse is held to Poisson's limit, so a bounce never adds energy.
+// An unarmed point only keeps the contact from closing (the speculative
+// bias). With propagation off, a contact without restitution is skipped.
 apply_restitution(ctx: *StepContext, constraints: ptr, count: int) {
     states = ctx.states
     dummy = dummy_state()
     threshold = ctx.restitution_threshold
+    inv_h = ctx.inv_h
+    propagate = ctx.world.enable_restitution_propagation
     index = 0
     while index < count {
         cc = contact_constraint_at(constraints, index)
         restitution = cc.restitution
-        if restitution != 0.0 {
+        if propagate || restitution != 0.0 {
             state_a = dummy
             if cc.index_a != NULL_INDEX { state_a = state_at(states, cc.index_a) }
             state_b = dummy
             if cc.index_b != NULL_INDEX { state_b = state_at(states, cc.index_b) }
             v_a = state_a.linear_velocity
             w_a = state_a.angular_velocity
+            dq_a = state_a.delta_rotation
             v_b = state_b.linear_velocity
             w_b = state_b.angular_velocity
+            dq_b = state_b.delta_rotation
+            dp = math.sub(state_b.delta_position, state_a.delta_position)
             m_a = cc.inv_mass_a
             i_a = cc.inv_inertia_a
             m_b = cc.inv_mass_b
@@ -561,34 +585,50 @@ apply_restitution(ctx: *StepContext, constraints: ptr, count: int) {
                 point_index = 0
                 while point_index < constraint.point_count {
                     cp = constraint_point_at(constraint, point_index)
-                    if cp.relative_velocity <= 0.0 - threshold && cp.total_normal_impulse != 0.0 {
-                        r_a = cp.r_a
-                        r_b = cp.r_b
-                        vr_b = math.add(v_b, math.cross(w_b, r_b))
-                        vr_a = math.add(v_a, math.cross(w_a, r_a))
-                        vn = math.dot(math.sub(vr_b, vr_a), normal)
-                        impulse = 0.0 - cp.normal_mass * (vn + restitution * cp.relative_velocity)
-                        new_impulse = math.max_float(cp.normal_impulse + impulse, 0.0)
-                        impulse = new_impulse - cp.normal_impulse
-                        cp.normal_impulse = new_impulse
-                        cp.total_normal_impulse = cp.total_normal_impulse + impulse
-                        p = math.mul_sv(impulse, normal)
-                        v_a = math.mul_sub(v_a, m_a, p)
-                        w_a = math.sub(w_a, math.mul_mv(i_a, math.cross(r_a, p)))
-                        v_b = math.mul_add(v_b, m_b, p)
-                        w_b = math.add(w_b, math.mul_mv(i_b, math.cross(r_b, p)))
+                    r_a = cp.r_a
+                    r_b = cp.r_b
+                    // A speculative point's total is zero: not armed.
+                    compression = cp.total_normal_impulse - cp.restitution_impulse
+                    armed = restitution > 0.0 && cp.relative_velocity < 0.0 - threshold && compression > 0.0
+                    velocity_bias = 0.0
+                    if armed {
+                        velocity_bias = restitution * cp.relative_velocity
+                    } else {
+                        ds = math.add(dp, math.sub(math.rotate_vector(dq_b, r_b), math.rotate_vector(dq_a, r_a)))
+                        s = math.dot(ds, normal) + cp.base_separation
+                        if s > 0.0 { velocity_bias = s * inv_h }
                     }
+                    vr_a = math.add(v_a, math.cross(w_a, r_a))
+                    vr_b = math.add(v_b, math.cross(w_b, r_b))
+                    vn = math.dot(math.sub(vr_b, vr_a), normal)
+                    impulse = 0.0 - cp.normal_mass * (vn + velocity_bias)
+                    new_impulse = math.max_float(cp.normal_impulse + impulse, 0.0)
+                    impulse = new_impulse - cp.normal_impulse
+                    approach = math.min_float(math.max_float(0.0 - cp.normal_mass * vn, 0.0), math.max_float(impulse, 0.0))
+                    if armed {
+                        // Poisson's kinetic restitution: no energy gained.
+                        allowance = restitution * (compression + approach) - cp.restitution_impulse
+                        impulse = math.min_float(impulse, approach + math.max_float(allowance, 0.0))
+                    }
+                    cp.normal_impulse = cp.normal_impulse + impulse
+                    cp.restitution_impulse = cp.restitution_impulse + impulse - approach
+                    cp.total_normal_impulse = cp.total_normal_impulse + impulse
+                    p = math.mul_sv(impulse, normal)
+                    v_a = math.mul_sub(v_a, m_a, p)
+                    w_a = math.sub(w_a, math.mul_mv(i_a, math.cross(r_a, p)))
+                    v_b = math.mul_add(v_b, m_b, p)
+                    w_b = math.add(w_b, math.mul_mv(i_b, math.cross(r_b, p)))
                     point_index = point_index + 1
                 }
-                if (state_a.flags & dynamics.DYNAMIC_FLAG) != 0 {
-                    state_a.linear_velocity = v_a
-                    state_a.angular_velocity = w_a
-                }
-                if (state_b.flags & dynamics.DYNAMIC_FLAG) != 0 {
-                    state_b.linear_velocity = v_b
-                    state_b.angular_velocity = w_b
-                }
                 manifold_index = manifold_index + 1
+            }
+            if (state_a.flags & dynamics.DYNAMIC_FLAG) != 0 {
+                state_a.linear_velocity = v_a
+                state_a.angular_velocity = w_a
+            }
+            if (state_b.flags & dynamics.DYNAMIC_FLAG) != 0 {
+                state_b.linear_velocity = v_b
+                state_b.angular_velocity = w_b
             }
         }
         index = index + 1
