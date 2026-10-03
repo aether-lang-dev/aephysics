@@ -2000,7 +2000,10 @@ shape_get_type(id: ShapeId) -> int { return get_shape_full_id(world_at(id.world0
 shape_get_density(id: ShapeId) -> float { return get_shape_full_id(world_at(id.world0), id).geometry.density }
 shape_set_density(id: ShapeId, density: float, update_body_mass: bool) {
     w = world_at(id.world0)
+    // Not mid-step, and an unchanged density spares the mass update (b3Shape_SetDensity).
+    if w.locked { return }
     s = get_shape_full_id(w, id)
+    if density == s.geometry.density { return }
     s.geometry.density = density
     if update_body_mass { update_body_mass_data(w, body_at(w, s.body_id)) }
 }
@@ -4192,6 +4195,11 @@ try_sleep_island(w: *World, island_id: int) -> bool {
         basics.buffer_remove_swap(&awake.body_states, awake_index)
         body.set_index = sleep_set_id
         body.local_index = sleep_index
+        // This step's move event says the body fell asleep (b3TrySleepIsland):
+        // from the next step on it has none.
+        if body.body_move_index != NULL_INDEX && body.body_move_index < w.body_move_events.count {
+            body_move_event_at(w, body.body_move_index).fell_asleep = true
+        }
         body.body_move_index = NULL_INDEX
         // Its non-touching contacts whose other body is not awake go to the disabled set.
         key = body.head_contact_key
