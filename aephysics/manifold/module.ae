@@ -256,7 +256,7 @@ reserve_scratch() { scratch_ready() }
 // edge computed on its own, in the same order, so the axis a pair
 // chooses is the axis it chose before: the tests hold the traces.
 const AXIS_SLOTS = 64              // MAX_HULL_EDGES / 2, already a multiple of four
-const AXIS_FIELDS = 13
+const AXIS_FIELDS = 14
 // Where each array starts, in elements: x, y, z of the direction, of
 // both face normals and of the origin, then the tolerance.
 const AXIS_DIR_X = 0
@@ -272,6 +272,7 @@ const AXIS_V0_X = 576
 const AXIS_V0_Y = 640
 const AXIS_V0_Z = 704
 const AXIS_TOL = 768
+const AXIS_EDGE = 832               // the candidate's half-edge index (exact in an f32)
 
 // --- the incident face and clipping ----------------------------------------------------
 
@@ -908,45 +909,112 @@ compute_separating_axis(hull_a: *HullData, hull_b: *HullData, xf_b: Transform, e
     edges_a = hull.hull_edges(hull_a)
     edges_b = hull.hull_edges(hull_b)
 
+    // No face can separate the hulls by more than its normal's reach along
+    // the line between their centres less their inner spheres' radii
+    // (Box3D adec25b): a face whose bound is under the best separation so
+    // far -- or under the seed's, the face most aligned with that line,
+    // taken first when an early return can use it -- needs no support
+    // search. The slack keeps the best face from being skipped; a skipped
+    // face could not have won, so the result is the full scan's.
+    delta_center = math.sub(math.add(math.mul_mv(r, hull_b.center), xf_b.p), hull_a.center)
+    center_distance = math.length(delta_center)
+    radius = hull_a.inner_radius + hull_b.inner_radius
+    radius_bound = radius - (math.LINEAR_SLOP + 0.001 * (center_distance + radius))
+
     // A's face planes against B's vertices.
+    seed_a = 0
+    max_dot = math.dot(planes_a[0].normal, delta_center)
+    i = 1
+    while i < hull_a.face_count {
+        dot_i = math.dot(planes_a[i].normal, delta_center)
+        if dot_i > max_dot {
+            max_dot = dot_i
+            seed_a = i
+        }
+        i = i + 1
+    }
+    floor_a = 0.0 - math.MAX_FLOAT
+    seed_separation = 0.0 - math.MAX_FLOAT
+    seed_vertex = 0
+    if early_return {
+        plane = planes_a[seed_a]
+        direction = math.neg(math.mul_mv(inv_r, plane.normal))
+        seed_vertex = support_index(points_b, hull_b.vertex_count, direction)
+        seed_separation = math.dot(plane.normal, xf_b.p) - plane.offset - math.dot(direction, points_b[seed_vertex])
+        floor_a = math.min_float(seed_separation, SPECULATIVE_DISTANCE)
+    }
     i = 0
     while i < hull_a.face_count {
         plane = planes_a[i]
-        direction = math.neg(math.mul_mv(inv_r, plane.normal))
-        plane_separation = math.dot(plane.normal, xf_b.p) - plane.offset
-        vertex_index = support_index(points_b, hull_b.vertex_count, direction)
-        support = math.dot(direction, points_b[vertex_index])
-        separation = plane_separation - support
-        if separation > res.face_a.separation {
-            res.face_a.normal = plane.normal
-            res.face_a.separation = separation
-            res.face_a.index_a = i
-            res.face_a.index_b = vertex_index
-            if separation > SPECULATIVE_DISTANCE && early_return {
-                res.separated_feature = AXIS_FACE_A
-                return res
+        if math.dot(plane.normal, delta_center) - radius_bound >= math.max_float(floor_a, res.face_a.separation) {
+            vertex_index = seed_vertex
+            separation = seed_separation
+            if early_return == false || i != seed_a {
+                direction = math.neg(math.mul_mv(inv_r, plane.normal))
+                plane_separation = math.dot(plane.normal, xf_b.p) - plane.offset
+                vertex_index = support_index(points_b, hull_b.vertex_count, direction)
+                separation = plane_separation - math.dot(direction, points_b[vertex_index])
+            }
+            if separation > res.face_a.separation {
+                res.face_a.normal = plane.normal
+                res.face_a.separation = separation
+                res.face_a.index_a = i
+                res.face_a.index_b = vertex_index
+                if separation > SPECULATIVE_DISTANCE && early_return {
+                    res.separated_feature = AXIS_FACE_A
+                    return res
+                }
             }
         }
         i = i + 1
     }
 
-    // B's face planes against A's vertices.
+    // B's face planes against A's vertices, the line between the centres
+    // taken into B's frame and reversed.
+    delta_b = math.neg(math.mul_mv(inv_r, delta_center))
+    seed_b = 0
+    max_dot = math.dot(planes_b[0].normal, delta_b)
+    i = 1
+    while i < hull_b.face_count {
+        dot_i = math.dot(planes_b[i].normal, delta_b)
+        if dot_i > max_dot {
+            max_dot = dot_i
+            seed_b = i
+        }
+        i = i + 1
+    }
+    floor_b = 0.0 - math.MAX_FLOAT
+    seed_separation = 0.0 - math.MAX_FLOAT
+    seed_vertex = 0
+    if early_return {
+        plane = planes_b[seed_b]
+        direction = math.neg(math.mul_mv(r, plane.normal))
+        seed_vertex = support_index(points_a, hull_a.vertex_count, direction)
+        seed_separation = math.dot(direction, xf_b.p) - plane.offset - math.dot(direction, points_a[seed_vertex])
+        // A's faces have set a floor of their own.
+        floor_b = math.min_float(math.max_float(seed_separation, res.face_a.separation), SPECULATIVE_DISTANCE)
+    }
     i = 0
     while i < hull_b.face_count {
         plane = planes_b[i]
-        direction = math.neg(math.mul_mv(r, plane.normal))
-        plane_separation = math.dot(direction, xf_b.p) - plane.offset
-        vertex_index = support_index(points_a, hull_a.vertex_count, direction)
-        support = math.dot(direction, points_a[vertex_index])
-        separation = plane_separation - support
-        if separation > res.face_b.separation {
-            res.face_b.normal = direction
-            res.face_b.separation = separation
-            res.face_b.index_a = vertex_index
-            res.face_b.index_b = i
-            if separation > SPECULATIVE_DISTANCE && early_return {
-                res.separated_feature = AXIS_FACE_B
-                return res
+        if math.dot(plane.normal, delta_b) - radius_bound >= math.max_float(floor_b, res.face_b.separation) {
+            direction = math.neg(math.mul_mv(r, plane.normal))
+            vertex_index = seed_vertex
+            separation = seed_separation
+            if early_return == false || i != seed_b {
+                plane_separation = math.dot(direction, xf_b.p) - plane.offset
+                vertex_index = support_index(points_a, hull_a.vertex_count, direction)
+                separation = plane_separation - math.dot(direction, points_a[vertex_index])
+            }
+            if separation > res.face_b.separation {
+                res.face_b.normal = direction
+                res.face_b.separation = separation
+                res.face_b.index_a = vertex_index
+                res.face_b.index_b = i
+                if separation > SPECULATIVE_DISTANCE && early_return {
+                    res.separated_feature = AXIS_FACE_B
+                    return res
+                }
             }
         }
         i = i + 1
@@ -963,10 +1031,32 @@ compute_separating_axis(hull_a: *HullData, hull_b: *HullData, xf_b: Transform, e
     scratch_ready()
     axes = edge_axes()
     slots = axes as f32[]
+    // Only the edges that can still beat the best face take part (Box3D
+    // adec25b): an edge pair's axis passes through both edges' arcs, and
+    // no axis on an edge's arc separates by more than the other hull's
+    // centre reaches along it less that hull's inner radius. Without an
+    // early return every edge is kept, as before.
+    max_face_separation = math.max_float(res.face_a.separation, res.face_b.separation)
+    bound_slack = radius - radius_bound
+    threshold_a = 0.0 - math.MAX_FLOAT
+    threshold_b = 0.0 - math.MAX_FLOAT
+    if early_return {
+        threshold_a = max_face_separation + hull_b.inner_radius - bound_slack
+        threshold_b = max_face_separation + hull_a.inner_radius - bound_slack
+    }
+    center_b_in_a = math.add(math.mul_mv(r, hull_b.center), xf_b.p)
+    center_a_in_b = math.mul_mv(inv_r, math.sub(hull_a.center, xf_b.p))
     axis_count = 0
     i = 0
     while i < hull_a.edge_count {
         twin_a = i + 1
+        plane0 = planes_a[edges_a[i].face]
+        plane1 = planes_a[edges_a[twin_a].face]
+        if edge_can_reach(math.plane_separation(plane0, center_b_in_a), math.plane_separation(plane1, center_b_in_a),
+                          math.dot(plane0.normal, plane1.normal), threshold_a) == false {
+            i = i + 2
+            continue
+        }
         av0 = points_a[edges_a[i].origin]
         ad = math.sub(points_a[edges_a[twin_a].origin], av0)
         dir32 = math.narrow3(ad)
@@ -986,6 +1076,7 @@ compute_separating_axis(hull_a: *HullData, hull_b: *HullData, xf_b: Transform, e
         slots[AXIS_V0_Y + axis_count] = v0_32.y
         slots[AXIS_V0_Z + axis_count] = v0_32.z
         slots[AXIS_TOL + axis_count] = (squared_tol * math.length_squared(ad)) as f32
+        slots[AXIS_EDGE + axis_count] = i as f32
         axis_count = axis_count + 1
         i = i + 2
     }
@@ -1000,9 +1091,17 @@ compute_separating_axis(hull_a: *HullData, hull_b: *HullData, xf_b: Transform, e
         padded = padded + 1
     }
     f32 eps32 = eps
+    if axis_count == 0 { return res }
     j = 0
     while j < hull_b.edge_count {
         twin_b = j + 1
+        plane0 = planes_b[edges_b[j].face]
+        plane1 = planes_b[edges_b[twin_b].face]
+        if edge_can_reach(math.plane_separation(plane0, center_a_in_b), math.plane_separation(plane1, center_a_in_b),
+                          math.dot(plane0.normal, plane1.normal), threshold_b) == false {
+            j = j + 2
+            continue
+        }
         c = math.neg(math.mul_mv(r, planes_b[edges_b[j].face].normal))
         d = math.neg(math.mul_mv(r, planes_b[edges_b[twin_b].face].normal))
         bv0 = math.neg(math.add(math.mul_mv(r, points_b[edges_b[j].origin]), xf_b.p))
@@ -1064,7 +1163,7 @@ compute_separating_axis(hull_a: *HullData, hull_b: *HullData, xf_b: Transform, e
                         if separation > res.edge.separation {
                             res.edge.normal = n
                             res.edge.separation = separation
-                            res.edge.index_a = 2 * at
+                            res.edge.index_a = slots[AXIS_EDGE + at] as int
                             res.edge.index_b = j
                             if separation > SPECULATIVE_DISTANCE && early_return {
                                 res.separated_feature = AXIS_EDGE_PAIR
@@ -1080,6 +1179,23 @@ compute_separating_axis(hull_a: *HullData, hull_b: *HullData, xf_b: Transform, e
         j = j + 2
     }
     return res
+}
+
+// Whether an edge between faces whose normals meet at cosine c, with the
+// other hull's centre at plane separations a1 and a2 from them, can reach
+// `bound` anywhere along its Gauss-map arc (Box3D's inscribed-sphere edge
+// test, b3TestEdgeCandidateSorted): the larger endpoint, or the interior
+// maximum of dot(d, nlerp(n1, n2, t)) when there is one; a nearly
+// degenerate arc is kept.
+edge_can_reach(a1: float, a2: float, c: float, bound: float) -> bool {
+    hi = math.max_float(a1, a2)
+    lo = math.min_float(a1, a2)
+    if hi >= bound { return true }
+    u = lo - c * hi
+    if u < 0.0 { return false }
+    s = 1.0 - c * c
+    if s < 0.0001 { return true }
+    return u * u >= (bound - hi) * (bound + hi) * s
 }
 
 // The vertex farthest along the direction.
@@ -1388,10 +1504,18 @@ collide_hulls(m: *LocalManifold, capacity: int, hull_a: *HullData, hull_b: *Hull
     edge_query = axis_query.edge
     if edge_query.index_a == NULL_INDEX { return }
 
+    // The edge contact when the face contact is empty and the edge beats
+    // the faces, or when it beats the clipped face contact by the slop
+    // (Box3D adec25b: with the edges culled, the best edge is the best of
+    // those that could beat a face, so an empty face contact alone is no
+    // longer reason enough).
+    face_separation = math.max_float(axis_query.face_a.separation, axis_query.face_b.separation)
     clip_separation = cache.separation
-    if m.point_count == 0 || edge_query.separation > clip_separation + math.LINEAR_SLOP {
-        // The edge contact into its own point, kept only if it built one.
-        edge_block = basics.alloc(sizeof(LocalManifoldPoint))
+    if (m.point_count == 0 && edge_query.separation > face_separation) || edge_query.separation > clip_separation + math.LINEAR_SLOP {
+        // The edge contact into its own point, kept only if it built one;
+        // the point lives in the edge axes' scratch, done with by now.
+        scratch_ready()
+        edge_block = edge_axes()
         edge_manifold = local_manifold(edge_block)
         edge_cache = empty_sat_cache()
         build_edge_contact(&edge_manifold, hull_a, hull_b, transform_b_to_a, edge_query, &edge_cache)
@@ -1401,6 +1525,5 @@ collide_hulls(m: *LocalManifold, capacity: int, hull_a: *HullData, hull_b: *Hull
             set_manifold_point(m, 0, manifold_point(&edge_manifold, 0))
             copy_sat_cache(cache, edge_cache)
         }
-        basics.free_bytes(edge_block, sizeof(LocalManifoldPoint))
     }
 }

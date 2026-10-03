@@ -1340,7 +1340,10 @@ tree_rebuild(t: *DynamicTree, full_build: bool) -> int {
         stack_count = 1
     } else {
         node = root
-        node.flag_index = node.flag_index & (0 - 1 - MOVED_NODE)
+        // A full build keeps the moved flags (Box3D 79fc559): a proxy made
+        // with pair creation forced, then rebuilt into a fresh static tree
+        // before the step, still finds its pairs.
+        if full_build == false { node.flag_index = node.flag_index & (0 - 1 - MOVED_NODE) }
         leaf_indices[0] = 0
         leaves[0] = node
         leaf_centers[0] = math.aabb_center(node.aabb)
@@ -1361,7 +1364,7 @@ tree_rebuild(t: *DynamicTree, full_build: bool) -> int {
                 }
                 continue
             }
-            node.flag_index = node.flag_index & (0 - 1 - MOVED_NODE)
+            if full_build == false { node.flag_index = node.flag_index & (0 - 1 - MOVED_NODE) }
             leaf_indices[leaf_count] = leaf_count
             leaves[leaf_count] = node
             leaf_centers[leaf_count] = math.aabb_center(node.aabb)
