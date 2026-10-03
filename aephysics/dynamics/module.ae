@@ -98,6 +98,7 @@ exports (
     body_allow_fast_rotation, body_is_fast_rotation_allowed, body_enable_contact_recycling, body_is_contact_recycling_enabled,
     body_set_safety_factor, body_get_safety_factor, shape_get_contact_data,
     shape_apply_wind, AIR_DENSITY, body_get_world, shape_get_world,
+    body_set_name, body_get_name, shape_set_name, shape_get_name,
     create_island, destroy_island, validate_island, create_solver_set, destroy_solver_set, wake_solver_set,
     validate_solver_sets, get_solver_set, get_island, world_island_count, world_solver_set_count,
     body_sim_at, body_state_at, island_sim_at, world_shape_at, island_at, solver_set_at, body_at,
@@ -377,6 +378,7 @@ struct Body {
     flags: int
     kind: int
     generation: int
+    name: ptr                      // a plain C copy the world owns (native.name_copy), or null
 }
 
 // What the solver reads and writes for an awake body.
@@ -431,6 +433,7 @@ struct WorldShape {
     user_data: ptr
     generation: int
     flags: int
+    name: ptr                      // a plain C copy the world owns, or null
 }
 
 struct ContactEdge {
@@ -1401,13 +1404,27 @@ create_world(def: *WorldDef) -> WorldId {
 destroy_world(id: WorldId) {
     if world_is_valid(id) == false { return }
     w = get_world_from_id(id)
-    // The shapes' materials, the sensors' lists and the contacts' caches.
+    // The shapes' materials and names, the bodies' names, the sensors'
+    // lists and the contacts' caches.
     i = 0
     while i < w.shapes.count {
         s = world_shape_at(w, i)
         if s.id != NULL_INDEX && s.materials != null {
             basics.free_bytes(s.materials, s.material_count * sizeof(SurfaceMaterial))
             s.materials = null
+        }
+        if s.id != NULL_INDEX {
+            native.name_free(s.name)
+            s.name = null
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < w.bodies.count {
+        named = body_at(w, i)
+        if named.set_index != NULL_INDEX {
+            native.name_free(named.name)
+            named.name = null
         }
         i = i + 1
     }
@@ -1712,6 +1729,7 @@ create_body(world_id: WorldId, def: *BodyDef) -> BodyId {
     body.inertia = math.mat3_zero()
     body.kind = def.kind
     body.flags = flags
+    body.name = null
     if set_id >= AWAKE_SET { create_island_for_body(w, set_id, body) }
     w.locked = false
     return BodyId { index1: body_id + 1, world0: w.world_id, generation: body.generation }
@@ -1758,10 +1776,14 @@ destroy_body(id: BodyId) {
             s.materials = null
             s.material_count = 0
         }
+        native.name_free(s.name)
+        s.name = null
         basics.idpool_free(&w.shape_id_pool, shape_id)
         s.id = NULL_INDEX
         shape_id = s.next_shape_id
     }
+    native.name_free(body.name)
+    body.name = null
     remove_body_from_island(w, body)
     set = solver_set_at(w, body.set_index)
     moved_index = basics.buffer_remove_swap(&set.body_sims, body.local_index)
@@ -1862,6 +1884,7 @@ create_shape(body_id: BodyId, def: *ShapeDef, geometry: Shape) -> ShapeId {
     s.fat_aabb = s.aabb
     s.generation = s.generation + 1
     s.sensor_index = NULL_INDEX
+    s.name = null
     if kind == KIND_COMPOUND {
         w.compound_shape_count = w.compound_shape_count + 1
         // A copy of the compound's materials, so every shape frees its array the same way.
@@ -1957,6 +1980,8 @@ destroy_shape(id: ShapeId, update_body_mass: bool) {
         s.materials = null
         s.material_count = 0
     }
+    native.name_free(s.name)
+    s.name = null
     basics.idpool_free(&w.shape_id_pool, s.id)
     s.id = NULL_INDEX
     if update_body_mass { update_body_mass_data(w, body) }
@@ -2201,6 +2226,21 @@ shape_apply_wind(id: ShapeId, wind: Vec3, drag: float, lift: float, max_speed: f
     sim.force = math.add(sim.force, force)
     sim.torque = math.add(sim.torque, torque)
 }
+
+// A label for debugging (b3Body_SetName and its siblings): copied, so the
+// caller's string may go; the old one freed; an empty name for none.
+body_set_name(id: BodyId, name: string) {
+    body = get_body_full_id(world_at(id.world0), id)
+    native.name_free(body.name)
+    body.name = native.name_copy(name)
+}
+body_get_name(id: BodyId) -> string { return native.name_text(get_body_full_id(world_at(id.world0), id).name) }
+shape_set_name(id: ShapeId, name: string) {
+    s = get_shape_full_id(world_at(id.world0), id)
+    native.name_free(s.name)
+    s.name = native.name_copy(name)
+}
+shape_get_name(id: ShapeId) -> string { return native.name_text(get_shape_full_id(world_at(id.world0), id).name) }
 
 // The world a body or shape belongs to, as an id (b3Body_GetWorld, b3Shape_GetWorld).
 body_get_world(id: BodyId) -> WorldId { return WorldId { index1: id.world0 + 1, generation: world_at(id.world0).generation } }
