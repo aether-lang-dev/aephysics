@@ -53,10 +53,37 @@ const char *aephysics_name_text(const void *name) { return name != NULL ? (const
 // Which worker the calling thread is, set by the task running on it: the
 // per-worker scratch every module keeps is chosen by this. The main
 // thread is worker 0 until a task says otherwise.
+//
+// On Windows, MinGW's gcc builds _Thread_local as emulated TLS: every read
+// is a call to __emutls_get_address, and every scratch block of every
+// module is chosen through this read, many times a query. A native TLS
+// slot (TlsAlloc) reads the thread's own slot instead; a new thread's
+// slot reads 0, worker 0, as the thread-local did. Elsewhere the
+// compiler's TLS is native already.
+#ifdef _WIN32
+static DWORD g_worker_slot = TLS_OUT_OF_INDEXES;
+
+static DWORD worker_slot(void)
+{
+    DWORD slot = g_worker_slot;
+    if (slot != TLS_OUT_OF_INDEXES) return slot;
+    DWORD made = TlsAlloc();
+    LONG raced = InterlockedCompareExchange((volatile LONG *)&g_worker_slot, (LONG)made, (LONG)TLS_OUT_OF_INDEXES);
+    if (raced != (LONG)TLS_OUT_OF_INDEXES) {
+        TlsFree(made);
+        return (DWORD)raced;
+    }
+    return made;
+}
+
+int aephysics_worker_index(void) { return (int)(intptr_t)TlsGetValue(worker_slot()); }
+void aephysics_set_worker_index(int index) { TlsSetValue(worker_slot(), (LPVOID)(intptr_t)index); }
+#else
 static _Thread_local int g_worker_index = 0;
 
 int aephysics_worker_index(void) { return g_worker_index; }
 void aephysics_set_worker_index(int index) { g_worker_index = index; }
+#endif
 
 // The calling thread gives up the rest of its slice, for a spin that waits on another worker.
 void aephysics_yield(void)
