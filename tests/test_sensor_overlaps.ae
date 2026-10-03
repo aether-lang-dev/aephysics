@@ -1,0 +1,148 @@
+// Sensors against brute force: 80 sensors and 240 visitors, every pairing
+// of sphere, capsule and box on static, kinematic and dynamic bodies,
+// turned every way, stepped two thirds of a second. Each sensor's overlaps
+// as the sensor pass left them are the visitors whose shapes, taken to the
+// world, are within the overlap slop by GJK's distance with radii -- an
+// answer that goes through neither the hulls' face planes nor the sensor's
+// asking the hull (aephysics#77). None missing, none extra.
+import std.string
+import aephysics.math
+import aephysics.hull
+import aephysics.distance
+import aephysics.manifold
+import aephysics.sphere
+import aephysics.shape
+import aephysics.dynamics
+import aephysics.physics_world
+
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+extern exit(code: int)
+
+var g_seed = 777
+rand01() -> float {
+    g_seed = (g_seed * 1103515245 + 12345) % 2147483647
+    if g_seed < 0 { g_seed = 0 - g_seed }
+    return (g_seed as float) / 2147483647.0
+}
+range(lo: float, hi: float) -> float { return lo + (hi - lo) * rand01() }
+
+const SENSORS = 80
+const VISITORS = 240
+
+// A shape's proxy points in the world, copied out of the shape module's scratch.
+world_points(w: *World, id: ShapeId, out: ptr) -> int {
+    ws = dynamics.get_shape_full_id(w, id)
+    proxy = shape.make_shape_proxy(&ws.geometry)
+    t = dynamics.get_body_transform(w, ws.body_id)
+    src = proxy.points as Vec3[]
+    dst = out as Vec3[]
+    i = 0
+    while i < proxy.count {
+        dst[i] = math.transform_point(t, src[i])
+        i = i + 1
+    }
+    return proxy.count
+}
+
+world_radius(w: *World, id: ShapeId) -> float {
+    ws = dynamics.get_shape_full_id(w, id)
+    return shape.make_shape_proxy(&ws.geometry).radius
+}
+
+make_shape(world_id: WorldId, body: BodyId, kind: int, sensor: bool, box: *HullData) -> ShapeId {
+    sdef = dynamics.default_shape_def()
+    sdef.is_sensor = sensor
+    sdef.enable_sensor_events = true
+    if kind == 0 { return dynamics.create_sphere_shape(body, &sdef, manifold.sphere(math.vec3(range(0.0 - 0.3, 0.3), 0.0, 0.0), range(0.3, 1.2))) }
+    if kind == 1 { return dynamics.create_capsule_shape(body, &sdef, manifold.capsule(math.vec3(0.0 - 0.7, 0.0, 0.0), math.vec3(0.7, 0.2, 0.0), range(0.2, 0.7))) }
+    return dynamics.create_hull_shape(body, &sdef, box)
+}
+
+make_body(world_id: WorldId, k: int) -> BodyId {
+    bdef = dynamics.default_body_def()
+    if k == 0 { bdef.kind = dynamics.BODY_STATIC } else if k == 1 { bdef.kind = dynamics.BODY_KINEMATIC } else { bdef.kind = dynamics.BODY_DYNAMIC }
+    bdef.position = math.vec3(range(0.0 - 8.0, 8.0), range(0.0, 6.0), range(0.0 - 8.0, 8.0))
+    bdef.rotation = math.make_quat_from_axis_angle(math.normalize(math.vec3(range(0.0 - 1.0, 1.0), range(0.0 - 1.0, 1.0), range(0.1, 1.0))), range(0.0, 6.0))
+    if bdef.kind == dynamics.BODY_KINEMATIC { bdef.linear_velocity = math.vec3(range(0.0 - 2.0, 2.0), 0.0, range(0.0 - 2.0, 2.0)) }
+    bdef.gravity_scale = 0.2
+    return dynamics.create_body(world_id, &bdef)
+}
+
+main() {
+    box = hull.make_box_hull(0.6, 0.4, 0.5)
+    wdef = dynamics.default_world_def()
+    world_id = dynamics.create_world(&wdef)
+    sensors_block = calloc(SENSORS, sizeof(ShapeId))
+    sensors = sensors_block as ShapeId[]
+    visitors_block = calloc(VISITORS, sizeof(ShapeId))
+    visitors = visitors_block as ShapeId[]
+    i = 0
+    while i < SENSORS {
+        sensors[i] = make_shape(world_id, make_body(world_id, i % 3), (i / 3) % 3, true, box)
+        i = i + 1
+    }
+    i = 0
+    while i < VISITORS {
+        visitors[i] = make_shape(world_id, make_body(world_id, i % 3), (i / 3) % 3, false, box)
+        i = i + 1
+    }
+    step = 0
+    while step < 40 {
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        step = step + 1
+    }
+    w = dynamics.get_world(world_id.index1 - 1)
+    a_block = calloc(8, sizeof(Vec3))
+    b_block = calloc(8, sizeof(Vec3))
+    got_block = calloc(VISITORS + SENSORS, sizeof(ShapeId))
+    got = got_block as ShapeId[]
+    total = 0
+    missing = 0
+    extra = 0
+    s = 0
+    while s < SENSORS {
+        count = dynamics.shape_get_sensor_data(sensors[s], got, VISITORS + SENSORS)
+        sensor_body = dynamics.get_shape_full_id(w, sensors[s]).body_id
+        expected = 0
+        v = 0
+        while v < VISITORS {
+            if dynamics.get_shape_full_id(w, visitors[v]).body_id != sensor_body {
+                ca = world_points(w, sensors[s], a_block)
+                ra = world_radius(w, sensors[s])
+                cb = world_points(w, visitors[v], b_block)
+                rb = world_radius(w, visitors[v])
+                input = DistanceInput { proxy_a: distance.shape_proxy(a_block, ca, ra), proxy_b: distance.shape_proxy(b_block, cb, rb),
+                                        transform: math.transform_identity(), use_radii: true }
+                cache = distance.empty_cache()
+                hit = distance.shape_distance(&input, &cache, null, 0).distance < sphere.OVERLAP_SLOP
+                listed = false
+                k = 0
+                while k < count {
+                    if got[k].index1 == visitors[v].index1 { listed = true }
+                    k = k + 1
+                }
+                if hit { expected = expected + 1 }
+                if hit && listed == false {
+                    missing = missing + 1
+                    if missing <= 5 { println("MISSING sensor ${s} (kind ${dynamics.shape_get_type(sensors[s])}) visitor ${v} (kind ${dynamics.shape_get_type(visitors[v])})") }
+                }
+                if hit == false && listed {
+                    extra = extra + 1
+                    if extra <= 5 { println("EXTRA sensor ${s} (kind ${dynamics.shape_get_type(sensors[s])}) visitor ${v} (kind ${dynamics.shape_get_type(visitors[v])})") }
+                }
+            }
+            v = v + 1
+        }
+        total = total + expected
+        s = s + 1
+    }
+    println("sensors: ${total} overlaps expected, ${missing} missing, ${extra} extra")
+    dynamics.destroy_world(world_id)
+    hull.destroy_hull(box)
+    if missing + extra > 0 || total < 50 {
+        println("sensor_overlaps: FAIL")
+        exit(1)
+    }
+    println("sensor_overlaps: all checks passed")
+}
