@@ -244,8 +244,15 @@ var g_for_handles: ptr = null      // *Task[MAX_WORKERS]
 parallel_for(s: *Scheduler, body: fn(int, int, int, ptr) -> void, item_count: int, min_range: int, context: ptr) -> int {
     if item_count <= 0 { return 0 }
     worker_count = s.worker_count
+    // The caller works as worker 0 -- the task contexts and every module's
+    // scratch are chosen by the thread's worker index -- and gets its own
+    // index back after: a host stepping a one-worker world from one of its
+    // pool's threads (index k) indexed the world's single task context at k.
+    caller_index = native.worker_index()
     if worker_count <= 1 {
+        native.set_worker_index(0)
         body(0, item_count, 0, context)
+        native.set_worker_index(caller_index)
         return 1
     }
     if g_for_tasks == null {
@@ -278,5 +285,6 @@ parallel_for(s: *Scheduler, body: fn(int, int, int, ptr) -> void, item_count: in
         finish(s, handles[i] as *Task)
         i = i + 1
     }
+    native.set_worker_index(caller_index)
     return block_count
 }

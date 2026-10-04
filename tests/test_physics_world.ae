@@ -20,6 +20,7 @@ import aephysics.distance
 import aephysics.broad_phase
 import aephysics.dynamics
 import aephysics.physics_world
+import aephysics.native
 import aephysics.joint_solver
 
 extern exit(code: int)
@@ -452,6 +453,58 @@ test_joint_springs_and_locks() {
     ensure("joints: a spring of no stiffness pushes no more (${w0} -> ${w1})", math.abs_float(w1 - w0) < 0.01)
     dynamics.destroy_world(world_id)
     hull.destroy_hull(cube)
+}
+
+// The parallel step's bookkeeping: a four-worker world allocating from its
+// workers (every new mesh contact grows a triangle cache in the collide pass)
+// frees everything it counted; and a step from a thread that is not worker 0
+// of anything (a host pool's thread) runs as worker 0 and gives the index back.
+test_parallel_bookkeeping() {
+    before = basics.alloc_count()
+    wdef = dynamics.default_world_def()
+    wdef.worker_count = 4
+    world_id = dynamics.create_world(&wdef)
+    grid = mesh.create_grid_mesh(16, 16, 1.0, 1, true)
+    gdef = dynamics.default_body_def()
+    ground = dynamics.create_body(world_id, &gdef)
+    sdef = dynamics.default_shape_def()
+    dynamics.create_mesh_shape(ground, &sdef, grid, math.vec3_one())
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    i = 0
+    while i < 200 {
+        bdef.position = math.vec3(-7.5 + ((i % 15) as float), 0.6 + 0.01 * ((i / 15) as float), -7.0 + ((i / 15) as float))
+        ball = dynamics.create_body(world_id, &bdef)
+        dynamics.create_sphere_shape(ball, &sdef, manifold.sphere(math.vec3_zero(), 0.4))
+        i = i + 1
+    }
+    i = 0
+    while i < 20 {
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        i = i + 1
+    }
+    dynamics.destroy_world(world_id)
+    mesh.destroy_mesh(grid)
+    ensure("parallel: everything the workers counted freed (${basics.alloc_count() - before})", basics.alloc_count() == before)
+
+    wdef = dynamics.default_world_def()
+    world_id = dynamics.create_world(&wdef)
+    slab = hull.make_box_hull(4.0, 0.5, 4.0)
+    gdef.position = math.vec3(0.0, 0.0 - 0.5, 0.0)
+    ground = dynamics.create_body(world_id, &gdef)
+    dynamics.create_hull_shape(ground, &sdef, slab)
+    bdef.position = math.vec3(0.0, 0.45, 0.0)
+    ball = dynamics.create_body(world_id, &bdef)
+    dynamics.create_sphere_shape(ball, &sdef, manifold.sphere(math.vec3_zero(), 0.5))
+    native.set_worker_index(5)
+    physics_world.step(world_id, 1.0 / 60.0, 4)
+    physics_world.step(world_id, 1.0 / 60.0, 4)
+    after = native.worker_index()
+    native.set_worker_index(0)
+    ensure("parallel: a host thread's index given back (${after})", after == 5)
+    ensure("parallel: the ball rests on the slab", dynamics.world_contact_count(dynamics.get_world(world_id.index1 - 1)) == 1)
+    dynamics.destroy_world(world_id)
+    hull.destroy_hull(slab)
 }
 
 test_hit_events() {
@@ -973,6 +1026,7 @@ main() {
     test_rebuilt_static_pairs()
     test_restitution()
     test_joint_springs_and_locks()
+    test_parallel_bookkeeping()
     test_continuous_move_event()
     test_continuous_gravity()
     test_sensor_stepped()
