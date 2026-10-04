@@ -20,6 +20,7 @@ import aephysics.distance
 import aephysics.broad_phase
 import aephysics.dynamics
 import aephysics.physics_world
+import aephysics.joint_solver
 
 extern exit(code: int)
 extern calloc(count: int, size: int) -> ptr
@@ -376,6 +377,80 @@ test_restitution() {
     free(data_block)
     dynamics.destroy_world(world_id)
     hull.destroy_hull(slab)
+    hull.destroy_hull(cube)
+}
+
+// Two joint fixes from an audit of the joint solvers against Box3D: the
+// prismatic's axis rows run for a pair that cannot turn, and a spring
+// set to no stiffness lets go instead of pushing on with its last impulse.
+test_joint_springs_and_locks() {
+    // An elevator: a rotation-locked box on a vertical prismatic joint to
+    // the ground, limited to half a metre down; gravity pulls it to the limit.
+    wdef = dynamics.default_world_def()
+    world_id = dynamics.create_world(&wdef)
+    gdef = dynamics.default_body_def()
+    ground = dynamics.create_body(world_id, &gdef)
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.position = math.vec3(0.0, 2.0, 0.0)
+    bdef.motion_locks = MotionLocks { linear_x: false, linear_y: false, linear_z: false, angular_x: true, angular_y: true, angular_z: true }
+    car = dynamics.create_body(world_id, &bdef)
+    cube = hull.make_box_hull(0.5, 0.5, 0.5)
+    sdef = dynamics.default_shape_def()
+    dynamics.create_hull_shape(car, &sdef, cube)
+    pdef = dynamics.default_prismatic_joint_def()
+    pdef.base.body_id_a = ground
+    pdef.base.body_id_b = car
+    up = math.make_quat_from_axis_angle(math.vec3(0.0, 0.0, 1.0), 0.5 * math.PI)
+    pdef.base.local_frame_a = Transform { p: math.vec3(0.0, 2.0, 0.0), q: up }
+    pdef.base.local_frame_b = Transform { p: math.vec3_zero(), q: up }
+    pdef.enable_limit = true
+    pdef.lower_translation = 0.0 - 0.5
+    pdef.upper_translation = 0.5
+    dynamics.create_prismatic_joint(world_id, &pdef)
+    i = 0
+    while i < 120 {
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        i = i + 1
+    }
+    y = dynamics.body_get_position(car).y
+    ensure("joints: a rotation-locked elevator stops at its limit (y ${y})", math.abs_float(y - 1.5) < 0.05)
+    dynamics.destroy_world(world_id)
+
+    // A hinge spring let go: spinning against an 8 Hz spring, then the spring
+    // set to no stiffness; the box spins on freely, no torque left on it.
+    wdef = dynamics.default_world_def()
+    wdef.gravity = math.vec3_zero()
+    world_id = dynamics.create_world(&wdef)
+    ground = dynamics.create_body(world_id, &gdef)
+    bdef.position = math.vec3_zero()
+    bdef.motion_locks = MotionLocks { linear_x: false, linear_y: false, linear_z: false, angular_x: false, angular_y: false, angular_z: false }
+    bdef.angular_velocity = math.vec3(0.0, 0.0, 3.0)
+    wheel = dynamics.create_body(world_id, &bdef)
+    dynamics.create_hull_shape(wheel, &sdef, cube)
+    rdef = dynamics.default_revolute_joint_def()
+    rdef.base.body_id_a = ground
+    rdef.base.body_id_b = wheel
+    rdef.enable_spring = true
+    rdef.hertz = 8.0
+    rdef.damping_ratio = 0.1
+    hinge = dynamics.create_revolute_joint(world_id, &rdef)
+    i = 0
+    while i < 5 {
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        i = i + 1
+    }
+    joint_solver.revolute_joint_set_spring_hertz(hinge, 0.0)
+    physics_world.step(world_id, 1.0 / 60.0, 4)
+    w0 = dynamics.body_get_angular_velocity(wheel).z
+    i = 0
+    while i < 30 {
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        i = i + 1
+    }
+    w1 = dynamics.body_get_angular_velocity(wheel).z
+    ensure("joints: a spring of no stiffness pushes no more (${w0} -> ${w1})", math.abs_float(w1 - w0) < 0.01)
+    dynamics.destroy_world(world_id)
     hull.destroy_hull(cube)
 }
 
@@ -897,6 +972,7 @@ main() {
     test_fell_asleep()
     test_rebuilt_static_pairs()
     test_restitution()
+    test_joint_springs_and_locks()
     test_continuous_move_event()
     test_continuous_gravity()
     test_sensor_stepped()
