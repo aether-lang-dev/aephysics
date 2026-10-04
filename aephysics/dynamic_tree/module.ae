@@ -134,8 +134,14 @@ node_height(n: DynamicTreeNode) -> int {
     return n.height
 }
 
+// An empty node passes for a leaf, so only its bounds keep a traversal out:
+// inverted infinities, which no box overlaps, as the reference's are. The
+// float limits were not enough: a query box out to them overlapped, and the
+// empty node's proxy index read far past the proxies.
 make_empty_node() -> DynamicTreeNode {
-    return DynamicTreeNode { aabb: math.aabb_empty(), flag_index: EMPTY_NODE, height: 0 }
+    inf = math.infinity()
+    return DynamicTreeNode { aabb: AABB { lower: Vec3 { x: inf, y: inf, z: inf }, upper: Vec3 { x: 0.0 - inf, y: 0.0 - inf, z: 0.0 - inf } },
+                             flag_index: EMPTY_NODE, height: 0 }
 }
 
 // The pair below the root, or the root itself when it is a leaf.
