@@ -326,7 +326,12 @@ shape_cast_shape(shape: *Shape, t: Transform, proxy: ShapeProxy, translation: Ve
     return output
 }
 
-overlap_shape(shape: *Shape, t: Transform, proxy: ShapeProxy) -> bool {
+overlap_shape(shape: *Shape, t: Transform, given: ShapeProxy) -> bool {
+    // The proxy's points copied first, as shape_cast_shape does: one made by
+    // make_shape_proxy for a sphere or capsule lives in the scratch the
+    // sphere's and capsule's overlaps write their own shape into, so GJK
+    // would have tested the shape against itself.
+    proxy = mesh.make_local_proxy(given, math.transform_identity(), local_buffer())
     kind = shape.kind
     if kind == SHAPE_CAPSULE { return capsule.overlap_capsule(shape.capsule, t, proxy) }
     if kind == SHAPE_COMPOUND { return compound.overlap_compound(shape.compound, t, proxy) }

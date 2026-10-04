@@ -558,6 +558,21 @@ test_far_origin() {
     free(offsets_block)
 }
 
+// A proxy made from one sphere tested against another far away: the
+// sphere's (and capsule's) overlap used to write its own shape into the
+// scratch the proxy's points live in, and so found its own copy touching.
+test_overlap_own_proxy() {
+    ball_a = shape.sphere_shape(manifold.sphere(math.vec3_zero(), 0.5), 1.0)
+    ball_b = shape.sphere_shape(manifold.sphere(math.vec3(10.0, 0.0, 0.0), 0.5), 1.0)
+    rod = shape.capsule_shape(manifold.capsule(math.vec3(10.0, 0.0, 0.0), math.vec3(10.0, 2.0, 0.0), 0.5), 1.0)
+    p = shape.make_shape_proxy(&ball_a)
+    ensure("own proxy: far sphere apart", shape.overlap_shape(&ball_b, math.transform_identity(), p) == false)
+    p = shape.make_shape_proxy(&ball_a)
+    ensure("own proxy: far capsule apart", shape.overlap_shape(&rod, math.transform_identity(), p) == false)
+    near = shape.sphere_shape(manifold.sphere(math.vec3(0.8, 0.0, 0.0), 0.5), 1.0)
+    p = shape.make_shape_proxy(&ball_a)
+    ensure("own proxy: near sphere touching", shape.overlap_shape(&near, math.transform_identity(), p))
+}
 test_dispatch() {
     origin = math.vec3(0.0 - 4.0, 0.0, 0.0)
     translation = math.vec3(8.0, 0.0, 0.0)
@@ -817,6 +832,7 @@ test_filters() {
 main() {
     before = basics.alloc_count()
     test_mass()
+    test_overlap_own_proxy()
     test_aabb()
     test_ray_cast_sphere()
     test_ray_cast_capsule()
