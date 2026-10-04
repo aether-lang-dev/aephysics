@@ -368,6 +368,8 @@ test_compound_pairs() {
 }
 
 main() {
+    // The compound's scratch (its baked trees' per-worker stacks) is the module's, reserved before the count.
+    compound.reserve_scratch()
     before = basics.alloc_count()
     test_keys()
     test_grid()
