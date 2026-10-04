@@ -26,7 +26,7 @@ import aephysics.basics
 
 exports (
     DynamicTreeNode, TreeProxy, TreeStats, DynamicTree, RayCastInput, BoxCastInput,
-    NULL_INDEX, default_category_bits, default_mask_bits, TREE_STACK_SIZE,
+    NULL_INDEX, default_category_bits, default_mask_bits, TREE_STACK_SIZE, query_stack_bytes, query_dist_bytes,
     LEAF_NODE, MOVED_NODE, NODE_INDEX_MASK, EMPTY_NODE, ROOT_NODE,
     is_leaf, is_node_moved, is_empty_node, left_child, proxy_id_of, node_height,
     tree_create, tree_destroy, tree_create_proxy, tree_destroy_proxy, tree_move_proxy,
@@ -291,6 +291,11 @@ tree_create(proxy_capacity: int) -> DynamicTree {
 
 // The calling worker's traversal stacks: queries run from any worker
 // (the continuous pass, the sensors), so each has a block of its own.
+// One worker's share of a tree's traversal stacks: a tree that keeps them
+// outside itself (a compound's baked tree) allocates MAX_WORKERS of these.
+query_stack_bytes() -> int { return TREE_STACK_SIZE * REBUILD_ITEM_INTS * 4 }
+query_dist_bytes() -> int { return TREE_STACK_SIZE * 8 }
+
 query_stack(t: *DynamicTree) -> ptr { return native.scratch(t.stack, TREE_STACK_SIZE * REBUILD_ITEM_INTS * 4) }
 query_dists(t: *DynamicTree) -> ptr { return native.scratch(t.stack_dist, TREE_STACK_SIZE * 8) }
 

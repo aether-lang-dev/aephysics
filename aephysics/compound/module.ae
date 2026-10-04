@@ -362,6 +362,7 @@ create_compound(def: *CompoundDef) -> *CompoundData {
     convex_count = capsule_count + hull_count + sphere_count
     shape_count = convex_count + mesh_count
     if shape_count == 0 || shape_count >= MAX_CHILD_SHAPES { return null }
+    tree_stacks_ready()
 
     tree = dynamic_tree.tree_create(shape_count)
     child_index = 0
@@ -481,8 +482,9 @@ create_compound(def: *CompoundDef) -> *CompoundData {
     byte_count = byte_count + align8(tree.node_end * sizeof(DynamicTreeNode))
     proxy_offset = byte_count
     byte_count = byte_count + align8(tree.proxy_count * sizeof(TreeProxy))
-    stack_offset = byte_count
-    byte_count = byte_count + align8(dynamic_tree.TREE_STACK_SIZE * 4)
+    // No stack in the block: queries take a worker's share of a stack, so the
+    // baked tree points at the module's per-worker stacks (tree_stacks_ready).
+    stack_offset = 0
     material_offset = byte_count
     byte_count = byte_count + align8(table.count * sizeof(SurfaceMaterial))
     material_map_offset = byte_count
@@ -540,7 +542,7 @@ create_compound(def: *CompoundDef) -> *CompoundData {
                            proxy_count: tree.proxy_count, proxy_capacity: tree.proxy_count, proxy_free_list: NULL_INDEX,
                            swap_nodes: null, leaf_indices: null, leaf_nodes: null, leaf_centers: null,
                            rebuild_capacity: 0, dfs_ordered: tree.dfs_ordered,
-                           stack: block + stack_offset, stack_dist: null, copy_stack: null }
+                           stack: g_tree_stack, stack_dist: g_tree_dists, copy_stack: null }
     dynamic_tree.tree_destroy(&tree)
 
     memcpy(block + material_offset, table.materials, table.count * sizeof(SurfaceMaterial))
@@ -615,6 +617,18 @@ overlap_visitor(proxy_id: int, user_data: long, context: ptr) -> bool {
         return false
     }
     return true
+}
+
+// Every baked tree's traversal stacks, one share per worker (the world's
+// trees carry their own): a query on worker k uses the k-th share, which the
+// one stack the block used to hold could not give a worker past the first.
+var g_tree_stack: ptr = null
+var g_tree_dists: ptr = null
+tree_stacks_ready() {
+    if g_tree_stack == null {
+        g_tree_stack = basics.alloc(native.MAX_WORKERS * dynamic_tree.query_stack_bytes())
+        g_tree_dists = basics.alloc(native.MAX_WORKERS * dynamic_tree.query_dist_bytes())
+    }
 }
 
 var g_local: ptr = null    // Vec3[MAX_SHAPE_CAST_POINTS]: the proxy in the compound's frame
@@ -794,6 +808,7 @@ planes_ready() {
 reserve_scratch() {
     scratch_ready()
     planes_ready()
+    tree_stacks_ready()
 }
 
 collide_mover_and_compound(planes: PlaneResult[], capacity: int, c: *CompoundData, mover: Capsule) -> int {

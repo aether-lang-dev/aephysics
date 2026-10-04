@@ -1282,8 +1282,10 @@ overlap_mesh(sh: Mesh, shape_transform: Transform, proxy: ShapeProxy) -> bool {
                     i = i + 1
                 }
             } else {
-                stack[count] = index + n.count_or_offset
-                count = count + 1
+                if count < MESH_STACK_SIZE {
+                    stack[count] = index + n.count_or_offset
+                    count = count + 1
+                }
                 index = index + 1
                 continue
             }
@@ -1341,14 +1343,19 @@ ray_cast_mesh(sh: Mesh, origin: Vec3, translation: Vec3, max_fraction: float) ->
                 }
             } else {
                 // Front to back along the split axis.
+                // The far child waits on the stack; a tree deeper than the stack
+                // (a pathological one) drops it rather than write past the stack.
+                far = index + 1
                 if axis_of(ray_delta, n.axis) > 0.0 {
-                    stack[count] = index + n.count_or_offset
+                    far = index + n.count_or_offset
                     index = index + 1
                 } else {
-                    stack[count] = index + 1
                     index = index + n.count_or_offset
                 }
-                count = count + 1
+                if count < MESH_STACK_SIZE {
+                    stack[count] = far
+                    count = count + 1
+                }
                 continue
             }
         }
@@ -1422,14 +1429,19 @@ shape_cast_mesh(sh: Mesh, proxy: ShapeProxy, translation: Vec3, max_fraction: fl
                     i = i + 1
                 }
             } else {
+                // The far child waits on the stack (dropped, not written past the
+                // stack, by a tree deeper than it).
+                far = index + 1
                 if axis_of(inv_delta, n.axis) > 0.0 {
-                    stack[count] = index + n.count_or_offset
+                    far = index + n.count_or_offset
                     index = index + 1
                 } else {
-                    stack[count] = index + 1
                     index = index + n.count_or_offset
                 }
-                count = count + 1
+                if count < MESH_STACK_SIZE {
+                    stack[count] = far
+                    count = count + 1
+                }
                 continue
             }
         }
@@ -1542,8 +1554,10 @@ collide_mover_and_mesh(planes: PlaneResult[], capacity: int, sh: Mesh, mover: Ca
                     i = i + 1
                 }
             } else {
-                stack[count] = index + n.count_or_offset
-                count = count + 1
+                if count < MESH_STACK_SIZE {
+                    stack[count] = index + n.count_or_offset
+                    count = count + 1
+                }
                 index = index + 1
                 continue
             }
@@ -1596,8 +1610,10 @@ query_mesh(sh: Mesh, bounds: AABB, visitor: fn(Vec3, Vec3, Vec3, int, ptr) -> bo
                     i = i + 1
                 }
             } else {
-                stack[count] = index + n.count_or_offset
-                count = count + 1
+                if count < MESH_STACK_SIZE {
+                    stack[count] = index + n.count_or_offset
+                    count = count + 1
+                }
                 index = index + 1
                 continue
             }
