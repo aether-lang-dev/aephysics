@@ -222,14 +222,15 @@ clip_points() -> ptr { return native.scratch(g_clip_points, MAX_CLIP_POINTS * si
 // A's edges, gathered once before the edge-pair loop reads them a
 // hundred times (see edge_axes).
 var g_edge_axes: ptr = null
-edge_axes() -> ptr { return native.scratch(g_edge_axes, AXIS_FIELDS * AXIS_SLOTS * 4) }
+edge_axes() -> ptr { return native.scratch(g_edge_axes, EDGE_SCRATCH_BYTES) }
+b_frame_scratch() -> ptr { return edge_axes() + AXIS_FIELDS * AXIS_SLOTS * 4 }
 
 scratch_ready() {
     if g_clip1 == null {
         g_clip1 = basics.alloc(native.MAX_WORKERS * (MAX_CLIP_POINTS * sizeof(ClipVertex)))
         g_clip2 = basics.alloc(native.MAX_WORKERS * (MAX_CLIP_POINTS * sizeof(ClipVertex)))
         g_clip_points = basics.alloc(native.MAX_WORKERS * (MAX_CLIP_POINTS * sizeof(LocalManifoldPoint)))
-        g_edge_axes = basics.alloc(native.MAX_WORKERS * (AXIS_FIELDS * AXIS_SLOTS * 4))
+        g_edge_axes = basics.alloc(native.MAX_WORKERS * EDGE_SCRATCH_BYTES)
     }
 }
 
@@ -255,24 +256,29 @@ reserve_scratch() { scratch_ready() }
 // edges at a time (std.lanes, Aether 0.706). Each lane computes what the
 // edge computed on its own, in the same order, so the axis a pair
 // chooses is the axis it chose before: the tests hold the traces.
-const AXIS_SLOTS = 64              // MAX_HULL_EDGES / 2, already a multiple of four
+// A hull has up to MAX_HULL_EDGES full edges (2 * MAX_HULL_EDGES half-edges,
+// the builder's limit), so the table holds that many, a multiple of four.
+const AXIS_SLOTS = 128
 const AXIS_FIELDS = 14
 // Where each array starts, in elements: x, y, z of the direction, of
 // both face normals and of the origin, then the tolerance.
-const AXIS_DIR_X = 0
-const AXIS_DIR_Y = 64
-const AXIS_DIR_Z = 128
-const AXIS_N0_X = 192
-const AXIS_N0_Y = 256
-const AXIS_N0_Z = 320
-const AXIS_N1_X = 384
-const AXIS_N1_Y = 448
-const AXIS_N1_Z = 512
-const AXIS_V0_X = 576
-const AXIS_V0_Y = 640
-const AXIS_V0_Z = 704
-const AXIS_TOL = 768
-const AXIS_EDGE = 832               // the candidate's half-edge index (exact in an f32)
+const AXIS_DIR_X = 0 * AXIS_SLOTS
+const AXIS_DIR_Y = 1 * AXIS_SLOTS
+const AXIS_DIR_Z = 2 * AXIS_SLOTS
+const AXIS_N0_X = 3 * AXIS_SLOTS
+const AXIS_N0_Y = 4 * AXIS_SLOTS
+const AXIS_N0_Z = 5 * AXIS_SLOTS
+const AXIS_N1_X = 6 * AXIS_SLOTS
+const AXIS_N1_Y = 7 * AXIS_SLOTS
+const AXIS_N1_Z = 8 * AXIS_SLOTS
+const AXIS_V0_X = 9 * AXIS_SLOTS
+const AXIS_V0_Y = 10 * AXIS_SLOTS
+const AXIS_V0_Z = 11 * AXIS_SLOTS
+const AXIS_TOL = 12 * AXIS_SLOTS
+const AXIS_EDGE = 13 * AXIS_SLOTS               // the candidate's half-edge index (exact in an f32)
+// The table, then room for B's face normals and vertices taken into A's frame
+// (up to MAX_HULL_FACES + MAX_HULL_VERTICES of them) after it.
+const EDGE_SCRATCH_BYTES = AXIS_FIELDS * AXIS_SLOTS * 4 + (hull.MAX_HULL_FACES + hull.MAX_HULL_VERTICES) * 24
 
 // --- the incident face and clipping ----------------------------------------------------
 
@@ -1093,11 +1099,10 @@ compute_separating_axis(hull_a: *HullData, hull_b: *HullData, xf_b: Transform, e
     f32 eps32 = eps
     if axis_count == 0 { return res }
     // B's face normals and vertices into A's frame, negated, once (Box3D
-    // adec25b) rather than four products for every B edge; they live in
-    // the first clip polygon's scratch, idle until the contact is built
-    // (a hull's faces and vertices number its edges plus two, at most 66).
+    // adec25b) rather than four products for every B edge, into the room
+    // after the edge table.
     scratch_ready()
-    b_in_a = clip1() as Vec3[]
+    b_in_a = b_frame_scratch() as Vec3[]
     k = 0
     while k < hull_b.face_count {
         b_in_a[k] = math.neg(math.mul_mv(r, planes_b[k].normal))

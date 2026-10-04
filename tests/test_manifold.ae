@@ -676,6 +676,88 @@ test_edge_axis_oracle() {
     hull.destroy_hull(a)
 }
 
+// A 32-sided cylinder hull: 64 vertices, 34 faces, 96 edges, past the 64
+// the edge-axis table used to hold (its later edges wrote over the earlier
+// ones' fields and past the worker's block).
+cylinder_hull(radius: float, half_height: float) -> *HullData {
+    block = calloc(64, sizeof(Vec3))
+    p = block as Vec3[]
+    i = 0
+    while i < 32 {
+        angle = 2.0 * math.PI * (i as float) / 32.0
+        x = radius * cos(angle)
+        z = radius * sin(angle)
+        p[2 * i] = math.vec3(x, 0.0 - half_height, z)
+        p[2 * i + 1] = math.vec3(x, half_height, z)
+        i = i + 1
+    }
+    h = hull.create_hull(p, 64, 64)
+    free(block)
+    return h
+}
+
+// The best edge-pair separation by brute force, with the SAT's own rule
+// for an axis (arcs crossing past its epsilon, not near parallel).
+brute_edge_separation(a: *HullData, b: *HullData, xf: Transform) -> float {
+    r = math.make_matrix_from_quat(xf.q)
+    planes_a = hull.hull_planes(a)
+    points_a = hull.hull_points(a)
+    edges_a = hull.hull_edges(a)
+    planes_b = hull.hull_planes(b)
+    points_b = hull.hull_points(b)
+    edges_b = hull.hull_edges(b)
+    tol = manifold.PARALLEL_EDGE_TOL * manifold.PARALLEL_EDGE_TOL
+    eps = 0.0 - 0.0001
+    best = 0.0 - math.MAX_FLOAT
+    i = 0
+    while i < a.edge_count {
+        av0 = points_a[edges_a[i].origin]
+        ad = math.sub(points_a[edges_a[i + 1].origin], av0)
+        n0 = planes_a[edges_a[i].face].normal
+        n1 = planes_a[edges_a[i + 1].face].normal
+        j = 0
+        while j < b.edge_count {
+            c = math.neg(math.mul_mv(r, planes_b[edges_b[j].face].normal))
+            d = math.neg(math.mul_mv(r, planes_b[edges_b[j + 1].face].normal))
+            bv0 = math.neg(math.add(math.mul_mv(r, points_b[edges_b[j].origin]), xf.p))
+            bv1 = math.neg(math.add(math.mul_mv(r, points_b[edges_b[j + 1].origin]), xf.p))
+            dc = math.sub(bv1, bv0)
+            cba = math.dot(c, ad)
+            dba = math.dot(d, ad)
+            adc = math.dot(n0, dc)
+            bdc = math.dot(n1, dc)
+            if cba * dba < eps && adc * bdc < eps && cba * bdc < eps && math.max_float(cba * cba, dba * dba) > tol * math.length_squared(ad) {
+                t = (0.0 - cba) / (dba - cba)
+                n = math.normalize(math.add(c, math.mul_sv(t, math.sub(d, c))))
+                best = math.max_float(best, 0.0 - math.dot(math.add(av0, bv0), n))
+            }
+            j = j + 2
+        }
+        i = i + 2
+    }
+    return best
+}
+
+test_many_edges() {
+    a = cylinder_hull(0.5, 0.4)
+    b = cylinder_hull(0.4, 0.6)
+    ensure("many edges: hulls of 96 edges (${a.edge_count / 2}, ${b.edge_count / 2})", a != null && b != null && a.edge_count == 192 && b.edge_count == 192)
+    seed = 97531
+    agree = 0
+    trials = 300
+    i = 0
+    while i < trials {
+        xf = Transform { p: math.mul_sv(next_float(0.6, 1.4), next_direction()), q: exact_quat(next_direction(), next_float(0.1, 3.0)) }
+        query = manifold.compute_separating_axis(a, b, xf, false)
+        brute = brute_edge_separation(a, b, xf)
+        if math.abs_float(query.edge.separation - brute) < 0.0001 { agree = agree + 1 }
+        i = i + 1
+    }
+    ensure("many edges: the SAT's edge phase agrees with brute force (${agree} of ${trials})", agree >= trials - 3)
+    hull.destroy_hull(a)
+    hull.destroy_hull(b)
+}
+
 // --- hull against capsule and sphere -----------------------------------------------------
 
 // A thin capsule stabbed through the +x +y edge of a box: the isolated
@@ -885,6 +967,7 @@ main() {
     test_overlap_never_empty()
     test_ridge_crossing()
     test_edge_axis_oracle()
+    test_many_edges()
     test_hull_capsule_edge_deep()
     test_sphere_hull_seam()
     test_rounded_pairs()
