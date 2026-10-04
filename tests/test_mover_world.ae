@@ -96,6 +96,60 @@ capture_planes(shape_id: ShapeId, planes: PlaneResult[], count: int, context: pt
     return true
 }
 
+// A visitor that asks a platform body for its plane mid-query, as a
+// character controller does, and checks its own planes did not move.
+struct NestedQuery {
+    platform: BodyId
+    before_normal: Vec3
+    before_separation: float
+    after_normal: Vec3
+    after_separation: float
+    platform_planes: int
+    visits: int
+}
+
+nested_visitor(shape_id: ShapeId, planes: PlaneResult[], count: int, context: ptr) -> bool {
+    nq = context as *NestedQuery
+    nq.visits = nq.visits + 1
+    nq.before_normal = planes[0].plane.normal
+    nq.before_separation = planes[0].plane.offset
+    found_block = calloc(4, sizeof(BodyPlaneResult))
+    found = found_block as BodyPlaneResult[]
+    nq.platform_planes = physics_world.body_collide_mover(nq.platform, found, 4, math.vec3_zero(), capsule_at(5.0, 1.15, 1.35, 0.2),
+                                                          shape.default_query_filter(), dynamics.body_get_transform(nq.platform))
+    free(found_block)
+    nq.after_normal = planes[0].plane.normal
+    nq.after_separation = planes[0].plane.offset
+    return false
+}
+
+test_nested_mover_queries() {
+    wdef = dynamics.default_world_def()
+    world_id = dynamics.create_world(&wdef)
+    gdef = dynamics.default_body_def()
+    gdef.position = math.vec3(0.0, 0.0 - 0.5, 0.0)
+    ground = dynamics.create_body(world_id, &gdef)
+    slab = hull.make_box_hull(4.0, 0.5, 4.0)
+    sdef = dynamics.default_shape_def()
+    dynamics.create_hull_shape(ground, &sdef, slab)
+    pdef = dynamics.default_body_def()
+    pdef.position = math.vec3(5.0, 1.0, 0.0)
+    pdef.rotation = math.make_quat_from_axis_angle(math.vec3(0.0, 0.0, 1.0), 0.4)
+    platform = dynamics.create_body(world_id, &pdef)
+    plank = hull.make_box_hull(1.0, 0.1, 1.0)
+    dynamics.create_hull_shape(platform, &sdef, plank)
+    physics_world.step(world_id, 1.0 / 60.0, 1)
+    nq = NestedQuery { platform: platform, before_normal: math.vec3_zero(), before_separation: 0.0, after_normal: math.vec3_zero(),
+                       after_separation: 0.0, platform_planes: 0, visits: 0 }
+    physics_world.collide_mover(world_id, math.vec3_zero(), capsule_at(0.0, 0.15, 0.35, 0.2), shape.default_query_filter(), nested_visitor, (&nq) as ptr)
+    ensure("nested: the ground visited, the platform found (${nq.visits}, ${nq.platform_planes})", nq.visits == 1 && nq.platform_planes == 1)
+    ensure("nested: the ground's plane unchanged by the platform query",
+           nq.after_normal.x == nq.before_normal.x && nq.after_normal.y == nq.before_normal.y && nq.after_separation == nq.before_separation)
+    dynamics.destroy_world(world_id)
+    hull.destroy_hull(slab)
+    hull.destroy_hull(plank)
+}
+
 capsule_at(x: float, y0: float, y1: float, radius: float) -> Capsule {
     return Capsule { center1: math.vec3(x, y0, 0.0), center2: math.vec3(x, y1, 0.0), radius: radius }
 }
@@ -315,6 +369,7 @@ main() {
     test_body_material_indices()
     test_body_skips_mesh_and_compound()
     test_world_mesh_material_clamp()
+    test_nested_mover_queries()
     println("mover_world: ${checks} checks")
     if failures == 0 {
         println("mover_world: all checks passed")
