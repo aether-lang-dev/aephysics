@@ -142,7 +142,7 @@ exports (
     world_body_move_event_count, world_body_move_event, world_contact_hit_event_count, world_contact_hit_event,
     world_joint_event_count, world_joint_event, world_set_pre_solve, world_clear_pre_solve,
     shape_user_material_id, make_relative_sweep, body_move_event_at,
-    TaskContext, task_context, task_context_at, task_sensor_hit_at
+    TaskContext, task_context, task_context_at, task_sensor_hit_at, enter_world, leave_world
 )
 
 extern memset(block: ptr, value: int, size: int) -> ptr
@@ -1133,6 +1133,8 @@ struct World {
     constraint_graph: ConstraintGraph
     task_contexts: ptr             // TaskContext[worker_count]
     worker_count: int
+    worker_base: int               // the first of the worker slots the world's steps run as
+    owns_worker_slots: bool        // claimed for this world alone (else base 0, shared)
     scheduler: ptr                 // *Scheduler (aephysics.parallel), the step's threads
     owns_scheduler: bool           // made with the world, or the host's
     contact_state: BitSet          // the contacts whose touching changed this pass, every worker's merged
@@ -1332,6 +1334,12 @@ create_world(def: *WorldDef) -> WorldId {
         w.owns_scheduler = true
     }
     reserve_scratch()
+    // The world's steps run as worker slots of its own, so worlds stepped
+    // at once on different threads use different scratch; with none free,
+    // slot 0 on, shared, as before (such worlds step one at a time).
+    w.worker_base = claim_worker_slots(w.worker_count)
+    w.owns_worker_slots = w.worker_base >= 0
+    if w.worker_base < 0 { w.worker_base = 0 }
     w.task_contexts = basics.alloc(w.worker_count * sizeof(TaskContext))
     i = 0
     while i < w.worker_count {
@@ -1513,6 +1521,7 @@ destroy_world(id: WorldId) {
         i = i + 1
     }
     basics.free_bytes(w.task_contexts, w.worker_count * sizeof(TaskContext))
+    if w.owns_worker_slots { release_worker_slots(w.worker_base, w.worker_count) }
     if w.owns_scheduler { parallel.destroy_scheduler(w.scheduler as *Scheduler) }
     basics.bitset_destroy(&w.contact_state)
     basics.buffer_destroy(&w.contact_begin_events)
@@ -4510,10 +4519,74 @@ collide_range(start: int, end: int, worker: int, context: ptr) {
 }
 
 // The calling worker's context, and any worker's.
-task_context(w: *World) -> *TaskContext { return (w.task_contexts + native.worker_index() * sizeof(TaskContext)) as *TaskContext }
+// The calling worker's context: its slot less the world's base. A serial
+// caller outside a step (a test driving the collide pass) is worker 0.
+task_context(w: *World) -> *TaskContext {
+    local = native.worker_index() - w.worker_base
+    if local < 0 || local >= w.worker_count { local = 0 }
+    return (w.task_contexts + local * sizeof(TaskContext)) as *TaskContext
+}
+
+// --- worker slots ------------------------------------------------------
+
+// The worker slots the worlds hold, a bit each (MAX_WORKERS is 64). A world
+// claims a run of its worker count when made and gives it back when
+// destroyed; worlds are made and destroyed on one thread at a time.
+var g_worker_slots: long = 0
+
+worker_slot_bit(slot: int) -> long { return (1 as long) << (slot as long) }
+
+// The first slot of a free run of count, claimed; -1 when there is none.
+claim_worker_slots(count: int) -> int {
+    start = 0
+    while start + count <= native.MAX_WORKERS {
+        free = true
+        k = 0
+        while k < count && free {
+            if (g_worker_slots & worker_slot_bit(start + k)) != (0 as long) { free = false }
+            k = k + 1
+        }
+        if free {
+            k = 0
+            while k < count {
+                g_worker_slots = g_worker_slots | worker_slot_bit(start + k)
+                k = k + 1
+            }
+            return start
+        }
+        start = start + 1
+    }
+    return 0 - 1
+}
+
+release_worker_slots(start: int, count: int) {
+    k = 0
+    while k < count {
+        g_worker_slots = g_worker_slots & (worker_slot_bit(start + k) ^ ((0 as long) - (1 as long)))
+        k = k + 1
+    }
+}
+
+// The calling thread made the world's first worker for a pass over it (a
+// step, the collide pass, the solve); the index it had before, to give back.
+enter_world(w: *World) -> int {
+    caller = native.worker_index()
+    native.set_worker_index(w.worker_base)
+    return caller
+}
+
+leave_world(caller: int) { native.set_worker_index(caller) }
 task_context_at(w: *World, index: int) -> *TaskContext { return (w.task_contexts + index * sizeof(TaskContext)) as *TaskContext }
 
+// The collide pass as the world's workers, whatever the calling thread's index.
 collide(w: *World) -> int {
+    caller = enter_world(w)
+    touching = collide_pass(w)
+    leave_world(caller)
+    return touching
+}
+
+collide_pass(w: *World) -> int {
     basics.buffer_clear(&w.contact_begin_events)
     touching_count = 0
     i = 0

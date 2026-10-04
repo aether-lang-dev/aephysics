@@ -133,11 +133,10 @@ is_valid(id: WorldId) -> bool { return dynamics.world_is_valid(id) }
 step(id: WorldId, time_step: float, sub_step_count: int) {
     w = world_of(id)
     if w == null { return }
-    // The step runs on the calling thread as worker 0 (its task context and
-    // scratch), whatever the thread's index in a host's pool; the index is
-    // given back at the end.
-    caller_index = native.worker_index()
-    native.set_worker_index(0)
+    // The step runs on the calling thread as the world's first worker slot
+    // (its task context and scratch), whatever the thread's index in a host's
+    // pool; the index is given back at the end.
+    caller_index = dynamics.enter_world(w)
     solver.stage_step()
     w.locked = true
     basics.buffer_clear(&w.body_move_events)
@@ -187,7 +186,7 @@ step(id: WorldId, time_step: float, sub_step_count: int) {
     dynamics.swap_end_events(w)
     w.profile.step = ms(os.now_monotonic_ns() - t0)
     w.locked = false
-    native.set_worker_index(caller_index)
+    dynamics.leave_world(caller_index)
 }
 
 ms(ns: long) -> float { return (ns as float) / 1000000.0 }
