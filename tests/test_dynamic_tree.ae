@@ -160,6 +160,13 @@ test_leaf_root() {
     ensure("leaf root: the proxy", hit.proxy_id == proxy_id)
     ensure("leaf root: its user data", hit.user_data == (7 as long))
 
+    // A box out to the float limits: the empty node beside the leaf root is
+    // still skipped (its bounds are inverted infinities, not the limits).
+    hit.count = 0
+    everything = math.aabb(math.vec3(0.0 - math.MAX_FLOAT, 0.0 - math.MAX_FLOAT, 0.0 - math.MAX_FLOAT), math.vec3(math.MAX_FLOAT, math.MAX_FLOAT, math.MAX_FLOAT))
+    dynamic_tree.tree_query(&tree, everything, dynamic_tree.default_mask_bits(), false, leaf_root_visit, (&hit) as ptr)
+    ensure("leaf root: everything finds only the proxy (${hit.count})", hit.count == 1 && hit.proxy_id == proxy_id)
+
     hit.count = 0
     miss_box = math.aabb(math.vec3(4.0, 4.0, 4.0), math.vec3(5.0, 5.0, 5.0))
     dynamic_tree.tree_query(&tree, miss_box, dynamic_tree.default_mask_bits(), false, leaf_root_visit, (&hit) as ptr)

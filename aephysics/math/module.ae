@@ -37,7 +37,7 @@ exports (
     EPSILON, TINY, MAX_FLOAT, HUGE,
     vec2, vec3, quat, quat_vs, qv, transform, matrix3, aabb, plane,
     vec3_zero, vec3_one, vec3_axis_x, vec3_axis_y, vec3_axis_z,
-    quat_identity, transform_identity, mat3_zero, mat3_identity, aabb_empty,
+    quat_identity, transform_identity, mat3_zero, mat3_identity, aabb_empty, infinity,
     min_int, max_int, clamp_int, abs_float, min_float, max_float, clamp_float, lerp_float,
     sqrt_float, atan2_approx, compute_cos_sin, sin_approx, cos_approx, unwind_angle,
     add, sub, mul, neg, dot, length, length_squared, distance, distance_squared,
@@ -182,6 +182,13 @@ transform_identity() -> Transform { return Transform { p: vec3_zero(), q: quat_i
 mat3_zero() -> Matrix3 { return Matrix3 { cx: vec3_zero(), cy: vec3_zero(), cz: vec3_zero() } }
 mat3_identity() -> Matrix3 { return Matrix3 { cx: vec3_axis_x(), cy: vec3_axis_y(), cz: vec3_axis_z() } }
 // The box no point is in: a union with it is the other box.
+// IEEE positive infinity: past every finite double, as an empty tree node's
+// bounds must be so no finite query box overlaps them (b3MakeEmptyNode).
+infinity() -> float {
+    zero = 0.0
+    return 1.0 / zero
+}
+
 aabb_empty() -> AABB {
     return AABB { lower: Vec3 { x: MAX_FLOAT, y: MAX_FLOAT, z: MAX_FLOAT },
                   upper: Vec3 { x: 0.0 - MAX_FLOAT, y: 0.0 - MAX_FLOAT, z: 0.0 - MAX_FLOAT } }
