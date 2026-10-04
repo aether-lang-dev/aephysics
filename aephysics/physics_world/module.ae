@@ -475,24 +475,17 @@ struct WorldMoverContext {
     mover: Capsule
     origin: Vec3
     user_context: ptr
+    planes: ptr              // PlaneResult[MOVER_PLANE_CAPACITY], this query's own
 }
 
 const MOVER_PLANE_CAPACITY = 64
-var g_mover_planes: ptr = null   // PlaneResult[MOVER_PLANE_CAPACITY]
-mover_plane_block() -> ptr { return native.scratch(g_mover_planes, MOVER_PLANE_CAPACITY * sizeof(PlaneResult)) }
-
-mover_planes() -> PlaneResult[] {
-    if g_mover_planes == null { g_mover_planes = basics.alloc(native.MAX_WORKERS * (MOVER_PLANE_CAPACITY * sizeof(PlaneResult))) }
-    return mover_plane_block() as PlaneResult[]
-}
-
 mover_collide_visitor(proxy_id: int, user_data: long, context: ptr) -> bool {
     mc = context as *WorldMoverContext
     w = mc.w
     s = dynamics.world_shape_at(w, user_data as int)
     if shape.should_query_collide(s.filter, mc.filter) == false { return true }
     t = relative_transform(w, s.body_id, mc.origin)
-    planes = mover_planes()
+    planes = mc.planes as PlaneResult[]
     count = shape.collide_mover(planes, MOVER_PLANE_CAPACITY, &s.geometry, t, mc.mover)
     if count > 0 {
         visitor = mc.visitor
@@ -509,12 +502,17 @@ collide_mover(id: WorldId, origin: Vec3, mover: Capsule, filter: QueryFilter, vi
     if w == null { return }
     r = math.vec3(mover.radius, mover.radius, mover.radius)
     box = math.offset_aabb(AABB { lower: math.sub(math.min_vec3(mover.center1, mover.center2), r), upper: math.add(math.max_vec3(mover.center1, mover.center2), r) }, origin)
-    mc = WorldMoverContext { w: w, visitor: visitor, filter: filter, mover: mover, origin: origin, user_context: context }
+    // The planes a visitor reads are this query's own block, as the
+    // reference's are on its stack: a visitor that queries the mover again
+    // (a character checking a platform) does not overwrite them.
+    planes_block = basics.alloc(MOVER_PLANE_CAPACITY * sizeof(PlaneResult))
+    mc = WorldMoverContext { w: w, visitor: visitor, filter: filter, mover: mover, origin: origin, user_context: context, planes: planes_block }
     i = 0
     while i < BODY_KIND_COUNT {
         dynamic_tree.tree_query(broad_phase.broad_phase_tree(&w.broad_phase, i), box, filter.mask_bits, false, mover_collide_visitor, (&mc) as ptr)
         i = i + 1
     }
+    basics.free_bytes(planes_block, MOVER_PLANE_CAPACITY * sizeof(PlaneResult))
 }
 
 struct WorldCastContext {
@@ -657,6 +655,8 @@ struct WorldMoverCastContext {
     translation: Vec3
     can_encroach: bool
     user_context: ptr
+    point1: Vec3             // the mover's segment, which proxy points at: this cast's own
+    point2: Vec3
 }
 
 mover_cast_visitor(input: *BoxCastInput, proxy_id: int, user_data: long, context: ptr) -> float {
@@ -684,14 +684,14 @@ mover_points() -> ptr { return native.scratch(g_mover_points, 2 * sizeof(Vec3)) 
 cast_mover(id: WorldId, origin: Vec3, mover: Capsule, translation: Vec3, filter: QueryFilter, has_filter: bool, filter_fn: fn(ShapeId, ptr) -> bool, context: ptr) -> float {
     w = world_of(id)
     if w == null { return 1.0 }
-    if g_mover_points == null { g_mover_points = basics.alloc(native.MAX_WORKERS * (2 * sizeof(Vec3))) }
-    points = mover_points() as Vec3[]
-    points[0] = mover.center1
-    points[1] = mover.center2
+    // The segment lives in this cast's context, as the reference's on its
+    // stack: a filter that casts again (or asks a body's time of impact) does
+    // not move it under this cast.
     mc = WorldMoverCastContext { w: w, filter_fn: filter_fn, has_filter: has_filter, filter: filter, fraction: 1.0, origin: origin,
-                            proxy: distance.shape_proxy(mover_points(), 2, mover.radius), translation: translation,
-                            can_encroach: mover.radius > 0.0, user_context: context }
-    input = BoxCastInput { box: math.offset_aabb(math.make_aabb(mover_points() as float[], 2, mover.radius), origin), translation: translation, max_fraction: 1.0 }
+                            proxy: distance.shape_proxy(null, 2, mover.radius), translation: translation,
+                            can_encroach: mover.radius > 0.0, user_context: context, point1: mover.center1, point2: mover.center2 }
+    mc.proxy.points = (&mc.point1) as ptr
+    input = BoxCastInput { box: math.offset_aabb(math.make_aabb(mc.proxy.points as float[], 2, mover.radius), origin), translation: translation, max_fraction: 1.0 }
     i = 0
     while i < BODY_KIND_COUNT {
         dynamic_tree.tree_box_cast(broad_phase.broad_phase_tree(&w.broad_phase, i), &input, filter.mask_bits, false, mover_cast_visitor, (&mc) as ptr)
@@ -797,15 +797,15 @@ body_collide_mover(id: BodyId, planes: BodyPlaneResult[], capacity: int, origin:
     body = dynamics.get_body_full_id(w, id)
     t = Transform { p: math.sub(body_transform.p, origin), q: body_transform.q }
     count = 0
-    one = mover_planes()
     shape_id = body.head_shape_id
     while shape_id != NULL_INDEX {
         s = dynamics.world_shape_at(w, shape_id)
         shape_id = s.next_shape_id
         if shape.should_query_collide(s.filter, filter) == false { continue }
         if shape.is_convex(s.geometry.kind) == false { continue }
-        if shape.collide_mover(one, 1, &s.geometry, t, mover) > 0 {
-            planes[count] = BodyPlaneResult { shape_id: dynamics.make_shape_id(w, s), result: one[0] }
+        // Straight into the caller's result, no shared scratch to overwrite.
+        if shape.collide_mover((&planes[count].result) as ptr as PlaneResult[], 1, &s.geometry, t, mover) > 0 {
+            planes[count].shape_id = dynamics.make_shape_id(w, s)
             count = count + 1
             if count == capacity { return count }
         }

@@ -904,8 +904,8 @@ main() {
     test_body_queries()
     test_world_queries()
     test_determinism()
-    // The scratch stays allocated: the worlds, the masses, the sweep and query buffers, the solvers' dummies (the modules' scratch is reserved before the count).
-    ensure("every other counted allocation was freed (${basics.alloc_count() - before})", basics.alloc_count() == before + 9)
+    // The scratch stays allocated: the worlds, the masses, the sweep and query buffers, the solvers' dummies (the modules' scratch is reserved before the count). The mover's planes are each query's own now, freed with it.
+    ensure("every other counted allocation was freed (${basics.alloc_count() - before})", basics.alloc_count() == before + 8)
     println("physics_world: ${checks} checks")
     if failures == 0 {
         println("physics_world: all checks passed")
