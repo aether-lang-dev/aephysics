@@ -88,7 +88,7 @@ static void add_profile( stage_sum* sum, b3Profile p )
 	sum->solve += p.solveImpulses;
 	sum->integratePositions += p.integratePositions;
 	sum->relax += p.relaxImpulses;
-	sum->restitution += p.applyRestitution;
+	sum->restitution += p.restitution;
 	sum->store += p.storeImpulses;
 	sum->transforms += p.transforms;
 	sum->refit += p.refit;

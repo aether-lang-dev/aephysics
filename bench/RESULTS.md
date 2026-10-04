@@ -594,6 +594,40 @@ The pyramids were 12.5 and 28.4 against 8.9 and 19.3 before the wide
 constraint became one single-precision record in the module's own lanes
 (#46): 1.40x and 1.47x to 1.22x and 1.31x.
 
+### Against Box3D main (e77352c, 2026-10-04)
+
+The reference pin moved from `f555ee4` to `e77352c` (#86). Upstream's
+optimization commits since the old pin (#161, #168, #170) and its AVX2
+dispatch (#174, picked at run time when the processor has it) make main
+much faster. aephysics has ported every behaviour change and the
+optimizations that measured faster here (#83-#94).
+
+All three engines ran back to back, one thread, all three scenes in one
+process each, two rounds. That mode inflates the later scenes for every
+engine compared with running each scene alone, so read across the rows,
+not against the table above:
+
+| scene | aephysics | Box3D `f555ee4` | Box3D `e77352c` |
+|---|---|---|---|
+| large pyramid | 9.84-10.23 ms | 9.09-9.34 | **5.38-5.69** |
+| many pyramids | 32.2-37.4 | 27.2-29.6 | **12.5-13.3** |
+| joint grid | 27.1-30.6 | 21.0-21.6 | **14.4-15.5** |
+
+Box3D's large pyramid stage by stage, old pin against main. The gain is
+the eight-wide (AVX2) contact stages:
+
+| stage | `f555ee4` | `e77352c` |
+|---|---|---|
+| collide | 1.06 ms | 0.80 |
+| prepare | 1.26 | 0.60 |
+| warm start | 1.17 | 0.55 |
+| solve | 1.76 | 0.92 |
+| relax | 2.24 | 1.02 |
+| store | 0.48 | 0.38 |
+
+Matching that needs eight float lanes. Aether's `std.lanes` has `f32x4`
+and no `f32x8`.
+
 ### Stage by stage
 
 `AEPHYSICS_STAGES=1` times every stage a worker runs and prints the
