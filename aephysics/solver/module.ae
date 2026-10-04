@@ -62,30 +62,48 @@ stages_timed() -> bool {
     return g_stage_on == 1
 }
 
-stage_clock() -> float[] {
-    if g_stage_ms == null { g_stage_ms = basics.alloc(STAGE_COUNT * 8) }
-    return g_stage_ms as float[]
-}
-
+// A row of stage clocks per worker, so the workers timing their blocks at
+// once neither race to allocate it nor lose each other's sums; made on the
+// stepping thread (stage_step) and summed for the report.
 stage_now_ms() -> float { return (os.now_monotonic_ns() as float) / 1000000.0 }
 
 stage_note(kind: int, started: float) {
-    if kind < 0 || kind >= STAGE_COUNT { return }
-    clock = stage_clock()
+    if kind < 0 || kind >= STAGE_COUNT || g_stage_ms == null { return }
+    clock = native.scratch(g_stage_ms, STAGE_COUNT * 8) as float[]
     clock[kind] = clock[kind] + (stage_now_ms() - started)
 }
 
 // One more step over the same stages, for the averages.
 stage_step() {
-    if stages_timed() { g_stage_steps = g_stage_steps + 1 }
+    if stages_timed() {
+        if g_stage_ms == null { g_stage_ms = basics.alloc(native.MAX_WORKERS * STAGE_COUNT * 8) }
+        g_stage_steps = g_stage_steps + 1
+    }
+}
+
+// The workers' rows summed.
+stage_clock() -> float[] {
+    totals = basics.alloc(STAGE_COUNT * 8) as float[]
+    rows = g_stage_ms as float[]
+    worker = 0
+    while worker < native.MAX_WORKERS {
+        kind = 0
+        while kind < STAGE_COUNT {
+            totals[kind] = totals[kind] + rows[worker * STAGE_COUNT + kind]
+            kind = kind + 1
+        }
+        worker = worker + 1
+    }
+    return totals
 }
 
 // The averages, in the reference's own order and words.
 stage_report() {
-    if stages_timed() == false || g_stage_steps == 0 { return }
+    if stages_timed() == false || g_stage_steps == 0 || g_stage_ms == null { return }
     clock = stage_clock()
     n = g_stage_steps as float
     println("aephysics stages ms/step: prepare_joints ${clock[STAGE_PREPARE_JOINTS] / n} prepare_wide ${clock[STAGE_PREPARE_WIDE] / n} prepare_contacts ${clock[STAGE_PREPARE_CONTACTS] / n} integrate_v ${clock[STAGE_INTEGRATE_VELOCITIES] / n} warm ${clock[STAGE_WARM_START] / n} solve ${clock[STAGE_SOLVE] / n} integrate_p ${clock[STAGE_INTEGRATE_POSITIONS] / n} relax ${clock[STAGE_RELAX] / n} restitution ${clock[STAGE_RESTITUTION] / n} store ${clock[STAGE_STORE_WIDE] / n}")
+    basics.free_bytes(clock as ptr, STAGE_COUNT * 8)
 }
 
 const NULL_INDEX = 0 - 1

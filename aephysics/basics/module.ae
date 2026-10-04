@@ -18,6 +18,7 @@
 // hold. The allocation counters the original keeps (b3Alloc, b3Free with
 // sizes) are kept so a leak is a number.
 import std.string
+import aephysics.native
 
 exports (
     BitSet, IdPool, HashSet, Ints, Buffer, Stack, Arena, BlockAllocator, BLOCK_SIZE,
@@ -57,22 +58,25 @@ var g_bytes_in_use = 0
 
 // Box3D's b3Alloc: zeroed, 16-byte aligned by the C runtime's own promise,
 // and counted, so a leak is a number a test reads.
+// The counters move atomically: the collide pass and finalize allocate from
+// several workers at once (a mesh contact's triangle cache, an arena's
+// overflow, the continuous pass's sensor hits).
 alloc(size: int) -> ptr {
     if size <= 0 { return null }
-    g_alloc_count = g_alloc_count + 1
-    g_bytes_in_use = g_bytes_in_use + size
+    native.atomic_add((&g_alloc_count) as ptr, 1)
+    native.atomic_add((&g_bytes_in_use) as ptr, size)
     return calloc(1, size)
 }
 
 free_bytes(block: ptr, size: int) {
     if block == null { return }
-    g_alloc_count = g_alloc_count - 1
-    g_bytes_in_use = g_bytes_in_use - size
+    native.atomic_add((&g_alloc_count) as ptr, 0 - 1)
+    native.atomic_add((&g_bytes_in_use) as ptr, 0 - size)
     free(block)
 }
 
-alloc_count() -> int { return g_alloc_count }
-bytes_in_use() -> int { return g_bytes_in_use }
+alloc_count() -> int { return native.atomic_load((&g_alloc_count) as ptr) }
+bytes_in_use() -> int { return native.atomic_load((&g_bytes_in_use) as ptr) }
 
 // --- bits (ctz.h) ----------------------------------------------------------
 
