@@ -274,7 +274,9 @@ continuous_query_visitor(proxy_id: int, user_data: long, context: ptr) -> bool {
     if shape.should_shapes_collide(fast_shape.filter, s.filter) == false { return true }
     body = dynamics.body_at(w, s.body_id)
     sim = dynamics.get_body_sim(w, body)
-    if (sim.flags & dynamics.IS_BULLET) != 0 { return true }
+    // Another bullet's flags, which its own sweep may be setting bits in on
+    // another worker: read atomically (the bullet bit itself never changes).
+    if (native.atomic_load((&sim.flags) as ptr) & dynamics.IS_BULLET) != 0 { return true }
     fast_body = dynamics.body_at(w, ctx.fast_sim.body_id)
     if dynamics.should_bodies_collide(w, fast_body, body) == false { return true }
     if w.has_custom_filter && ((s.flags & dynamics.SHAPE_ENABLE_CUSTOM_FILTERING) != 0 || (fast_shape.flags & dynamics.SHAPE_ENABLE_CUSTOM_FILTERING) != 0) {
@@ -298,7 +300,7 @@ continuous_query_visitor(proxy_id: int, user_data: long, context: ptr) -> bool {
             did_hit = pre_solve(dynamics.make_shape_id(w, s), dynamics.make_shape_id(w, fast_shape), math.add(ctx.base, output.point), output.normal, w.pre_solve_context)
         }
         if did_hit {
-            ctx.fast_sim.flags = ctx.fast_sim.flags | dynamics.HAD_TIME_OF_IMPACT
+            native.atomic_or((&ctx.fast_sim.flags) as ptr, dynamics.HAD_TIME_OF_IMPACT)
             ctx.fraction = output.fraction
         }
     }
@@ -310,7 +312,7 @@ grow_bounds(w: *World, s: *WorldShape, sim: *BodySim, is_bullet: bool) {
     if math.aabb_contains(s.fat_aabb, s.aabb) { return }
     margin = math.vec3(s.aabb_margin, s.aabb_margin, s.aabb_margin)
     s.fat_aabb = AABB { lower: math.sub(s.aabb.lower, margin), upper: math.add(s.aabb.upper, margin) }
-    sim.flags = sim.flags | dynamics.ENLARGE_BOUNDS
+    native.atomic_or((&sim.flags) as ptr, dynamics.ENLARGE_BOUNDS)
     // A bullet's proxies are enlarged later, serially.
     if is_bullet == false { broad_phase.broad_phase_mark_proxy_moved(&w.broad_phase, s.proxy_key, s.fat_aabb) }
 }
@@ -1038,7 +1040,14 @@ orchestrate(sc: *SolverContext) {
 
 // The step's solve (b3Solve). The world's step counter advances; with
 // no awake body nothing else happens.
+// The solve as the world's workers, whatever the calling thread's index.
 solve(w: *World, ctx: *StepContext) {
+    caller = dynamics.enter_world(w)
+    solve_step(w, ctx)
+    dynamics.leave_world(caller)
+}
+
+solve_step(w: *World, ctx: *StepContext) {
     w.step_index = w.step_index + (1 as long)
     awake = dynamics.get_solver_set(w, dynamics.AWAKE_SET)
     awake_body_count = awake.body_sims.count
@@ -1207,11 +1216,11 @@ solve(w: *World, ctx: *StepContext) {
     i = 1
     while i < worker_count {
         workers[i] = WorkerContext { sc: &sc, worker_index: i }
-        handles[i] = parallel.enqueue(scheduler, solver_task, workers_block + i * sizeof(WorkerContext), i) as ptr
+        handles[i] = parallel.enqueue(scheduler, solver_task, workers_block + i * sizeof(WorkerContext), w.worker_base + i) as ptr
         i = i + 1
     }
     workers[0] = WorkerContext { sc: &sc, worker_index: 0 }
-    native.set_worker_index(0)
+    native.set_worker_index(w.worker_base)
     solver_task(workers_block)
     i = 1
     while i < worker_count {

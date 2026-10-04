@@ -67,6 +67,8 @@ struct Scheduler {
     semaphore: ptr
     shutdown: int                  // atomic
     live: int                      // atomic
+    for_tasks: ptr                 // ForTask[MAX_WORKERS], parallel_for's, the scheduler's own
+    for_handles: ptr               // *Task[MAX_WORKERS]
 }
 
 task_at(s: *Scheduler, index: int) -> *Task { return (s.tasks + index * sizeof(Task)) as *Task }
@@ -112,6 +114,8 @@ create_scheduler(worker_count: int) -> *Scheduler {
     s = calloc(1, sizeof(Scheduler)) as *Scheduler
     s.worker_count = count
     s.tasks = calloc(MAX_TASKS, sizeof(Task))
+    s.for_tasks = calloc(MAX_WORKERS, sizeof(ForTask))
+    s.for_handles = calloc(MAX_WORKERS, 8)
     s.semaphore = native.semaphore_new(0)
     i = 1
     while i < count {
@@ -133,6 +137,8 @@ destroy_scheduler(s: *Scheduler) {
     }
     native.semaphore_free(s.semaphore)
     free(s.tasks)
+    free(s.for_tasks)
+    free(s.for_handles)
     free(s as ptr)
 }
 
@@ -171,9 +177,10 @@ enqueue(s: *Scheduler, body: fn(ptr) -> void, context: ptr, worker_index: int) -
         t.body = body
         t.context = context
         t.worker_index = worker_index
+        caller = native.worker_index()
         native.set_worker_index(worker_index)
         body(context)
-        native.set_worker_index(0)
+        native.set_worker_index(caller)
         native.atomic_store(status_of(t), TASK_COMPLETE)
         return t
     }
@@ -196,10 +203,11 @@ enqueue(s: *Scheduler, body: fn(ptr) -> void, context: ptr, worker_index: int) -
 // the thread when there are none; the caller is worker 0 again after.
 finish(s: *Scheduler, t: *Task) {
     if t == null { return }
+    caller = native.worker_index()
     while native.atomic_load(status_of(t)) != TASK_COMPLETE {
         if execute_one(s) == false { native.yield_thread() }
     }
-    native.set_worker_index(0)
+    native.set_worker_index(caller)
 }
 
 // --- parallel_for --------------------------------------------------------------------------------------------
@@ -233,9 +241,6 @@ for_trampoline(context: ptr) {
     }
 }
 
-var g_for_tasks: ptr = null        // ForTask[MAX_WORKERS]
-var g_for_handles: ptr = null      // *Task[MAX_WORKERS]
-
 // [0, item_count) in blocks of at least min_range, over the scheduler's
 // workers; the caller works as worker 0 and returns when every block is
 // done, with how many blocks there were. Blocks stay at min_range until
@@ -244,20 +249,14 @@ var g_for_handles: ptr = null      // *Task[MAX_WORKERS]
 parallel_for(s: *Scheduler, body: fn(int, int, int, ptr) -> void, item_count: int, min_range: int, context: ptr) -> int {
     if item_count <= 0 { return 0 }
     worker_count = s.worker_count
-    // The caller works as worker 0 -- the task contexts and every module's
-    // scratch are chosen by the thread's worker index -- and gets its own
-    // index back after: a host stepping a one-worker world from one of its
-    // pool's threads (index k) indexed the world's single task context at k.
+    // The caller is the range's worker 0 and keeps its own slot (a world's
+    // first, set by whoever entered the world); task i runs as the slot i on
+    // from it, so worlds in their own slots share no scratch. The body is
+    // given the worker's index within the range.
     caller_index = native.worker_index()
     if worker_count <= 1 {
-        native.set_worker_index(0)
         body(0, item_count, 0, context)
-        native.set_worker_index(caller_index)
         return 1
-    }
-    if g_for_tasks == null {
-        g_for_tasks = calloc(MAX_WORKERS, sizeof(ForTask))
-        g_for_handles = calloc(MAX_WORKERS, 8)
     }
     max_block_count = 32 * worker_count
     block_size = min_range
@@ -268,18 +267,17 @@ parallel_for(s: *Scheduler, body: fn(int, int, int, ptr) -> void, item_count: in
     shared = ForShared { next_block: 0, block_count: block_count, block_size: block_size, item_count: item_count,
                          body: body, context: context }
     begin_round(s)
-    tasks = g_for_tasks as ForTask[]
-    handles = g_for_handles as ptr[]
+    tasks = s.for_tasks as ForTask[]
+    handles = s.for_handles as ptr[]
     i = 1
     while i < task_count {
         tasks[i] = ForTask { shared: &shared, worker_index: i }
-        handles[i] = enqueue(s, for_trampoline, (g_for_tasks + i * sizeof(ForTask)), i) as ptr
+        handles[i] = enqueue(s, for_trampoline, (s.for_tasks + i * sizeof(ForTask)), caller_index + i) as ptr
         i = i + 1
     }
     // The calling thread takes blocks as worker 0.
     tasks[0] = ForTask { shared: &shared, worker_index: 0 }
-    native.set_worker_index(0)
-    for_trampoline(g_for_tasks)
+    for_trampoline(s.for_tasks)
     i = 1
     while i < task_count {
         finish(s, handles[i] as *Task)

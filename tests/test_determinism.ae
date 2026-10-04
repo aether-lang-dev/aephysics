@@ -480,7 +480,86 @@ mesh_drop(workers: int) -> Outcome {
     return outcome
 }
 
+// Independent worlds stepped at the same time on different threads: each
+// claims worker slots of its own, so they share no scratch, and each ends
+// where the same world stepped alone does, bit for bit. Worlds are made
+// one at a time (as the reference's are); only the stepping is concurrent.
+struct ConcurrentWorld {
+    world_id: WorldId
+    bodies: ptr                    // BodyId[PYRAMID_BOXES]
+    steps: int
+}
+
+const PYRAMID_BOXES = 55           // a base of ten
+
+pyramid_world(box: *HullData, slab: *HullData) -> ConcurrentWorld {
+    wdef = dynamics.default_world_def()
+    wdef.worker_count = 2
+    world_id = dynamics.create_world(&wdef)
+    gdef = dynamics.default_body_def()
+    gdef.position = math.vec3(0.0, 0.0 - 0.5, 0.0)
+    ground = dynamics.create_body(world_id, &gdef)
+    sdef = dynamics.default_shape_def()
+    // The hulls are the world's by reference: they outlive it.
+    dynamics.create_hull_shape(ground, &sdef, slab)
+    block = calloc(PYRAMID_BOXES, sizeof(BodyId))
+    bodies = block as BodyId[]
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    n = 0
+    row = 0
+    while row < 10 {
+        k = 0
+        while k < 10 - row {
+            bdef.position = math.vec3(1.05 * (k as float) - 0.525 * ((9 - row) as float), 0.5 + 1.0 * (row as float), 0.0)
+            bodies[n] = dynamics.create_body(world_id, &bdef)
+            dynamics.create_hull_shape(bodies[n], &sdef, box)
+            n = n + 1
+            k = k + 1
+        }
+        row = row + 1
+    }
+    return ConcurrentWorld { world_id: world_id, bodies: block, steps: 120 }
+}
+
+step_concurrent_world(context: ptr) {
+    cw = context as *ConcurrentWorld
+    i = 0
+    while i < cw.steps {
+        physics_world.step(cw.world_id, 1.0 / 60.0, 4)
+        i = i + 1
+    }
+}
+
+test_concurrent_worlds() {
+    box = hull.make_box_hull(0.5, 0.5, 0.5)
+    slab = hull.make_box_hull(20.0, 0.5, 20.0)
+    alone = pyramid_world(box, slab)
+    step_concurrent_world((&alone) as ptr)
+    expected = checksum(alone.bodies as BodyId[], PYRAMID_BOXES)
+    a = pyramid_world(box, slab)
+    b = pyramid_world(box, slab)
+    host = parallel.create_scheduler(2)
+    parallel.begin_round(host)
+    task = parallel.enqueue(host, step_concurrent_world, (&a) as ptr, 1)
+    step_concurrent_world((&b) as ptr)
+    parallel.finish(host, task)
+    parallel.destroy_scheduler(host)
+    hash_a = checksum(a.bodies as BodyId[], PYRAMID_BOXES)
+    hash_b = checksum(b.bodies as BodyId[], PYRAMID_BOXES)
+    ensure("concurrent worlds: the world on the host thread as alone, bit for bit", bits_of(hash_a) == bits_of(expected))
+    ensure("concurrent worlds: the world on the main thread as alone, bit for bit", bits_of(hash_b) == bits_of(expected))
+    dynamics.destroy_world(alone.world_id)
+    dynamics.destroy_world(a.world_id)
+    dynamics.destroy_world(b.world_id)
+    free(alone.bodies)
+    free(a.bodies)
+    free(b.bodies)
+    hull.destroy_hull(box)
+    hull.destroy_hull(slab)
+}
 main() {
+    test_concurrent_worlds()
     value = os.getenv("AEPHYSICS_TRACE")
     g_trace = value != null && string.length(value) > 0
     g_trace_run = true
