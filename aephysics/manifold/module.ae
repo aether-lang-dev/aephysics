@@ -1092,6 +1092,22 @@ compute_separating_axis(hull_a: *HullData, hull_b: *HullData, xf_b: Transform, e
     }
     f32 eps32 = eps
     if axis_count == 0 { return res }
+    // B's face normals and vertices into A's frame, negated, once (Box3D
+    // adec25b) rather than four products for every B edge; they live in
+    // the first clip polygon's scratch, idle until the contact is built
+    // (a hull's faces and vertices number its edges plus two, at most 66).
+    scratch_ready()
+    b_in_a = clip1() as Vec3[]
+    k = 0
+    while k < hull_b.face_count {
+        b_in_a[k] = math.neg(math.mul_mv(r, planes_b[k].normal))
+        k = k + 1
+    }
+    k = 0
+    while k < hull_b.vertex_count {
+        b_in_a[hull_b.face_count + k] = math.neg(math.add(math.mul_mv(r, points_b[k]), xf_b.p))
+        k = k + 1
+    }
     j = 0
     while j < hull_b.edge_count {
         twin_b = j + 1
@@ -1102,10 +1118,10 @@ compute_separating_axis(hull_a: *HullData, hull_b: *HullData, xf_b: Transform, e
             j = j + 2
             continue
         }
-        c = math.neg(math.mul_mv(r, planes_b[edges_b[j].face].normal))
-        d = math.neg(math.mul_mv(r, planes_b[edges_b[twin_b].face].normal))
-        bv0 = math.neg(math.add(math.mul_mv(r, points_b[edges_b[j].origin]), xf_b.p))
-        bv1 = math.neg(math.add(math.mul_mv(r, points_b[edges_b[twin_b].origin]), xf_b.p))
+        c = b_in_a[edges_b[j].face]
+        d = b_in_a[edges_b[twin_b].face]
+        bv0 = b_in_a[hull_b.face_count + edges_b[j].origin]
+        bv1 = b_in_a[hull_b.face_count + edges_b[twin_b].origin]
         dc = math.sub(bv1, bv0)
         c32 = math.narrow3(c)
         d32 = math.narrow3(d)
