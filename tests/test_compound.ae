@@ -537,6 +537,61 @@ test_casts() {
     free(point_block)
 }
 
+// A mesh child of six materials, past the four slots a child used to
+// carry (Box3D #172): every cell's hit maps to its own triangle's material.
+test_many_mesh_materials() {
+    md = mesh.create_grid_mesh(6, 2, 1.0, 6, true)
+    mats_block = calloc(6, sizeof(SurfaceMaterial))
+    mat_array = mats_block as SurfaceMaterial[]
+    i = 0
+    while i < 6 {
+        mat_array[i] = make_material(0.1 * ((i + 1) as float), 10 + i)
+        i = i + 1
+    }
+    d = make_defs(0, 0, 1, 0)
+    meshes = d.meshes as CompoundMeshDef[]
+    meshes[0] = compound.compound_mesh_def(md, math.transform_identity(), math.vec3_one(), mats_block, 6)
+    c = compound.create_compound(&d.def)
+    ensure("six materials in the table", c.material_count == 6)
+    child = compound.get_compound_child(c, 0)
+    ensure("the child carries all six", child.material_count == 6)
+    triangle_materials = mesh.mesh_material_indices(md)
+    seen_block = calloc(6, 4)
+    seen = seen_block as int[]
+    all_match = true
+    ix = 0
+    while ix < 6 {
+        iz = 0
+        while iz < 2 {
+            origin = math.vec3(0.0 - 2.5 + (ix as float), 5.0, 0.0 - 0.5 + (iz as float))
+            out = compound.ray_cast_compound(c, origin, math.vec3(0.0, 0.0 - 10.0, 0.0), 1.0)
+            if out.hit {
+                id = compound.get_compound_material(c, out.material_index).user_material_id
+                expected = (10 + triangle_materials[out.triangle_index]) as long
+                if id != expected { all_match = false }
+                seen[(id as int) - 10] = 1
+            } else {
+                all_match = false
+            }
+            iz = iz + 1
+        }
+        ix = ix + 1
+    }
+    distinct = 0
+    i = 0
+    while i < 6 {
+        distinct = distinct + seen[i]
+        i = i + 1
+    }
+    ensure("every hit has its triangle's material", all_match)
+    ensure("all six materials reached (${distinct})", distinct == 6)
+    free(seen_block)
+    compound.destroy_compound(c)
+    free_defs(d)
+    free(mats_block)
+    mesh.destroy_mesh(md)
+}
+
 test_overlap() {
     mat = material.default_surface_material()
     point_block = calloc(2, sizeof(Vec3))
@@ -863,6 +918,7 @@ main() {
     test_sharing()
     test_children_and_bounds()
     test_casts()
+    test_many_mesh_materials()
     test_overlap()
     test_query_and_mover()
     test_through_shape()

@@ -8,15 +8,14 @@
 // this engine is measured against: the child order (capsules, hulls,
 // meshes, spheres), the tree built once with a full rebuild and carried
 // in the block, the one level of indirection from a hull or mesh
-// instance to its shared data, a mesh child's four material slots
-// remapped into the compound's table, and every query brought into the
+// instance to its shared data, a mesh child's materials remapped into the
+// compound's table (any number of them, Box3D #172), and every query brought into the
 // child's frame and its result carried back. Names are the reference's
 // without its prefix, in snake case: b3CreateCompound is
 // create_compound.
 //
 // Differences: the byte roundtrip (b3ConvertCompoundToBytes) is not
-// ported, as with the tree's, the mesh's and the height field's; a
-// child's material indices are four named fields; the shared-content
+// ported, as with the tree's, the mesh's and the height field's; the shared-content
 // maps are core's LongMap on the hull's and the mesh's own hash with a
 // byte comparison behind it.
 import std.string
@@ -40,7 +39,7 @@ exports (
     compound_def, compound_capsule_def, compound_hull_def, compound_mesh_def, compound_sphere_def,
     create_compound, destroy_compound,
     get_compound_materials, get_compound_material, get_compound_capsule, get_compound_hull,
-    get_compound_mesh, get_compound_sphere, get_compound_child, compound_child_count,
+    get_compound_mesh, get_compound_sphere, get_compound_child, compound_child_count, child_material,
     compute_compound_aabb, overlap_compound, ray_cast_compound, shape_cast_compound,
     query_compound, collide_mover_and_compound, make_compound_child_sweep
 )
@@ -50,7 +49,8 @@ extern memset(block: ptr, value: int, size: int) -> ptr
 extern memcmp(a: ptr, b: ptr, size: int) -> int
 
 const NULL_INDEX = 0 - 1
-const COMPOUND_VERSION = 0x5C0E7B9A
+const COMPOUND_VERSION = 0x5C0E7B9B  // a mesh child's materials became a table (Box3D #172)
+// Kept for the API; a mesh child is no longer limited to it.
 const MAX_COMPOUND_MESH_MATERIALS = 4
 // The child index shares a 64-bit key with two shape ids in the reference's tables.
 const MAX_CHILD_SHAPES = 1 << 20
@@ -133,6 +133,8 @@ struct CompoundData {
     tree: DynamicTree        // its pointers into this block; never inserted into
     material_offset: int
     material_count: int
+    material_map_offset: int // int[], each mesh instance's run of indices into the material table
+    material_map_count: int
     capsule_offset: int
     capsule_count: int
     hull_offset: int         // the HullInstance array
@@ -165,26 +167,23 @@ struct CompoundHull {
     material_index: int
 }
 
-// A mesh instance as stored: the triangle's material index, clamped to
-// four, selects one of its slots in the compound's table.
+// A mesh instance as stored: the triangle's material index selects an
+// entry of its run in the material map (clamped to the run), which is an
+// index into the compound's table.
 struct MeshInstance {
     transform: Transform
     scale: Vec3
     mesh_offset: int
-    material_index0: int
-    material_index1: int
-    material_index2: int
-    material_index3: int
+    material_start: int      // its first entry in the material map
+    material_count: int      // at least one
 }
 
 struct CompoundMesh {
     mesh_data: *MeshData
     transform: Transform
     scale: Vec3
-    material_index0: int
-    material_index1: int
-    material_index2: int
-    material_index3: int
+    material_indices: ptr    // int[material_count] into the compound's table
+    material_count: int
 }
 
 struct CompoundSphere {
@@ -194,7 +193,8 @@ struct CompoundSphere {
 
 // A child of any kind: the fields of the other kinds are unused. The
 // capsule's and sphere's transform is the identity, their place being
-// in their centres; material index 0 serves the convex kinds.
+// in their centres. material_index0 serves the convex kinds; a mesh's
+// materials are its run of indices (child_material picks one).
 struct ChildShape {
     kind: int
     capsule: Capsule
@@ -203,9 +203,8 @@ struct ChildShape {
     sphere: Sphere
     transform: Transform
     material_index0: int
-    material_index1: int
-    material_index2: int
-    material_index3: int
+    material_indices: ptr    // int[material_count] for a mesh, null otherwise
+    material_count: int
 }
 
 align8(x: int) -> int { return (x + 7) & (0 - 8) }
@@ -231,9 +230,9 @@ get_compound_hull(c: *CompoundData, index: int) -> CompoundHull {
 get_compound_mesh(c: *CompoundData, index: int) -> CompoundMesh {
     instances = ((c as ptr) + c.mesh_offset) as MeshInstance[]
     return CompoundMesh { mesh_data: ((c as ptr) + instances[index].mesh_offset) as *MeshData, transform: instances[index].transform,
-                          scale: instances[index].scale, material_index0: instances[index].material_index0,
-                          material_index1: instances[index].material_index1, material_index2: instances[index].material_index2,
-                          material_index3: instances[index].material_index3 }
+                          scale: instances[index].scale,
+                          material_indices: (c as ptr) + c.material_map_offset + instances[index].material_start * 4,
+                          material_count: instances[index].material_count }
 }
 
 get_compound_sphere(c: *CompoundData, index: int) -> CompoundSphere {
@@ -246,7 +245,7 @@ compound_child_count(c: *CompoundData) -> int { return c.capsule_count + c.hull_
 empty_child() -> ChildShape {
     return ChildShape { kind: KIND_SPHERE, capsule: Capsule { center1: math.vec3_zero(), center2: math.vec3_zero(), radius: 0.0 },
                         hull: null, mesh: Mesh { data: null, scale: math.vec3_one() }, sphere: Sphere { center: math.vec3_zero(), radius: 0.0 },
-                        transform: math.transform_identity(), material_index0: 0, material_index1: 0, material_index2: 0, material_index3: 0 }
+                        transform: math.transform_identity(), material_index0: 0, material_indices: null, material_count: 0 }
 }
 
 // The child at an index, in the order capsules, hulls, meshes, spheres.
@@ -275,10 +274,10 @@ get_compound_child(c: *CompoundData, child_index: int) -> ChildShape {
         child.kind = KIND_MESH
         child.mesh = Mesh { data: cm.mesh_data, scale: cm.scale }
         child.transform = cm.transform
-        child.material_index0 = cm.material_index0
-        child.material_index1 = cm.material_index1
-        child.material_index2 = cm.material_index2
-        child.material_index3 = cm.material_index3
+        child.material_indices = cm.material_indices
+        child.material_count = cm.material_count
+        indices = cm.material_indices as int[]
+        child.material_index0 = indices[0]
         return child
     }
     index = index - c.mesh_count
@@ -289,11 +288,12 @@ get_compound_child(c: *CompoundData, child_index: int) -> ChildShape {
     return child
 }
 
+// The compound table index of a child's material: a mesh's triangle
+// material slot through its run (clamped to it), the convex kinds' one.
 child_material(child: ChildShape, slot: int) -> int {
-    if slot <= 0 { return child.material_index0 }
-    if slot == 1 { return child.material_index1 }
-    if slot == 2 { return child.material_index2 }
-    return child.material_index3
+    if child.material_count <= 0 { return child.material_index0 }
+    indices = child.material_indices as int[]
+    return indices[math.clamp_int(slot, 0, child.material_count - 1)]
 }
 
 // --- creation --------------------------------------------------------------------------------------
@@ -387,6 +387,11 @@ create_compound(def: *CompoundDef) -> *CompoundData {
     }
     table = MaterialTable { materials: basics.alloc(material_capacity * sizeof(SurfaceMaterial)), count: 0, capacity: material_capacity,
                             map: basics.map_create(2 * material_capacity), scratch: basics.alloc(64) }
+    // Each mesh's run of table indices, at least one entry each.
+    map_capacity = math.max_int(material_capacity - convex_count, 1)
+    material_map_block = basics.alloc(map_capacity * 4)
+    material_map = material_map_block as int[]
+    map_count = 0
 
     // Capsules.
     i = 0
@@ -436,15 +441,20 @@ create_compound(def: *CompoundDef) -> *CompoundData {
         box = mesh.compute_mesh_aabb(md, mesh_defs[i].transform, mesh_defs[i].scale)
         dynamic_tree.tree_create_proxy(&tree, box, all_bits(), child_index as long)
         child_index = child_index + 1
-        // The mesh's materials go through the same table; only four slots travel.
-        slots = math.min_int(mesh_defs[i].material_count, MAX_COMPOUND_MESH_MATERIALS)
+        // The mesh's materials go through the same table, all of them: its
+        // run in the material map holds their table indices (a mesh with
+        // none gets one entry, the table's first).
+        run = math.max_int(mesh_defs[i].material_count, 1)
         mesh_materials = mesh_defs[i].materials as SurfaceMaterial[]
         instance = MeshInstance { transform: mesh_defs[i].transform, scale: mesh_defs[i].scale, mesh_offset: 0,
-                                  material_index0: 0, material_index1: 0, material_index2: 0, material_index3: 0 }
-        if slots > 0 { instance.material_index0 = table_index(&table, mesh_materials[0]) }
-        if slots > 1 { instance.material_index1 = table_index(&table, mesh_materials[1]) }
-        if slots > 2 { instance.material_index2 = table_index(&table, mesh_materials[2]) }
-        if slots > 3 { instance.material_index3 = table_index(&table, mesh_materials[3]) }
+                                  material_start: map_count, material_count: run }
+        k = 0
+        while k < run {
+            material_map[map_count + k] = 0
+            if k < mesh_defs[i].material_count { material_map[map_count + k] = table_index(&table, mesh_materials[k]) }
+            k = k + 1
+        }
+        map_count = map_count + run
         shared = shared_index(&mesh_map, md.hash, md as ptr, md.byte_count, shared_meshes, shared_mesh_sizes, shared_mesh_count)
         if shared == shared_mesh_count { shared_mesh_count = shared_mesh_count + 1 }
         instance.mesh_offset = shared
@@ -475,6 +485,8 @@ create_compound(def: *CompoundDef) -> *CompoundData {
     byte_count = byte_count + align8(dynamic_tree.TREE_STACK_SIZE * 4)
     material_offset = byte_count
     byte_count = byte_count + align8(table.count * sizeof(SurfaceMaterial))
+    material_map_offset = byte_count
+    byte_count = byte_count + align8(map_count * 4)
     capsule_offset = byte_count
     byte_count = byte_count + align8(capsule_count * sizeof(CompoundCapsule))
     hull_offset = byte_count
@@ -506,6 +518,8 @@ create_compound(def: *CompoundDef) -> *CompoundData {
     c.stack_offset = stack_offset
     c.material_offset = material_offset
     c.material_count = table.count
+    c.material_map_offset = material_map_offset
+    c.material_map_count = map_count
     c.capsule_offset = capsule_offset
     c.capsule_count = capsule_count
     c.hull_offset = hull_offset
@@ -530,6 +544,7 @@ create_compound(def: *CompoundDef) -> *CompoundData {
     dynamic_tree.tree_destroy(&tree)
 
     memcpy(block + material_offset, table.materials, table.count * sizeof(SurfaceMaterial))
+    if map_count > 0 { memcpy(block + material_map_offset, material_map_block, map_count * 4) }
     if capsule_count > 0 { memcpy(block + capsule_offset, capsule_instances_block, capsule_count * sizeof(CompoundCapsule)) }
     i = 0
     while i < hull_count {
@@ -558,6 +573,7 @@ create_compound(def: *CompoundDef) -> *CompoundData {
     basics.map_destroy(&table.map)
     basics.free_bytes(table.scratch, 64)
     basics.free_bytes(table.materials, material_capacity * sizeof(SurfaceMaterial))
+    basics.free_bytes(material_map_block, map_capacity * 4)
     basics.free_bytes(shared_hulls_block, math.max_int(hull_count, 1) * 8)
     basics.free_bytes(shared_hull_sizes_block, math.max_int(hull_count, 1) * 4)
     basics.free_bytes(shared_hull_offsets_block, math.max_int(hull_count, 1) * 4)
@@ -637,7 +653,7 @@ struct CastContext {
 // A child's material for a hit: slot 0 for the convex kinds, the
 // triangle's (clamped to four) for a mesh.
 hit_material(child: ChildShape, output: CastOutput) -> int {
-    if child.kind == KIND_MESH { return child_material(child, math.min_int(output.material_index, MAX_COMPOUND_MESH_MATERIALS - 1)) }
+    if child.kind == KIND_MESH { return child_material(child, output.material_index) }
     return child.material_index0
 }
 
@@ -757,7 +773,7 @@ mover_visitor(proxy_id: int, user_data: long, context: ptr) -> bool {
         p.plane.normal = math.rotate_vector(child.transform.q, p.plane.normal)
         p.point = math.transform_point(child.transform, p.point)
         p.child_index = child_index
-        p.material_index = child_material(child, math.min_int(p.material_index, MAX_COMPOUND_MESH_MATERIALS - 1))
+        p.material_index = child_material(child, p.material_index)
         planes[ctx.count + i] = p
         i = i + 1
     }
