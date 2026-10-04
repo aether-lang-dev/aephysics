@@ -277,8 +277,11 @@ const AXIS_V0_Z = 11 * AXIS_SLOTS
 const AXIS_TOL = 12 * AXIS_SLOTS
 const AXIS_EDGE = 13 * AXIS_SLOTS               // the candidate's half-edge index (exact in an f32)
 // The table, then room for B's face normals and vertices taken into A's frame
-// (up to MAX_HULL_FACES + MAX_HULL_VERTICES of them) after it.
-const EDGE_SCRATCH_BYTES = AXIS_FIELDS * AXIS_SLOTS * 4 + (hull.MAX_HULL_FACES + hull.MAX_HULL_VERTICES) * 24
+// after it: hull.MAX_HULL_FACES + hull.MAX_HULL_VERTICES of them, written out
+// (a constant naming another module's is expanded where this module is
+// imported, and not every importer imports the hull).
+const B_FRAME_SLOTS = 256
+const EDGE_SCRATCH_BYTES = AXIS_FIELDS * AXIS_SLOTS * 4 + B_FRAME_SLOTS * 24
 
 // --- the incident face and clipping ----------------------------------------------------
 
