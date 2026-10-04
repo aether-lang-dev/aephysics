@@ -214,9 +214,12 @@ set_manifold_point(m: *LocalManifold, i: int, p: LocalManifoldPoint) {
 // The clip polygons and the unreduced points, allocated once. One collision
 // at a time until the parallel layer gives each worker its own.
 var g_clip1: ptr = null
-clip1() -> ptr { return native.scratch(g_clip1, MAX_CLIP_POINTS * sizeof(ClipVertex)) }
+// A polygon clipped against a face gains up to a vertex per side: an incident
+// face of up to 64 sides against a reference face of up to 64 reaches 128.
+const CLIP_CAPACITY = 2 * MAX_CLIP_POINTS
+clip1() -> ptr { return native.scratch(g_clip1, CLIP_CAPACITY * sizeof(ClipVertex)) }
 var g_clip2: ptr = null
-clip2() -> ptr { return native.scratch(g_clip2, MAX_CLIP_POINTS * sizeof(ClipVertex)) }
+clip2() -> ptr { return native.scratch(g_clip2, CLIP_CAPACITY * sizeof(ClipVertex)) }
 var g_clip_points: ptr = null
 clip_points() -> ptr { return native.scratch(g_clip_points, MAX_CLIP_POINTS * sizeof(LocalManifoldPoint)) }
 // A's edges, gathered once before the edge-pair loop reads them a
@@ -227,8 +230,8 @@ b_frame_scratch() -> ptr { return edge_axes() + AXIS_FIELDS * AXIS_SLOTS * 4 }
 
 scratch_ready() {
     if g_clip1 == null {
-        g_clip1 = basics.alloc(native.MAX_WORKERS * (MAX_CLIP_POINTS * sizeof(ClipVertex)))
-        g_clip2 = basics.alloc(native.MAX_WORKERS * (MAX_CLIP_POINTS * sizeof(ClipVertex)))
+        g_clip1 = basics.alloc(native.MAX_WORKERS * (CLIP_CAPACITY * sizeof(ClipVertex)))
+        g_clip2 = basics.alloc(native.MAX_WORKERS * (CLIP_CAPACITY * sizeof(ClipVertex)))
         g_clip_points = basics.alloc(native.MAX_WORKERS * (MAX_CLIP_POINTS * sizeof(LocalManifoldPoint)))
         g_edge_axes = basics.alloc(native.MAX_WORKERS * EDGE_SCRATCH_BYTES)
     }

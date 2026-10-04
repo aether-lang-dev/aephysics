@@ -23,6 +23,7 @@ import aephysics.material
 import aephysics.sphere
 import aephysics.capsule
 import aephysics.compound
+import aephysics.native
 import aephysics.shape
 
 extern calloc(count: int, size: int) -> ptr
@@ -592,6 +593,36 @@ test_many_mesh_materials() {
     mesh.destroy_mesh(md)
 }
 
+// A compound's baked tree queried from every worker: each takes its own
+// share of the per-worker stack (the block held one stack, and a worker
+// past the first wrote 12 KB a worker beyond it).
+test_compound_workers() {
+    d = make_defs(0, 0, 0, 40)
+    spheres = d.spheres as CompoundSphereDef[]
+    i = 0
+    while i < 40 {
+        spheres[i] = compound.compound_sphere_def(manifold.sphere(math.vec3(1.5 * (i as float), 0.0, 0.0), 0.5), make_material(0.5, i))
+        i = i + 1
+    }
+    c = compound.create_compound(&d.def)
+    origin = math.vec3(80.0, 0.0, 0.0)
+    translation = math.vec3(0.0 - 100.0, 0.0, 0.0)
+    expected = compound.ray_cast_compound(c, origin, translation, 1.0)
+    agree = true
+    workers = [ 1, 7, 31, 63 ]
+    k = 0
+    while k < 4 {
+        native.set_worker_index(workers[k])
+        out = compound.ray_cast_compound(c, origin, translation, 1.0)
+        if out.hit != expected.hit || out.child_index != expected.child_index || out.fraction != expected.fraction { agree = false }
+        k = k + 1
+    }
+    native.set_worker_index(0)
+    ensure("workers: the nearest sphere from worker 0 (${expected.child_index})", expected.hit && expected.child_index == 39)
+    ensure("workers: every worker casts the same", agree)
+    compound.destroy_compound(c)
+    free_defs(d)
+}
 test_overlap() {
     mat = material.default_surface_material()
     point_block = calloc(2, sizeof(Vec3))
@@ -919,13 +950,14 @@ main() {
     test_children_and_bounds()
     test_casts()
     test_many_mesh_materials()
+    test_compound_workers()
     test_overlap()
     test_query_and_mover()
     test_through_shape()
     test_field()
     test_brute_force_rays()
-    // The scratch stays allocated: compound's three blocks, mesh's three, sphere's two, shape's one.
-    ensure("every other counted allocation was freed (${basics.alloc_count() - before})", basics.alloc_count() == before + 9)
+    // The scratch stays allocated: compound's five blocks (its baked trees' per-worker stacks among them), mesh's three, sphere's two, shape's one.
+    ensure("every other counted allocation was freed (${basics.alloc_count() - before})", basics.alloc_count() == before + 11)
 
     println("compound: ${checks} checks")
     if failures == 0 {

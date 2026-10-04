@@ -13,6 +13,7 @@ import aephysics.math
 import aephysics.basics
 import aephysics.distance
 import aephysics.hull
+import aephysics.native
 import aephysics.manifold
 
 extern calloc(count: int, size: int) -> ptr
@@ -758,6 +759,28 @@ test_many_edges() {
     hull.destroy_hull(b)
 }
 
+// Two 40-sided cylinders cap to cap, the top turned half a side: the caps
+// overlap in an 80-gon, past the 64 vertices the clip buffers held (the
+// last worker's spilled past the allocation). Collided as that worker.
+test_wide_faces() {
+    a = hull.create_cylinder(1.0, 1.0, 0.0, 40)
+    b = hull.create_cylinder(1.0, 1.0, 0.0, 40)
+    ensure("wide faces: 40-sided cylinders", a != null && b != null && a.vertex_count == 80)
+    low = hull.compute_hull_aabb(a, math.transform_identity())
+    height = low.upper.y - low.lower.y
+    xf = Transform { p: math.vec3(0.0, height - 0.005, 0.0), q: exact_quat(math.vec3_axis_y(), math.PI / 40.0) }
+    points = new_manifold()
+    m = manifold.local_manifold(points)
+    cache = manifold.empty_sat_cache()
+    native.set_worker_index(native.MAX_WORKERS - 1)
+    manifold.collide_hulls(&m, 8, a, b, xf, &cache)
+    native.set_worker_index(0)
+    ensure("wide faces: four points (${m.point_count})", m.point_count == 4)
+    ensure("wide faces: normal up (${m.normal.y})", m.normal.y > 0.999)
+    free(points)
+    hull.destroy_hull(a)
+    hull.destroy_hull(b)
+}
 // --- hull against capsule and sphere -----------------------------------------------------
 
 // A thin capsule stabbed through the +x +y edge of a box: the isolated
@@ -968,6 +991,7 @@ main() {
     test_ridge_crossing()
     test_edge_axis_oracle()
     test_many_edges()
+    test_wide_faces()
     test_hull_capsule_edge_deep()
     test_sphere_hull_seam()
     test_rounded_pairs()

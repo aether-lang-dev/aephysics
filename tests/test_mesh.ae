@@ -15,6 +15,7 @@ import aephysics.distance
 import aephysics.manifold
 import aephysics.triangle_manifold
 import aephysics.mesh
+import aephysics.native
 
 extern calloc(count: int, size: int) -> ptr
 extern exit(code: int)
@@ -568,9 +569,50 @@ test_brute_force_casts() {
     mesh.destroy_mesh(wave)
 }
 
+// A mesh whose tree leans right all the way down: 300 thin triangles at
+// x = -1e5 / 2^k, each median split peeling one off. A ray against the split
+// axis pushes a far child at every level, past the 256-entry stack (the last
+// worker's spilled past the allocation); now the stack holds or drops.
+test_deep_tree_cast() {
+    count = 300
+    vertices_block = calloc(3 * count, sizeof(Vec3))
+    vertices = vertices_block as Vec3[]
+    indices_block = calloc(3 * count, 4)
+    indices = indices_block as int[]
+    x = 0.0 - 100000.0
+    k = 0
+    while k < count {
+        vertices[3 * k] = math.vec3(x, 0.0, 0.0)
+        vertices[3 * k + 1] = math.vec3(x, 1.0, 0.0)
+        vertices[3 * k + 2] = math.vec3(x, 0.0, 1.0)
+        indices[3 * k] = 3 * k
+        indices[3 * k + 1] = 3 * k + 1
+        indices[3 * k + 2] = 3 * k + 2
+        x = 0.5 * x
+        k = k + 1
+    }
+    mdef = mesh.mesh_def()
+    mdef.vertices = vertices_block
+    mdef.indices = indices_block
+    mdef.vertex_count = 3 * count
+    mdef.triangle_count = count
+    mdef.use_median_split = true
+    md = mesh.create_mesh(&mdef, null, 0)
+    ensure("deep tree: built", md != null)
+    if md != null {
+        native.set_worker_index(native.MAX_WORKERS - 1)
+        out = mesh.ray_cast_mesh(mesh.mesh(md, math.vec3_one()), math.vec3(1.0, 0.2, 0.2), math.vec3(0.0 - 2.0, 0.0, 0.0), 1.0)
+        native.set_worker_index(0)
+        ensure("deep tree: the ray hits the nearest sheet (${out.hit}, ${out.fraction})", out.hit && out.fraction > 0.49 && out.fraction <= 0.5 + 0.000001)
+        mesh.destroy_mesh(md)
+    }
+    free(vertices_block)
+    free(indices_block)
+}
 main() {
     before = basics.alloc_count()
     test_valley()
+    test_deep_tree_cast()
     test_creators()
     test_ray_casts()
     test_query_and_overlap()
