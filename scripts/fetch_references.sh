@@ -9,7 +9,7 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
 mkdir -p reference
-BOX3D_REF="${BOX3D_REF:-f555ee4}"
+BOX3D_REF="${BOX3D_REF:-e77352c}"
 JOLT_REF="${JOLT_REF:-v5.3.0}"
 
 if [ ! -d reference/box3d ]; then
