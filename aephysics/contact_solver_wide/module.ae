@@ -625,28 +625,35 @@ warm_start_wide_contacts(ctx: *StepContext, constraints: ptr, count: int) {
         b_a = gather_bodies(states, &c.index_a)
         b_b = gather_bodies(states, &c.index_b)
         point_count = max_point_count(c)
+        // The impulses summed first and applied once a body (Box3D 79fc559):
+        // the normal impulses' total and moments, then one linear and one
+        // angular impulse each, the friction, twist and rolling folded in.
+        zero = zero_w()
+        total_normal_impulse = zero
+        moment_a = Vec3W { x: zero, y: zero, z: zero }
+        moment_b = moment_a
         j = 0
         while j < point_count {
             cp = wide_point_at(c, j)
-            impulse = mul_sv_w(cp.normal_impulse, c.normal)
-            b_a.w = mul_sub_mv_w(b_a.w, c.inv_inertia_a, cross_w(cp.anchor_a, impulse))
-            b_a.v = mul_sub_sv_w(b_a.v, c.inv_mass_a, impulse)
-            b_b.w = mul_add_mv_w(b_b.w, c.inv_inertia_b, cross_w(cp.anchor_b, impulse))
-            b_b.v = mul_add_sv_w(b_b.v, c.inv_mass_b, impulse)
+            total_normal_impulse = add_w(total_normal_impulse, cp.normal_impulse)
+            moment_a = mul_add_sv_w(moment_a, cp.normal_impulse, cp.anchor_a)
+            moment_b = mul_add_sv_w(moment_b, cp.normal_impulse, cp.anchor_b)
             j = j + 1
         }
-        // Central friction.
+        normal = c.normal
         friction = mul_add_sv_w(mul_sv_w(c.friction_impulse.x, c.tangent1), c.friction_impulse.y, c.tangent2)
-        b_a.w = mul_sub_mv_w(b_a.w, c.inv_inertia_a, cross_w(c.center_a, friction))
-        b_a.v = mul_sub_sv_w(b_a.v, c.inv_mass_a, friction)
-        b_b.w = mul_add_mv_w(b_b.w, c.inv_inertia_b, cross_w(c.center_b, friction))
-        b_b.v = mul_add_sv_w(b_b.v, c.inv_mass_b, friction)
-        // Twist friction and rolling resistance.
-        twist = mul_sv_w(c.twist_impulse, c.normal)
-        b_a.w = mul_sub_mv_w(b_a.w, c.inv_inertia_a, twist)
-        b_b.w = mul_add_mv_w(b_b.w, c.inv_inertia_b, twist)
-        b_a.w = mul_sub_mv_w(b_a.w, c.inv_inertia_a, c.rolling_impulse)
-        b_b.w = mul_add_mv_w(b_b.w, c.inv_inertia_b, c.rolling_impulse)
+        linear = mul_add_sv_w(friction, total_normal_impulse, normal)
+        twist = mul_sv_w(c.twist_impulse, normal)
+        angular_a = add_v_w(add_v_w(cross_w(moment_a, normal), cross_w(c.center_a, friction)), twist)
+        angular_b = add_v_w(add_v_w(cross_w(moment_b, normal), cross_w(c.center_b, friction)), twist)
+        if all_zero_w(c.rolling_resistance) == false {
+            angular_a = add_v_w(angular_a, c.rolling_impulse)
+            angular_b = add_v_w(angular_b, c.rolling_impulse)
+        }
+        b_a.w = mul_sub_mv_w(b_a.w, c.inv_inertia_a, angular_a)
+        b_a.v = mul_sub_sv_w(b_a.v, c.inv_mass_a, linear)
+        b_b.w = mul_add_mv_w(b_b.w, c.inv_inertia_b, angular_b)
+        b_b.v = mul_add_sv_w(b_b.v, c.inv_mass_b, linear)
         scatter_bodies(states, &c.index_a, &b_a)
         scatter_bodies(states, &c.index_b, &b_b)
         index = index + 1
