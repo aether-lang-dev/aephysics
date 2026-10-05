@@ -626,7 +626,44 @@ the eight-wide (AVX2) contact stages:
 | store | 0.48 | 0.38 |
 
 Matching that needs eight float lanes. Aether's `std.lanes` has `f32x4`
-and no `f32x8`.
+and no `f32x8` (aether-lang-dev/aether#2428).
+
+### The joint grid, stage by stage (2026-10-05)
+
+The joint grid has no contacts, so the eight-wide lanes don't explain its
+gap. It is the scalar spherical joint, the same code as the reference's.
+Each scene run alone (`AEPHYSICS_BENCH_SCENE=grid`), one thread:
+
+| stage | aephysics before | aephysics after | Box3D `e77352c` |
+|---|---|---|---|
+| prepare joints | 1.21-1.42 ms | 1.27-1.49 | 0.61 |
+| integrate velocities | 1.25 | 1.25 | 1.15 |
+| warm start | 2.09-2.95 | 2.04-2.39 | 1.31 |
+| solve | 4.36-4.98 | 3.90-4.14 | 3.33 |
+| relax | 4.21-4.88 | 3.88-4.14 | 3.22 |
+| step | 14.4-17.0 | 13.6-14.7 | 10.4-10.6 |
+
+"After" is #107's layout. The solve and relax were reading about eleven
+cache lines per joint, because what they need was spread through the
+records. `JointSim` kept the local frames (read only by the prepare)
+between its header and the masses, and `SphericalJoint` kept the enable
+flags, tested first, 536 bytes in. `JointSim` now puts the solve's fields
+first: kind, masses, inertias, softness and the joint event thresholds.
+The kind's data comes next, and the frames and settings go last.
+`SphericalJoint` puts its flags, body indices, impulse, frames and centre
+delta first, then what the warm start reads. The arithmetic is unchanged
+and the height sum is the same.
+
+What's left of the gap is the records' size in double precision. Our
+`JointSim` is about 900 bytes, against the reference's float union. A
+`BodyState` is 112 bytes against 64.
+
+Before #107, `AEPHYSICS_STAGES` never reset its clocks between scenes. A
+benchmark's second and third scenes reported averages over every step
+since the start, so the joint grid showed a wide prepare and a store
+although it has no contacts. Stage figures for the many pyramids and the
+joint grid from before then (in this file and on the issues) carry the
+earlier scenes' stages. The large pyramid, which runs first, was right.
 
 ### Stage by stage
 
