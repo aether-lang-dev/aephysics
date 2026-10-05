@@ -288,6 +288,18 @@ sphere shape casts take a closed form for a triangle against a point
 (Real-Time Collision Detection 5.1.5) in place of GJK since then: 22.4 ms
 to 11.6, under the reference's 14.3, the same hits and sum.
 
+The builds since (2026-10-05): the tree's recursion carried each child's
+height back in a 4-byte heap block, two a node, and the binned SAH
+allocated its bins on every call; the heights now come back with the
+node index and the bins are made once a build. The SAH bins all three
+axes in one pass over the primitives rather than one pass an axis. And
+the edge identification pairs edges by bucketing them under their lower
+vertex (a vertex has a handful) where it hashed 240,000 keys into a
+LongMap twice each: 8 ms of a 27 ms build to 4.5. The ten median builds
+went from 212-232 ms to 156-186 (the reference: 129-134), the ten SAH
+builds from 323-344 to 239-256 (the reference: 256-258), and every
+mesh's block, hash included, is the same byte for byte.
+
 ## height_field
 
 `bench/height_field.ae` and `bench/height_field_box3d.c`: a 512 x 512
