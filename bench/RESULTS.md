@@ -869,6 +869,18 @@ against 24,187): eight figures tumbling for six seconds is chaotic,
 and single against double precision parts them, where the resting
 pyramids of physics_world agree to six digits.
 
+Checked again on 2026-10-05, when the rain ended at 6,062 contacts
+against 6,831. Traced every 10 steps, the counts agree within 1% through
+the fall and part at the first landing (step 120: 1,700 against 1,805),
+when the figures hit the top of the tori. One figure dropped on one cell
+follows Box3D to four digits until it lands. From there, both engines
+split between staying on the torus and sliding off it with the drop
+point: over eleven offsets, Box3D stays on top three times and
+aephysics four. Groups of three, dropped at sixteen offsets, end with
+34 to 93 contacts in Box3D and 47 to 138 here, and ours has the
+larger sum (1,373 against 1,074). No figure falls through a mesh in
+either engine. The rain's total is chaos, not a contact difference.
+
 ## Build flags (inlining)
 
 The generated C of every Aether function is a plain `static` function,
