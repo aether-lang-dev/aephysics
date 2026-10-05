@@ -654,6 +654,12 @@ The kind's data comes next, and the frames and settings go last.
 delta first, then what the warm start reads. The arithmetic is unchanged
 and the height sum is the same.
 
+`BodySim` now starts with what every constraint prepare reads: the
+transform, centres, inverse mass and world inertia, in three lines
+instead of five. That took the joint prepare from 1.43-1.49 to 1.26-1.37 ms
+and the many pyramids' wide prepare from 3.53-3.60 to 3.38-3.49. The
+large pyramid was about even.
+
 What's left of the gap is the records' size in double precision. Our
 `JointSim` is about 900 bytes, against the reference's float union. A
 `BodyState` is 112 bytes against 64.

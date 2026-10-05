@@ -395,24 +395,27 @@ struct BodyState {
 }
 
 // What integration and collision need of a body.
+// What every constraint prepare reads first (the pose, the masses), then
+// the collide pass's extents, the integration's loads, and the time of
+// impact's start pose.
 struct BodySim {
     transform: Transform           // of the body's origin
     center: Vec3                   // of mass, in world space
-    rotation0: Quat                // for the time of impact
-    center0: Vec3
     local_center: Vec3
+    inv_mass: float
+    inv_inertia_world: Matrix3
+    body_id: int
+    flags: int
+    max_extent: Vec3
+    min_extent: float
     force: Vec3
     torque: Vec3
-    inv_mass: float
-    inv_inertia_local: Matrix3
-    inv_inertia_world: Matrix3
-    min_extent: float
-    max_extent: Vec3
     linear_damping: float
     angular_damping: float
     gravity_scale: float
-    body_id: int
-    flags: int
+    inv_inertia_local: Matrix3
+    rotation0: Quat                // for the time of impact
+    center0: Vec3
 }
 
 // A shape in the world: its geometry (the shape module's Shape, with
