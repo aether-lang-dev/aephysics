@@ -47,6 +47,7 @@ extern floor(x: float) -> float
 const NULL_INDEX = 0 - 1
 const MESH_VERSION = 0x2AAB9A00
 const BIN_COUNT = 8
+const BINS_BYTES = 3 * BIN_COUNT * 52    // the bins of three axes: a box (48 bytes) and a count each
 const DESIRED_TRIANGLES_PER_LEAF = 4
 const LEAF_NODE = 3
 const MAXIMUM_TRIANGLES_PER_LEAF = 8
@@ -367,8 +368,9 @@ no_split() -> Split { return Split { left_bounds: math.aabb_empty(), right_bound
 
 // Eight bins along each axis of the centroid bounds; the cheapest
 // left/right partition by surface area times count. The primitives in
-// [first, first + count) are partitioned in place.
-split_binned_sah(primitives: Primitive[], first: int, count: int) -> Split {
+// [first, first + count) are partitioned in place. `bins` is the build's
+// room for the bins (BINS_BYTES), made once a build rather than per node.
+split_binned_sah(primitives: Primitive[], first: int, count: int, bins: ptr) -> Split {
     split = no_split()
     bounds = AABB { lower: primitives[first].center, upper: primitives[first].center }
     i = 1
@@ -379,45 +381,75 @@ split_binned_sah(primitives: Primitive[], first: int, count: int) -> Split {
     best_bucket = NULL_INDEX
     best_cost = math.MAX_FLOAT
     best_factor = 0.0
-    // The bins: a count and a box each, for one axis at a time.
-    bin_counts_block = basics.alloc(BIN_COUNT * 4)
-    bin_counts = bin_counts_block as int[]
-    bin_bounds_block = basics.alloc(BIN_COUNT * sizeof(AABB))
-    bin_bounds = bin_bounds_block as AABB[]
+    // The bins of all three axes filled in one pass over the primitives
+    // (each read once, not once an axis), then each axis weighed in turn
+    // as before: an axis too thin to split keeps empty bins and is passed.
+    bin_bounds = bins as AABB[]
+    bin_counts = (bins + 3 * BIN_COUNT * sizeof(AABB)) as int[]
+    extent = math.aabb_extents(bounds)
+    usable_x = extent.x >= math.LINEAR_SLOP
+    usable_y = extent.y >= math.LINEAR_SLOP
+    usable_z = extent.z >= math.LINEAR_SLOP
+    factor_x = 0.0
+    factor_y = 0.0
+    factor_z = 0.0
+    if usable_x { factor_x = (BIN_COUNT as float) * (1.0 - FLOAT_EPSILON) / (bounds.upper.x - bounds.lower.x) }
+    if usable_y { factor_y = (BIN_COUNT as float) * (1.0 - FLOAT_EPSILON) / (bounds.upper.y - bounds.lower.y) }
+    if usable_z { factor_z = (BIN_COUNT as float) * (1.0 - FLOAT_EPSILON) / (bounds.upper.z - bounds.lower.z) }
+    b = 0
+    while b < 3 * BIN_COUNT {
+        bin_counts[b] = 0
+        bin_bounds[b] = math.aabb_empty()
+        b = b + 1
+    }
+    i = 0
+    while i < count {
+        p = primitives[first + i]
+        if usable_x {
+            index = (factor_x * (p.center.x - bounds.lower.x)) as int
+            bin_counts[index] = bin_counts[index] + 1
+            bin_bounds[index] = math.aabb_union(bin_bounds[index], p.aabb)
+        }
+        if usable_y {
+            index = BIN_COUNT + (factor_y * (p.center.y - bounds.lower.y)) as int
+            bin_counts[index] = bin_counts[index] + 1
+            bin_bounds[index] = math.aabb_union(bin_bounds[index], p.aabb)
+        }
+        if usable_z {
+            index = 2 * BIN_COUNT + (factor_z * (p.center.z - bounds.lower.z)) as int
+            bin_counts[index] = bin_counts[index] + 1
+            bin_bounds[index] = math.aabb_union(bin_bounds[index], p.aabb)
+        }
+        i = i + 1
+    }
     axis = 0
     while axis < 3 {
-        extent = math.aabb_extents(bounds)
-        if axis_of(extent, axis) >= math.LINEAR_SLOP {
-            b = 0
-            while b < BIN_COUNT {
-                bin_counts[b] = 0
-                bin_bounds[b] = math.aabb_empty()
-                b = b + 1
-            }
-            factor = (BIN_COUNT as float) * (1.0 - FLOAT_EPSILON) / (axis_of(bounds.upper, axis) - axis_of(bounds.lower, axis))
-            i = 0
-            while i < count {
-                p = primitives[first + i]
-                index = (factor * (axis_of(p.center, axis) - axis_of(bounds.lower, axis))) as int
-                bin_counts[index] = bin_counts[index] + 1
-                bin_bounds[index] = math.aabb_union(bin_bounds[index], p.aabb)
-                i = i + 1
-            }
+        usable = usable_x
+        factor = factor_x
+        if axis == 1 {
+            usable = usable_y
+            factor = factor_y
+        } else if axis == 2 {
+            usable = usable_z
+            factor = factor_z
+        }
+        if usable {
+            base = axis * BIN_COUNT
             b = 0
             while b < BIN_COUNT - 1 {
                 left_count = 0
                 left_bounds = math.aabb_empty()
                 k = 0
                 while k <= b {
-                    left_count = left_count + bin_counts[k]
-                    left_bounds = math.aabb_union(left_bounds, bin_bounds[k])
+                    left_count = left_count + bin_counts[base + k]
+                    left_bounds = math.aabb_union(left_bounds, bin_bounds[base + k])
                     k = k + 1
                 }
                 right_count = 0
                 right_bounds = math.aabb_empty()
                 while k < BIN_COUNT {
-                    right_count = right_count + bin_counts[k]
-                    right_bounds = math.aabb_union(right_bounds, bin_bounds[k])
+                    right_count = right_count + bin_counts[base + k]
+                    right_bounds = math.aabb_union(right_bounds, bin_bounds[base + k])
                     k = k + 1
                 }
                 if left_count > 0 && right_count > 0 {
@@ -437,8 +469,6 @@ split_binned_sah(primitives: Primitive[], first: int, count: int) -> Split {
         }
         axis = axis + 1
     }
-    basics.free_bytes(bin_counts_block, BIN_COUNT * 4)
-    basics.free_bytes(bin_bounds_block, BIN_COUNT * sizeof(AABB))
 
     if best_bucket >= 0 {
         axis = split.axis
@@ -540,14 +570,21 @@ primitives_bounds(primitives: Primitive[], first: int, count: int) -> AABB {
     return bounds
 }
 
+// A subtree's root and height.
+struct Built {
+    index: int
+    height: int
+}
+
 // Build the subtree over primitives[first, first + count) into the node
-// array (node_count[0] is the bump pointer), returning the node's index
-// and its height in height_out[0].
+// array (node_count[0] is the bump pointer). The heights come back with
+// the indices: carried in heap blocks, two a node, they were a fifth of
+// the build.
 build_recursive(nodes: MeshNode[], node_count: int[], primitives: Primitive[], first: int, count: int, use_median_split: bool,
-                height_out: int[]) -> int {
+                bins: ptr) -> Built {
     if count > DESIRED_TRIANGLES_PER_LEAF {
         split = no_split()
-        if use_median_split { split = split_median(primitives, first, count) } else { split = split_binned_sah(primitives, first, count) }
+        if use_median_split { split = split_median(primitives, first, count) } else { split = split_binned_sah(primitives, first, count, bins) }
         if split.axis < 0 {
             if count > MAXIMUM_TRIANGLES_PER_LEAF {
                 // A worse split, with more false positives, rather than a huge leaf.
@@ -556,31 +593,22 @@ build_recursive(nodes: MeshNode[], node_count: int[], primitives: Primitive[], f
                 index = node_count[0]
                 node_count[0] = index + 1
                 store_leaf(nodes, index, primitives_bounds(primitives, first, count), count, first)
-                height_out[0] = 1
-                return index
+                return Built { index: index, height: 1 }
             }
         }
         index = node_count[0]
         node_count[0] = index + 1
-        left_height_block = basics.alloc(4)
-        right_height_block = basics.alloc(4)
-        left_height = left_height_block as int[]
-        right_height = right_height_block as int[]
-        build_recursive(nodes, node_count, primitives, first, split.index, use_median_split, left_height)
-        right_index = build_recursive(nodes, node_count, primitives, first + split.index, count - split.index, use_median_split, right_height)
-        height_out[0] = math.max_int(left_height[0], right_height[0]) + 1
-        basics.free_bytes(left_height_block, 4)
-        basics.free_bytes(right_height_block, 4)
+        left = build_recursive(nodes, node_count, primitives, first, split.index, use_median_split, bins)
+        right = build_recursive(nodes, node_count, primitives, first + split.index, count - split.index, use_median_split, bins)
         bounds = math.aabb_union(split.left_bounds, split.right_bounds)
-        nodes[index] = MeshNode { lower: bounds.lower, axis: split.axis, count_or_offset: right_index - index, upper: bounds.upper,
+        nodes[index] = MeshNode { lower: bounds.lower, axis: split.axis, count_or_offset: right.index - index, upper: bounds.upper,
                                   triangle_offset: 0 }
-        return index
+        return Built { index: index, height: math.max_int(left.height, right.height) + 1 }
     }
     index = node_count[0]
     node_count[0] = index + 1
     store_leaf(nodes, index, primitives_bounds(primitives, first, count), count, first)
-    height_out[0] = 1
-    return index
+    return Built { index: index, height: 1 }
 }
 
 // The triangles and materials into the tree's depth-first order, so a
@@ -685,26 +713,67 @@ identify_edges(m: *MeshData) {
         i = i + 1
     }
 
-    map = basics.map_create(edge_count)
+    // Each edge meets the first earlier edge on the same two vertices. The
+    // edges are bucketed by their lower vertex, in edge order, and an
+    // edge looks back through its bucket (a vertex's few edges) for the
+    // first with the same upper vertex: the pairing a map of first
+    // occurrences gives, without hashing 3n keys twice each.
+    vertex_count = m.vertex_count
+    starts_block = basics.alloc((vertex_count + 1) * 4)
+    starts = starts_block as int[]
     i = 0
     while i < edge_count {
-        e = i * EDGE_INTS
-        key = ((edges[e] as long) << 32) | (edges[e + 1] as long)
-        if key == (0 as long) { key = (1 as long) << 62 }
-        other = basics.map_get(&map, key, NULL_INDEX)
-        if other == NULL_INDEX {
-            basics.map_set(&map, key, i)
-        } else {
-            o = other * EDGE_INTS
-            if edges[o + 6] == 1 {
-                edges[o + 3] = edges[e + 2]
-                edges[o + 5] = edges[e + 4]
-            }
-            edges[o + 6] = edges[o + 6] + 1
-        }
+        v = edges[i * EDGE_INTS]
+        starts[v + 1] = starts[v + 1] + 1
         i = i + 1
     }
-    basics.map_destroy(&map)
+    v = 0
+    while v < vertex_count {
+        starts[v + 1] = starts[v + 1] + starts[v]
+        v = v + 1
+    }
+    buckets_block = basics.alloc(edge_count * 4)
+    buckets = buckets_block as int[]
+    fill_block = basics.alloc(vertex_count * 4)
+    fill = fill_block as int[]
+    i = 0
+    while i < edge_count {
+        v = edges[i * EDGE_INTS]
+        buckets[starts[v] + fill[v]] = i
+        fill[v] = fill[v] + 1
+        i = i + 1
+    }
+    v = 0
+    while v < vertex_count {
+        first_slot = starts[v]
+        end_slot = starts[v + 1]
+        slot = first_slot + 1
+        while slot < end_slot {
+            i = buckets[slot]
+            e = i * EDGE_INTS
+            upper = edges[e + 1]
+            look = first_slot
+            other = NULL_INDEX
+            while look < slot && other == NULL_INDEX {
+                candidate = buckets[look]
+                if edges[candidate * EDGE_INTS + 1] == upper { other = candidate }
+                look = look + 1
+            }
+            if other != NULL_INDEX {
+                o = other * EDGE_INTS
+                if edges[o + 6] == 1 {
+                    edges[o + 3] = edges[e + 2]
+                    edges[o + 5] = edges[e + 4]
+                }
+                edges[o + 6] = edges[o + 6] + 1
+            }
+            slot = slot + 1
+        }
+        v = v + 1
+    }
+    basics.free_bytes(fill_block, vertex_count * 4)
+    basics.free_bytes(buckets_block, edge_count * 4)
+    basics.free_bytes(starts_block, (vertex_count + 1) * 4)
 
     cos_5_deg = 0.9962
     i = 0
@@ -817,13 +886,12 @@ create_mesh(def: *MeshDef, degenerate_indices: ptr, degenerate_capacity: int) ->
     counters_block = basics.alloc(8)
     counters = counters_block as int[]
     counters[0] = 0
-    height_block = basics.alloc(4)
-    height = height_block as int[]
-    build_recursive(temp_nodes, counters, primitives, 0, triangle_count, def.use_median_split, height)
+    bins = basics.alloc(BINS_BYTES)
+    built = build_recursive(temp_nodes, counters, primitives, 0, triangle_count, def.use_median_split, bins)
     node_count = counters[0]
-    tree_height = height[0]
+    tree_height = built.height
     basics.free_bytes(counters_block, 8)
-    basics.free_bytes(height_block, 4)
+    basics.free_bytes(bins, BINS_BYTES)
 
     // The block.
     byte_count = align8(sizeof(MeshData))
