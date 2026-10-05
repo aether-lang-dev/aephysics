@@ -395,24 +395,27 @@ struct BodyState {
 }
 
 // What integration and collision need of a body.
+// What every constraint prepare reads first (the pose, the masses), then
+// the collide pass's extents, the integration's loads, and the time of
+// impact's start pose.
 struct BodySim {
     transform: Transform           // of the body's origin
     center: Vec3                   // of mass, in world space
-    rotation0: Quat                // for the time of impact
-    center0: Vec3
     local_center: Vec3
+    inv_mass: float
+    inv_inertia_world: Matrix3
+    body_id: int
+    flags: int
+    max_extent: Vec3
+    min_extent: float
     force: Vec3
     torque: Vec3
-    inv_mass: float
-    inv_inertia_local: Matrix3
-    inv_inertia_world: Matrix3
-    min_extent: float
-    max_extent: Vec3
     linear_damping: float
     angular_damping: float
     gravity_scale: float
-    body_id: int
-    flags: int
+    inv_inertia_local: Matrix3
+    rotation0: Quat                // for the time of impact
+    center0: Vec3
 }
 
 // A shape in the world: its geometry (the shape module's Shape, with
@@ -833,13 +836,26 @@ struct RevoluteJoint {
     enable_limit: bool
 }
 
+// The point constraint's fields first (every solve reads them), then the
+// impulses and axes the warm start reads, the settings after.
 struct SphericalJoint {
+    enable_spring: bool
+    enable_motor: bool
+    enable_cone_limit: bool
+    enable_twist_limit: bool
+    index_a: int
+    index_b: int
     linear_impulse: Vec3
+    frame_a: Transform
+    frame_b: Transform
+    delta_center: Vec3
     spring_impulse: Vec3
     motor_impulse: Vec3
     lower_twist_impulse: float
     upper_twist_impulse: float
     swing_impulse: float
+    swing_axis: Vec3
+    twist_jacobian: Vec3
     hertz: float
     damping_ratio: float
     max_motor_torque: float
@@ -849,21 +865,10 @@ struct SphericalJoint {
     cone_angle: float
     cone_axis: Vec3                // unit, in frame A
     target_rotation: Quat
-    index_a: int
-    index_b: int
-    frame_a: Transform
-    frame_b: Transform
-    delta_center: Vec3
-    swing_axis: Vec3
-    twist_jacobian: Vec3
     rotation_mass: Matrix3
     swing_mass: float
     twist_mass: float
     spring_softness: Softness
-    enable_spring: bool
-    enable_motor: bool
-    enable_cone_limit: bool
-    enable_twist_limit: bool
 }
 
 struct WeldJoint {
@@ -927,24 +932,27 @@ struct WheelJoint {
 // (filled by the solver's prepare), the constraint's softness, the
 // thresholds, and the kind's data in the block at the end (the
 // reference's union: read through distance_joint_of and its siblings).
+// What the warm start and the solve read comes first and the kind's data
+// right after it, so a joint's pass touches as few lines as it can; the
+// frames and settings only the prepare and the API read go last.
 struct JointSim {
-    joint_id: int
     kind: int
-    body_id_a: int
-    body_id_b: int
-    local_frame_a: Transform
-    local_frame_b: Transform
+    fixed_rotation: bool
     inv_mass_a: float
     inv_mass_b: float
     inv_inertia_a: Matrix3
     inv_inertia_b: Matrix3
+    constraint_softness: Softness
+    force_threshold: float         // the solve's joint event test
+    torque_threshold: float
+    data: long[68]                 // JOINT_DATA_BYTES
+    joint_id: int
+    body_id_a: int
+    body_id_b: int
+    local_frame_a: Transform
+    local_frame_b: Transform
     constraint_hertz: float
     constraint_damping_ratio: float
-    constraint_softness: Softness
-    force_threshold: float
-    torque_threshold: float
-    fixed_rotation: bool
-    data: long[68]                 // JOINT_DATA_BYTES
 }
 
 struct JointPair {

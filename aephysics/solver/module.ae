@@ -97,13 +97,18 @@ stage_clock() -> float[] {
     return totals
 }
 
-// The averages, in the reference's own order and words.
+// The averages since the last report, in the reference's own order and
+// words; the clocks then start over, so a benchmark's next scene reports
+// its own steps rather than an average over every scene so far.
 stage_report() {
     if stages_timed() == false || g_stage_steps == 0 || g_stage_ms == null { return }
     clock = stage_clock()
     n = g_stage_steps as float
     println("aephysics stages ms/step: prepare_joints ${clock[STAGE_PREPARE_JOINTS] / n} prepare_wide ${clock[STAGE_PREPARE_WIDE] / n} prepare_contacts ${clock[STAGE_PREPARE_CONTACTS] / n} integrate_v ${clock[STAGE_INTEGRATE_VELOCITIES] / n} warm ${clock[STAGE_WARM_START] / n} solve ${clock[STAGE_SOLVE] / n} integrate_p ${clock[STAGE_INTEGRATE_POSITIONS] / n} relax ${clock[STAGE_RELAX] / n} restitution ${clock[STAGE_RESTITUTION] / n} store ${clock[STAGE_STORE_WIDE] / n}")
     basics.free_bytes(clock as ptr, STAGE_COUNT * 8)
+    basics.free_bytes(g_stage_ms, native.MAX_WORKERS * STAGE_COUNT * 8)
+    g_stage_ms = null
+    g_stage_steps = 0
 }
 
 const NULL_INDEX = 0 - 1
