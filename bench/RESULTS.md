@@ -528,6 +528,29 @@ definition's cookie; the destruction is 2x on a tenth of a millisecond.
 The sensor passes are 1.2-1.4x: each pass queries the three trees per
 sensor and runs GJK on every candidate, the distance layer's gap.
 
+Re-measured on 2026-10-05 (main b47a270, Aether 0.779.0), three runs
+each, the same session:
+
+| phase | aephysics | Box3D |
+|---|---|---|
+| 5,500 bodies and 10,500 shapes created, 10 rounds | **106-109 ms** | 120-122 |
+| 5,000 transforms set, 10 rounds | **26.5-27.3** | 54.3-54.9 |
+| the world destroyed, 10 rounds | 7.9-9.0 | **5.2-5.4** |
+| first collide | 4.57-5.21 | 4.61-4.65 |
+| 10 recycling collides | 2.46-2.88 | **2.15-2.35** |
+| 4,999 revolute joints created | **3.19-3.46** | 5.57-5.82 |
+| the joints destroyed | 0.21-0.26 | **0.10-0.16** |
+| first sensor pass | **0.99-1.01** | 1.03-1.27 |
+| 10 more sensor passes | **5.25-5.42** | 6.99-7.49 |
+
+The collide passes are at parity on the first pass and within 10-20% on
+the recycling (#17 closed). The prefetching (#79, #83), the SAT changes
+(#87, #94, #101) and #111's union of the contact's caches got them there.
+The sensor passes are now ahead. The world's destruction frees 16 MB in
+5,088 blocks (an island's body list each, then the large arrays); timed
+section by section, it is the freeing of the double-precision records'
+memory, with no one culprit.
+
 ## contact_solver
 
 `bench/contact_solver.ae` (ours alone: the reference has no solve
