@@ -1703,26 +1703,9 @@ create_rock(radius: float) -> *HullData {
 
 // --- the box hull ----------------------------------------------------------------
 
-// The box's topology: 8 vertices, 24 half-edges, 6 faces, as the
-// reference bakes it; the geometry is filled in per box.
-box_edge_table(index: int, field: int) -> int {
-    // next, twin, origin, face per half-edge
-    table = [ 2, 1, 2, 0,  17, 0, 1, 5,  4, 3, 1, 0,  20, 2, 5, 3,  6, 5, 5, 0,  23, 4, 6, 4,  0, 7, 6, 0,  18, 6, 2, 2,
-              10, 9, 0, 1,  21, 8, 3, 5,  12, 11, 3, 1,  16, 10, 7, 2,  14, 13, 7, 1,  19, 12, 4, 4,  8, 15, 4, 1,  22, 14, 0, 3,
-              7, 17, 3, 2,  9, 16, 2, 5,  11, 19, 6, 2,  5, 18, 7, 4,  15, 21, 1, 3,  1, 20, 0, 5,  3, 23, 4, 3,  13, 22, 5, 4 ]
-    return table[index * 4 + field]
-}
-
-box_vertex_edge(index: int) -> int {
-    table = [ 8, 1, 0, 9, 13, 3, 5, 11 ]
-    return table[index]
-}
-
-box_face_edge(index: int) -> int {
-    table = [ 0, 8, 16, 20, 19, 21 ]
-    return table[index]
-}
-
+// The signs of a box corner's coordinates, in the order of the box's
+// vertices (8 vertices, 24 half-edges, 6 faces, as the reference bakes
+// them; the geometry is filled in per box).
 box_corner_sign(index: int) -> Vec3 {
     if index == 0 { return math.vec3(1.0, 1.0, 1.0) }
     if index == 1 { return math.vec3(0.0 - 1.0, 1.0, 1.0) }
@@ -1752,21 +1735,51 @@ make_transformed_box_hull(hx: float, hy: float, hz: float, t: Transform) -> *Hul
     faces = hull_faces(box)
     points = hull_points(box)
     planes = hull_planes(box)
+    // The box's topology, as the reference bakes it, written out (a table
+    // local to a helper called per entry was copied onto the stack on every
+    // call, most of a box's build).
+    vertices[0] = 8
+    vertices[1] = 1
+    vertices[2] = 0
+    vertices[3] = 9
+    vertices[4] = 13
+    vertices[5] = 3
+    vertices[6] = 5
+    vertices[7] = 11
+    // Half-edges: next, twin, origin, face.
+    edges[0] = HalfEdge { next: 2, twin: 1, origin: 2, face: 0 }
+    edges[1] = HalfEdge { next: 17, twin: 0, origin: 1, face: 5 }
+    edges[2] = HalfEdge { next: 4, twin: 3, origin: 1, face: 0 }
+    edges[3] = HalfEdge { next: 20, twin: 2, origin: 5, face: 3 }
+    edges[4] = HalfEdge { next: 6, twin: 5, origin: 5, face: 0 }
+    edges[5] = HalfEdge { next: 23, twin: 4, origin: 6, face: 4 }
+    edges[6] = HalfEdge { next: 0, twin: 7, origin: 6, face: 0 }
+    edges[7] = HalfEdge { next: 18, twin: 6, origin: 2, face: 2 }
+    edges[8] = HalfEdge { next: 10, twin: 9, origin: 0, face: 1 }
+    edges[9] = HalfEdge { next: 21, twin: 8, origin: 3, face: 5 }
+    edges[10] = HalfEdge { next: 12, twin: 11, origin: 3, face: 1 }
+    edges[11] = HalfEdge { next: 16, twin: 10, origin: 7, face: 2 }
+    edges[12] = HalfEdge { next: 14, twin: 13, origin: 7, face: 1 }
+    edges[13] = HalfEdge { next: 19, twin: 12, origin: 4, face: 4 }
+    edges[14] = HalfEdge { next: 8, twin: 15, origin: 4, face: 1 }
+    edges[15] = HalfEdge { next: 22, twin: 14, origin: 0, face: 3 }
+    edges[16] = HalfEdge { next: 7, twin: 17, origin: 3, face: 2 }
+    edges[17] = HalfEdge { next: 9, twin: 16, origin: 2, face: 5 }
+    edges[18] = HalfEdge { next: 11, twin: 19, origin: 6, face: 2 }
+    edges[19] = HalfEdge { next: 5, twin: 18, origin: 7, face: 4 }
+    edges[20] = HalfEdge { next: 15, twin: 21, origin: 1, face: 3 }
+    edges[21] = HalfEdge { next: 1, twin: 20, origin: 0, face: 5 }
+    edges[22] = HalfEdge { next: 3, twin: 23, origin: 4, face: 3 }
+    edges[23] = HalfEdge { next: 13, twin: 22, origin: 5, face: 4 }
+    faces[0] = 0
+    faces[1] = 8
+    faces[2] = 16
+    faces[3] = 20
+    faces[4] = 19
+    faces[5] = 21
     i = 0
     while i < 8 {
-        vertices[i] = box_vertex_edge(i)
         points[i] = math.transform_point(t, math.mul(box_corner_sign(i), h))
-        i = i + 1
-    }
-    i = 0
-    while i < 24 {
-        edges[i] = HalfEdge { next: box_edge_table(i, 0), twin: box_edge_table(i, 1),
-                              origin: box_edge_table(i, 2), face: box_edge_table(i, 3) }
-        i = i + 1
-    }
-    i = 0
-    while i < 6 {
-        faces[i] = box_face_edge(i)
         i = i + 1
     }
     lower = math.neg(h)

@@ -942,10 +942,49 @@ test_brute_force_rays() {
     hull.destroy_hull(box)
 }
 
+// Many children over two materials keep two slots, build after build, the
+// benchmark's scene. The material table hashes each material right after
+// writing its words; when the hash read them through an integer pointer,
+// GCC moved the reads ahead of the writes in the benchmark (not in this
+// program: the inlining differs) and most children got a slot of their own.
+test_two_materials_many_children() {
+    mat_a = make_material(0.6, 0)
+    mat_b = make_material(0.3, 0)
+    box = hull.make_box_hull(0.4, 0.4, 0.4)
+    d = make_defs(500, 500, 0, 1000)
+    spheres = d.spheres as CompoundSphereDef[]
+    capsules = d.capsules as CompoundCapsuleDef[]
+    hulls = d.hulls as CompoundHullDef[]
+    i = 0
+    while i < 2000 {
+        c = math.vec3((2 * (i % 20)) as float, (2 * ((i / 20) % 10)) as float, (2 * (i / 200)) as float)
+        mat = mat_a
+        if (i & 1) != 0 { mat = mat_b }
+        if i < 1000 {
+            spheres[i] = compound.compound_sphere_def(manifold.sphere(c, 0.5), mat)
+        } else if i < 1500 {
+            capsules[i - 1000] = compound.compound_capsule_def(manifold.capsule(math.vec3(c.x - 0.4, c.y, c.z), math.vec3(c.x + 0.4, c.y, c.z), 0.3), mat)
+        } else {
+            hulls[i - 1500] = compound.compound_hull_def(box, Transform { p: c, q: math.make_quat_from_axis_angle(math.vec3_axis_y(), 0.3) }, mat)
+        }
+        i = i + 1
+    }
+    k = 0
+    while k < 3 {
+        data = compound.create_compound(&d.def)
+        ensure("two materials over two thousand children (${data.material_count})", data.material_count == 2)
+        compound.destroy_compound(data)
+        k = k + 1
+    }
+    free_defs(d)
+    hull.destroy_hull(box)
+}
+
 main() {
     before = basics.alloc_count()
     test_create()
     test_materials()
+    test_two_materials_many_children()
     test_sharing()
     test_children_and_bounds()
     test_casts()

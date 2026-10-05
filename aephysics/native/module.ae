@@ -11,7 +11,7 @@ exports (
     MAX_WORKERS, worker_index, set_worker_index, yield_thread, pause, processor_count, scratch,
     atomic_load, atomic_store, atomic_add, atomic_or, atomic_cas,
     semaphore_new, semaphore_free, semaphore_wait, semaphore_signal,
-    name_copy, name_text, name_free, prefetch
+    name_copy, name_text, name_free, prefetch, load_word
 )
 
 // The most workers a world can have: every module's scratch is a block
@@ -33,12 +33,17 @@ extern aephysics_semaphore_free(s: ptr)
 extern aephysics_semaphore_wait(s: ptr)
 extern aephysics_semaphore_signal(s: ptr, count: int)
 extern aephysics_prefetch(p: ptr) @c_import
+extern aephysics_load_word(p: ptr, index: long) -> long @c_import
 extern aephysics_name_copy(s: string) -> ptr
 extern aephysics_name_text(name: ptr) -> string
 extern free(p: ptr)
 
 // The cache line at `p` fetched ahead of its use; harmless on any pointer.
 prefetch(p: ptr) { aephysics_prefetch(p) }
+
+// The word at `index` words into `p`, safe to read whatever the block was
+// written as (C's aliasing rule).
+load_word(p: ptr, index: long) -> long { return aephysics_load_word(p, index) }
 
 // A name the world keeps: a plain copy of `s` (null for none), its text
 // (empty for none), and its release.

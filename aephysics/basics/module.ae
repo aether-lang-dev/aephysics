@@ -374,15 +374,38 @@ map_bytes(m: *LongMap) -> int { return m.capacity * sizeof(MapItem) }
 // never zero. The reference uses rapidhash for the same purpose: identity
 // of hull and mesh data.
 hash_bytes(block: ptr, byte_count: int) -> long {
-    words = block as long[]
+    // Four lanes take every fourth word, so their mixes (each a chain of
+    // multiplies) overlap instead of waiting on one another: a word at a
+    // time through one chain was most of building a box hull.
     count = byte_count / 8
-    h = 0x9E3779B9 as long
+    m32 = 4294967295 as long
+    a = 0x9E3779B9 as long
+    b = 0x85EBCA6B as long
+    c = 0xC2B2AE35 as long
+    d = 0x27D4EB2F as long
     i = 0
+    while i + 4 <= count {
+        w0 = native.load_word(block, i as long)
+        w1 = native.load_word(block, (i + 1) as long)
+        w2 = native.load_word(block, (i + 2) as long)
+        w3 = native.load_word(block, (i + 3) as long)
+        a = mix32(mix32(a ^ (w0 & m32)) ^ lsr(w0, 32))
+        b = mix32(mix32(b ^ (w1 & m32)) ^ lsr(w1, 32))
+        c = mix32(mix32(c ^ (w2 & m32)) ^ lsr(w2, 32))
+        d = mix32(mix32(d ^ (w3 & m32)) ^ lsr(w3, 32))
+        i = i + 4
+    }
     while i < count {
-        h = key_hash(h ^ words[i]) + (i as long)
+        w = native.load_word(block, i as long)
+        a = mix32(mix32(a ^ (w & m32)) ^ lsr(w, 32))
         i = i + 1
     }
-    h = key_hash(h)
+    // The lanes and the length folded into two halves of the result.
+    low = mix32(mix32(a ^ (count as long)) ^ b)
+    high = mix32(mix32(c ^ low) ^ d)
+    // high kept to 31 bits: a shift into the sign bit is undefined in C, and
+    // GCC compiled it differently where the hash was inlined.
+    h = ((high & (2147483647 as long)) << 32) | low
     if h == (0 as long) { return 1 as long }
     return h
 }
