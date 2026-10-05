@@ -660,6 +660,25 @@ instead of five. That took the joint prepare from 1.43-1.49 to 1.26-1.37 ms
 and the many pyramids' wide prepare from 3.53-3.60 to 3.38-3.49. The
 large pyramid was about even.
 
+Then #108: the profile put a sixth of the joint grid in
+`point_mass_matrix`, a real call (GCC didn't inline it) forming
+`skew(r) i skew(r)` through two full 3x3 products per body. It now leaves
+out the products with skew's zeros. Every surviving term is the one
+`mul_mm` forms, added in the same order, and adding an exact zero product
+changes nothing, so the matrix is the same to the bit
+(`tests/test_joint_solver.ae` checks 2,000 random cases). Joint grid,
+interleaved, 4 rounds:
+
+| stage | before | after | Box3D `e77352c` |
+|---|---|---|---|
+| solve | 3.87-4.23 ms | 3.09-3.38 | 3.33 |
+| relax | 3.87-4.22 | 3.01-3.22 | 3.22 |
+| step | 13.6-14.5 | 11.5-12.7 | 10.4-10.6 |
+
+The joint solve and relax are now level with the reference's. The warm
+start (1.9-2.2 ms against 1.31) and the prepare (1.2-1.4 against 0.61)
+are what's left.
+
 What's left of the gap is the records' size in double precision. Our
 `JointSim` is about 900 bytes, against the reference's float union. A
 `BodyState` is 112 bytes against 64.
