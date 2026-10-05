@@ -713,6 +713,54 @@ test_parallel_motor_wheel() {
     dynamics.destroy_world(f.world_id)
 }
 
+// The point constraint's mass matrix leaves out skew's zero products; it
+// must still be the full product to the bit, over a spread of anchors,
+// masses and (symmetric and not) inertias.
+var g_seed = 12345
+
+next_unit() -> float {
+    g_seed = (g_seed * 1103515245 + 12345) & 2147483647
+    return (g_seed as float) / 1073741824.0 - 1.0
+}
+
+random_vec3(scale: float) -> Vec3 { return math.vec3(scale * next_unit(), scale * next_unit(), scale * next_unit()) }
+
+full_point_mass_matrix(m_a: float, i_a: Matrix3, r_a: Vec3, m_b: float, i_b: Matrix3, r_b: Vec3) -> Matrix3 {
+    s_a = math.skew(r_a)
+    s_b = math.skew(r_b)
+    k = math.negate_mat3(math.add_mm(math.mul_mm(s_a, math.mul_mm(i_a, s_a)), math.mul_mm(s_b, math.mul_mm(i_b, s_b))))
+    k.cx.x = k.cx.x + m_a + m_b
+    k.cy.y = k.cy.y + m_a + m_b
+    k.cz.z = k.cz.z + m_a + m_b
+    return k
+}
+
+same_vec3(a: Vec3, b: Vec3) -> bool { return a.x == b.x && a.y == b.y && a.z == b.z }
+
+test_point_mass_matrix() {
+    mismatches = 0
+    n = 0
+    while n < 2000 {
+        scale = 1.0
+        if n % 3 == 1 { scale = 1000.0 }
+        if n % 3 == 2 { scale = 0.001 }
+        i_a = math.matrix3(random_vec3(scale), random_vec3(scale), random_vec3(scale))
+        i_b = math.matrix3(random_vec3(scale), random_vec3(scale), random_vec3(scale))
+        r_a = random_vec3(1.0 / scale)
+        r_b = random_vec3(2.0)
+        m_a = next_unit() + 1.0
+        m_b = 0.0
+        if n % 2 == 0 { m_b = next_unit() + 1.0 }
+        got = joint_solver.point_mass_matrix(m_a, i_a, r_a, m_b, i_b, r_b)
+        want = full_point_mass_matrix(m_a, i_a, r_a, m_b, i_b, r_b)
+        if same_vec3(got.cx, want.cx) == false || same_vec3(got.cy, want.cy) == false || same_vec3(got.cz, want.cz) == false {
+            mismatches = mismatches + 1
+        }
+        n = n + 1
+    }
+    ensure("the point mass matrix is the full skew product to the bit (${mismatches} of 2000 differ)", mismatches == 0)
+}
+
 main() {
     dynamics.reserve_scratch()
     before = basics.alloc_count()
@@ -723,6 +771,7 @@ main() {
     test_prismatic()
     test_spherical()
     test_parallel_motor_wheel()
+    test_point_mass_matrix()
     hull.destroy_hull(g_cube as *HullData)
     // The scratch stays allocated: the worlds' block, the masses, the dummy state (the modules' scratch is reserved before the count).
     ensure("every other counted allocation was freed (${basics.alloc_count() - before})", basics.alloc_count() == before + 3)

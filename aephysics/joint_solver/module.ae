@@ -24,7 +24,7 @@ import aephysics.dynamics
 import aephysics.contact_solver
 
 exports (
-    prepare_joint, warm_start_joint, solve_joint, dummy_state, prepare_joints, warm_start_joints, solve_joints, prepare_joints_range, warm_start_joints_range, solve_joints_range,
+    prepare_joint, warm_start_joint, solve_joint, dummy_state, point_mass_matrix, prepare_joints, warm_start_joints, solve_joints, prepare_joints_range, warm_start_joints_range, solve_joints_range,
     joint_get_constraint_force, joint_get_constraint_torque, get_joint_constraint_force, get_joint_constraint_torque,
     prepare_distance_joint, warm_start_distance_joint, solve_distance_joint,
     prepare_motor_joint, warm_start_motor_joint, solve_motor_joint,
@@ -146,12 +146,28 @@ perp_axis(quat_a: Quat, rel_q: Quat, axis: Vec3) -> Vec3 {
     return math.mul_sv(0.5, math.rotate_vector(quat_a, math.add(math.mul_sv(rel_q.w, axis), math.cross(math.qv(rel_q), axis))))
 }
 
+// skew(r) i skew(r), the products with skew's zeros left out: each
+// surviving term is the one mul_mm forms, in the order it adds them, and
+// a product with zero added to a sum is exact, so the result is
+// mul_mm(skew(r), mul_mm(i, skew(r))) to the bit at a quarter of the work.
+skew_sandwich(i: *Matrix3, r: Vec3) -> Matrix3 {
+    // m = i skew(r), column by column.
+    mx = math.vec3(i.cy.x * r.z + i.cz.x * (0.0 - r.y), i.cy.y * r.z + i.cz.y * (0.0 - r.y), i.cy.z * r.z + i.cz.z * (0.0 - r.y))
+    my = math.vec3(i.cx.x * (0.0 - r.z) + i.cz.x * r.x, i.cx.y * (0.0 - r.z) + i.cz.y * r.x, i.cx.z * (0.0 - r.z) + i.cz.z * r.x)
+    mz = math.vec3(i.cx.x * r.y + i.cy.x * (0.0 - r.x), i.cx.y * r.y + i.cy.y * (0.0 - r.x), i.cx.z * r.y + i.cy.z * (0.0 - r.x))
+    // skew(r) m.
+    return Matrix3 { cx: skew_times(r, mx), cy: skew_times(r, my), cz: skew_times(r, mz) }
+}
+
+// skew(r) c: mul_mv's terms without its zero ones.
+skew_times(r: Vec3, c: Vec3) -> Vec3 {
+    return math.vec3((0.0 - r.z) * c.y + r.y * c.z, r.z * c.x + (0.0 - r.x) * c.z, (0.0 - r.y) * c.x + r.x * c.y)
+}
+
 // The point constraint's mass matrix: (mA + mB) I - skew(rA) iA skew(rA) - skew(rB) iB skew(rB).
 point_mass_matrix(m_a: float, i_a: Matrix3, r_a: Vec3, m_b: float, i_b: Matrix3, r_b: Vec3) -> Matrix3 {
-    s_a = math.skew(r_a)
-    s_b = math.skew(r_b)
-    k_a = math.mul_mm(s_a, math.mul_mm(i_a, s_a))
-    k_b = math.mul_mm(s_b, math.mul_mm(i_b, s_b))
+    k_a = skew_sandwich(&i_a, r_a)
+    k_b = skew_sandwich(&i_b, r_b)
     k = math.negate_mat3(math.add_mm(k_a, k_b))
     k.cx.x = k.cx.x + m_a + m_b
     k.cy.y = k.cy.y + m_a + m_b

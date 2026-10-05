@@ -43,4 +43,15 @@ static inline int aephysics_atomic_cas(void *p, int expected, int desired)
     return __atomic_compare_exchange_n((int *)p, &expected, desired, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
 }
 
+// The 8-byte word at `index` words into `p`, read through memcpy so a
+// block written as doubles, ints and structs can be read as words without
+// breaking C's aliasing rule (a plain int64_t* read let GCC move the read
+// ahead of the stores it follows once the hash was inlined).
+static inline long long aephysics_load_word(const void *p, long long index)
+{
+    long long word;
+    __builtin_memcpy(&word, (const char *)p + 8 * index, 8);
+    return word;
+}
+
 #endif

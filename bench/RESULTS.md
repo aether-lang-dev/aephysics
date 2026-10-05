@@ -120,14 +120,24 @@ on both.
 |---|---|---|
 | 200 sphere hulls, 64 points to 32 | 4.7 ms | **2.9** |
 | 20 cube hulls, 4,096 points to 8 | 5.2 | **2.5** |
-| 2,000 box hulls | 2.0 | **0.17** |
+| 2,000 box hulls | 0.62 (2.0 before #108) | **0.17** |
 
 Both produce 6,554 vertices and 12,106 faces in total: the same hulls.
 The builder runs at 1.6-2x the reference's time (doubles, indices in
-place of pointers, structs passed by value); the box hull is a heap block
-here where the reference's is a stack value, so its cost is the
-allocation and the hash. Hull construction is a load-time cost, not a
-per-step one, so this is recorded rather than chased.
+place of pointers, structs passed by value). Hull construction is a
+load-time cost, not a per-step one.
+
+The box hulls were not the allocation (#108, 2026-10-05). The box's
+topology came from helpers holding their table as a local array, so each
+call copied the whole table onto the stack, 96 times a box. And the block
+hash ran every word through one chain of multiplies. Now the topology is
+written out and the hash runs four lanes: 2.9 ms to 0.62 ms for the 2,000
+boxes. The faster hash also took about 10% off the mesh and height field
+builds (median mesh 234-260 to 207-224 ms, height field 172-181 to
+152-161). The hash now reads its words through `memcpy`
+(`native.load_word`). Read through an integer pointer, as before, GCC
+moved the reads ahead of the writes once the hash was inlined, and the
+compound benchmark's material table found 253 materials instead of 2.
 
 ## distance
 
@@ -659,6 +669,25 @@ transform, centres, inverse mass and world inertia, in three lines
 instead of five. That took the joint prepare from 1.43-1.49 to 1.26-1.37 ms
 and the many pyramids' wide prepare from 3.53-3.60 to 3.38-3.49. The
 large pyramid was about even.
+
+Then #108: the profile put a sixth of the joint grid in
+`point_mass_matrix`, a real call (GCC didn't inline it) forming
+`skew(r) i skew(r)` through two full 3x3 products per body. It now leaves
+out the products with skew's zeros. Every surviving term is the one
+`mul_mm` forms, added in the same order, and adding an exact zero product
+changes nothing, so the matrix is the same to the bit
+(`tests/test_joint_solver.ae` checks 2,000 random cases). Joint grid,
+interleaved, 4 rounds:
+
+| stage | before | after | Box3D `e77352c` |
+|---|---|---|---|
+| solve | 3.87-4.23 ms | 3.09-3.38 | 3.33 |
+| relax | 3.87-4.22 | 3.01-3.22 | 3.22 |
+| step | 13.6-14.5 | 11.5-12.7 | 10.4-10.6 |
+
+The joint solve and relax are now level with the reference's. The warm
+start (1.9-2.2 ms against 1.31) and the prepare (1.2-1.4 against 0.61)
+are what's left.
 
 What's left of the gap is the records' size in double precision. Our
 `JointSim` is about 900 bytes, against the reference's float union. A
