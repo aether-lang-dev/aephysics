@@ -31,7 +31,7 @@ exports (
     reserve_scratch,
     HeightFieldDef, HeightFieldData,
     HEIGHT_FIELD_VERSION, HEIGHT_FIELD_HOLE, NULL_INDEX,
-    height_field_def, height_field_heights, height_field_material_indices, height_field_flags,
+    height_field_def, height_field_quanta, height_field_quantum, height_field_material_indices, height_field_flags,
     height_field_triangle_count, height_field_height,
     create_height_field, destroy_height_field, create_grid, create_wave,
     get_height_field_triangle, get_height_field_material, compute_height_field_aabb,
@@ -43,7 +43,7 @@ extern memset(block: ptr, value: int, size: int) -> ptr
 extern floor(x: float) -> float
 
 const NULL_INDEX = 0 - 1
-const HEIGHT_FIELD_VERSION = 0x0E41E5FB
+const HEIGHT_FIELD_VERSION = 0x0E41E5FC   // bumped when the block's layout changes (2026-10-05: 16-bit quanta, byte materials and flags)
 const HEIGHT_FIELD_HOLE = 255
 const MAX_QUANTUM = 65535
 const MAX_AABB_MARGIN = 0.05
@@ -72,9 +72,9 @@ struct HeightFieldData {
     scale: Vec3
     column_count: int        // along x
     row_count: int           // along z
-    heights_offset: int      // int[] of quantised heights, one per grid point
-    material_offset: int     // int[] per cell
-    flags_offset: int        // int[] per triangle
+    heights_offset: int      // a 16-bit quantum per grid point (low byte first)
+    material_offset: int     // a byte per cell
+    flags_offset: int        // a byte per triangle
     clockwise: bool
 }
 
@@ -83,15 +83,27 @@ height_field_def() -> HeightFieldDef {
                             global_minimum_height: 0.0 - 1.0, global_maximum_height: 1.0, clockwise_winding: false }
 }
 
-height_field_heights(h: *HeightFieldData) -> int[] { return ((h as ptr) + h.heights_offset) as int[] }
-height_field_material_indices(h: *HeightFieldData) -> int[] { return ((h as ptr) + h.material_offset) as int[] }
-height_field_flags(h: *HeightFieldData) -> int[] { return ((h as ptr) + h.flags_offset) as int[] }
+// The block stores as the reference does: a 16-bit quantum per grid point,
+// a byte per cell for its material (HEIGHT_FIELD_HOLE for a hole) and a
+// byte per triangle for its edge flags.
+height_field_quanta(h: *HeightFieldData) -> byte[] { return ((h as ptr) + h.heights_offset) as byte[] }
+height_field_material_indices(h: *HeightFieldData) -> byte[] { return ((h as ptr) + h.material_offset) as byte[] }
+height_field_flags(h: *HeightFieldData) -> byte[] { return ((h as ptr) + h.flags_offset) as byte[] }
+
+// A grid point's quantum, 0 to MAX_QUANTUM.
+height_field_quantum(h: *HeightFieldData, index: int) -> int {
+    return native.load_u16((h as ptr) + h.heights_offset, index as long)
+}
+
+set_quantum(quanta: byte[], index: int, value: int) {
+    quanta[2 * index] = (value & 255) as byte
+    quanta[2 * index + 1] = ((value >> 8) & 255) as byte
+}
 height_field_triangle_count(h: *HeightFieldData) -> int { return 2 * (h.column_count - 1) * (h.row_count - 1) }
 
 // The unscaled height of a grid point.
 height_field_height(h: *HeightFieldData, index: int) -> float {
-    heights = height_field_heights(h)
-    return h.min_height + h.height_scale * (heights[index] as float)
+    return h.min_height + h.height_scale * (height_field_quantum(h, index) as float)
 }
 
 align8(x: int) -> int { return (x + 7) & (0 - 8) }
@@ -143,11 +155,11 @@ create_height_field(def: *HeightFieldDef) -> *HeightFieldData {
 
     byte_count = align8(sizeof(HeightFieldData))
     heights_offset = byte_count
-    byte_count = byte_count + align8(height_count * 4)
+    byte_count = byte_count + align8(height_count * 2)
     material_offset = byte_count
-    byte_count = byte_count + align8(cell_count * 4)
+    byte_count = byte_count + align8(cell_count)
     flags_offset = byte_count
-    byte_count = byte_count + align8(triangle_count * 4)
+    byte_count = byte_count + align8(triangle_count)
     h = basics.alloc(byte_count) as *HeightFieldData
     h.version = HEIGHT_FIELD_VERSION
     h.byte_count = byte_count
@@ -159,7 +171,7 @@ create_height_field(def: *HeightFieldDef) -> *HeightFieldData {
     h.flags_offset = flags_offset
     h.clockwise = def.clockwise_winding
 
-    quantised = height_field_heights(h)
+    quantised = height_field_quanta(h)
     materials = height_field_material_indices(h)
     flags = height_field_flags(h)
     source = def.heights as float[]
@@ -174,7 +186,7 @@ create_height_field(def: *HeightFieldDef) -> *HeightFieldData {
     while i < height_count {
         clamped = math.clamp_float(source[i], h.min_height, h.max_height)
         scaled = (clamped - h.min_height) * inv_quantum
-        quantised[i] = math.min_float(scaled, MAX_QUANTUM as float) as int
+        set_quantum(quantised, i, math.min_float(scaled, MAX_QUANTUM as float) as int)
         lower_bound = math.min_float(lower_bound, clamped)
         upper_bound = math.max_float(upper_bound, clamped)
         i = i + 1
@@ -184,14 +196,14 @@ create_height_field(def: *HeightFieldDef) -> *HeightFieldData {
     heights = heights_block as float[]
     i = 0
     while i < height_count {
-        heights[i] = h.min_height + h.height_scale * (quantised[i] as float)
+        heights[i] = height_field_height(h, i)
         i = i + 1
     }
     source_materials = def.material_indices as int[]
     i = 0
     while i < cell_count {
-        materials[i] = 0
-        if def.material_indices != null { materials[i] = source_materials[i] }
+        materials[i] = 0 as byte
+        if def.material_indices != null { materials[i] = (source_materials[i] & 255) as byte }
         i = i + 1
     }
     h.aabb = AABB { lower: math.vec3(0.0, h.scale.y * lower_bound, 0.0),
@@ -206,10 +218,10 @@ create_height_field(def: *HeightFieldDef) -> *HeightFieldData {
             triangle1 = triangle_index
             triangle2 = triangle_index + 1
             triangle_index = triangle_index + 2
-            flags[triangle1] = 0
-            flags[triangle2] = 0
+            flags[triangle1] = 0 as byte
+            flags[triangle2] = 0 as byte
             cell = row * (column_count - 1) + column
-            if materials[cell] != HEIGHT_FIELD_HOLE {
+            if (materials[cell] as int) != HEIGHT_FIELD_HOLE {
                 index11 = row * column_count + column
                 index12 = index11 + 1
                 index21 = (row + 1) * column_count + column
@@ -228,7 +240,7 @@ create_height_field(def: *HeightFieldDef) -> *HeightFieldData {
                 flags1 = flags1 | diagonal
                 flags2 = flags2 | diagonal
                 // The cell above (row - 1): its triangle 1 against triangle 0's edge 3.
-                if row > 0 && materials[cell - (column_count - 1)] != HEIGHT_FIELD_HOLE {
+                if row > 0 && (materials[cell - (column_count - 1)] as int) != HEIGHT_FIELD_HOLE {
                     r = row - 1
                     q22 = grid_point(scale, column + 1, r + 1, heights[(r + 1) * column_count + column + 1])
                     q12 = grid_point(scale, column + 1, r, heights[r * column_count + column + 1])
@@ -237,7 +249,7 @@ create_height_field(def: *HeightFieldDef) -> *HeightFieldData {
                     flags1 = flags1 | edge_flags(plane1, n, q12, 2)
                 }
                 // The cell below (row + 1): its triangle 0 against triangle 1's edge 3.
-                if row + 1 < row_count - 1 && materials[cell + (column_count - 1)] != HEIGHT_FIELD_HOLE {
+                if row + 1 < row_count - 1 && (materials[cell + (column_count - 1)] as int) != HEIGHT_FIELD_HOLE {
                     r = row + 1
                     q11 = grid_point(scale, column, r, heights[r * column_count + column])
                     q21 = grid_point(scale, column, r + 1, heights[(r + 1) * column_count + column])
@@ -246,7 +258,7 @@ create_height_field(def: *HeightFieldDef) -> *HeightFieldData {
                     flags2 = flags2 | edge_flags(plane2, n, q21, 2)
                 }
                 // The cell to the left: its triangle 1 against triangle 0's edge 1.
-                if column > 0 && materials[cell - 1] != HEIGHT_FIELD_HOLE {
+                if column > 0 && (materials[cell - 1] as int) != HEIGHT_FIELD_HOLE {
                     c = column - 1
                     q22 = grid_point(scale, c + 1, row + 1, heights[(row + 1) * column_count + c + 1])
                     q12 = grid_point(scale, c + 1, row, heights[row * column_count + c + 1])
@@ -255,7 +267,7 @@ create_height_field(def: *HeightFieldDef) -> *HeightFieldData {
                     flags1 = flags1 | edge_flags(plane1, n, q21, 0)
                 }
                 // The cell to the right: its triangle 0 against triangle 1's edge 1.
-                if column + 1 < column_count - 1 && materials[cell + 1] != HEIGHT_FIELD_HOLE {
+                if column + 1 < column_count - 1 && (materials[cell + 1] as int) != HEIGHT_FIELD_HOLE {
                     c = column + 1
                     q11 = grid_point(scale, c, row, heights[row * column_count + c])
                     q21 = grid_point(scale, c, row + 1, heights[(row + 1) * column_count + c])
@@ -263,8 +275,8 @@ create_height_field(def: *HeightFieldDef) -> *HeightFieldData {
                     n = math.make_normal_from_points(q11, q21, q12)
                     flags2 = flags2 | edge_flags(plane2, n, q12, 0)
                 }
-                flags[triangle1] = flags1
-                flags[triangle2] = flags2
+                flags[triangle1] = flags1 as byte
+                flags[triangle2] = flags2 as byte
             }
             column = column + 1
         }
@@ -375,9 +387,9 @@ get_height_field_triangle(h: *HeightFieldData, triangle_index: int) -> Triangle 
     index22 = index21 + 1
     corners = corners_ready()
     cell_corners(h, row, column, corners)
-    t = Triangle { v1: corners[0], v2: corners[2], v3: corners[1], i1: index11, i2: index21, i3: index12, flags: flags[triangle_index] }
+    t = Triangle { v1: corners[0], v2: corners[2], v3: corners[1], i1: index11, i2: index21, i3: index12, flags: flags[triangle_index] as int }
     if (triangle_index & 1) != 0 {
-        t = Triangle { v1: corners[3], v2: corners[1], v3: corners[2], i1: index22, i2: index12, i3: index21, flags: flags[triangle_index] }
+        t = Triangle { v1: corners[3], v2: corners[1], v3: corners[2], i1: index22, i2: index12, i3: index21, flags: flags[triangle_index] as int }
     }
     if h.clockwise {
         // Reversing the winding swaps edges 1 and 3; the diagonal (edge 2) stays.
@@ -393,7 +405,7 @@ get_height_field_triangle(h: *HeightFieldData, triangle_index: int) -> Triangle 
 
 get_height_field_material(h: *HeightFieldData, triangle_index: int) -> int {
     materials = height_field_material_indices(h)
-    return materials[triangle_index >> 1]
+    return materials[triangle_index >> 1] as int
 }
 
 compute_height_field_aabb(h: *HeightFieldData, t: Transform) -> AABB { return math.aabb_transform(t, h.aabb) }
@@ -522,7 +534,7 @@ shape_cast_height_field(h: *HeightFieldData, proxy: ShapeProxy, translation: Vec
                 while column <= column2 {
                     if column >= 0 && column < column_count - 1 {
                         cell = row * (column_count - 1) + column
-                        material = materials[cell]
+                        material = materials[cell] as int
                         if material != HEIGHT_FIELD_HOLE {
                             cell_corners(h, row, column, corners)
                             p11 = corners[0]
@@ -677,7 +689,7 @@ overlap_height_field(h: *HeightFieldData, shape_transform: Transform, proxy: Sha
             while column <= range.max_column {
                 if column >= 0 && column < h.column_count - 1 {
                     cell = row * (h.column_count - 1) + column
-                    if materials[cell] != HEIGHT_FIELD_HOLE {
+                    if (materials[cell] as int) != HEIGHT_FIELD_HOLE {
                         cell_corners(h, row, column, corners)
                         if mesh.test_bounds_triangle_overlap(center, extent, corners[0], corners[2], corners[1]) {
                             tri[0] = corners[0]
@@ -717,7 +729,7 @@ query_height_field(h: *HeightFieldData, bounds: AABB, visitor: fn(Vec3, Vec3, Ve
             while column <= range.max_column {
                 if column >= 0 && column < h.column_count - 1 {
                     cell = row * (h.column_count - 1) + column
-                    if materials[cell] != HEIGHT_FIELD_HOLE {
+                    if (materials[cell] as int) != HEIGHT_FIELD_HOLE {
                         cell_corners(h, row, column, corners)
                         p11 = corners[0]
                         p12 = corners[1]
@@ -769,7 +781,7 @@ collide_mover_and_height_field(planes: PlaneResult[], capacity: int, h: *HeightF
             while column <= range.max_column {
                 if column >= 0 && column < h.column_count - 1 {
                     cell = row * (h.column_count - 1) + column
-                    material = materials[cell]
+                    material = materials[cell] as int
                     if material != HEIGHT_FIELD_HOLE {
                         cell_corners(h, row, column, corners)
                         p11 = corners[0]
