@@ -3644,8 +3644,8 @@ update_mesh_contact(w: *World, c: *Contact, mesh_geometry: *Shape, mesh_shape: *
                         material_index = map[math.clamp_int(material_index, 0, material_map_count - 1)]
                     }
                 } else {
-                    indices = height_field.height_field_material_indices(mesh_geometry.height_field)
-                    material_index = indices[triangle_index >> 1]
+                    cell_materials = height_field.height_field_material_indices(mesh_geometry.height_field)
+                    material_index = cell_materials[triangle_index >> 1] as int
                 }
                 material_index = math.clamp_int(material_index, 0, mesh_shape.material_count - 1)
                 material_a = materials_a[material_index]

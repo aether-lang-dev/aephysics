@@ -162,14 +162,14 @@ test_flags() {
     flags = height_field.height_field_flags(h)
     // Cell 0 (corner): triangle 0 has the diagonal (edge 2) flat and
     // edges 1 and 3 on the border.
-    ensure("corner triangle 0 flags", flags[0] == (triangle_manifold.CONCAVE_EDGE2 | triangle_manifold.INVERSE_CONCAVE_EDGE2))
+    ensure("corner triangle 0 flags", (flags[0] as int) == (triangle_manifold.CONCAVE_EDGE2 | triangle_manifold.INVERSE_CONCAVE_EDGE2))
     // Cell 0 triangle 1: diagonal flat, edge 1 against cell 1 (flat), edge 3 against cell 3 (flat).
-    ensure("corner triangle 1 flags", flags[1] == triangle_manifold.ALL_FLAT_EDGES)
+    ensure("corner triangle 1 flags", (flags[1] as int) == triangle_manifold.ALL_FLAT_EDGES)
     // Cell 1 triangle 1: edge 3 against the hole (cell 4).
-    ensure("triangle above the hole", flags[3] == (triangle_manifold.ALL_FLAT_EDGES & (255 - triangle_manifold.CONCAVE_EDGE3 - triangle_manifold.INVERSE_CONCAVE_EDGE3)))
+    ensure("triangle above the hole", (flags[3] as int) == (triangle_manifold.ALL_FLAT_EDGES & (255 - triangle_manifold.CONCAVE_EDGE3 - triangle_manifold.INVERSE_CONCAVE_EDGE3)))
     // Cell 5 triangle 0: edge 1 against the hole.
-    ensure("triangle right of the hole", flags[10] == (triangle_manifold.ALL_FLAT_EDGES & (255 - triangle_manifold.CONCAVE_EDGE1 - triangle_manifold.INVERSE_CONCAVE_EDGE1)))
-    ensure("the hole's triangles carry no flags", flags[8] == 0 && flags[9] == 0)
+    ensure("triangle right of the hole", (flags[10] as int) == (triangle_manifold.ALL_FLAT_EDGES & (255 - triangle_manifold.CONCAVE_EDGE1 - triangle_manifold.INVERSE_CONCAVE_EDGE1)))
+    ensure("the hole's triangles carry no flags", (flags[8] as int) == 0 && (flags[9] as int) == 0)
     ensure("a hole's material", height_field.get_height_field_material(h, 9) == height_field.HEIGHT_FIELD_HOLE)
     height_field.destroy_height_field(h)
 
@@ -184,15 +184,15 @@ test_flags() {
     h = height_field.create_height_field(&def)
     flags = height_field.height_field_flags(h)
     // Cell 0 triangle 1 (its edge 1 is x = 1, the ridge's crest, against cell 1 sloping down): inverse concave only.
-    ensure("convex ridge edge", (flags[1] & triangle_manifold.CONCAVE_EDGE1) == 0 && (flags[1] & triangle_manifold.INVERSE_CONCAVE_EDGE1) != 0)
+    ensure("convex ridge edge", ((flags[1] as int) & triangle_manifold.CONCAVE_EDGE1) == 0 && ((flags[1] as int) & triangle_manifold.INVERSE_CONCAVE_EDGE1) != 0)
     // Cell 1 triangle 1 (edge 1 is x = 2, at the foot of the ridge): concave, not inverse.
-    ensure("concave foot edge", (flags[3] & triangle_manifold.CONCAVE_EDGE1) != 0 && (flags[3] & triangle_manifold.INVERSE_CONCAVE_EDGE1) == 0)
+    ensure("concave foot edge", ((flags[3] as int) & triangle_manifold.CONCAVE_EDGE1) != 0 && ((flags[3] as int) & triangle_manifold.INVERSE_CONCAVE_EDGE1) == 0)
     // The clockwise field swaps edges 1 and 3 on the returned triangle.
     def.clockwise_winding = true
     cw = height_field.create_height_field(&def)
     t = height_field.get_height_field_triangle(cw, 3)
-    swapped = (flags[3] & 0x22) | ((flags[3] & 0x11) << 2) | ((flags[3] & 0x44) >> 2)
-    ensure("clockwise swaps the edge bits", t.flags == swapped && t.flags != flags[3])
+    swapped = ((flags[3] as int) & 0x22) | (((flags[3] as int) & 0x11) << 2) | (((flags[3] as int) & 0x44) >> 2)
+    ensure("clockwise swaps the edge bits", t.flags == swapped && t.flags != (flags[3] as int))
     ensure("the concave foot edge became edge 3", (t.flags & triangle_manifold.CONCAVE_EDGE3) != 0 && (t.flags & triangle_manifold.INVERSE_CONCAVE_EDGE3) == 0)
     height_field.destroy_height_field(cw)
     height_field.destroy_height_field(h)
@@ -295,7 +295,7 @@ brute_force_shape_cast(h: *HeightFieldData, proxy: ShapeProxy, translation: Vec3
     count = height_field.height_field_triangle_count(h)
     t = 0
     while t < count {
-        if materials[t >> 1] != height_field.HEIGHT_FIELD_HOLE {
+        if (materials[t >> 1] as int) != height_field.HEIGHT_FIELD_HOLE {
             triangle = height_field.get_height_field_triangle(h, t)
             tri[0] = triangle.v1
             tri[1] = triangle.v2
@@ -321,7 +321,7 @@ brute_force_ray_cast(h: *HeightFieldData, origin: Vec3, translation: Vec3) -> Ca
     count = height_field.height_field_triangle_count(h)
     t = 0
     while t < count {
-        if materials[t >> 1] != height_field.HEIGHT_FIELD_HOLE {
+        if (materials[t >> 1] as int) != height_field.HEIGHT_FIELD_HOLE {
             triangle = height_field.get_height_field_triangle(h, t)
             alpha = mesh.intersect_ray_triangle(origin, translation, triangle.v1, triangle.v2, triangle.v3)
             if alpha < best_fraction {

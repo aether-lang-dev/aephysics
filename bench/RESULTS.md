@@ -312,10 +312,17 @@ here against 2,171,914 there (0.001% more, boundary cases of the cell
 bounds test). The build is 1.5x, the quantisation and the edge flags of
 half a million triangles; the ray walk 1.4x; the box query at parity
 (no SIMD in the reference's); the shape cast 2.1x, the GJK cast per
-straddled cell on top of distance's 1.3-1.5x; the overlap 1.85x. The
-field is 4.2 MB here against 1.3 MB there: the reference packs 16-bit
-heights and 8-bit materials and flags, which Aether cannot yet address,
-so they are ints.
+straddled cell on top of distance's 1.3-1.5x; the overlap 1.85x.
+
+The field now packs as the reference's does (2026-10-05): a 16-bit
+quantum per grid point, read through `native.load_u16`, and a byte per
+cell for its material and per triangle for its edge flags (Aether's
+`byte[]`). 4,182,176 bytes became 1,307,808 (the reference: 1,307,760),
+with the same hits and sums. The 10 builds went from 148-158 ms to
+140-146. Rays and queries are unchanged once the quantum is a single
+16-bit load: read as two bytes and a shift, the queries were 6% slower.
+`HEIGHT_FIELD_VERSION` moved with the layout. Meshes keep 32-bit
+material indices, which go past the reference's 255.
 
 The shape casts and overlaps meet each straddled cell's triangles with a
 sphere's centre, and that pair takes a closed form (Real-Time Collision
@@ -868,6 +875,18 @@ awake against 6,831 and 3,144, the moved bodies' height sum 24,019
 against 24,187): eight figures tumbling for six seconds is chaotic,
 and single against double precision parts them, where the resting
 pyramids of physics_world agree to six digits.
+
+Checked again on 2026-10-05, when the rain ended at 6,062 contacts
+against 6,831. Traced every 10 steps, the counts agree within 1% through
+the fall and part at the first landing (step 120: 1,700 against 1,805),
+when the figures hit the top of the tori. One figure dropped on one cell
+follows Box3D to four digits until it lands. From there, both engines
+split between staying on the torus and sliding off it with the drop
+point: over eleven offsets, Box3D stays on top three times and
+aephysics four. Groups of three, dropped at sixteen offsets, end with
+34 to 93 contacts in Box3D and 47 to 138 here, and ours has the
+larger sum (1,373 against 1,074). No figure falls through a mesh in
+either engine. The rain's total is chaos, not a contact difference.
 
 ## Build flags (inlining)
 

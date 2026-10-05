@@ -54,4 +54,14 @@ static inline long long aephysics_load_word(const void *p, long long index)
     return word;
 }
 
+// The unsigned 16-bit value at `index` halves into `p` (a height field's
+// quanta), one load where two byte reads and a shift were the field's
+// queries' extra cost.
+static inline int aephysics_load_u16(const void *p, long long index)
+{
+    unsigned short value;
+    __builtin_memcpy(&value, (const char *)p + 2 * index, 2);
+    return value;
+}
+
 #endif
