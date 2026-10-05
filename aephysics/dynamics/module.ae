@@ -54,7 +54,7 @@ import aephysics.broad_phase
 import aephysics.mesh_contact
 
 exports (
-    reserve_scratch,
+    reserve_scratch, mesh_cache_of, convex_cache_of, CONTACT_CACHE_WORDS,
     WorldDef, BodyDef, ShapeDef, MotionLocks, WorldId, BodyId, ShapeId,
     World, Body, BodySim, BodyState, WorldShape, Contact, ContactEdge, Joint, JointEdge,
     SolverSet, Island, IslandSim, ContactLink, JointLink,
@@ -474,10 +474,17 @@ struct Contact {
     restitution: float
     rolling_resistance: float
     tangent_velocity: Vec3
-    mesh_cache: MeshContactCache   // a mesh contact's triangles
-    convex_cache: TriangleCache    // a convex contact's simplex or axis
+    // A mesh contact's triangles or a convex contact's simplex or axis, in
+    // the same bytes (the reference's union): mesh_cache_of and
+    // convex_cache_of, by SIM_MESH_CONTACT. CONTACT_CACHE_WORDS words cover
+    // the larger, a TriangleCache (80 bytes).
+    caches: long[10]
     generation: int
 }
+
+const CONTACT_CACHE_WORDS = 10
+mesh_cache_of(c: *Contact) -> *MeshContactCache { return (&c.caches) as *MeshContactCache }
+convex_cache_of(c: *Contact) -> *TriangleCache { return (&c.caches) as *TriangleCache }
 
 // A contact point the solver works on: anchors relative to the bodies'
 // centres of mass in world space, the separation, the impulses.
@@ -1476,7 +1483,7 @@ destroy_world(id: WorldId) {
         c = contact_at(w, i)
         if c.contact_id != NULL_INDEX {
             free_manifolds(w, c)
-            if (c.flags & SIM_MESH_CONTACT) != 0 { mesh_contact.mesh_contact_cache_destroy(&c.mesh_cache) }
+            if (c.flags & SIM_MESH_CONTACT) != 0 { mesh_contact.mesh_contact_cache_destroy(mesh_cache_of(c)) }
         }
         i = i + 1
     }
@@ -3183,8 +3190,6 @@ create_contact(w: *World, shape_a: *WorldShape, shape_b: *WorldShape, child_inde
     c.child_index = child_index
     c.manifolds = null
     c.manifold_count = 0
-    c.mesh_cache = mesh_contact.mesh_contact_cache_create()
-    c.convex_cache = TriangleCache { triangle_index: NULL_INDEX, simplex_cache: distance.empty_cache(), sat_cache: manifold.empty_sat_cache() }
     flags = 0
     if (body_a.flags & ENABLE_CONTACT_RECYCLING) != 0 && (body_b.flags & ENABLE_CONTACT_RECYCLING) != 0 { flags = flags | CONTACT_RECYCLE }
     if kind_a == KIND_MESH || kind_a == KIND_HEIGHT_FIELD { flags = flags | SIM_MESH_CONTACT }
@@ -3197,6 +3202,13 @@ create_contact(w: *World, shape_a: *WorldShape, shape_b: *WorldShape, child_inde
     if (shape_a.flags & SHAPE_ENABLE_SPECULATIVE) != 0 && (shape_b.flags & SHAPE_ENABLE_SPECULATIVE) != 0 { flags = flags | ENABLE_SPECULATIVE_POINTS }
     if (shape_a.flags & SHAPE_ENABLE_PRE_SOLVE_EVENTS) != 0 || (shape_b.flags & SHAPE_ENABLE_PRE_SOLVE_EVENTS) != 0 { flags = flags | SIM_ENABLE_PRE_SOLVE_EVENTS }
     c.flags = flags
+    if (flags & SIM_MESH_CONTACT) != 0 {
+        mesh_caches = (&c.caches) as MeshContactCache[]
+        mesh_caches[0] = mesh_contact.mesh_contact_cache_create()
+    } else {
+        convex_caches = (&c.caches) as TriangleCache[]
+        convex_caches[0] = TriangleCache { triangle_index: NULL_INDEX, simplex_cache: distance.empty_cache(), sat_cache: manifold.empty_sat_cache() }
+    }
     // Into body A's list.
     c.edge_a = ContactEdge { body_id: shape_a.body_id, prev_key: NULL_INDEX, next_key: body_a.head_contact_key }
     key_a = (contact_id << 1) | 0
@@ -3300,7 +3312,7 @@ destroy_contact(w: *World, c: *Contact, wake_bodies: bool) {
     if c.edge_b.next_key != NULL_INDEX { set_contact_edge_prev(w, c.edge_b.next_key, c.edge_b.prev_key) }
     if body_b.head_contact_key == ((contact_id << 1) | 1) { body_b.head_contact_key = c.edge_b.next_key }
     body_b.contact_count = body_b.contact_count - 1
-    if (flags & SIM_MESH_CONTACT) != 0 { mesh_contact.mesh_contact_cache_destroy(&c.mesh_cache) }
+    if (flags & SIM_MESH_CONTACT) != 0 { mesh_contact.mesh_contact_cache_destroy(mesh_cache_of(c)) }
     if c.island_id != NULL_INDEX { unlink_contact(w, c) }
     if c.color_index != NULL_INDEX {
         remove_contact_from_graph(w, body_id_a, body_id_b, c.color_index, c.local_index, (flags & SIM_MESH_CONTACT) != 0)
@@ -3402,13 +3414,14 @@ compute_convex_manifold(w: *World, c: *Contact, geometry_a: *Shape, xf_a: Transf
         if kind_b == KIND_SPHERE { manifold.collide_capsule_and_sphere(&m, MAX_MANIFOLD_POINTS, geometry_a.capsule, geometry_b.sphere, transform_b_to_a) }
         else { manifold.collide_capsules(&m, MAX_MANIFOLD_POINTS, geometry_a.capsule, geometry_b.capsule, transform_b_to_a) }
     } else {
-        if kind_b == KIND_SPHERE { manifold.collide_hull_and_sphere(&m, MAX_MANIFOLD_POINTS, geometry_a.hull, geometry_b.sphere, transform_b_to_a, &c.convex_cache.simplex_cache) }
-        else if kind_b == KIND_CAPSULE { manifold.collide_hull_and_capsule(&m, MAX_MANIFOLD_POINTS, geometry_a.hull, geometry_b.capsule, transform_b_to_a, &c.convex_cache.simplex_cache) }
+        convex = convex_cache_of(c)
+        if kind_b == KIND_SPHERE { manifold.collide_hull_and_sphere(&m, MAX_MANIFOLD_POINTS, geometry_a.hull, geometry_b.sphere, transform_b_to_a, &convex.simplex_cache) }
+        else if kind_b == KIND_CAPSULE { manifold.collide_hull_and_capsule(&m, MAX_MANIFOLD_POINTS, geometry_a.hull, geometry_b.capsule, transform_b_to_a, &convex.simplex_cache) }
         else {
-            manifold.collide_hulls(&m, MAX_MANIFOLD_POINTS, geometry_a.hull, geometry_b.hull, transform_b_to_a, &c.convex_cache.sat_cache)
+            manifold.collide_hulls(&m, MAX_MANIFOLD_POINTS, geometry_a.hull, geometry_b.hull, transform_b_to_a, &convex.sat_cache)
             tc = task_context(w)
             tc.sat_call_count = tc.sat_call_count + 1
-            tc.sat_cache_hit_count = tc.sat_cache_hit_count + c.convex_cache.sat_cache.hit
+            tc.sat_cache_hit_count = tc.sat_cache_hit_count + convex.sat_cache.hit
         }
     }
     if m.point_count == 0 {
@@ -3528,7 +3541,7 @@ update_mesh_contact(w: *World, c: *Contact, mesh_geometry: *Shape, mesh_shape: *
     enable_speculative = (c.flags & ENABLE_SPECULATIVE_POINTS) != 0
     tc = task_context(w)
     mark = tc.arena.index
-    r = mesh_contact.compute_mesh_manifolds(&c.mesh_cache, mesh_geometry, xf_a, &shape_b.geometry, xf_b, bounds_b, is_fast, enable_speculative, &tc.arena)
+    r = mesh_contact.compute_mesh_manifolds(mesh_cache_of(c), mesh_geometry, xf_a, &shape_b.geometry, xf_b, bounds_b, is_fast, enable_speculative, &tc.arena)
     tc.sat_call_count = tc.sat_call_count + r.sat_calls
     tc.sat_cache_hit_count = tc.sat_cache_hit_count + r.sat_cache_hits
     cluster_count = r.cluster_count
