@@ -312,10 +312,17 @@ here against 2,171,914 there (0.001% more, boundary cases of the cell
 bounds test). The build is 1.5x, the quantisation and the edge flags of
 half a million triangles; the ray walk 1.4x; the box query at parity
 (no SIMD in the reference's); the shape cast 2.1x, the GJK cast per
-straddled cell on top of distance's 1.3-1.5x; the overlap 1.85x. The
-field is 4.2 MB here against 1.3 MB there: the reference packs 16-bit
-heights and 8-bit materials and flags, which Aether cannot yet address,
-so they are ints.
+straddled cell on top of distance's 1.3-1.5x; the overlap 1.85x.
+
+The field now packs as the reference's does (2026-10-05): a 16-bit
+quantum per grid point, read through `native.load_u16`, and a byte per
+cell for its material and per triangle for its edge flags (Aether's
+`byte[]`). 4,182,176 bytes became 1,307,808 (the reference: 1,307,760),
+with the same hits and sums. The 10 builds went from 148-158 ms to
+140-146. Rays and queries are unchanged once the quantum is a single
+16-bit load: read as two bytes and a shift, the queries were 6% slower.
+`HEIGHT_FIELD_VERSION` moved with the layout. Meshes keep 32-bit
+material indices, which go past the reference's 255.
 
 The shape casts and overlaps meet each straddled cell's triangles with a
 sphere's centre, and that pair takes a closed form (Real-Time Collision
