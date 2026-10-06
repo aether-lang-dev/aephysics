@@ -710,6 +710,34 @@ test_bad_meshes() {
     heights[2] = not_a_number()
     if field_of(heights_block, math.vec3_one(), 0.0 - 1.0, 1.0) == null { refused = refused + 1 }
     ensure("fields of zero, negative or NaN scale, an inverted or unbounded range or a NaN height are refused (${refused} of 7)", refused == 7)
+    // Hulls: NaN points, NaN box sizes and NaN scales make none; a box
+    // mirrored and flattened at once is still a box.
+    points_block = basics.alloc(8 * sizeof(Vec3))
+    points = points_block as Vec3[]
+    k = 0
+    while k < 8 {
+        points[k] = math.vec3(((k & 1) as float) - 0.5, (((k >> 1) & 1) as float) - 0.5, (((k >> 2) & 1) as float) - 0.5)
+        k = k + 1
+    }
+    cube = hull.create_hull(points, 8, 8)
+    ensure("eight corners make a hull", cube != null)
+    if cube != null { hull.destroy_hull(cube) }
+    points[5] = math.vec3(0.5, not_a_number(), 0.5)
+    ensure("a NaN point makes no hull", hull.create_hull(points, 8, 8) == null)
+    basics.free_bytes(points_block, 8 * sizeof(Vec3))
+    ensure("a NaN half width makes no box", hull.make_box_hull(0.5, not_a_number(), 0.5) == null)
+    ensure("an infinite half width makes no box", hull.make_box_hull(infinity(), 0.5, 0.5) == null)
+    ensure("a NaN scale makes no box", hull.make_scaled_box_hull(math.vec3_one(), math.transform_identity(), math.vec3(1.0, not_a_number(), 1.0)) == null)
+    flat = hull.make_scaled_box_hull(math.vec3_one(), math.transform_identity(), math.vec3(0.0 - 1.0, 0.0, 1.0))
+    sound_flat = flat != null && math.abs_float(flat.aabb.upper.x - 1.0) < 0.001 && flat.aabb.upper.y < 0.05 && math.abs_float(flat.aabb.upper.z - 1.0) < 0.001
+    ensure("a box mirrored and flattened at once is the flat box it should be", sound_flat)
+    // Turned a quarter about z, its y half width of 2 lies along x, which the scale flattens.
+    turned = hull.make_scaled_box_hull(math.vec3(1.0, 2.0, 3.0), Transform { p: math.vec3_zero(), q: math.make_quat_from_axis_angle(math.vec3_axis_z(), 0.5 * math.PI) },
+                                       math.vec3(0.0, 0.0 - 1.0, 1.0))
+    sound_turned = turned != null && turned.aabb.upper.x < 0.05 && math.abs_float(turned.aabb.upper.y - 1.0) < 0.001 && math.abs_float(turned.aabb.upper.z - 3.0) < 0.001
+    ensure("and turned, too", sound_turned)
+    if turned != null { hull.destroy_hull(turned) }
+    if flat != null { hull.destroy_hull(flat) }
     basics.free_bytes(vertices_block, 4 * sizeof(Vec3))
     basics.free_bytes(indices_block, 6 * 4)
     basics.free_bytes(materials_block, 2 * 4)

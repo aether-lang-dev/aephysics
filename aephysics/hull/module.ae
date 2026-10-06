@@ -1416,6 +1416,12 @@ allocate_hull(vertex_count: int, edge_count: int, face_count: int) -> *HullData 
 // the limits.
 create_hull(points: Vec3[], count: int, max_vertex_count: int) -> *HullData {
     if count < 4 { return null }
+    // A NaN or infinite point has no side of a plane: no hull holds it.
+    i = 0
+    while i < count {
+        if math.is_valid_vec3(points[i]) == false { return null }
+        i = i + 1
+    }
     origin = points[0]
     clamped_max = math.clamp_int(max_vertex_count, 4, MAX_HULL_VERTICES)
     b = builder_create(count, clamped_max)
@@ -1720,6 +1726,7 @@ box_corner_sign(index: int) -> Vec3 {
 // A box of half widths hx, hy, hz under a local transform, as a hull
 // with analytic mass properties. Destroy it like any hull.
 make_transformed_box_hull(hx: float, hy: float, hz: float, t: Transform) -> *HullData {
+    if math.is_valid_vec3(math.vec3(hx, hy, hz)) == false || math.is_valid_transform(t) == false { return null }
     min_h = 0.2 * math.LINEAR_SLOP
     h = math.max_vec3(math.vec3(min_h, min_h, min_h), math.vec3(hx, hy, hz))
     box = allocate_hull(8, 24, 6)
@@ -1846,6 +1853,7 @@ scale_box(half_widths: float[], t: *Transform, post_scale: Vec3, min_half_width:
 }
 
 make_scaled_box_hull(half_widths: Vec3, t: Transform, post_scale: Vec3) -> *HullData {
+    if math.is_valid_vec3(post_scale) == false { return null }
     block = basics.alloc(24)
     h = block as float[]
     h[0] = half_widths.x
