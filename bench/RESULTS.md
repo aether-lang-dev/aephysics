@@ -923,6 +923,51 @@ aephysics four. Groups of three, dropped at sixteen offsets, end with
 larger sum (1,373 against 1,074). No figure falls through a mesh in
 either engine. The rain's total is chaos, not a contact difference.
 
+## soak (a mixed pile)
+
+`bench/soak.ae` against `bench/soak_box3d.c` (2026-10-06, i7-13700K, one
+thread): 2,048 bodies of every convex kind -- boxes, spheres, capsules,
+hulls of twelve random points, restitution up to 0.6, a little rolling
+resistance -- thrown spinning from eight layers into a walled pen, 600
+steps, the same dice drawn in the same order in both. The reference's own
+benchmarks are cubes; this is the pile a game throws.
+
+| | Box3D | aephysics |
+|---|---|---|
+| sleeping, ms per step | 1.74-1.76 | 2.27-2.47 |
+| awake throughout, ms per step | 2.78-2.87 | 3.23-3.49 |
+| pairs | 0.075 | 0.104 |
+| collide | 0.563 | 0.679 |
+| solve (constraints) | 2.14 (1.98) | 2.45 (2.24) |
+| transforms | 0.154 | 0.198 |
+| height sum, contacts | 615.8, 9,041 | 621.9, 8,927 |
+
+Awake, the like-for-like cost, we are 1.14-1.22x the reference, the gap
+spread over every phase: the solve's share is the eight-lane gap (#96,
+#95), the pairs, the narrow phase of the mixed pairings and the
+transforms are their own (#121).
+
+The sleeping times differ by when each pile happens to sleep, and why is
+worth knowing. A random hull resting on an edge rocks between two faces:
+when the floor's manifold flips to the other incident face, the corner
+that comes down was not among the old manifold's speculative points and
+is found 5 mm deep; the soft contact pushes it out, lifting the body, and
+it falls back the other way. In the reference a hull does this for good
+(its body 912, at 0.09 m/s and 0.5 rad/s, keeps itself and a sphere it
+touches awake through 1,500 steps); in ours the pile's rocker (body 1098,
+0.12 m/s, 0.4 rad/s) holds an island of 1,330 awake until step 1,150, then
+settles. The same algorithm, the same behaviour, a different body by
+chaos (#122).
+
+`tests/test_soak.ae` holds the small version to account on four seeds
+(64 bodies, 900 steps), and the reference's port on the same dice agrees
+on everything it checks: the same starting energies to the joule, none
+ever gained, the fastest bodies at 11.3-12.4 m/s (ours 11.3-11.4), the
+deepest overlap in the fall 13-16 cm (ours 12-16: dynamic bodies have no
+continuous collision in either, so a body meeting another at 9 m/s is a
+step's 15 cm in before its contact exists), at rest 1.0-5.7 mm (ours
+0.6-5.0), every body asleep at the end.
+
 ## Build flags (inlining)
 
 The generated C of every Aether function is a plain `static` function,

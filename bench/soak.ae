@@ -1,0 +1,220 @@
+// The soak's scene at scale against the reference's port in
+// bench/soak_box3d.c: 2,048 bodies of every convex kind (boxes, spheres,
+// capsules, hulls of twelve random points) thrown spinning into a walled
+// pen from 8 layers, 600 steps, the same dice in both. The reference's
+// own benchmarks are cubes; this is the mixed pile a game throws. Single
+// thread, wall time of the steps, the bodies' heights summed as a
+// checksum (a chaotic pile: the sums agree to the pile, not the digit).
+// A hull rocking on an edge can hold its island awake for hundreds of
+// steps in both engines (see the soak in RESULTS.md), so the sleeping
+// times differ by when each pile happens to sleep.
+import std.string
+import std.os
+import aephysics.math
+import aephysics.basics
+import aephysics.hull
+import aephysics.manifold
+import aephysics.shape
+import aephysics.dynamics
+import aephysics.physics_world
+
+clock() -> long { return os.now_monotonic_ns() }
+ms(ns: long) -> float { return (ns as float) / 1000000.0 }
+
+// xorshift32, as the determinism test's.
+const RAND_LIMIT = 32767
+const MASK32: long = 4294967295
+var g_random_seed: long = 1
+
+random_int() -> int {
+    x = g_random_seed
+    x = (x ^ (x << 13)) & MASK32
+    x = x ^ (x >> 17)
+    x = (x ^ (x << 5)) & MASK32
+    g_random_seed = x
+    return (x % ((RAND_LIMIT + 1) as long)) as int
+}
+
+random_float_range(lo: float, hi: float) -> float {
+    r = (random_int() & RAND_LIMIT) as float
+    return (hi - lo) * (r / (RAND_LIMIT as float)) + lo
+}
+
+random_vec3_uniform(lo: float, hi: float) -> Vec3 {
+    x = random_float_range(lo, hi)
+    y = random_float_range(lo, hi)
+    z = random_float_range(lo, hi)
+    return math.vec3(x, y, z)
+}
+
+// The draws are made one statement at a time: C fixes no order for a
+// call's arguments, and the reference's port must draw the same dice.
+random_quat() -> Quat {
+    v = random_vec3_uniform(0.0 - 1.0, 1.0)
+    w = random_float_range(0.0 - 1.0, 1.0)
+    return math.normalize_quat(math.quat_vs(v, w))
+}
+
+const SIDE = 16
+const LAYERS = 8
+const BODY_COUNT = 2048
+const SPACING = 1.8
+const STEPS = 600
+const GRAVITY = 10.0
+const PEN = 16.0
+
+// Shapes hold their hulls: kept until the world is gone.
+var g_hulls: ptr = null
+var g_hull_count = 0
+
+keep(h: *HullData) {
+    (g_hulls as ptr[])[g_hull_count] = h as ptr
+    g_hull_count = g_hull_count + 1
+}
+
+free_hulls() {
+    i = 0
+    while i < g_hull_count {
+        hull.destroy_hull((g_hulls as ptr[])[i] as *HullData)
+        i = i + 1
+    }
+    g_hull_count = 0
+}
+
+// One body of a kind the dice pick: a box, a sphere, a capsule or a hull
+// of random points, each fitting the spacing so none starts touching.
+add_body(world_id: WorldId, p: Vec3) -> BodyId {
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.position = p
+    bdef.rotation = random_quat()
+    bdef.linear_velocity = random_vec3_uniform(0.0 - 2.0, 2.0)
+    bdef.angular_velocity = random_vec3_uniform(0.0 - 3.0, 3.0)
+    body = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    sdef.base_material.restitution = random_float_range(0.0, 0.6)
+    // A ball on a flat floor rolls for ever: a little resistance lets it stop.
+    sdef.base_material.rolling_resistance = 0.05
+    kind = random_int() % 4
+    if kind == 0 {
+        hx = random_float_range(0.1, 0.5)
+        hy = random_float_range(0.1, 0.5)
+        hz = random_float_range(0.1, 0.5)
+        box = hull.make_box_hull(hx, hy, hz)
+        dynamics.create_hull_shape(body, &sdef, box)
+        keep(box)
+    } else if kind == 1 {
+        radius = random_float_range(0.1, 0.4)
+        dynamics.create_sphere_shape(body, &sdef, manifold.sphere(math.vec3_zero(), radius))
+    } else if kind == 2 {
+        half = random_float_range(0.1, 0.4)
+        radius = random_float_range(0.1, 0.3)
+        dynamics.create_capsule_shape(body, &sdef, manifold.capsule(math.vec3(0.0, 0.0 - half, 0.0), math.vec3(0.0, half, 0.0), radius))
+    } else {
+        points_block = basics.alloc(12 * sizeof(Vec3))
+        points = points_block as Vec3[]
+        k = 0
+        while k < 12 {
+            points[k] = random_vec3_uniform(0.0 - 0.4, 0.4)
+            k = k + 1
+        }
+        h = hull.create_hull(points, 12, 12)
+        if h == null {
+            dynamics.create_sphere_shape(body, &sdef, manifold.sphere(math.vec3_zero(), 0.3))
+        } else {
+            dynamics.create_hull_shape(body, &sdef, h)
+            keep(h)
+        }
+        basics.free_bytes(points_block, 12 * sizeof(Vec3))
+    }
+    return body
+}
+
+run(name: string, sleep: bool) {
+    g_random_seed = 1
+    wdef = dynamics.default_world_def()
+    wdef.gravity = math.vec3(0.0, 0.0 - GRAVITY, 0.0)
+    wdef.enable_sleep = sleep
+    world_id = dynamics.create_world(&wdef)
+    gdef = dynamics.default_body_def()
+    gdef.position = math.vec3(0.0, 0.0 - 0.5, 0.0)
+    ground = dynamics.create_body(world_id, &gdef)
+    gsdef = dynamics.default_shape_def()
+    floor = hull.make_box_hull(PEN, 0.5, PEN)
+    dynamics.create_hull_shape(ground, &gsdef, floor)
+    keep(floor)
+    wall_x = hull.make_offset_box_hull(0.5, 3.0, PEN, math.vec3(PEN + 0.5, 3.0, 0.0))
+    dynamics.create_hull_shape(ground, &gsdef, wall_x)
+    keep(wall_x)
+    wall_nx = hull.make_offset_box_hull(0.5, 3.0, PEN, math.vec3(0.0 - PEN - 0.5, 3.0, 0.0))
+    dynamics.create_hull_shape(ground, &gsdef, wall_nx)
+    keep(wall_nx)
+    wall_z = hull.make_offset_box_hull(PEN, 3.0, 0.5, math.vec3(0.0, 3.0, PEN + 0.5))
+    dynamics.create_hull_shape(ground, &gsdef, wall_z)
+    keep(wall_z)
+    wall_nz = hull.make_offset_box_hull(PEN, 3.0, 0.5, math.vec3(0.0, 3.0, 0.0 - PEN - 0.5))
+    dynamics.create_hull_shape(ground, &gsdef, wall_nz)
+    keep(wall_nz)
+    bodies_block = basics.alloc(BODY_COUNT * sizeof(BodyId))
+    bodies = bodies_block as BodyId[]
+    n = 0
+    layer = 0
+    while layer < LAYERS {
+        row = 0
+        while row < SIDE {
+            column = 0
+            while column < SIDE {
+                half = 0.5 * ((SIDE - 1) as float)
+                p = math.vec3(SPACING * ((column as float) - half), 1.0 + SPACING * (layer as float), SPACING * ((row as float) - half))
+                bodies[n] = add_body(world_id, p)
+                n = n + 1
+                column = column + 1
+            }
+            row = row + 1
+        }
+        layer = layer + 1
+    }
+    // The phases, summed as bench/soak_box3d.c sums b3Profile's.
+    pairs = 0.0
+    collide = 0.0
+    solve = 0.0
+    constraints = 0.0
+    transforms = 0.0
+    sleep_islands = 0.0
+    t0 = clock()
+    s = 0
+    while s < STEPS {
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        seen = physics_world.get_profile(world_id)
+        pairs = pairs + seen.pairs
+        collide = collide + seen.collide
+        solve = solve + seen.solve
+        constraints = constraints + seen.constraints
+        transforms = transforms + seen.transforms
+        sleep_islands = sleep_islands + seen.sleep_islands
+        s = s + 1
+    }
+    t1 = clock()
+    sum = 0.0
+    i = 0
+    while i < BODY_COUNT {
+        sum = sum + dynamics.body_get_position(bodies[i]).y
+        i = i + 1
+    }
+    counters = physics_world.get_counters(world_id)
+    println("aephysics soak ${name}: ${STEPS} steps of ${BODY_COUNT} mixed bodies ${ms(t1 - t0)} ms, ${ms(t1 - t0) / (STEPS as float)} ms per step (height sum ${sum}, ${counters.contact_count} contacts, ${physics_world.get_awake_body_count(world_id)} awake)")
+    per = 1.0 / (STEPS as float)
+    println("aephysics phases ms/step: pairs ${pairs * per} collide ${collide * per} solve ${solve * per} (constraints ${constraints * per} transforms ${transforms * per} sleep ${sleep_islands * per})")
+    dynamics.destroy_world(world_id)
+    basics.free_bytes(bodies_block, BODY_COUNT * sizeof(BodyId))
+    free_hulls()
+}
+
+// Sleeping as a game has it, then awake throughout: a chaotic pile falls
+// asleep when it will, a step sooner or later in either engine, so the
+// steps awake are the like-for-like cost.
+main() {
+    g_hulls = basics.alloc((BODY_COUNT + 5) * 8)
+    run("sleeping", true)
+    run("awake", false)
+}
