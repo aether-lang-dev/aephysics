@@ -1,0 +1,223 @@
+// Queries from several threads at once. Box3D's queries may be called from
+// any thread, since their scratch is on each thread's stack; every module
+// here keeps its scratch per worker slot, so each thread must hold a slot
+// of its own. Four plain threads (not a world's workers) cast rays and
+// spheres and overlap boxes against a world of a mesh, a height field, a
+// compound and hulls, round after round, and every answer must be the one
+// cast serially first. Then threads that come and go give their slots
+// back, so a program that makes threads all day never runs out.
+import std.string
+import std.worker
+import aephysics.math
+import aephysics.basics
+import aephysics.native
+import aephysics.hull
+import aephysics.manifold
+import aephysics.distance
+import aephysics.mesh
+import aephysics.height_field
+import aephysics.material
+import aephysics.compound
+import aephysics.shape
+import aephysics.dynamics
+import aephysics.physics_world
+
+extern exit(code: int)
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+
+var failures = 0
+var checks = 0
+
+ensure(name: string, ok: bool) {
+    checks = checks + 1
+    if !ok {
+        println("threads: FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+const QUERIES = 1500
+const ROUNDS = 6
+const THREADS = 4
+
+var g_world_index1 = 0
+var g_world_generation = 0
+world_id() -> WorldId { return WorldId { index1: g_world_index1, generation: g_world_generation } }
+
+var g_answers: ptr = null      // float[3 * QUERIES]: the ray's, the cast's and the overlap's answer
+var g_done = 0
+var g_mismatches = 0
+
+query_point(i: int) -> Vec3 {
+    t = (i as float) / (QUERIES as float)
+    return math.vec3(0.0 - 40.0 + 80.0 * t, 6.0, 25.0 * math.compute_cos_sin(23.0 * t).sine)
+}
+
+ray_answer(i: int) -> float {
+    r = physics_world.cast_ray_closest(world_id(), query_point(i), math.vec3(0.0, 0.0 - 12.0, 0.0), shape.default_query_filter())
+    if r.hit { return r.point.y + 1000.0 * (r.shape_id.index1 as float) }
+    return 0.0 - 1.0
+}
+
+var g_cast_best = 1.0
+closest_cast(shape_id: ShapeId, point: Vec3, normal: Vec3, fraction: float, user_material_id: long, triangle_index: int, child_index: int, context: ptr) -> float {
+    best = context as float[]
+    if fraction < best[0] { best[0] = fraction }
+    return fraction
+}
+
+cast_answer(i: int, block: ptr) -> float {
+    points = block as Vec3[]
+    points[0] = math.vec3_zero()
+    best = (block + sizeof(Vec3)) as float[]
+    best[0] = 1.0
+    physics_world.cast_shape(world_id(), query_point(i), distance.shape_proxy(block, 1, 0.3), math.vec3(0.0, 0.0 - 12.0, 0.0),
+                             shape.default_query_filter(), closest_cast, (block + sizeof(Vec3)))
+    return best[0]
+}
+
+count_overlap(shape_id: ShapeId, context: ptr) -> bool {
+    n = context as int[]
+    n[0] = n[0] + 1
+    return true
+}
+
+overlap_answer(i: int, block: ptr) -> float {
+    points = block as Vec3[]
+    points[0] = math.vec3_zero()
+    n = (block + sizeof(Vec3)) as int[]
+    n[0] = 0
+    p = query_point(i)
+    physics_world.overlap_shape(world_id(), math.vec3(p.x, 0.5, p.z), distance.shape_proxy(block, 1, 1.5), shape.default_query_filter(),
+                                count_overlap, (block + sizeof(Vec3)))
+    return n[0] as float
+}
+
+thread_queries() {
+    block = calloc(1, 64)
+    answers = g_answers as float[]
+    bad = 0
+    k = 0
+    while k < ROUNDS {
+        i = 0
+        while i < QUERIES {
+            if ray_answer(i) != answers[3 * i] { bad = bad + 1 }
+            if cast_answer(i, block) != answers[3 * i + 1] { bad = bad + 1 }
+            if overlap_answer(i, block) != answers[3 * i + 2] { bad = bad + 1 }
+            i = i + 1
+        }
+        k = k + 1
+    }
+    free(block)
+    native.atomic_add((&g_mismatches) as ptr, bad)
+    native.atomic_add((&g_done) as ptr, 1)
+}
+
+// One query on a fresh thread, which then exits.
+var g_short_done = 0
+short_thread() {
+    ray_answer(7)
+    native.atomic_add((&g_short_done) as ptr, 1)
+}
+
+main() {
+    wdef = dynamics.default_world_def()
+    created = dynamics.create_world(&wdef)
+    g_world_index1 = created.index1
+    g_world_generation = created.generation
+    bdef = dynamics.default_body_def()
+    sdef = dynamics.default_shape_def()
+    // A wave mesh on the left, a height field on the right, a compound and
+    // hulls on top of them.
+    left = dynamics.create_body(created, &bdef)
+    wave = mesh.create_wave_mesh(80, 80, 0.5, 0.4, 0.3, 0.7)
+    dynamics.create_mesh_shape(left, &sdef, wave, math.vec3_one())
+    bdef.position = math.vec3(0.0, 0.0, 0.0)
+    field_body = dynamics.create_body(created, &bdef)
+    field = height_field.create_wave(48, 48, math.vec3(1.0, 1.0, 1.0), 0.1, 0.07, true)
+    dynamics.create_height_field_shape(field_body, &sdef, field)
+    box = hull.make_box_hull(0.6, 0.6, 0.6)
+    spheres_block = calloc(40, sizeof(CompoundSphereDef))
+    spheres = spheres_block as CompoundSphereDef[]
+    i = 0
+    while i < 40 {
+        spheres[i] = compound.compound_sphere_def(manifold.sphere(math.vec3((i % 8) as float * 2.0 - 7.0, 2.0, (i / 8) as float * 2.0 - 4.0), 0.5),
+                                                  material.default_surface_material())
+        i = i + 1
+    }
+    cdef = compound.compound_def()
+    cdef.spheres = spheres_block
+    cdef.sphere_count = 40
+    baked = compound.create_compound(&cdef)
+    bdef.position = math.vec3(10.0, 1.0, 0.0)
+    compound_body = dynamics.create_body(created, &bdef)
+    dynamics.create_compound_shape(compound_body, &sdef, baked)
+    i = 0
+    while i < 30 {
+        bdef.position = math.vec3((i % 10) as float * 6.0 - 27.0, 3.0, (i / 10) as float * 6.0 - 6.0)
+        b = dynamics.create_body(created, &bdef)
+        dynamics.create_hull_shape(b, &sdef, box)
+        i = i + 1
+    }
+
+    // The answers, cast serially.
+    g_answers = basics.alloc(3 * QUERIES * 8)
+    answers = g_answers as float[]
+    block = calloc(1, 64)
+    hits = 0
+    i = 0
+    while i < QUERIES {
+        answers[3 * i] = ray_answer(i)
+        answers[3 * i + 1] = cast_answer(i, block)
+        answers[3 * i + 2] = overlap_answer(i, block)
+        if answers[3 * i] >= 0.0 { hits = hits + 1 }
+        i = i + 1
+    }
+    free(block)
+    ensure("the serial rays hit the world (${hits})", hits > QUERIES / 3)
+
+    // The same queries from four threads at once.
+    t = 0
+    while t < THREADS {
+        worker.run_detached(| _c: ptr | { thread_queries() })
+        t = t + 1
+    }
+    while native.atomic_load((&g_done) as ptr) < THREADS { native.yield_thread() }
+    ensure("${THREADS} threads at once get the serial answers (${native.atomic_load((&g_mismatches) as ptr)} of ${THREADS * ROUNDS * QUERIES * 3} differ)",
+           native.atomic_load((&g_mismatches) as ptr) == 0)
+
+    // Threads that come and go give their slots back: a hundred, one after
+    // another, each holding a slot while it runs.
+    n = 0
+    while n < 100 {
+        worker.run_detached(| _c: ptr | { short_thread() })
+        while native.atomic_load((&g_short_done) as ptr) < n + 1 { native.yield_thread() }
+        n = n + 1
+    }
+    // The last thread may still be exiting; its slot comes back when it has.
+    free_run = 0 - 1
+    tries = 0
+    while free_run < 0 && tries < 100000 {
+        free_run = native.claim_slots(native.MAX_WORKERS - 4)
+        if free_run < 0 { native.yield_thread() }
+        tries = tries + 1
+    }
+    ensure("a hundred threads come and gone left their slots free", free_run >= 0)
+    if free_run >= 0 { native.release_slots(free_run, native.MAX_WORKERS - 4) }
+
+    dynamics.destroy_world(created)
+    compound.destroy_compound(baked)
+    free(spheres_block)
+    hull.destroy_hull(box)
+    height_field.destroy_height_field(field)
+    mesh.destroy_mesh(wave)
+    basics.free_bytes(g_answers, 3 * QUERIES * 8)
+    println("threads: ${checks} checks")
+    if failures == 0 {
+        println("threads: all checks passed")
+    } else {
+        println("threads: ${failures} failure(s)")
+        exit(1)
+    }
+}

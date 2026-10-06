@@ -8,7 +8,7 @@
 @source("aephysics_native.c")
 @c_include("aephysics_inline.h")
 exports (
-    MAX_WORKERS, worker_index, set_worker_index, yield_thread, pause, processor_count, scratch,
+    MAX_WORKERS, worker_index, set_worker_index, claim_slots, release_slots, yield_thread, pause, processor_count, scratch,
     atomic_load, atomic_store, atomic_add, atomic_or, atomic_cas,
     semaphore_new, semaphore_free, semaphore_wait, semaphore_signal,
     name_copy, name_text, name_free, prefetch, load_word, load_u16
@@ -20,6 +20,8 @@ const MAX_WORKERS = 64
 
 extern aephysics_worker_index() -> int
 extern aephysics_set_worker_index(index: int)
+extern aephysics_claim_slots(count: int) -> int
+extern aephysics_release_slots(start: int, count: int)
 extern aephysics_yield()
 extern aephysics_processor_count() -> int
 extern aephysics_pause() @c_import
@@ -56,11 +58,18 @@ name_copy(s: string) -> ptr { return aephysics_name_copy(s) }
 name_text(name: ptr) -> string { return aephysics_name_text(name) }
 name_free(name: ptr) { if name != null { free(name) } }
 
-// The worker the calling thread is running as: 0 on the main thread
-// outside a task, the task's worker inside one. Every module's scratch
-// is a block per worker chosen by this.
+// The worker slot the calling thread is running as: the task's inside a
+// world's step, else the slot the thread claimed the first time it asked
+// (given back when it exits). Every module's scratch is a block per slot
+// chosen by this, so threads querying a world at once never share one.
 worker_index() -> int { return aephysics_worker_index() }
 set_worker_index(index: int) { aephysics_set_worker_index(index) }
+
+// A run of `count` worker slots claimed (the first, or -1 when none is
+// free), and given back: the slots threads and worlds hold, so no two
+// running at once choose the same scratch.
+claim_slots(count: int) -> int { return aephysics_claim_slots(count) }
+release_slots(start: int, count: int) { aephysics_release_slots(start, count) }
 yield_thread() { aephysics_yield() }
 pause() { aephysics_pause() }
 processor_count() -> int { return aephysics_processor_count() }

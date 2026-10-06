@@ -132,6 +132,17 @@ takes a game's task callbacks, so an engine runs its crowd, its
 weather and its physics on one pool. [What the workers buy, against
 the reference's own scaling](bench/RESULTS.md#parallel).
 
+A world's queries may be called from any thread at once, as the
+reference's may (but not while that world steps). Every module keeps
+its scratch per worker slot, where the reference keeps it on each
+thread's stack, and every running thread holds a slot of its own: a
+world's workers hold the world's, and any other thread claims one the
+first time it asks and gives it back when it exits (64 in all, the
+reference's own cap on workers). `test_threads.ae` casts rays and
+spheres and overlaps boxes from four threads at once against a mesh, a
+height field, a compound and hulls, and checks every answer against the
+serial one.
+
 Beyond the modules' own tests, the reference's scene tests run on the
 world as a whole: `test_mover_world.ae` (the mover through a world:
 which material a plane came from, for meshes, compounds and convex

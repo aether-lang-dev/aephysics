@@ -50,18 +50,69 @@ const char *aephysics_name_text(const void *name) { return name != NULL ? (const
 
 // --- threads --------------------------------------------------------------------------------------------------
 
-// Which worker the calling thread is, set by the task running on it: the
-// per-worker scratch every module keeps is chosen by this. The main
-// thread is worker 0 until a task says otherwise.
+// --- worker slots ---------------------------------------------------------------------------------------------
+
+// The worker slots a program's threads and worlds hold, a bit each, and
+// MAX_WORKERS (64) of them: every module keeps a scratch block per slot,
+// chosen by the calling thread's index, so two threads running at once
+// must never hold the same one. A world claims a run of its worker count
+// when made and gives it back when destroyed; a thread that is not one of
+// a world's workers (the main thread, a host's own threads) claims one
+// the first time it asks for its index, and gives it back when it exits.
+// The reference keeps the same scratch on each thread's stack, which is
+// what makes its queries safe from any thread; this is that, by slot.
+static volatile uint64_t g_slot_mask = 0;
+
+// The first slot of a free run of `count`, claimed; -1 when there is none.
+int aephysics_claim_slots(int count)
+{
+    if (count < 1 || count > 64) return -1;
+    uint64_t run = count == 64 ? ~(uint64_t)0 : (((uint64_t)1 << count) - 1);
+    for (;;) {
+        uint64_t mask = __atomic_load_n(&g_slot_mask, __ATOMIC_SEQ_CST);
+        int start = -1;
+        for (int i = 0; i + count <= 64; ++i) {
+            if ((mask & (run << i)) == 0) {
+                start = i;
+                break;
+            }
+        }
+        if (start < 0) return -1;
+        if (__atomic_compare_exchange_n(&g_slot_mask, &mask, mask | (run << start), 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) return start;
+    }
+}
+
+void aephysics_release_slots(int start, int count)
+{
+    if (start < 0 || count < 1 || start + count > 64) return;
+    uint64_t run = count == 64 ? ~(uint64_t)0 : (((uint64_t)1 << count) - 1);
+    __atomic_fetch_and(&g_slot_mask, ~(run << start), __ATOMIC_SEQ_CST);
+}
+
+// --- threads --------------------------------------------------------------------------------------------------
+
+// Which worker the calling thread is: the slot it claimed, or the one a
+// task running on it set (a world's step and its tasks run in the world's
+// own slots). Kept as the index plus one, so a thread that has not asked
+// yet reads zero and claims a slot of its own. When every slot is held a
+// thread shares slot 0, as every thread did before slots were claimed:
+// the reference caps its workers at 64 the same way (B3_MAX_WORKERS).
 //
 // On Windows, MinGW's gcc builds _Thread_local as emulated TLS: every read
 // is a call to __emutls_get_address, and every scratch block of every
 // module is chosen through this read, many times a query. A native TLS
-// slot (TlsAlloc) reads the thread's own slot instead; a new thread's
-// slot reads 0, worker 0, as the thread-local did. Elsewhere the
-// compiler's TLS is native already.
+// slot (TlsAlloc) reads the thread's own slot instead, and a fiber-local
+// slot (FlsAlloc) gives the claimed worker slot back when the thread
+// exits. Elsewhere the compiler's TLS is native already, and a pthread
+// key's destructor gives the slot back.
 #ifdef _WIN32
 static DWORD g_worker_slot = TLS_OUT_OF_INDEXES;
+static DWORD g_owned_slot = FLS_OUT_OF_INDEXES;
+
+static void WINAPI release_owned_slot(void *value)
+{
+    if (value != NULL) aephysics_release_slots((int)((intptr_t)value - 1), 1);
+}
 
 static DWORD worker_slot(void)
 {
@@ -76,13 +127,73 @@ static DWORD worker_slot(void)
     return made;
 }
 
-int aephysics_worker_index(void) { return (int)(intptr_t)TlsGetValue(worker_slot()); }
-void aephysics_set_worker_index(int index) { TlsSetValue(worker_slot(), (LPVOID)(intptr_t)index); }
-#else
-static _Thread_local int g_worker_index = 0;
+static DWORD owned_slot(void)
+{
+    DWORD slot = g_owned_slot;
+    if (slot != FLS_OUT_OF_INDEXES) return slot;
+    DWORD made = FlsAlloc(release_owned_slot);
+    LONG raced = InterlockedCompareExchange((volatile LONG *)&g_owned_slot, (LONG)made, (LONG)FLS_OUT_OF_INDEXES);
+    if (raced != (LONG)FLS_OUT_OF_INDEXES) {
+        FlsFree(made);
+        return (DWORD)raced;
+    }
+    return made;
+}
 
-int aephysics_worker_index(void) { return g_worker_index; }
-void aephysics_set_worker_index(int index) { g_worker_index = index; }
+static int claim_thread_slot(void)
+{
+    int index = aephysics_claim_slots(1);
+    if (index < 0) {
+        index = 0;
+    } else {
+        FlsSetValue(owned_slot(), (void *)(intptr_t)(index + 1));
+    }
+    TlsSetValue(worker_slot(), (LPVOID)(intptr_t)(index + 1));
+    return index;
+}
+
+int aephysics_worker_index(void)
+{
+    intptr_t stored = (intptr_t)TlsGetValue(worker_slot());
+    if (stored != 0) return (int)(stored - 1);
+    return claim_thread_slot();
+}
+
+void aephysics_set_worker_index(int index) { TlsSetValue(worker_slot(), (LPVOID)(intptr_t)(index + 1)); }
+#else
+#include <pthread.h>
+static _Thread_local int g_worker_index = 0;   // the index plus one; zero until claimed or set
+static pthread_key_t g_owned_key;
+static pthread_once_t g_owned_once = PTHREAD_ONCE_INIT;
+
+static void release_owned_slot(void *value)
+{
+    if (value != NULL) aephysics_release_slots((int)((intptr_t)value - 1), 1);
+}
+
+static void make_owned_key(void) { pthread_key_create(&g_owned_key, release_owned_slot); }
+
+static int claim_thread_slot(void)
+{
+    int index = aephysics_claim_slots(1);
+    if (index < 0) {
+        index = 0;
+    } else {
+        pthread_once(&g_owned_once, make_owned_key);
+        pthread_setspecific(g_owned_key, (void *)(intptr_t)(index + 1));
+    }
+    g_worker_index = index + 1;
+    return index;
+}
+
+int aephysics_worker_index(void)
+{
+    int stored = g_worker_index;
+    if (stored != 0) return stored - 1;
+    return claim_thread_slot();
+}
+
+void aephysics_set_worker_index(int index) { g_worker_index = index + 1; }
 #endif
 
 // The calling thread gives up the rest of its slice, for a spin that waits on another worker.

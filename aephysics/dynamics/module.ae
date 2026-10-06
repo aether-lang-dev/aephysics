@@ -4666,43 +4666,11 @@ task_context(w: *World) -> *TaskContext {
 
 // --- worker slots ------------------------------------------------------
 
-// The worker slots the worlds hold, a bit each (MAX_WORKERS is 64). A world
-// claims a run of its worker count when made and gives it back when
-// destroyed; worlds are made and destroyed on one thread at a time.
-var g_worker_slots: long = 0
-
-worker_slot_bit(slot: int) -> long { return (1 as long) << (slot as long) }
-
-// The first slot of a free run of count, claimed; -1 when there is none.
-claim_worker_slots(count: int) -> int {
-    start = 0
-    while start + count <= native.MAX_WORKERS {
-        free = true
-        k = 0
-        while k < count && free {
-            if (g_worker_slots & worker_slot_bit(start + k)) != (0 as long) { free = false }
-            k = k + 1
-        }
-        if free {
-            k = 0
-            while k < count {
-                g_worker_slots = g_worker_slots | worker_slot_bit(start + k)
-                k = k + 1
-            }
-            return start
-        }
-        start = start + 1
-    }
-    return 0 - 1
-}
-
-release_worker_slots(start: int, count: int) {
-    k = 0
-    while k < count {
-        g_worker_slots = g_worker_slots & (worker_slot_bit(start + k) ^ ((0 as long) - (1 as long)))
-        k = k + 1
-    }
-}
+// A world's run of worker slots, from the same mask the threads claim
+// theirs from (aephysics.native): a world's workers and the program's
+// other threads never share scratch, whichever threads they run on.
+claim_worker_slots(count: int) -> int { return native.claim_slots(count) }
+release_worker_slots(start: int, count: int) { native.release_slots(start, count) }
 
 // The calling thread made the world's first worker for a pass over it (a
 // step, the collide pass, the solve); the index it had before, to give back.
