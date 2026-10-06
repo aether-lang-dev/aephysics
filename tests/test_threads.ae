@@ -5,7 +5,10 @@
 // spheres and overlap boxes against a world of a mesh, a height field, a
 // compound and hulls, round after round, and every answer must be the one
 // cast serially first. Then threads that come and go give their slots
-// back, so a program that makes threads all day never runs out.
+// back, so a program that makes threads all day never runs out. And a
+// query's visitor may run more queries on its own thread (an overlap
+// checking each find's line of sight): the outer query still sees all it
+// would alone, as each of the reference's queries has its own stack.
 import std.string
 import std.worker
 import aephysics.math
@@ -121,6 +124,94 @@ short_thread() {
     native.atomic_add((&g_short_done) as ptr, 1)
 }
 
+// --- queries within queries ------------------------------------------------
+
+var g_nest = false
+var g_outer_visits = 0
+
+// Each find of the outer query runs a ray and an overlap of its own.
+nested_queries() {
+    physics_world.cast_ray_closest(world_id(), math.vec3(3.0, 10.0, 1.0), math.vec3(0.0, 0.0 - 20.0, 0.0), shape.default_query_filter())
+    physics_world.overlap_aabb(world_id(), AABB { lower: math.vec3(0.0 - 50.0, 0.0 - 5.0, 0.0 - 50.0), upper: math.vec3(50.0, 8.0, 50.0) },
+                               shape.default_query_filter(), count_nothing, null)
+}
+
+count_nothing(shape_id: ShapeId, context: ptr) -> bool { return true }
+
+outer_overlap_visit(shape_id: ShapeId, context: ptr) -> bool {
+    g_outer_visits = g_outer_visits + 1
+    if g_nest { nested_queries() }
+    return true
+}
+
+// A ray that keeps every hit (the visitor returns 1) and counts them.
+outer_ray_visit(shape_id: ShapeId, point: Vec3, normal: Vec3, fraction: float, user_material_id: long, triangle_index: int, child_index: int, context: ptr) -> float {
+    g_outer_visits = g_outer_visits + 1
+    if g_nest { nested_queries() }
+    return 1.0
+}
+
+var g_mesh: ptr = null
+var g_compound: ptr = null
+outer_mesh_visit(a: Vec3, b: Vec3, c: Vec3, triangle_index: int, context: ptr) -> bool {
+    g_outer_visits = g_outer_visits + 1
+    if g_nest { mesh.ray_cast_mesh(mesh.mesh(g_mesh as *MeshData, math.vec3_one()), math.vec3(1.0, 5.0, 1.0), math.vec3(0.0, 0.0 - 10.0, 0.0), 1.0) }
+    return true
+}
+
+outer_compound_visit(c: *CompoundData, child_index: int, context: ptr) -> bool {
+    g_outer_visits = g_outer_visits + 1
+    if g_nest { compound.ray_cast_compound(g_compound as *CompoundData, math.vec3(0.0, 5.0, 0.0), math.vec3(0.0, 0.0 - 10.0, 0.0), 1.0) }
+    return true
+}
+
+// The visits of an outer query, run plain and then with queries nested in it.
+outer_overlap(nest: bool) -> int {
+    g_nest = nest
+    g_outer_visits = 0
+    physics_world.overlap_aabb(world_id(), AABB { lower: math.vec3(0.0 - 50.0, 0.0 - 5.0, 0.0 - 50.0), upper: math.vec3(50.0, 8.0, 50.0) },
+                               shape.default_query_filter(), outer_overlap_visit, null)
+    return g_outer_visits
+}
+
+outer_ray(nest: bool) -> int {
+    g_nest = nest
+    g_outer_visits = 0
+    physics_world.cast_ray(world_id(), math.vec3(0.0 - 40.0, 3.0, 0.0), math.vec3(80.0, 0.0, 0.0), shape.default_query_filter(), outer_ray_visit, null)
+    return g_outer_visits
+}
+
+outer_mesh(nest: bool) -> int {
+    g_nest = nest
+    g_outer_visits = 0
+    mesh.query_mesh(mesh.mesh(g_mesh as *MeshData, math.vec3_one()), AABB { lower: math.vec3(0.0 - 5.0, 0.0 - 2.0, 0.0 - 5.0), upper: math.vec3(5.0, 2.0, 5.0) },
+                    outer_mesh_visit, null)
+    return g_outer_visits
+}
+
+outer_compound(nest: bool) -> int {
+    g_nest = nest
+    g_outer_visits = 0
+    compound.query_compound(g_compound as *CompoundData, AABB { lower: math.vec3(0.0 - 10.0, 0.0 - 1.0, 0.0 - 10.0), upper: math.vec3(10.0, 5.0, 10.0) },
+                            outer_compound_visit, null)
+    return g_outer_visits
+}
+
+test_nested_queries() {
+    plain = outer_overlap(false)
+    nested = outer_overlap(true)
+    ensure("an overlap with queries in its visitor finds all it finds alone (${nested} of ${plain})", plain > 30 && nested == plain)
+    plain = outer_ray(false)
+    nested = outer_ray(true)
+    ensure("a ray with queries in its visitor hits all it hits alone (${nested} of ${plain})", plain > 3 && nested == plain)
+    plain = outer_mesh(false)
+    nested = outer_mesh(true)
+    ensure("a mesh query with mesh rays in its visitor finds all its triangles (${nested} of ${plain})", plain > 10 && nested == plain)
+    plain = outer_compound(false)
+    nested = outer_compound(true)
+    ensure("a compound query with compound rays in its visitor finds all its children (${nested} of ${plain})", plain > 10 && nested == plain)
+}
+
 main() {
     wdef = dynamics.default_world_def()
     created = dynamics.create_world(&wdef)
@@ -176,6 +267,9 @@ main() {
     }
     free(block)
     ensure("the serial rays hit the world (${hits})", hits > QUERIES / 3)
+    g_mesh = wave as ptr
+    g_compound = baked as ptr
+    test_nested_queries()
 
     // The same queries from four threads at once.
     t = 0

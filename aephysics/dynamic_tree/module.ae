@@ -26,7 +26,7 @@ import aephysics.basics
 
 exports (
     DynamicTreeNode, TreeProxy, TreeStats, DynamicTree, RayCastInput, BoxCastInput,
-    NULL_INDEX, default_category_bits, default_mask_bits, TREE_STACK_SIZE, query_stack_bytes, query_dist_bytes,
+    NULL_INDEX, default_category_bits, default_mask_bits, TREE_STACK_SIZE, query_stack_bytes, query_dist_bytes, tree_stacks_bytes,
     LEAF_NODE, MOVED_NODE, NODE_INDEX_MASK, EMPTY_NODE, ROOT_NODE,
     is_leaf, is_node_moved, is_empty_node, left_child, proxy_id_of, node_height,
     tree_create, tree_destroy, tree_create_proxy, tree_destroy_proxy, tree_move_proxy,
@@ -283,7 +283,7 @@ tree_create(proxy_capacity: int) -> DynamicTree {
     proxies[capacity - 1].node = NULL_INDEX
     proxies[capacity - 1].next = NULL_INDEX
 
-    t.stack = basics.alloc(native.MAX_WORKERS * (TREE_STACK_SIZE * REBUILD_ITEM_INTS * 4))
+    t.stack = basics.alloc(tree_stacks_bytes())
     t.stack_dist = basics.alloc(native.MAX_WORKERS * (TREE_STACK_SIZE * 8))
     t.copy_stack = basics.alloc(TREE_STACK_SIZE * COPY_ITEM_INTS * 4)
     return t
@@ -294,6 +294,11 @@ tree_create(proxy_capacity: int) -> DynamicTree {
 // One worker's share of a tree's traversal stacks: a tree that keeps them
 // outside itself (a compound's baked tree) allocates MAX_WORKERS of these.
 query_stack_bytes() -> int { return TREE_STACK_SIZE * REBUILD_ITEM_INTS * 4 }
+
+// A tree's stack block: MAX_WORKERS slots' stacks, then the slots'
+// traversal depths (one int each) the queries count nesting by.
+tree_stacks_bytes() -> int { return native.MAX_WORKERS * (query_stack_bytes() + 4) }
+stack_depths(t: *DynamicTree) -> ptr { return t.stack + native.MAX_WORKERS * query_stack_bytes() }
 query_dist_bytes() -> int { return TREE_STACK_SIZE * 8 }
 
 query_stack(t: *DynamicTree) -> ptr { return native.scratch(t.stack, TREE_STACK_SIZE * REBUILD_ITEM_INTS * 4) }
@@ -307,7 +312,7 @@ tree_destroy(t: *DynamicTree) {
     basics.free_bytes(t.leaf_indices, t.rebuild_capacity * 4)
     basics.free_bytes(t.leaf_nodes, t.rebuild_capacity * sizeof(DynamicTreeNode))
     basics.free_bytes(t.leaf_centers, t.rebuild_capacity * sizeof(Vec3))
-    basics.free_bytes(t.stack, native.MAX_WORKERS * (TREE_STACK_SIZE * REBUILD_ITEM_INTS * 4))
+    basics.free_bytes(t.stack, tree_stacks_bytes())
     basics.free_bytes(t.stack_dist, native.MAX_WORKERS * (TREE_STACK_SIZE * 8))
     basics.free_bytes(t.copy_stack, TREE_STACK_SIZE * COPY_ITEM_INTS * 4)
     memset(t as ptr, 0, sizeof(DynamicTree))
@@ -812,15 +817,49 @@ tree_validate_no_moved(t: *DynamicTree) -> bool {
 
 // --- queries -------------------------------------------------------------------
 
+// A query's stacks: the slot's when the query is the calling thread's
+// outermost traversal, else blocks of its own for its length, so a
+// visitor may run another query on the same thread (the reference's
+// stacks are on the C stack, one a call). Nesting is rare; the outermost
+// query costs a counter.
+struct TraversalStacks {
+    stack: ptr          // int[TREE_STACK_SIZE] at the least
+    dists: ptr          // float[TREE_STACK_SIZE]
+    depths: ptr         // the tree's traversal depths, one a slot
+    owned: bool         // allocated for a nested traversal, freed at its end
+}
+
+begin_traversal(t: *DynamicTree) -> TraversalStacks {
+    depths = stack_depths(t)
+    if native.enter_traversal(depths) == 0 { return TraversalStacks { stack: query_stack(t), dists: query_dists(t), depths: depths, owned: false } }
+    return TraversalStacks { stack: basics.alloc(TREE_STACK_SIZE * 4), dists: basics.alloc(TREE_STACK_SIZE * 8), depths: depths, owned: true }
+}
+
+end_traversal(s: TraversalStacks) {
+    if s.owned {
+        basics.free_bytes(s.stack, TREE_STACK_SIZE * 4)
+        basics.free_bytes(s.dists, TREE_STACK_SIZE * 8)
+    }
+    native.leave_traversal(s.depths)
+}
+
 // Every proxy whose box overlaps the query box, through the visitor, which
 // returns false to stop.
 tree_query(t: *DynamicTree, box: AABB, mask_bits: long, require_all: bool,
            visitor: fn(int, long, ptr) -> bool, context: ptr) -> TreeStats {
+    stacks = begin_traversal(t)
+    result = tree_query_on(t, stacks.stack, box, mask_bits, require_all, visitor, context)
+    end_traversal(stacks)
+    return result
+}
+
+tree_query_on(t: *DynamicTree, stack_block: ptr, box: AABB, mask_bits: long, require_all: bool,
+              visitor: fn(int, long, ptr) -> bool, context: ptr) -> TreeStats {
     result = TreeStats { node_visits: 0, leaf_visits: 0 }
     if t.proxy_count == 0 { return result }
     nodes = t.nodes as DynamicTreeNode[]
     proxies = t.proxies as TreeProxy[]
-    stack = query_stack(t) as int[]
+    stack = stack_block as int[]
     stack_count = 0
     stack[stack_count] = root_pair(nodes)
     stack_count = stack_count + 1
@@ -874,12 +913,21 @@ push_closest(stack: int[], dists: float[], count: int, index: int, dist: float) 
 tree_query_closest(t: *DynamicTree, point: Vec3, mask_bits: long, require_all: bool,
                    visitor: fn(float, int, long, ptr) -> float, context: ptr,
                    min_distance_sqr: float[]) -> TreeStats {
+    stacks = begin_traversal(t)
+    result = tree_query_closest_on(t, stacks.stack, stacks.dists, point, mask_bits, require_all, visitor, context, min_distance_sqr)
+    end_traversal(stacks)
+    return result
+}
+
+tree_query_closest_on(t: *DynamicTree, stack_block: ptr, dists_block: ptr, point: Vec3, mask_bits: long, require_all: bool,
+                      visitor: fn(float, int, long, ptr) -> float, context: ptr,
+                      min_distance_sqr: float[]) -> TreeStats {
     result = TreeStats { node_visits: 0, leaf_visits: 0 }
     if t.proxy_count == 0 { return result }
     nodes = t.nodes as DynamicTreeNode[]
     proxies = t.proxies as TreeProxy[]
-    stack = query_stack(t) as int[]
-    dists = query_dists(t) as float[]
+    stack = stack_block as int[]
+    dists = dists_block as float[]
     min_sqr = min_distance_sqr[0]
     stack_count = 0
 
@@ -963,11 +1011,19 @@ test_bounds_ray_overlap(lower: Vec3, upper: Vec3, ray_start: Vec3, ray_delta: Ve
 // anything negative to skip. Roughly k log n in the hits k.
 tree_ray_cast(t: *DynamicTree, input: *RayCastInput, mask_bits: long, require_all: bool,
               visitor: fn(*RayCastInput, int, long, ptr) -> float, context: ptr) -> TreeStats {
+    stacks = begin_traversal(t)
+    result = tree_ray_cast_on(t, stacks.stack, input, mask_bits, require_all, visitor, context)
+    end_traversal(stacks)
+    return result
+}
+
+tree_ray_cast_on(t: *DynamicTree, stack_block: ptr, input: *RayCastInput, mask_bits: long, require_all: bool,
+                 visitor: fn(*RayCastInput, int, long, ptr) -> float, context: ptr) -> TreeStats {
     result = TreeStats { node_visits: 0, leaf_visits: 0 }
     if t.proxy_count == 0 { return result }
     nodes = t.nodes as DynamicTreeNode[]
     proxies = t.proxies as TreeProxy[]
-    stack = query_stack(t) as int[]
+    stack = stack_block as int[]
 
     p1 = input.origin
     d = input.translation
@@ -1038,11 +1094,19 @@ tree_ray_cast(t: *DynamicTree, input: *RayCastInput, mask_bits: long, require_al
 // the cast box's extents and the segment is the box centre's path.
 tree_box_cast(t: *DynamicTree, input: *BoxCastInput, mask_bits: long, require_all: bool,
               visitor: fn(*BoxCastInput, int, long, ptr) -> float, context: ptr) -> TreeStats {
+    stacks = begin_traversal(t)
+    result = tree_box_cast_on(t, stacks.stack, input, mask_bits, require_all, visitor, context)
+    end_traversal(stacks)
+    return result
+}
+
+tree_box_cast_on(t: *DynamicTree, stack_block: ptr, input: *BoxCastInput, mask_bits: long, require_all: bool,
+                 visitor: fn(*BoxCastInput, int, long, ptr) -> float, context: ptr) -> TreeStats {
     result = TreeStats { node_visits: 0, leaf_visits: 0 }
     if t.proxy_count == 0 { return result }
     nodes = t.nodes as DynamicTreeNode[]
     proxies = t.proxies as TreeProxy[]
-    stack = query_stack(t) as int[]
+    stack = stack_block as int[]
 
     origin_box = input.box
     p1 = math.aabb_center(origin_box)

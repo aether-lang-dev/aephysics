@@ -159,8 +159,24 @@ axis_of(v: Vec3, axis: int) -> float {
 
 // --- scratch ---------------------------------------------------------------------
 
-var g_stack: ptr = null       // int[MESH_STACK_SIZE], the traversal stack
+var g_stack: ptr = null       // int[MESH_STACK_SIZE] a slot, the traversal stacks, then int[MAX_WORKERS] their depths
 traversal_stack() -> ptr { return native.scratch(g_stack, MESH_STACK_SIZE * 4) }
+stack_depths() -> ptr { return g_stack + native.MAX_WORKERS * (MESH_STACK_SIZE * 4) }
+
+// A traversal's stack: the slot's when it is the calling thread's
+// outermost traversal of a mesh, else one of its own for its length, so
+// a query's visitor may run another mesh query on the same thread (the
+// reference's stack is on the C stack).
+begin_traversal() -> ptr {
+    scratch_ready()
+    if native.enter_traversal(stack_depths()) == 0 { return traversal_stack() }
+    return basics.alloc(MESH_STACK_SIZE * 4)
+}
+
+end_traversal(stack: ptr) {
+    if stack != traversal_stack() { basics.free_bytes(stack, MESH_STACK_SIZE * 4) }
+    native.leave_traversal(stack_depths())
+}
 var g_triangle: ptr = null    // Vec3[3], a triangle as a GJK proxy
 triangle_points() -> ptr { return native.scratch(g_triangle, 3 * sizeof(Vec3)) }
 var g_local: ptr = null       // Vec3[MAX_SHAPE_CAST_POINTS], a proxy brought into the mesh's frame
@@ -168,7 +184,7 @@ local_points() -> ptr { return native.scratch(g_local, MAX_SHAPE_CAST_POINTS * s
 
 scratch_ready() {
     if g_stack == null {
-        g_stack = basics.alloc(native.MAX_WORKERS * (MESH_STACK_SIZE * 4))
+        g_stack = basics.alloc(native.MAX_WORKERS * (MESH_STACK_SIZE * 4 + 4))
         g_triangle = basics.alloc(native.MAX_WORKERS * (3 * sizeof(Vec3)))
         g_local = basics.alloc(native.MAX_WORKERS * (MAX_SHAPE_CAST_POINTS * sizeof(Vec3)))
     }
@@ -1317,6 +1333,13 @@ scaled_triangle(m: *MeshData, index: int, scale: Vec3, ccw: bool, out: Vec3[]) {
 // Whether a proxy in world space comes within the overlap slop of any
 // triangle of the mesh under its transform and scale.
 overlap_mesh(sh: Mesh, shape_transform: Transform, proxy: ShapeProxy) -> bool {
+    stack = begin_traversal()
+    result = overlap_mesh_on(stack, sh, shape_transform, proxy)
+    end_traversal(stack)
+    return result
+}
+
+overlap_mesh_on(stack_block: ptr, sh: Mesh, shape_transform: Transform, proxy: ShapeProxy) -> bool {
     scratch_ready()
     local_proxy = make_local_proxy(proxy, shape_transform, local_points())
     bounds = inverse_scaled_bounds(compute_proxy_aabb(local_proxy), sh.scale)
@@ -1329,7 +1352,7 @@ overlap_mesh(sh: Mesh, shape_transform: Transform, proxy: ShapeProxy) -> bool {
     triangles = mesh_triangles(sh.data)
     vertices = mesh_vertices(sh.data)
     tri = triangle_points() as Vec3[]
-    stack = traversal_stack() as int[]
+    stack = stack_block as int[]
     count = 0
     index = 0
     while true {
@@ -1374,6 +1397,13 @@ compute_mesh_aabb(m: *MeshData, t: Transform, scale: Vec3) -> AABB {
 // The nearest front-facing triangle along a ray, front to back through
 // the tree; the triangle and material indices on the hit.
 ray_cast_mesh(sh: Mesh, origin: Vec3, translation: Vec3, max_fraction: float) -> CastOutput {
+    stack = begin_traversal()
+    result = ray_cast_mesh_on(stack, sh, origin, translation, max_fraction)
+    end_traversal(stack)
+    return result
+}
+
+ray_cast_mesh_on(stack_block: ptr, sh: Mesh, origin: Vec3, translation: Vec3, max_fraction: float) -> CastOutput {
     m = sh.data
     scale = sh.scale
     best = distance.empty_cast_output()
@@ -1384,7 +1414,7 @@ ray_cast_mesh(sh: Mesh, origin: Vec3, translation: Vec3, max_fraction: float) ->
     ray_delta = math.mul(inv, translation)
     ray_inv = math.ray_inverse(ray_delta)
     scratch_ready()
-    stack = traversal_stack() as int[]
+    stack = stack_block as int[]
     tri = triangle_points() as Vec3[]
     nodes = mesh_nodes(m)
     materials = mesh_material_indices(m)
@@ -1437,6 +1467,13 @@ ray_cast_mesh(sh: Mesh, origin: Vec3, translation: Vec3, max_fraction: float) ->
 // A proxy swept through the mesh: the nearest hit among the front-facing
 // triangles its swept box reaches.
 shape_cast_mesh(sh: Mesh, proxy: ShapeProxy, translation: Vec3, max_fraction: float, can_encroach: bool) -> CastOutput {
+    stack = begin_traversal()
+    result = shape_cast_mesh_on(stack, sh, proxy, translation, max_fraction, can_encroach)
+    end_traversal(stack)
+    return result
+}
+
+shape_cast_mesh_on(stack_block: ptr, sh: Mesh, proxy: ShapeProxy, translation: Vec3, max_fraction: float, can_encroach: bool) -> CastOutput {
     m = sh.data
     scale = sh.scale
     best = distance.empty_cast_output()
@@ -1456,7 +1493,7 @@ shape_cast_mesh(sh: Mesh, proxy: ShapeProxy, translation: Vec3, max_fraction: fl
     inv_inv = math.ray_inverse(inv_delta)
     inv_extent = math.mul(abs_inv, extents)
     scratch_ready()
-    stack = traversal_stack() as int[]
+    stack = stack_block as int[]
     tri = triangle_points() as Vec3[]
     nodes = mesh_nodes(m)
     materials = mesh_material_indices(m)
@@ -1565,6 +1602,13 @@ collide_mover_and_hull(planes: PlaneResult[], h: *HullData, mover: Capsule) -> i
 // The planes of the front-facing triangles the mover's capsule is
 // within its radius of, up to the capacity; returns how many.
 collide_mover_and_mesh(planes: PlaneResult[], capacity: int, sh: Mesh, mover: Capsule) -> int {
+    stack = begin_traversal()
+    result = collide_mover_and_mesh_on(stack, planes, capacity, sh, mover)
+    end_traversal(stack)
+    return result
+}
+
+collide_mover_and_mesh_on(stack_block: ptr, planes: PlaneResult[], capacity: int, sh: Mesh, mover: Capsule) -> int {
     if capacity == 0 { return 0 }
     scratch_ready()
     input = DistanceInput { proxy_a: distance.shape_proxy(triangle_points(), 3, 0.0), proxy_b: distance.shape_proxy((&mover) as ptr, 2, 0.0),
@@ -1583,7 +1627,7 @@ collide_mover_and_mesh(planes: PlaneResult[], capacity: int, sh: Mesh, mover: Ca
     vertices = mesh_vertices(sh.data)
     materials = mesh_material_indices(sh.data)
     tri = triangle_points() as Vec3[]
-    stack = traversal_stack() as int[]
+    stack = stack_block as int[]
     count = 0
     index = 0
     plane_count = 0
@@ -1641,6 +1685,12 @@ collide_mover_and_mesh(planes: PlaneResult[], capacity: int, sh: Mesh, mover: Ca
 // scale), to the visitor, which returns false to stop. False positives
 // are possible.
 query_mesh(sh: Mesh, bounds: AABB, visitor: fn(Vec3, Vec3, Vec3, int, ptr) -> bool, context: ptr) {
+    stack = begin_traversal()
+    query_mesh_on(stack, sh, bounds, visitor, context)
+    end_traversal(stack)
+}
+
+query_mesh_on(stack_block: ptr, sh: Mesh, bounds: AABB, visitor: fn(Vec3, Vec3, Vec3, int, ptr) -> bool, context: ptr) {
     scale = sh.scale
     ccw = scale.x * scale.y * scale.z > 0.0
     inv_bounds = inverse_scaled_bounds(bounds, scale)
@@ -1650,7 +1700,7 @@ query_mesh(sh: Mesh, bounds: AABB, visitor: fn(Vec3, Vec3, Vec3, int, ptr) -> bo
     nodes = mesh_nodes(sh.data)
     triangles = mesh_triangles(sh.data)
     vertices = mesh_vertices(sh.data)
-    stack = traversal_stack() as int[]
+    stack = stack_block as int[]
     count = 0
     index = 0
     while true {
