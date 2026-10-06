@@ -207,6 +207,12 @@ limit_scales(base: *JointSim, ctx: *StepContext, c: float, use_bias: bool) -> Li
 // A joint id's sim when it is of the kind, else null.
 sim_of(id: JointId, kind: int) -> *JointSim { return dynamics.get_joint_sim_of_kind(id, kind) }
 
+// A setter's number: finite and not below zero (stiffness, damping,
+// maximum forces and torques, lengths). A NaN or an infinity, or a
+// negative one of these, leaves the joint as it was, as the reference
+// asserts at the same places (b3IsValidFloat).
+nonnegative(x: float) -> bool { return math.is_valid_float(x) && x >= 0.0 }
+
 // --- distance joint -----------------------------------------------------------------------------------------------
 
 // C = |pB - pA| - L along the axis u: K = mA + mB + (rA x u) iA (rA x u) + (rB x u) iB (rB x u).
@@ -383,6 +389,7 @@ get_distance_joint_force(w: *World, base: *JointSim) -> Vec3 {
 }
 
 distance_joint_set_length(id: JointId, length: float) {
+    if nonnegative(length) == false { return }
     base = sim_of(id, dynamics.JOINT_DISTANCE)
     if base == null { return }
     j = dynamics.distance_joint_of(base)
@@ -398,6 +405,7 @@ distance_joint_enable_limit(id: JointId, flag: bool) {
 }
 distance_joint_is_limit_enabled(id: JointId) -> bool { return dynamics.distance_joint_of(sim_of(id, dynamics.JOINT_DISTANCE)).enable_limit }
 distance_joint_set_length_range(id: JointId, min_length: float, max_length: float) {
+    if math.is_valid_float(min_length) == false || math.is_valid_float(max_length) == false { return }
     base = sim_of(id, dynamics.JOINT_DISTANCE)
     if base == null { return }
     j = dynamics.distance_joint_of(base)
@@ -425,6 +433,7 @@ distance_joint_enable_spring(id: JointId, flag: bool) {
 }
 distance_joint_is_spring_enabled(id: JointId) -> bool { return dynamics.distance_joint_of(sim_of(id, dynamics.JOINT_DISTANCE)).enable_spring }
 distance_joint_set_spring_force_range(id: JointId, lower: float, upper: float) {
+    if math.is_valid_float(lower) == false || math.is_valid_float(upper) == false { return }
     base = sim_of(id, dynamics.JOINT_DISTANCE)
     if base == null { return }
     j = dynamics.distance_joint_of(base)
@@ -434,10 +443,12 @@ distance_joint_set_spring_force_range(id: JointId, lower: float, upper: float) {
 distance_joint_get_lower_spring_force(id: JointId) -> float { return dynamics.distance_joint_of(sim_of(id, dynamics.JOINT_DISTANCE)).lower_spring_force }
 distance_joint_get_upper_spring_force(id: JointId) -> float { return dynamics.distance_joint_of(sim_of(id, dynamics.JOINT_DISTANCE)).upper_spring_force }
 distance_joint_set_spring_hertz(id: JointId, hertz: float) {
+    if nonnegative(hertz) == false { return }
     base = sim_of(id, dynamics.JOINT_DISTANCE)
     if base != null { dynamics.distance_joint_of(base).hertz = hertz }
 }
 distance_joint_set_spring_damping_ratio(id: JointId, ratio: float) {
+    if nonnegative(ratio) == false { return }
     base = sim_of(id, dynamics.JOINT_DISTANCE)
     if base != null { dynamics.distance_joint_of(base).damping_ratio = ratio }
 }
@@ -454,6 +465,7 @@ distance_joint_enable_motor(id: JointId, flag: bool) {
 }
 distance_joint_is_motor_enabled(id: JointId) -> bool { return dynamics.distance_joint_of(sim_of(id, dynamics.JOINT_DISTANCE)).enable_motor }
 distance_joint_set_motor_speed(id: JointId, speed: float) {
+    if math.is_valid_float(speed) == false { return }
     base = sim_of(id, dynamics.JOINT_DISTANCE)
     if base != null { dynamics.distance_joint_of(base).motor_speed = speed }
 }
@@ -464,6 +476,7 @@ distance_joint_get_motor_force(id: JointId) -> float {
     return dynamics.get_world(id.world0).inv_h * dynamics.distance_joint_of(base).motor_impulse
 }
 distance_joint_set_max_motor_force(id: JointId, force: float) {
+    if nonnegative(force) == false { return }
     base = sim_of(id, dynamics.JOINT_DISTANCE)
     if base != null { dynamics.distance_joint_of(base).max_motor_force = force }
 }
@@ -626,51 +639,61 @@ get_motor_joint_torque(w: *World, base: *JointSim) -> Vec3 {
 }
 
 motor_joint_set_linear_velocity(id: JointId, v: Vec3) {
+    if math.is_valid_vec3(v) == false { return }
     base = sim_of(id, dynamics.JOINT_MOTOR)
     if base != null { dynamics.motor_joint_of(base).linear_velocity = v }
 }
 motor_joint_get_linear_velocity(id: JointId) -> Vec3 { return dynamics.motor_joint_of(sim_of(id, dynamics.JOINT_MOTOR)).linear_velocity }
 motor_joint_set_angular_velocity(id: JointId, v: Vec3) {
+    if math.is_valid_vec3(v) == false { return }
     base = sim_of(id, dynamics.JOINT_MOTOR)
     if base != null { dynamics.motor_joint_of(base).angular_velocity = v }
 }
 motor_joint_get_angular_velocity(id: JointId) -> Vec3 { return dynamics.motor_joint_of(sim_of(id, dynamics.JOINT_MOTOR)).angular_velocity }
 motor_joint_set_max_velocity_torque(id: JointId, value: float) {
+    if nonnegative(value) == false { return }
     base = sim_of(id, dynamics.JOINT_MOTOR)
     if base != null { dynamics.motor_joint_of(base).max_velocity_torque = value }
 }
 motor_joint_get_max_velocity_torque(id: JointId) -> float { return dynamics.motor_joint_of(sim_of(id, dynamics.JOINT_MOTOR)).max_velocity_torque }
 motor_joint_set_max_velocity_force(id: JointId, value: float) {
+    if nonnegative(value) == false { return }
     base = sim_of(id, dynamics.JOINT_MOTOR)
     if base != null { dynamics.motor_joint_of(base).max_velocity_force = value }
 }
 motor_joint_get_max_velocity_force(id: JointId) -> float { return dynamics.motor_joint_of(sim_of(id, dynamics.JOINT_MOTOR)).max_velocity_force }
 motor_joint_set_linear_hertz(id: JointId, value: float) {
+    if nonnegative(value) == false { return }
     base = sim_of(id, dynamics.JOINT_MOTOR)
     if base != null { dynamics.motor_joint_of(base).linear_hertz = value }
 }
 motor_joint_get_linear_hertz(id: JointId) -> float { return dynamics.motor_joint_of(sim_of(id, dynamics.JOINT_MOTOR)).linear_hertz }
 motor_joint_set_linear_damping_ratio(id: JointId, value: float) {
+    if nonnegative(value) == false { return }
     base = sim_of(id, dynamics.JOINT_MOTOR)
     if base != null { dynamics.motor_joint_of(base).linear_damping_ratio = value }
 }
 motor_joint_get_linear_damping_ratio(id: JointId) -> float { return dynamics.motor_joint_of(sim_of(id, dynamics.JOINT_MOTOR)).linear_damping_ratio }
 motor_joint_set_angular_hertz(id: JointId, value: float) {
+    if nonnegative(value) == false { return }
     base = sim_of(id, dynamics.JOINT_MOTOR)
     if base != null { dynamics.motor_joint_of(base).angular_hertz = value }
 }
 motor_joint_get_angular_hertz(id: JointId) -> float { return dynamics.motor_joint_of(sim_of(id, dynamics.JOINT_MOTOR)).angular_hertz }
 motor_joint_set_angular_damping_ratio(id: JointId, value: float) {
+    if nonnegative(value) == false { return }
     base = sim_of(id, dynamics.JOINT_MOTOR)
     if base != null { dynamics.motor_joint_of(base).angular_damping_ratio = value }
 }
 motor_joint_get_angular_damping_ratio(id: JointId) -> float { return dynamics.motor_joint_of(sim_of(id, dynamics.JOINT_MOTOR)).angular_damping_ratio }
 motor_joint_set_max_spring_force(id: JointId, value: float) {
+    if nonnegative(value) == false { return }
     base = sim_of(id, dynamics.JOINT_MOTOR)
     if base != null { dynamics.motor_joint_of(base).max_spring_force = value }
 }
 motor_joint_get_max_spring_force(id: JointId) -> float { return dynamics.motor_joint_of(sim_of(id, dynamics.JOINT_MOTOR)).max_spring_force }
 motor_joint_set_max_spring_torque(id: JointId, value: float) {
+    if nonnegative(value) == false { return }
     base = sim_of(id, dynamics.JOINT_MOTOR)
     if base != null { dynamics.motor_joint_of(base).max_spring_torque = value }
 }
@@ -759,11 +782,13 @@ get_parallel_joint_torque(w: *World, base: *JointSim) -> Vec3 {
 }
 
 parallel_joint_set_spring_hertz(id: JointId, value: float) {
+    if nonnegative(value) == false { return }
     base = sim_of(id, dynamics.JOINT_PARALLEL)
     if base != null { dynamics.parallel_joint_of(base).hertz = value }
 }
 parallel_joint_get_spring_hertz(id: JointId) -> float { return dynamics.parallel_joint_of(sim_of(id, dynamics.JOINT_PARALLEL)).hertz }
 parallel_joint_set_spring_damping_ratio(id: JointId, value: float) {
+    if nonnegative(value) == false { return }
     base = sim_of(id, dynamics.JOINT_PARALLEL)
     if base != null { dynamics.parallel_joint_of(base).damping_ratio = value }
 }
@@ -776,6 +801,7 @@ parallel_joint_get_spring_damping_ratio(id: JointId) -> float { return dynamics.
 // figure's pelvis anchor, let go as it fell, turned the lying figure's
 // pelvis and legs for good). Cleared here; nothing else differs from it.
 parallel_joint_set_max_torque(id: JointId, value: float) {
+    if nonnegative(value) == false { return }
     base = sim_of(id, dynamics.JOINT_PARALLEL)
     if base != null {
         j = dynamics.parallel_joint_of(base)
@@ -1013,16 +1039,19 @@ prismatic_joint_enable_spring(id: JointId, flag: bool) {
 }
 prismatic_joint_is_spring_enabled(id: JointId) -> bool { return dynamics.prismatic_joint_of(sim_of(id, dynamics.JOINT_PRISMATIC)).enable_spring }
 prismatic_joint_set_spring_hertz(id: JointId, value: float) {
+    if nonnegative(value) == false { return }
     base = sim_of(id, dynamics.JOINT_PRISMATIC)
     if base != null { dynamics.prismatic_joint_of(base).hertz = value }
 }
 prismatic_joint_get_spring_hertz(id: JointId) -> float { return dynamics.prismatic_joint_of(sim_of(id, dynamics.JOINT_PRISMATIC)).hertz }
 prismatic_joint_set_spring_damping_ratio(id: JointId, value: float) {
+    if nonnegative(value) == false { return }
     base = sim_of(id, dynamics.JOINT_PRISMATIC)
     if base != null { dynamics.prismatic_joint_of(base).damping_ratio = value }
 }
 prismatic_joint_get_spring_damping_ratio(id: JointId) -> float { return dynamics.prismatic_joint_of(sim_of(id, dynamics.JOINT_PRISMATIC)).damping_ratio }
 prismatic_joint_set_target_translation(id: JointId, value: float) {
+    if math.is_valid_float(value) == false { return }
     base = sim_of(id, dynamics.JOINT_PRISMATIC)
     if base != null { dynamics.prismatic_joint_of(base).target_translation = value }
 }
@@ -1041,6 +1070,7 @@ prismatic_joint_is_limit_enabled(id: JointId) -> bool { return dynamics.prismati
 prismatic_joint_get_lower_limit(id: JointId) -> float { return dynamics.prismatic_joint_of(sim_of(id, dynamics.JOINT_PRISMATIC)).lower_translation }
 prismatic_joint_get_upper_limit(id: JointId) -> float { return dynamics.prismatic_joint_of(sim_of(id, dynamics.JOINT_PRISMATIC)).upper_translation }
 prismatic_joint_set_limits(id: JointId, lower: float, upper: float) {
+    if math.is_valid_float(lower) == false || math.is_valid_float(upper) == false { return }
     base = sim_of(id, dynamics.JOINT_PRISMATIC)
     if base == null { return }
     j = dynamics.prismatic_joint_of(base)
@@ -1068,11 +1098,13 @@ prismatic_joint_enable_motor(id: JointId, flag: bool) {
 }
 prismatic_joint_is_motor_enabled(id: JointId) -> bool { return dynamics.prismatic_joint_of(sim_of(id, dynamics.JOINT_PRISMATIC)).enable_motor }
 prismatic_joint_set_motor_speed(id: JointId, value: float) {
+    if math.is_valid_float(value) == false { return }
     base = sim_of(id, dynamics.JOINT_PRISMATIC)
     if base != null { dynamics.prismatic_joint_of(base).motor_speed = value }
 }
 prismatic_joint_get_motor_speed(id: JointId) -> float { return dynamics.prismatic_joint_of(sim_of(id, dynamics.JOINT_PRISMATIC)).motor_speed }
 prismatic_joint_set_max_motor_force(id: JointId, value: float) {
+    if nonnegative(value) == false { return }
     base = sim_of(id, dynamics.JOINT_PRISMATIC)
     if base != null { dynamics.prismatic_joint_of(base).max_motor_force = value }
 }
@@ -1306,6 +1338,7 @@ revolute_joint_is_limit_enabled(id: JointId) -> bool { return dynamics.revolute_
 revolute_joint_get_lower_limit(id: JointId) -> float { return dynamics.revolute_joint_of(sim_of(id, dynamics.JOINT_REVOLUTE)).lower_angle }
 revolute_joint_get_upper_limit(id: JointId) -> float { return dynamics.revolute_joint_of(sim_of(id, dynamics.JOINT_REVOLUTE)).upper_angle }
 revolute_joint_set_limits(id: JointId, lower: float, upper: float) {
+    if math.is_valid_float(lower) == false || math.is_valid_float(upper) == false { return }
     base = sim_of(id, dynamics.JOINT_REVOLUTE)
     if base == null { return }
     j = dynamics.revolute_joint_of(base)
@@ -1334,16 +1367,19 @@ revolute_joint_enable_spring(id: JointId, flag: bool) {
 }
 revolute_joint_is_spring_enabled(id: JointId) -> bool { return dynamics.revolute_joint_of(sim_of(id, dynamics.JOINT_REVOLUTE)).enable_spring }
 revolute_joint_set_target_angle(id: JointId, value: float) {
+    if math.is_valid_float(value) == false { return }
     base = sim_of(id, dynamics.JOINT_REVOLUTE)
     if base != null { dynamics.revolute_joint_of(base).target_angle = value }
 }
 revolute_joint_get_target_angle(id: JointId) -> float { return dynamics.revolute_joint_of(sim_of(id, dynamics.JOINT_REVOLUTE)).target_angle }
 revolute_joint_set_spring_hertz(id: JointId, value: float) {
+    if nonnegative(value) == false { return }
     base = sim_of(id, dynamics.JOINT_REVOLUTE)
     if base != null { dynamics.revolute_joint_of(base).hertz = value }
 }
 revolute_joint_get_spring_hertz(id: JointId) -> float { return dynamics.revolute_joint_of(sim_of(id, dynamics.JOINT_REVOLUTE)).hertz }
 revolute_joint_set_spring_damping_ratio(id: JointId, value: float) {
+    if nonnegative(value) == false { return }
     base = sim_of(id, dynamics.JOINT_REVOLUTE)
     if base != null { dynamics.revolute_joint_of(base).damping_ratio = value }
 }
@@ -1357,11 +1393,13 @@ revolute_joint_enable_motor(id: JointId, flag: bool) {
 }
 revolute_joint_is_motor_enabled(id: JointId) -> bool { return dynamics.revolute_joint_of(sim_of(id, dynamics.JOINT_REVOLUTE)).enable_motor }
 revolute_joint_set_motor_speed(id: JointId, value: float) {
+    if math.is_valid_float(value) == false { return }
     base = sim_of(id, dynamics.JOINT_REVOLUTE)
     if base != null { dynamics.revolute_joint_of(base).motor_speed = value }
 }
 revolute_joint_get_motor_speed(id: JointId) -> float { return dynamics.revolute_joint_of(sim_of(id, dynamics.JOINT_REVOLUTE)).motor_speed }
 revolute_joint_set_max_motor_torque(id: JointId, value: float) {
+    if nonnegative(value) == false { return }
     base = sim_of(id, dynamics.JOINT_REVOLUTE)
     if base != null { dynamics.revolute_joint_of(base).max_motor_torque = value }
 }
@@ -1571,6 +1609,7 @@ spherical_joint_get_cone_limit(id: JointId) -> float { return dynamics.spherical
 // Clamped as the joint's creation clamps it: to a right angle about frame
 // A's z, to 0.8 pi about a centre off it.
 spherical_joint_set_cone_limit(id: JointId, angle: float) {
+    if math.is_valid_float(angle) == false { return }
     base = sim_of(id, dynamics.JOINT_SPHERICAL)
     if base == null { return }
     j = dynamics.spherical_joint_of(base)
@@ -1606,6 +1645,7 @@ spherical_joint_is_twist_limit_enabled(id: JointId) -> bool { return dynamics.sp
 spherical_joint_get_lower_twist_limit(id: JointId) -> float { return dynamics.spherical_joint_of(sim_of(id, dynamics.JOINT_SPHERICAL)).lower_twist_angle }
 spherical_joint_get_upper_twist_limit(id: JointId) -> float { return dynamics.spherical_joint_of(sim_of(id, dynamics.JOINT_SPHERICAL)).upper_twist_angle }
 spherical_joint_set_twist_limits(id: JointId, lower: float, upper: float) {
+    if math.is_valid_float(lower) == false || math.is_valid_float(upper) == false { return }
     base = sim_of(id, dynamics.JOINT_SPHERICAL)
     if base == null { return }
     j = dynamics.spherical_joint_of(base)
@@ -1627,16 +1667,19 @@ spherical_joint_enable_spring(id: JointId, flag: bool) {
 }
 spherical_joint_is_spring_enabled(id: JointId) -> bool { return dynamics.spherical_joint_of(sim_of(id, dynamics.JOINT_SPHERICAL)).enable_spring }
 spherical_joint_set_target_rotation(id: JointId, q: Quat) {
+    if math.is_valid_quat(q) == false { return }
     base = sim_of(id, dynamics.JOINT_SPHERICAL)
     if base != null { dynamics.spherical_joint_of(base).target_rotation = q }
 }
 spherical_joint_get_target_rotation(id: JointId) -> Quat { return dynamics.spherical_joint_of(sim_of(id, dynamics.JOINT_SPHERICAL)).target_rotation }
 spherical_joint_set_spring_hertz(id: JointId, value: float) {
+    if nonnegative(value) == false { return }
     base = sim_of(id, dynamics.JOINT_SPHERICAL)
     if base != null { dynamics.spherical_joint_of(base).hertz = value }
 }
 spherical_joint_get_spring_hertz(id: JointId) -> float { return dynamics.spherical_joint_of(sim_of(id, dynamics.JOINT_SPHERICAL)).hertz }
 spherical_joint_set_spring_damping_ratio(id: JointId, value: float) {
+    if nonnegative(value) == false { return }
     base = sim_of(id, dynamics.JOINT_SPHERICAL)
     if base != null { dynamics.spherical_joint_of(base).damping_ratio = value }
 }
@@ -1650,11 +1693,13 @@ spherical_joint_enable_motor(id: JointId, flag: bool) {
 }
 spherical_joint_is_motor_enabled(id: JointId) -> bool { return dynamics.spherical_joint_of(sim_of(id, dynamics.JOINT_SPHERICAL)).enable_motor }
 spherical_joint_set_motor_velocity(id: JointId, v: Vec3) {
+    if math.is_valid_vec3(v) == false { return }
     base = sim_of(id, dynamics.JOINT_SPHERICAL)
     if base != null { dynamics.spherical_joint_of(base).motor_velocity = v }
 }
 spherical_joint_get_motor_velocity(id: JointId) -> Vec3 { return dynamics.spherical_joint_of(sim_of(id, dynamics.JOINT_SPHERICAL)).motor_velocity }
 spherical_joint_set_max_motor_torque(id: JointId, value: float) {
+    if nonnegative(value) == false { return }
     base = sim_of(id, dynamics.JOINT_SPHERICAL)
     if base != null { dynamics.spherical_joint_of(base).max_motor_torque = value }
 }
@@ -1758,21 +1803,25 @@ get_weld_joint_force(w: *World, base: *JointSim) -> Vec3 { return math.mul_sv(w.
 get_weld_joint_torque(w: *World, base: *JointSim) -> Vec3 { return math.mul_sv(w.inv_h, dynamics.weld_joint_of(base).angular_impulse) }
 
 weld_joint_set_linear_hertz(id: JointId, value: float) {
+    if nonnegative(value) == false { return }
     base = sim_of(id, dynamics.JOINT_WELD)
     if base != null { dynamics.weld_joint_of(base).linear_hertz = value }
 }
 weld_joint_get_linear_hertz(id: JointId) -> float { return dynamics.weld_joint_of(sim_of(id, dynamics.JOINT_WELD)).linear_hertz }
 weld_joint_set_linear_damping_ratio(id: JointId, value: float) {
+    if nonnegative(value) == false { return }
     base = sim_of(id, dynamics.JOINT_WELD)
     if base != null { dynamics.weld_joint_of(base).linear_damping_ratio = value }
 }
 weld_joint_get_linear_damping_ratio(id: JointId) -> float { return dynamics.weld_joint_of(sim_of(id, dynamics.JOINT_WELD)).linear_damping_ratio }
 weld_joint_set_angular_hertz(id: JointId, value: float) {
+    if nonnegative(value) == false { return }
     base = sim_of(id, dynamics.JOINT_WELD)
     if base != null { dynamics.weld_joint_of(base).angular_hertz = value }
 }
 weld_joint_get_angular_hertz(id: JointId) -> float { return dynamics.weld_joint_of(sim_of(id, dynamics.JOINT_WELD)).angular_hertz }
 weld_joint_set_angular_damping_ratio(id: JointId, value: float) {
+    if nonnegative(value) == false { return }
     base = sim_of(id, dynamics.JOINT_WELD)
     if base != null { dynamics.weld_joint_of(base).angular_damping_ratio = value }
 }
@@ -2113,11 +2162,13 @@ wheel_joint_enable_suspension(id: JointId, flag: bool) {
 }
 wheel_joint_is_suspension_enabled(id: JointId) -> bool { return dynamics.wheel_joint_of(sim_of(id, dynamics.JOINT_WHEEL)).enable_suspension_spring }
 wheel_joint_set_suspension_hertz(id: JointId, value: float) {
+    if nonnegative(value) == false { return }
     base = sim_of(id, dynamics.JOINT_WHEEL)
     if base != null { dynamics.wheel_joint_of(base).suspension_hertz = value }
 }
 wheel_joint_get_suspension_hertz(id: JointId) -> float { return dynamics.wheel_joint_of(sim_of(id, dynamics.JOINT_WHEEL)).suspension_hertz }
 wheel_joint_set_suspension_damping_ratio(id: JointId, value: float) {
+    if nonnegative(value) == false { return }
     base = sim_of(id, dynamics.JOINT_WHEEL)
     if base != null { dynamics.wheel_joint_of(base).suspension_damping_ratio = value }
 }
@@ -2136,6 +2187,7 @@ wheel_joint_is_suspension_limit_enabled(id: JointId) -> bool { return dynamics.w
 wheel_joint_get_lower_suspension_limit(id: JointId) -> float { return dynamics.wheel_joint_of(sim_of(id, dynamics.JOINT_WHEEL)).lower_suspension_limit }
 wheel_joint_get_upper_suspension_limit(id: JointId) -> float { return dynamics.wheel_joint_of(sim_of(id, dynamics.JOINT_WHEEL)).upper_suspension_limit }
 wheel_joint_set_suspension_limits(id: JointId, lower: float, upper: float) {
+    if math.is_valid_float(lower) == false || math.is_valid_float(upper) == false { return }
     base = sim_of(id, dynamics.JOINT_WHEEL)
     if base == null { return }
     j = dynamics.wheel_joint_of(base)
@@ -2157,11 +2209,13 @@ wheel_joint_enable_spin_motor(id: JointId, flag: bool) {
 }
 wheel_joint_is_spin_motor_enabled(id: JointId) -> bool { return dynamics.wheel_joint_of(sim_of(id, dynamics.JOINT_WHEEL)).enable_spin_motor }
 wheel_joint_set_spin_motor_speed(id: JointId, value: float) {
+    if math.is_valid_float(value) == false { return }
     base = sim_of(id, dynamics.JOINT_WHEEL)
     if base != null { dynamics.wheel_joint_of(base).spin_speed = value }
 }
 wheel_joint_get_spin_motor_speed(id: JointId) -> float { return dynamics.wheel_joint_of(sim_of(id, dynamics.JOINT_WHEEL)).spin_speed }
 wheel_joint_set_max_spin_torque(id: JointId, value: float) {
+    if nonnegative(value) == false { return }
     base = sim_of(id, dynamics.JOINT_WHEEL)
     if base != null { dynamics.wheel_joint_of(base).max_spin_torque = value }
 }
@@ -2182,16 +2236,19 @@ wheel_joint_enable_steering(id: JointId, flag: bool) {
 }
 wheel_joint_is_steering_enabled(id: JointId) -> bool { return dynamics.wheel_joint_of(sim_of(id, dynamics.JOINT_WHEEL)).enable_steering }
 wheel_joint_set_steering_hertz(id: JointId, value: float) {
+    if nonnegative(value) == false { return }
     base = sim_of(id, dynamics.JOINT_WHEEL)
     if base != null { dynamics.wheel_joint_of(base).steering_hertz = value }
 }
 wheel_joint_get_steering_hertz(id: JointId) -> float { return dynamics.wheel_joint_of(sim_of(id, dynamics.JOINT_WHEEL)).steering_hertz }
 wheel_joint_set_steering_damping_ratio(id: JointId, value: float) {
+    if nonnegative(value) == false { return }
     base = sim_of(id, dynamics.JOINT_WHEEL)
     if base != null { dynamics.wheel_joint_of(base).steering_damping_ratio = value }
 }
 wheel_joint_get_steering_damping_ratio(id: JointId) -> float { return dynamics.wheel_joint_of(sim_of(id, dynamics.JOINT_WHEEL)).steering_damping_ratio }
 wheel_joint_set_max_steering_torque(id: JointId, value: float) {
+    if nonnegative(value) == false { return }
     base = sim_of(id, dynamics.JOINT_WHEEL)
     if base != null { dynamics.wheel_joint_of(base).max_steering_torque = value }
 }
@@ -2210,6 +2267,7 @@ wheel_joint_is_steering_limit_enabled(id: JointId) -> bool { return dynamics.whe
 wheel_joint_get_lower_steering_limit(id: JointId) -> float { return dynamics.wheel_joint_of(sim_of(id, dynamics.JOINT_WHEEL)).lower_steering_limit }
 wheel_joint_get_upper_steering_limit(id: JointId) -> float { return dynamics.wheel_joint_of(sim_of(id, dynamics.JOINT_WHEEL)).upper_steering_limit }
 wheel_joint_set_steering_limits(id: JointId, lower: float, upper: float) {
+    if math.is_valid_float(lower) == false || math.is_valid_float(upper) == false { return }
     base = sim_of(id, dynamics.JOINT_WHEEL)
     if base == null { return }
     j = dynamics.wheel_joint_of(base)
@@ -2224,6 +2282,7 @@ wheel_joint_set_steering_limits(id: JointId, lower: float, upper: float) {
     }
 }
 wheel_joint_set_target_steering_angle(id: JointId, value: float) {
+    if math.is_valid_float(value) == false { return }
     base = sim_of(id, dynamics.JOINT_WHEEL)
     if base != null { dynamics.wheel_joint_of(base).target_steering_angle = value }
 }

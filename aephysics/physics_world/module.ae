@@ -133,6 +133,10 @@ is_valid(id: WorldId) -> bool { return dynamics.world_is_valid(id) }
 step(id: WorldId, time_step: float, sub_step_count: int) {
     w = world_of(id)
     if w == null { return }
+    // An infinite step would make every sub-step infinite; a NaN one is
+    // refused with it. Zero and negative steps collide without solving,
+    // as the reference's do.
+    if math.is_valid_float(time_step) == false { return }
     // The step runs on the calling thread as the world's first worker slot
     // (its task context and scratch), whatever the thread's index in a host's
     // pool; the index is given back at the end.
@@ -290,6 +294,7 @@ enable_speculative(id: WorldId, flag: bool) {
     if w != null { w.enable_speculative = flag }
 }
 set_restitution_threshold(id: WorldId, value: float) {
+    if math.is_valid_float(value) == false { return }
     w = world_of(id)
     if w != null { w.restitution_threshold = math.clamp_float(value, 0.0, math.MAX_FLOAT) }
 }
@@ -307,11 +312,13 @@ enable_restitution_propagation(id: WorldId, flag: bool) {
 }
 is_restitution_propagation_enabled(id: WorldId) -> bool { return dynamics.get_world(id.index1 - 1).enable_restitution_propagation }
 set_hit_event_threshold(id: WorldId, value: float) {
+    if math.is_valid_float(value) == false { return }
     w = world_of(id)
     if w != null { w.hit_event_threshold = math.clamp_float(value, 0.0, math.MAX_FLOAT) }
 }
 get_hit_event_threshold(id: WorldId) -> float { return dynamics.get_world(id.index1 - 1).hit_event_threshold }
 set_contact_tuning(id: WorldId, hertz: float, damping_ratio: float, contact_speed: float) {
+    if math.is_valid_float(hertz) == false || math.is_valid_float(damping_ratio) == false || math.is_valid_float(contact_speed) == false { return }
     w = world_of(id)
     if w == null { return }
     w.contact_hertz = math.clamp_float(hertz, 0.0, math.MAX_FLOAT)
@@ -319,17 +326,20 @@ set_contact_tuning(id: WorldId, hertz: float, damping_ratio: float, contact_spee
     w.contact_speed = math.clamp_float(contact_speed, 0.0, math.MAX_FLOAT)
 }
 set_contact_recycle_distance(id: WorldId, distance: float) {
+    if math.is_valid_float(distance) == false { return }
     w = world_of(id)
     if w != null { w.contact_recycle_distance = math.clamp_float(distance, 0.0, math.MAX_FLOAT) }
 }
 get_contact_recycle_distance(id: WorldId) -> float { return dynamics.get_world(id.index1 - 1).contact_recycle_distance }
 set_maximum_linear_speed(id: WorldId, speed: float) {
+    if math.is_valid_float(speed) == false || speed <= 0.0 { return }
     w = world_of(id)
     if w != null { w.max_linear_speed = speed }
 }
 get_maximum_linear_speed(id: WorldId) -> float { return dynamics.get_world(id.index1 - 1).max_linear_speed }
 // Gravity and the user data change even mid-step, from a callback, as the reference's do (no lock).
 set_gravity(id: WorldId, gravity: Vec3) {
+    if math.is_valid_vec3(gravity) == false { return }
     if dynamics.world_is_valid(id) { dynamics.get_world(id.index1 - 1).gravity = gravity }
 }
 get_gravity(id: WorldId) -> Vec3 { return dynamics.get_world(id.index1 - 1).gravity }
@@ -419,6 +429,12 @@ struct WorldQueryContext {
     user_context: ptr
 }
 
+// A query's or a setter's number: finite and not below zero.
+nonnegative(x: float) -> bool { return math.is_valid_float(x) && x >= 0.0 }
+
+// A mover's capsule: its two centres finite, its radius finite and not below zero.
+valid_capsule(c: Capsule) -> bool { return math.is_valid_vec3(c.center1) && math.is_valid_vec3(c.center2) && nonnegative(c.radius) }
+
 aabb_query_visitor(proxy_id: int, user_data: long, context: ptr) -> bool {
     qc = context as *WorldQueryContext
     w = qc.w
@@ -434,6 +450,7 @@ overlap_aabb(id: WorldId, box: AABB, filter: QueryFilter, visitor: fn(ShapeId, p
     stats = TreeStats { node_visits: 0, leaf_visits: 0 }
     w = world_of(id)
     if w == null { return stats }
+    if math.is_valid_aabb(box) == false { return stats }
     qc = WorldQueryContext { w: w, visitor: visitor, filter: filter, proxy: distance.shape_proxy(null, 0, 0.0), origin: math.vec3_zero(), user_context: context }
     i = 0
     while i < BODY_KIND_COUNT {
@@ -461,6 +478,7 @@ overlap_shape(id: WorldId, origin: Vec3, proxy: ShapeProxy, filter: QueryFilter,
     stats = TreeStats { node_visits: 0, leaf_visits: 0 }
     w = world_of(id)
     if w == null { return stats }
+    if math.is_valid_position(origin) == false { return stats }
     box = math.offset_aabb(math.make_aabb(proxy.points as float[], proxy.count, proxy.radius), origin)
     qc = WorldQueryContext { w: w, visitor: visitor, filter: filter, proxy: proxy, origin: origin, user_context: context }
     i = 0
@@ -505,6 +523,7 @@ mover_collide_visitor(proxy_id: int, user_data: long, context: ptr) -> bool {
 collide_mover(id: WorldId, origin: Vec3, mover: Capsule, filter: QueryFilter, visitor: fn(ShapeId, PlaneResult[], int, ptr) -> bool, context: ptr) {
     w = world_of(id)
     if w == null { return }
+    if math.is_valid_position(origin) == false || valid_capsule(mover) == false { return }
     r = math.vec3(mover.radius, mover.radius, mover.radius)
     box = math.offset_aabb(AABB { lower: math.sub(math.min_vec3(mover.center1, mover.center2), r), upper: math.add(math.max_vec3(mover.center1, mover.center2), r) }, origin)
     // The planes a visitor reads are this query's own block, as the
@@ -558,6 +577,7 @@ cast_ray(id: WorldId, origin: Vec3, translation: Vec3, filter: QueryFilter,
     stats = TreeStats { node_visits: 0, leaf_visits: 0 }
     w = world_of(id)
     if w == null { return stats }
+    if math.is_valid_position(origin) == false || math.is_valid_vec3(translation) == false { return stats }
     input = RayCastInput { origin: origin, translation: translation, max_fraction: 1.0 }
     cc = WorldCastContext { w: w, visitor: visitor, filter: filter, fraction: 1.0, origin: origin, proxy: distance.shape_proxy(null, 0, 0.0),
                        translation: translation, can_encroach: false, user_context: context }
@@ -594,6 +614,7 @@ cast_ray_closest(id: WorldId, origin: Vec3, translation: Vec3, filter: QueryFilt
                          fraction: 0.0, triangle_index: 0, child_index: 0, node_visits: 0, leaf_visits: 0, hit: false }
     w = world_of(id)
     if w == null { return result }
+    if math.is_valid_position(origin) == false || math.is_valid_vec3(translation) == false { return result }
     input = RayCastInput { origin: origin, translation: translation, max_fraction: 1.0 }
     cc = WorldCastContext { w: w, visitor: closest_ray_visitor, filter: filter, fraction: 1.0, origin: origin, proxy: distance.shape_proxy(null, 0, 0.0),
                        translation: translation, can_encroach: false, user_context: (&result) as ptr }
@@ -633,6 +654,7 @@ cast_shape(id: WorldId, origin: Vec3, proxy: ShapeProxy, translation: Vec3, filt
     stats = TreeStats { node_visits: 0, leaf_visits: 0 }
     w = world_of(id)
     if w == null { return stats }
+    if math.is_valid_position(origin) == false || math.is_valid_vec3(translation) == false { return stats }
     local_box = math.make_aabb(proxy.points as float[], proxy.count, proxy.radius)
     input = BoxCastInput { box: math.offset_aabb(local_box, origin), translation: translation, max_fraction: 1.0 }
     cc = WorldCastContext { w: w, visitor: visitor, filter: filter, fraction: 1.0, origin: origin, proxy: proxy, translation: translation,
@@ -689,6 +711,7 @@ mover_points() -> ptr { return native.scratch(g_mover_points, 2 * sizeof(Vec3)) 
 cast_mover(id: WorldId, origin: Vec3, mover: Capsule, translation: Vec3, filter: QueryFilter, has_filter: bool, filter_fn: fn(ShapeId, ptr) -> bool, context: ptr) -> float {
     w = world_of(id)
     if w == null { return 1.0 }
+    if math.is_valid_position(origin) == false || math.is_valid_vec3(translation) == false || valid_capsule(mover) == false { return 1.0 }
     // The segment lives in this cast's context, as the reference's on its
     // stack: a filter that casts again (or asks a body's time of impact) does
     // not move it under this cast.
@@ -727,6 +750,7 @@ body_cast_ray(id: BodyId, origin: Vec3, translation: Vec3, filter: QueryFilter, 
     result = no_body_hit()
     w = body_world(id)
     if w == null { return result }
+    if math.is_valid_position(origin) == false || math.is_valid_vec3(translation) == false || math.is_valid_float(max_fraction) == false || math.is_valid_world_transform(body_transform) == false { return result }
     body = dynamics.get_body_full_id(w, id)
     t = Transform { p: math.sub(body_transform.p, origin), q: body_transform.q }
     fraction_left = max_fraction
@@ -749,6 +773,7 @@ body_cast_ray(id: BodyId, origin: Vec3, translation: Vec3, filter: QueryFilter, 
 // so the cast runs close to it however far the world's origin is; the
 // hit point lifted back.
 shape_ray_cast(id: ShapeId, origin: Vec3, translation: Vec3) -> CastOutput {
+    if math.is_valid_position(origin) == false || math.is_valid_vec3(translation) == false { return distance.empty_cast_output() }
     w = dynamics.get_world(id.world0)
     s = dynamics.get_shape_full_id(w, id)
     body_transform = dynamics.get_body_transform(w, s.body_id)
@@ -762,6 +787,7 @@ body_cast_shape(id: BodyId, origin: Vec3, proxy: ShapeProxy, translation: Vec3, 
     result = no_body_hit()
     w = body_world(id)
     if w == null { return result }
+    if math.is_valid_position(origin) == false || math.is_valid_vec3(translation) == false || math.is_valid_float(max_fraction) == false || math.is_valid_world_transform(body_transform) == false { return result }
     body = dynamics.get_body_full_id(w, id)
     t = Transform { p: math.sub(body_transform.p, origin), q: body_transform.q }
     fraction_left = max_fraction
@@ -783,6 +809,7 @@ body_cast_shape(id: BodyId, origin: Vec3, proxy: ShapeProxy, translation: Vec3, 
 body_overlap_shape(id: BodyId, origin: Vec3, proxy: ShapeProxy, filter: QueryFilter, body_transform: Transform) -> bool {
     w = body_world(id)
     if w == null { return false }
+    if math.is_valid_position(origin) == false || math.is_valid_world_transform(body_transform) == false { return false }
     body = dynamics.get_body_full_id(w, id)
     t = Transform { p: math.sub(body_transform.p, origin), q: body_transform.q }
     shape_id = body.head_shape_id
@@ -799,6 +826,7 @@ body_overlap_shape(id: BodyId, origin: Vec3, proxy: ShapeProxy, filter: QueryFil
 body_collide_mover(id: BodyId, planes: BodyPlaneResult[], capacity: int, origin: Vec3, mover: Capsule, filter: QueryFilter, body_transform: Transform) -> int {
     w = body_world(id)
     if w == null || capacity == 0 { return 0 }
+    if math.is_valid_position(origin) == false || valid_capsule(mover) == false || math.is_valid_world_transform(body_transform) == false { return 0 }
     body = dynamics.get_body_full_id(w, id)
     t = Transform { p: math.sub(body_transform.p, origin), q: body_transform.q }
     count = 0
@@ -825,6 +853,7 @@ body_time_of_impact_mover(id: BodyId, origin: Vec3, mover: Capsule, mover_transl
     result = BodyTOIResult { point: math.vec3_zero(), normal: math.vec3_zero(), fraction: 1.0, shape_id: dynamics.null_shape_id() }
     w = body_world(id)
     if w == null { return result }
+    if math.is_valid_position(origin) == false || valid_capsule(mover) == false || math.is_valid_vec3(mover_translation) == false || math.is_valid_world_transform(transform1) == false || math.is_valid_world_transform(transform2) == false { return result }
     if g_mover_points == null { g_mover_points = basics.alloc(native.MAX_WORKERS * (2 * sizeof(Vec3))) }
     points = mover_points() as Vec3[]
     points[0] = mover.center1
@@ -908,6 +937,7 @@ explosion_visitor(proxy_id: int, user_data: long, context: ptr) -> bool {
 }
 
 explode(id: WorldId, def: *ExplosionDef) {
+    if math.is_valid_position(def.position) == false || nonnegative(def.radius) == false || nonnegative(def.falloff) == false || math.is_valid_float(def.impulse_per_area) == false { return }
     w = world_of(id)
     if w == null { return }
     w.locked = true
