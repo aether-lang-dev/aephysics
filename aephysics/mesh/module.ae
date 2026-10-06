@@ -212,11 +212,18 @@ get_height(m: *MeshData) -> int {
 
 // Every node's box holds its children's, or its triangles'.
 is_consistent(m: *MeshData) -> bool {
+    stack = begin_traversal()
+    result = is_consistent_on(stack, m)
+    end_traversal(stack)
+    return result
+}
+
+is_consistent_on(stack_block: ptr, m: *MeshData) -> bool {
     nodes = mesh_nodes(m)
     triangles = mesh_triangles(m)
     vertices = mesh_vertices(m)
     scratch_ready()
-    stack = traversal_stack() as int[]
+    stack = stack_block as int[]
     count = 1
     stack[0] = 0
     while count > 0 {
@@ -630,6 +637,13 @@ build_recursive(nodes: MeshNode[], node_count: int[], primitives: Primitive[], f
 // The triangles and materials into the tree's depth-first order, so a
 // query's results come out sorted. False if the tree is too tall.
 sort_mesh_triangles(m: *MeshData) -> bool {
+    stack = begin_traversal()
+    result = sort_mesh_triangles_on(stack, m)
+    end_traversal(stack)
+    return result
+}
+
+sort_mesh_triangles_on(stack_block: ptr, m: *MeshData) -> bool {
     nodes = mesh_nodes(m)
     triangles = mesh_triangles(m)
     materials = mesh_material_indices(m)
@@ -638,7 +652,7 @@ sort_mesh_triangles(m: *MeshData) -> bool {
     temp_materials_block = basics.alloc(m.triangle_count * 4)
     temp_materials = temp_materials_block as int[]
     scratch_ready()
-    stack = traversal_stack() as int[]
+    stack = stack_block as int[]
     offset = 0
     count = 1
     stack[0] = 0
