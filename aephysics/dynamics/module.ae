@@ -2009,16 +2009,46 @@ create_shape(body_id: BodyId, def: *ShapeDef, geometry: Shape) -> ShapeId {
     return ShapeId { index1: shape_id + 1, world0: w.world_id, generation: s.generation }
 }
 
-create_sphere_shape(body_id: BodyId, def: *ShapeDef, s: Sphere) -> ShapeId { return create_shape(body_id, def, shape.sphere_shape(s, def.density)) }
-create_capsule_shape(body_id: BodyId, def: *ShapeDef, c: Capsule) -> ShapeId { return create_shape(body_id, def, shape.capsule_shape(c, def.density)) }
-create_hull_shape(body_id: BodyId, def: *ShapeDef, h: *HullData) -> ShapeId { return create_shape(body_id, def, shape.hull_shape(h, def.density)) }
+// A sphere or capsule the narrow phase can use: finite centres, a finite
+// radius not below zero.
+valid_sphere(s: Sphere) -> bool { return math.is_valid_vec3(s.center) && valid_nonnegative(s.radius) }
+valid_capsule(c: Capsule) -> bool { return math.is_valid_vec3(c.center1) && math.is_valid_vec3(c.center2) && valid_nonnegative(c.radius) }
+
+create_sphere_shape(body_id: BodyId, def: *ShapeDef, s: Sphere) -> ShapeId {
+    if valid_sphere(s) == false { return null_shape_id() }
+    return create_shape(body_id, def, shape.sphere_shape(s, def.density))
+}
+
+// A capsule whose centres are within the linear slop is made a sphere at
+// their midpoint, as the reference's b3CreateCapsuleShape does: its segment
+// has no direction to collide along.
+create_capsule_shape(body_id: BodyId, def: *ShapeDef, c: Capsule) -> ShapeId {
+    if valid_capsule(c) == false { return null_shape_id() }
+    if math.distance_squared(c.center1, c.center2) <= math.LINEAR_SLOP * math.LINEAR_SLOP {
+        middle = math.lerp(c.center1, c.center2, 0.5)
+        return create_shape(body_id, def, shape.sphere_shape(Sphere { center: middle, radius: c.radius }, def.density))
+    }
+    return create_shape(body_id, def, shape.capsule_shape(c, def.density))
+}
+
+// The baked shapes are refused when they are missing or of another
+// layout's version, as the reference refuses them.
+create_hull_shape(body_id: BodyId, def: *ShapeDef, h: *HullData) -> ShapeId {
+    if h == null || h.version != hull.HULL_VERSION { return null_shape_id() }
+    return create_shape(body_id, def, shape.hull_shape(h, def.density))
+}
 create_mesh_shape(body_id: BodyId, def: *ShapeDef, m: *MeshData, scale: Vec3) -> ShapeId {
+    if m == null || m.version != mesh.MESH_VERSION || math.is_valid_vec3(scale) == false { return null_shape_id() }
     return create_shape(body_id, def, shape.mesh_shape(mesh.mesh(m, math.safe_scale(scale)), math.max_int(def.material_count, 1)))
 }
 create_height_field_shape(body_id: BodyId, def: *ShapeDef, h: *HeightFieldData) -> ShapeId {
+    if h == null || h.version != height_field.HEIGHT_FIELD_VERSION { return null_shape_id() }
     return create_shape(body_id, def, shape.height_field_shape(h, math.max_int(def.material_count, 1)))
 }
-create_compound_shape(body_id: BodyId, def: *ShapeDef, c: *CompoundData) -> ShapeId { return create_shape(body_id, def, shape.compound_shape(c)) }
+create_compound_shape(body_id: BodyId, def: *ShapeDef, c: *CompoundData) -> ShapeId {
+    if c == null || c.version != compound.COMPOUND_VERSION { return null_shape_id() }
+    return create_shape(body_id, def, shape.compound_shape(c))
+}
 
 shape_is_valid(id: ShapeId) -> bool {
     if id.world0 < 0 || id.world0 >= MAX_WORLDS { return false }
@@ -2157,11 +2187,20 @@ shape_get_height_field(id: ShapeId) -> *HeightFieldData { return get_shape_full_
 // The body's mass is the caller's to update (body_apply_mass_from_shapes),
 // as in the reference. A compound or height field (static-only shapes) is
 // not changed, nor changed into.
-shape_set_sphere(id: ShapeId, s: Sphere) { change_shape_geometry(id, shape.sphere_shape(s, 0.0)) }
-shape_set_capsule(id: ShapeId, c: Capsule) { change_shape_geometry(id, shape.capsule_shape(c, 0.0)) }
-shape_set_hull(id: ShapeId, h: *HullData) { change_shape_geometry(id, shape.hull_shape(h, 0.0)) }
+shape_set_sphere(id: ShapeId, s: Sphere) {
+    if valid_sphere(s) == false { return }
+    change_shape_geometry(id, shape.sphere_shape(s, 0.0))
+}
+shape_set_capsule(id: ShapeId, c: Capsule) {
+    if valid_capsule(c) == false { return }
+    change_shape_geometry(id, shape.capsule_shape(c, 0.0))
+}
+shape_set_hull(id: ShapeId, h: *HullData) {
+    if h == null || h.version != hull.HULL_VERSION { return }
+    change_shape_geometry(id, shape.hull_shape(h, 0.0))
+}
 shape_set_mesh(id: ShapeId, m: *MeshData, scale: Vec3) {
-    if math.is_valid_vec3(scale) == false { return }
+    if m == null || m.version != mesh.MESH_VERSION || math.is_valid_vec3(scale) == false { return }
     change_shape_geometry(id, shape.mesh_shape(mesh.mesh(m, math.safe_scale(scale)), 1))
 }
 

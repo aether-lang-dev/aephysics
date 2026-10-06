@@ -442,7 +442,8 @@ test_huge_ground() {
     dynamics.destroy_world(world_id)
 }
 
-// A capsule whose two centres meet is a sphere: it falls and rests.
+// A capsule whose two centres meet is made a sphere at their midpoint, as
+// the reference makes it: it falls and rests like one.
 test_degenerate_capsule() {
     fixtures_ready()
     world_id = new_world()
@@ -452,12 +453,42 @@ test_degenerate_capsule() {
     bdef.position = math.vec3(0.0, 1.0, 0.0)
     body = dynamics.create_body(world_id, &bdef)
     sdef = dynamics.default_shape_def()
-    capsule_id = dynamics.create_capsule_shape(body, &sdef, manifold.capsule(math.vec3_zero(), math.vec3_zero(), 0.25))
+    capsule_id = dynamics.create_capsule_shape(body, &sdef, manifold.capsule(math.vec3(0.0, 0.001, 0.0), math.vec3(0.0, 0.0 - 0.001, 0.0), 0.25))
     ensure("a capsule of no length is made", dynamics.shape_is_valid(capsule_id))
+    ensure("as a sphere", dynamics.shape_get_type(capsule_id) == shape.SHAPE_SPHERE)
+    ensure("at the midpoint, of the capsule's radius", math.length(dynamics.shape_get_sphere(capsule_id).center) < 0.000001 &&
+           dynamics.shape_get_sphere(capsule_id).radius == 0.25)
+    long_id = dynamics.create_capsule_shape(body, &sdef, manifold.capsule(math.vec3(0.0, 0.1, 0.0), math.vec3(0.0, 0.0 - 0.1, 0.0), 0.2))
+    ensure("a capsule with length stays a capsule", dynamics.shape_get_type(long_id) == shape.SHAPE_CAPSULE)
+    dynamics.destroy_shape(long_id, true)
     steps(world_id, 240)
     ensure("it falls and rests like a sphere (${dynamics.body_get_position(body).y})",
            finite_body(body) && math.abs_float(dynamics.body_get_position(body).y - 0.25) < 0.02)
     dynamics.destroy_world(world_id)
+}
+
+// Geometry that cannot collide is refused: a NaN or negative radius, a
+// missing hull, a hull of another layout's version.
+test_bad_geometry() {
+    fixtures_ready()
+    world_id = new_world()
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    body = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    ensure("a NaN radius makes no sphere", dynamics.shape_is_valid(dynamics.create_sphere_shape(body, &sdef, manifold.sphere(math.vec3_zero(), not_a_number()))) == false)
+    ensure("a negative radius makes no capsule",
+           dynamics.shape_is_valid(dynamics.create_capsule_shape(body, &sdef, manifold.capsule(math.vec3_zero(), math.vec3(1.0, 0.0, 0.0), 0.0 - 0.1))) == false)
+    ensure("a missing hull makes no shape", dynamics.shape_is_valid(dynamics.create_hull_shape(body, &sdef, null)) == false)
+    stale = hull.clone_hull(g_box as *HullData)
+    stale.version = stale.version + 1
+    ensure("a hull of another version makes no shape", dynamics.shape_is_valid(dynamics.create_hull_shape(body, &sdef, stale)) == false)
+    ensure("the body has no shape", dynamics.body_get_shape_count(body) == 0)
+    sphere_id = dynamics.create_sphere_shape(body, &sdef, manifold.sphere(math.vec3_zero(), 0.5))
+    dynamics.shape_set_sphere(sphere_id, manifold.sphere(math.vec3(not_a_number(), 0.0, 0.0), 0.5))
+    ensure("a NaN sphere is refused by the setter", math.is_valid_vec3(dynamics.shape_get_sphere(sphere_id).center))
+    dynamics.destroy_world(world_id)
+    hull.destroy_hull(stale)
 }
 
 // Points on one plane make no hull, rather than a broken one.
@@ -486,6 +517,7 @@ main() {
     test_tiny_boxes()
     test_huge_ground()
     test_degenerate_capsule()
+    test_bad_geometry()
     test_flat_hull()
     println("edge_cases: ${checks} checks")
     if failures == 0 {
