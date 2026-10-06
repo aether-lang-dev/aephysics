@@ -168,6 +168,12 @@ NaN numbers never made, steps of no, negative and infinite time,
 geometry that cannot collide, a heavy chain, an unlimited motor and a
 hinge whose limits meet; 115 checks).
 
+`test_soak.ae` throws seeded piles of every convex kind into a walled
+pen and holds them to what a sane world does: no energy made, no body
+faster than its fall, none through the walls, overlaps no deeper than a
+step of speed while falling and the slop at rest, every pile asleep in
+the end -- [the reference on the same dice agrees on each](bench/RESULTS.md#soak-a-mixed-pile).
+
 The step is deterministic across platforms and worker counts, not
 only across runs: `AEPHYSICS_TRACE=1 target/test_determinism` prints
 every body's checksum after every step with its bits, CI records the
