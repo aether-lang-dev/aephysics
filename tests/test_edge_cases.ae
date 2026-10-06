@@ -491,6 +491,122 @@ test_bad_geometry() {
     hull.destroy_hull(stale)
 }
 
+// A chain of eight light links holding a ball ten times as dense, some
+// 180 times a link's mass: the soft step's hard case for joints. It
+// hangs, finite, its joints apart by a few centimetres, as the
+// reference's do: 5.4 cm at worst and the ball at y 5.82 in both. Far
+// past that the soft step lets go in both: at a thousand times the
+// density the reference's joints open 17 m and the ball falls away, as
+// ours do.
+test_heavy_chain() {
+    fixtures_ready()
+    world_id = new_world()
+    bdef = dynamics.default_body_def()
+    bdef.position = math.vec3(0.0, 10.0, 0.0)
+    anchor = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    jdef = dynamics.default_spherical_joint_def()
+    previous = anchor
+    joints_block = basics.alloc(9 * sizeof(JointId))
+    joints = joints_block as JointId[]
+    links_block = basics.alloc(9 * sizeof(BodyId))
+    links = links_block as BodyId[]
+    i = 0
+    while i < 9 {
+        bdef = dynamics.default_body_def()
+        bdef.kind = dynamics.BODY_DYNAMIC
+        bdef.position = math.vec3(0.0, 10.0 - 0.5 * ((i as float) + 0.5), 0.0)
+        link = dynamics.create_body(world_id, &bdef)
+        sdef = dynamics.default_shape_def()
+        if i < 8 {
+            dynamics.create_capsule_shape(link, &sdef, manifold.capsule(math.vec3(0.0, 0.0 - 0.2, 0.0), math.vec3(0.0, 0.2, 0.0), 0.05))
+        } else {
+            sdef.density = 10.0 * sdef.density
+            dynamics.create_sphere_shape(link, &sdef, manifold.sphere(math.vec3_zero(), 0.25))
+        }
+        jdef = dynamics.default_spherical_joint_def()
+        jdef.base.body_id_a = previous
+        jdef.base.body_id_b = link
+        jdef.base.local_frame_a = Transform { p: math.vec3(0.0, 0.0 - 0.25, 0.0), q: math.quat_identity() }
+        if i == 0 { jdef.base.local_frame_a = Transform { p: math.vec3_zero(), q: math.quat_identity() } }
+        jdef.base.local_frame_b = Transform { p: math.vec3(0.0, 0.25, 0.0), q: math.quat_identity() }
+        joints[i] = dynamics.create_spherical_joint(world_id, &jdef)
+        links[i] = link
+        previous = link
+        i = i + 1
+    }
+    // Swing it: a sideways push on the heavy ball.
+    dynamics.body_set_linear_velocity(links[8], math.vec3(3.0, 0.0, 0.0))
+    worst = 0.0
+    s = 0
+    while s < 300 {
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        i = 0
+        while i < 9 {
+            worst = math.max_float(worst, dynamics.joint_get_linear_separation(joints[i]))
+            i = i + 1
+        }
+        s = s + 1
+    }
+    finite = true
+    i = 0
+    while i < 9 {
+        if finite_body(links[i]) == false { finite = false }
+        i = i + 1
+    }
+    ensure("the heavy chain stays finite", finite)
+    ensure("its joints stay together (${worst} m apart at worst)", worst < 0.06)
+    ensure("the ball hangs below the anchor (${dynamics.body_get_position(links[8]).y})",
+           dynamics.body_get_position(links[8]).y < 6.0 && dynamics.body_get_position(links[8]).y > 5.0)
+    basics.free_bytes(joints_block, 9 * sizeof(JointId))
+    basics.free_bytes(links_block, 9 * sizeof(BodyId))
+    dynamics.destroy_world(world_id)
+}
+
+// A hinge driven by a motor of all but unlimited torque spins its box at
+// the motor's speed and no faster; a hinge whose limits meet holds still.
+test_motor_and_limits() {
+    fixtures_ready()
+    wdef = dynamics.default_world_def()
+    wdef.gravity = math.vec3_zero()
+    world_id = dynamics.create_world(&wdef)
+    bdef = dynamics.default_body_def()
+    ground = dynamics.create_body(world_id, &bdef)
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.enable_sleep = false
+    wheel = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    dynamics.create_hull_shape(wheel, &sdef, g_box as *HullData)
+    rdef = dynamics.default_revolute_joint_def()
+    rdef.base.body_id_a = ground
+    rdef.base.body_id_b = wheel
+    rdef.enable_motor = true
+    rdef.motor_speed = 40.0
+    rdef.max_motor_torque = 1000000000000.0
+    dynamics.create_revolute_joint(world_id, &rdef)
+    steps(world_id, 120)
+    spin = math.length(dynamics.body_get_angular_velocity(wheel))
+    ensure("an unlimited motor spins at its speed (${spin})", math.abs_float(spin - 40.0) < 0.01)
+    ensure("and the wheel stays finite and in place", finite_body(wheel) && math.length(dynamics.body_get_position(wheel)) < 0.001)
+
+    bdef.position = math.vec3(5.0, 0.0, 0.0)
+    pinned = dynamics.create_body(world_id, &bdef)
+    dynamics.create_hull_shape(pinned, &sdef, g_box as *HullData)
+    rdef = dynamics.default_revolute_joint_def()
+    rdef.base.body_id_a = ground
+    rdef.base.body_id_b = pinned
+    rdef.base.local_frame_a = Transform { p: math.vec3(5.0, 0.0, 0.0), q: math.quat_identity() }
+    rdef.enable_limit = true
+    rdef.lower_angle = 0.0
+    rdef.upper_angle = 0.0
+    pin = dynamics.create_revolute_joint(world_id, &rdef)
+    dynamics.body_set_angular_velocity(pinned, math.vec3(0.0, 0.0, 30.0))
+    steps(world_id, 60)
+    ensure("a hinge whose limits meet holds its box still (${joint_solver.revolute_joint_get_angle(pin)} rad)",
+           math.abs_float(joint_solver.revolute_joint_get_angle(pin)) < 0.02 && finite_body(pinned))
+    dynamics.destroy_world(world_id)
+}
+
 // Points on one plane make no hull, rather than a broken one.
 test_flat_hull() {
     block = basics.alloc(8 * sizeof(Vec3))
@@ -518,6 +634,8 @@ main() {
     test_huge_ground()
     test_degenerate_capsule()
     test_bad_geometry()
+    test_heavy_chain()
+    test_motor_and_limits()
     test_flat_hull()
     println("edge_cases: ${checks} checks")
     if failures == 0 {
