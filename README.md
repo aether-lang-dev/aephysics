@@ -141,7 +141,10 @@ first time it asks and gives it back when it exits (64 in all, the
 reference's own cap on workers). `test_threads.ae` casts rays and
 spheres and overlaps boxes from four threads at once against a mesh, a
 height field, a compound and hulls, and checks every answer against the
-serial one.
+serial one. A query's visitor may also run more queries on its own
+thread, an overlap checking each find's line of sight: a traversal nested
+inside another of the same stacks takes stacks of its own for its length,
+as each of the reference's queries has its stack on the C stack.
 
 Beyond the modules' own tests, the reference's scene tests run on the
 world as a whole: `test_mover_world.ae` (the mover through a world:

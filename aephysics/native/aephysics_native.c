@@ -196,6 +196,18 @@ int aephysics_worker_index(void)
 void aephysics_set_worker_index(int index) { g_worker_index = index + 1; }
 #endif
 
+// How deep the calling thread's slot is in traversals of one set of
+// stacks (a tree's, the meshes', the compounds'): a query's visitor may
+// run another query on the same thread (an overlap checking a line of
+// sight), and the slot's stacks belong to the outermost traversal of
+// them. `depths` is the set's int[64], one count a slot. A traversal
+// entered at depth 0 uses the slot's stacks; a nested one takes stacks of
+// its own for its length, as each of the reference's queries has its
+// stack on the C stack. A slot is one running thread's, so the counts
+// need no atomics.
+int aephysics_enter_traversal(void *depths) { return ((int *)depths)[aephysics_worker_index()]++; }
+void aephysics_leave_traversal(void *depths) { ((int *)depths)[aephysics_worker_index()]--; }
+
 // The calling thread gives up the rest of its slice, for a spin that waits on another worker.
 void aephysics_yield(void)
 {

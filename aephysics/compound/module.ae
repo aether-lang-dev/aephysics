@@ -626,7 +626,7 @@ var g_tree_stack: ptr = null
 var g_tree_dists: ptr = null
 tree_stacks_ready() {
     if g_tree_stack == null {
-        g_tree_stack = basics.alloc(native.MAX_WORKERS * dynamic_tree.query_stack_bytes())
+        g_tree_stack = basics.alloc(dynamic_tree.tree_stacks_bytes())
         g_tree_dists = basics.alloc(native.MAX_WORKERS * dynamic_tree.query_dist_bytes())
     }
 }

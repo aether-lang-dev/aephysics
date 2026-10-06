@@ -8,7 +8,7 @@
 @source("aephysics_native.c")
 @c_include("aephysics_inline.h")
 exports (
-    MAX_WORKERS, worker_index, set_worker_index, claim_slots, release_slots, yield_thread, pause, processor_count, scratch,
+    MAX_WORKERS, worker_index, set_worker_index, claim_slots, release_slots, enter_traversal, leave_traversal, yield_thread, pause, processor_count, scratch,
     atomic_load, atomic_store, atomic_add, atomic_or, atomic_cas,
     semaphore_new, semaphore_free, semaphore_wait, semaphore_signal,
     name_copy, name_text, name_free, prefetch, load_word, load_u16
@@ -22,6 +22,8 @@ extern aephysics_worker_index() -> int
 extern aephysics_set_worker_index(index: int)
 extern aephysics_claim_slots(count: int) -> int
 extern aephysics_release_slots(start: int, count: int)
+extern aephysics_enter_traversal(depths: ptr) -> int
+extern aephysics_leave_traversal(depths: ptr)
 extern aephysics_yield()
 extern aephysics_processor_count() -> int
 extern aephysics_pause() @c_import
@@ -70,6 +72,12 @@ set_worker_index(index: int) { aephysics_set_worker_index(index) }
 // running at once choose the same scratch.
 claim_slots(count: int) -> int { return aephysics_claim_slots(count) }
 release_slots(start: int, count: int) { aephysics_release_slots(start, count) }
+
+// A traversal of a set of stacks entered on the calling thread's slot
+// (its depth before: 0 for the outermost, which uses the slot's stacks)
+// and left; `depths` is the set's int[MAX_WORKERS].
+enter_traversal(depths: ptr) -> int { return aephysics_enter_traversal(depths) }
+leave_traversal(depths: ptr) { aephysics_leave_traversal(depths) }
 yield_thread() { aephysics_yield() }
 pause() { aephysics_pause() }
 processor_count() -> int { return aephysics_processor_count() }
