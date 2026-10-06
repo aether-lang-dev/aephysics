@@ -158,11 +158,12 @@ origin-relative queries at x = 0 and at x = 1e7 agree, the whole
 engine being in doubles; 43 checks) and `test_edge_cases.ae` (every
 number a world takes refused when it is NaN, infinite or negative where
 it must not be, as the reference asserts it, the world left as it was;
-a perfect bounce holding its height over twelve bounces, a free spin
+a world or a ragdoll of such numbers never made, a ragdoll made whole
+or not at all; a perfect bounce holding its height over twelve bounces, a free spin
 keeping its energy, a box a hundred times heavier resting on a light one,
 centimetre boxes, a kilometre of ground, a capsule of no length, steps of
 no, negative and infinite time, geometry that cannot collide, a heavy
-chain, an unlimited motor and a hinge whose limits meet; 80 checks).
+chain, an unlimited motor and a hinge whose limits meet; 87 checks).
 
 The step is deterministic across platforms and worker counts, not
 only across runs: `AEPHYSICS_TRACE=1 target/test_determinism` prints

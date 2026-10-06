@@ -584,8 +584,13 @@ create_human(h: *Human, world_id: WorldId, position: Vec3, friction_torque: floa
 
 // A figure of a shape, its space put in the world by `placement`.
 create_human_shaped(h: *Human, world_id: WorldId, placement: Transform, shape: ptr, friction_torque: float, hertz: float, damping_ratio: float, group_index: int, user_data: ptr) {
+    // A figure is made whole or not at all: refused inputs leave it unspawned.
+    h.is_spawned = false
+    if dynamics.world_is_valid(world_id) == false || shape == null || math.is_valid_world_transform(placement) == false { return }
+    if valid_nonnegative(friction_torque) == false || valid_nonnegative(hertz) == false || valid_nonnegative(damping_ratio) == false { return }
     h.bones = calloc(BONE_COUNT, sizeof(HumanBone))
     h.filter_joints = calloc(FILTER_JOINT_COUNT, sizeof(JointId))
+    h.filter_joint_count = 0
     i = 0
     while i < BONE_COUNT {
         bone = bone_at(h, i)
@@ -610,6 +615,17 @@ create_human_shaped(h: *Human, world_id: WorldId, placement: Transform, shape: p
     i = 0
     while i < BONE_COUNT {
         place_bone(h, world_id, i, placement, spec_at(shape, i), user_data, group_index)
+        i = i + 1
+    }
+    // A bone the world refused (a full world, a shape spec out of range)
+    // would leave a figure missing a limb that every later call reaches
+    // for: what was made is taken down and the figure stays unspawned.
+    i = 0
+    while i < BONE_COUNT {
+        if dynamics.body_is_valid(bone_at(h, i).body_id) == false {
+            destroy_human(h)
+            return
+        }
         i = i + 1
     }
 
@@ -658,7 +674,6 @@ create_human_shaped(h: *Human, world_id: WorldId, placement: Transform, shape: p
         i = i + 1
     }
     // The thighs pass each other and the head the shoulders.
-    h.filter_joint_count = 0
     add_filter(h, world_id, BONE_THIGH_L, BONE_THIGH_R)
     add_filter(h, world_id, BONE_NECK, BONE_UPPER_ARM_L)
     add_filter(h, world_id, BONE_NECK, BONE_UPPER_ARM_R)
@@ -673,6 +688,9 @@ add_filter(h: *Human, world_id: WorldId, a: int, b: int) {
     filters[h.filter_joint_count] = dynamics.create_filter_joint(world_id, &fdef)
     h.filter_joint_count = h.filter_joint_count + 1
 }
+
+// A finite number at or above zero.
+valid_nonnegative(x: float) -> bool { return math.is_valid_float(x) && x >= 0.0 }
 
 // The joints, then the bodies (and their anchors), then the blocks.
 destroy_human(h: *Human) {
