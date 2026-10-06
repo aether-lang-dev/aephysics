@@ -159,7 +159,7 @@ engine being in doubles; 43 checks) and `test_edge_cases.ae` (every
 number a world takes refused when it is NaN, infinite or negative where
 it must not be, as the reference asserts it, the world left as it was;
 a world or a ragdoll of such numbers never made, a ragdoll made whole
-or not at all and never made over, its calls nothing when it is not;
+or not at all and never made over, its calls doing nothing unspawned;
 a perfect bounce holding its height over twelve bounces, a free spin
 keeping its energy, a box a hundred times heavier resting on a light one,
 centimetre boxes, a kilometre of ground, a capsule of no length, steps of
