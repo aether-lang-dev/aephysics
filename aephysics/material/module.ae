@@ -5,7 +5,7 @@
 import std.string
 import aephysics.math
 
-exports ( SurfaceMaterial, default_surface_material, same_material )
+exports ( SurfaceMaterial, default_surface_material, same_material, is_valid_material )
 
 // A surface's material.
 struct SurfaceMaterial {
@@ -23,6 +23,14 @@ default_surface_material() -> SurfaceMaterial {
 }
 
 // Field by field, so the struct's padding never enters.
+// Friction, restitution and rolling resistance finite and not below
+// zero, a finite tangent velocity.
+is_valid_material(m: SurfaceMaterial) -> bool {
+    return nonnegative(m.friction) && nonnegative(m.restitution) && nonnegative(m.rolling_resistance) && math.is_valid_vec3(m.tangent_velocity)
+}
+
+nonnegative(x: float) -> bool { return math.is_valid_float(x) && x >= 0.0 }
+
 same_material(a: SurfaceMaterial, b: SurfaceMaterial) -> bool {
     return a.friction == b.friction && a.restitution == b.restitution && a.rolling_resistance == b.rolling_resistance &&
            a.tangent_velocity.x == b.tangent_velocity.x && a.tangent_velocity.y == b.tangent_velocity.y &&

@@ -1706,10 +1706,7 @@ valid_nonnegative(x: float) -> bool { return math.is_valid_float(x) && x >= 0.0 
 
 // A surface material the solver can use: finite, with friction,
 // restitution and rolling resistance not below zero.
-valid_material(m: SurfaceMaterial) -> bool {
-    return valid_nonnegative(m.friction) && valid_nonnegative(m.restitution) && valid_nonnegative(m.rolling_resistance) &&
-           math.is_valid_vec3(m.tangent_velocity)
-}
+valid_material(m: SurfaceMaterial) -> bool { return material.is_valid_material(m) }
 
 valid_body_def(def: *BodyDef) -> bool {
     if math.is_valid_position(def.position) == false || math.is_valid_quat(def.rotation) == false { return false }

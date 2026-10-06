@@ -45,7 +45,6 @@ exports (
 )
 
 extern memcpy(dst: ptr, src: ptr, size: int) -> ptr
-extern memset(block: ptr, value: int, size: int) -> ptr
 extern memcmp(a: ptr, b: ptr, size: int) -> int
 
 const NULL_INDEX = 0 - 1
@@ -354,7 +353,59 @@ all_bits() -> long { return (0 as long) - (1 as long) }
 // tree rebuilt in full, the materials into a shared table, the hulls and
 // meshes deduplicated by content, then everything is packed into one
 // block. Null when there are no children or too many.
+// Every child as the shape of its own would be checked: counts not below
+// zero with their arrays, finite spheres and capsules of radii not below
+// zero, hulls and meshes of this version, finite transforms and scales,
+// materials as a shape takes them.
+valid_compound_def(def: *CompoundDef) -> bool {
+    if def.capsule_count < 0 || def.hull_count < 0 || def.mesh_count < 0 || def.sphere_count < 0 { return false }
+    if (def.capsule_count > 0 && def.capsules == null) || (def.hull_count > 0 && def.hulls == null) { return false }
+    if (def.mesh_count > 0 && def.meshes == null) || (def.sphere_count > 0 && def.spheres == null) { return false }
+    capsule_defs = def.capsules as CompoundCapsuleDef[]
+    i = 0
+    while i < def.capsule_count {
+        c = capsule_defs[i].capsule
+        if math.is_valid_vec3(c.center1) == false || math.is_valid_vec3(c.center2) == false || nonnegative(c.radius) == false { return false }
+        if material.is_valid_material(capsule_defs[i].material) == false { return false }
+        i = i + 1
+    }
+    sphere_defs = def.spheres as CompoundSphereDef[]
+    i = 0
+    while i < def.sphere_count {
+        if math.is_valid_vec3(sphere_defs[i].sphere.center) == false || nonnegative(sphere_defs[i].sphere.radius) == false { return false }
+        if material.is_valid_material(sphere_defs[i].material) == false { return false }
+        i = i + 1
+    }
+    hull_defs = def.hulls as CompoundHullDef[]
+    i = 0
+    while i < def.hull_count {
+        h = hull_defs[i].hull
+        if h == null || h.version != hull.HULL_VERSION || math.is_valid_transform(hull_defs[i].transform) == false { return false }
+        if material.is_valid_material(hull_defs[i].material) == false { return false }
+        i = i + 1
+    }
+    mesh_defs = def.meshes as CompoundMeshDef[]
+    i = 0
+    while i < def.mesh_count {
+        md = mesh_defs[i].mesh_data
+        if md == null || md.version != mesh.MESH_VERSION || math.is_valid_transform(mesh_defs[i].transform) == false { return false }
+        if math.is_valid_vec3(mesh_defs[i].scale) == false || mesh_defs[i].material_count < 0 { return false }
+        if mesh_defs[i].material_count > 0 && mesh_defs[i].materials == null { return false }
+        materials = mesh_defs[i].materials as SurfaceMaterial[]
+        k = 0
+        while k < mesh_defs[i].material_count {
+            if material.is_valid_material(materials[k]) == false { return false }
+            k = k + 1
+        }
+        i = i + 1
+    }
+    return true
+}
+
+nonnegative(x: float) -> bool { return math.is_valid_float(x) && x >= 0.0 }
+
 create_compound(def: *CompoundDef) -> *CompoundData {
+    if valid_compound_def(def) == false { return null }
     capsule_count = def.capsule_count
     hull_count = def.hull_count
     mesh_count = def.mesh_count
@@ -439,7 +490,10 @@ create_compound(def: *CompoundDef) -> *CompoundData {
     i = 0
     while i < mesh_count {
         md = mesh_defs[i].mesh_data
-        box = mesh.compute_mesh_aabb(md, mesh_defs[i].transform, mesh_defs[i].scale)
+        // A scale's axes kept off zero, as a mesh shape's are: its inverse
+        // divides every ray and cast into the mesh.
+        scale = math.safe_scale(mesh_defs[i].scale)
+        box = mesh.compute_mesh_aabb(md, mesh_defs[i].transform, scale)
         dynamic_tree.tree_create_proxy(&tree, box, all_bits(), child_index as long)
         child_index = child_index + 1
         // The mesh's materials go through the same table, all of them: its
@@ -447,7 +501,7 @@ create_compound(def: *CompoundDef) -> *CompoundData {
         // none gets one entry, the table's first).
         run = math.max_int(mesh_defs[i].material_count, 1)
         mesh_materials = mesh_defs[i].materials as SurfaceMaterial[]
-        instance = MeshInstance { transform: mesh_defs[i].transform, scale: mesh_defs[i].scale, mesh_offset: 0,
+        instance = MeshInstance { transform: mesh_defs[i].transform, scale: scale, mesh_offset: 0,
                                   material_start: map_count, material_count: run }
         k = 0
         while k < run {
@@ -510,8 +564,7 @@ create_compound(def: *CompoundDef) -> *CompoundData {
     sphere_offset = byte_count
     byte_count = byte_count + align8(sphere_count * sizeof(CompoundSphere))
 
-    block = basics.alloc(byte_count)
-    memset(block, 0, byte_count)
+    block = basics.alloc(byte_count)   // zeroed
     c = block as *CompoundData
     c.version = COMPOUND_VERSION
     c.byte_count = byte_count

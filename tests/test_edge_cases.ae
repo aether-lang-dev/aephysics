@@ -13,6 +13,7 @@ import aephysics.basics
 import aephysics.hull
 import aephysics.mesh
 import aephysics.height_field
+import aephysics.compound
 import aephysics.manifold
 import aephysics.material
 import aephysics.shape
@@ -744,6 +745,72 @@ test_bad_meshes() {
     basics.free_bytes(heights_block, 4 * 8)
 }
 
+// Compounds of children a shape would refuse are not made; a mesh child
+// scaled to nothing on an axis is kept off zero as a mesh shape is, so a
+// ray into it divides by no zero.
+compound_of_spheres(spheres: ptr, count: int) -> *CompoundData {
+    cdef = compound.compound_def()
+    cdef.spheres = spheres
+    cdef.sphere_count = count
+    return compound.create_compound(&cdef)
+}
+
+test_bad_compounds() {
+    fixtures_ready()
+    m = material.default_surface_material()
+    spheres_block = basics.alloc(2 * sizeof(CompoundSphereDef))
+    spheres = spheres_block as CompoundSphereDef[]
+    spheres[0] = compound.compound_sphere_def(manifold.sphere(math.vec3(0.0 - 1.0, 0.0, 0.0), 0.5), m)
+    spheres[1] = compound.compound_sphere_def(manifold.sphere(math.vec3(1.0, 0.0, 0.0), 0.5), m)
+    sound = compound_of_spheres(spheres_block, 2)
+    ensure("two spheres make a compound", sound != null)
+    if sound != null { compound.destroy_compound(sound) }
+    refused = 0
+    if compound_of_spheres(spheres_block, 0 - 1) == null { refused = refused + 1 }
+    if compound_of_spheres(null, 2) == null { refused = refused + 1 }
+    spheres[1] = compound.compound_sphere_def(manifold.sphere(math.vec3(1.0, not_a_number(), 0.0), 0.5), m)
+    if compound_of_spheres(spheres_block, 2) == null { refused = refused + 1 }
+    spheres[1] = compound.compound_sphere_def(manifold.sphere(math.vec3(1.0, 0.0, 0.0), 0.0 - 0.5), m)
+    if compound_of_spheres(spheres_block, 2) == null { refused = refused + 1 }
+    bad = m
+    bad.friction = not_a_number()
+    spheres[1] = compound.compound_sphere_def(manifold.sphere(math.vec3(1.0, 0.0, 0.0), 0.5), bad)
+    if compound_of_spheres(spheres_block, 2) == null { refused = refused + 1 }
+    hulls_block = basics.alloc(sizeof(CompoundHullDef))
+    hulls = hulls_block as CompoundHullDef[]
+    hulls[0] = compound.compound_hull_def(g_box as *HullData, Transform { p: math.vec3(infinity(), 0.0, 0.0), q: math.quat_identity() }, m)
+    cdef = compound.compound_def()
+    cdef.hulls = hulls_block
+    cdef.hull_count = 1
+    if compound.create_compound(&cdef) == null { refused = refused + 1 }
+    hulls[0] = compound.compound_hull_def(null, math.transform_identity(), m)
+    if compound.create_compound(&cdef) == null { refused = refused + 1 }
+    ensure("compounds of negative counts, missing arrays, NaN or negative spheres, NaN materials, infinite or missing hulls are refused (${refused} of 7)", refused == 7)
+
+    grid = mesh.create_grid_mesh(4, 4, 1.0, 0, false)
+    meshes_block = basics.alloc(sizeof(CompoundMeshDef))
+    meshes = meshes_block as CompoundMeshDef[]
+    meshes[0] = compound.compound_mesh_def(grid, math.transform_identity(), math.vec3(1.0, 0.0, 1.0), null, 0)
+    cdef = compound.compound_def()
+    cdef.meshes = meshes_block
+    cdef.mesh_count = 1
+    flat = compound.create_compound(&cdef)
+    ensure("a mesh child of zero scale on an axis makes a compound", flat != null)
+    if flat != null {
+        ray = compound.ray_cast_compound(flat, math.vec3(1.5, 2.0, 1.5), math.vec3(0.0, 0.0 - 4.0, 0.0), 1.0)
+        ensure("a ray into it hits at a finite point (${ray.point.y})", ray.hit && math.is_valid_vec3(ray.point) && math.abs_float(ray.point.y) < 0.05)
+        compound.destroy_compound(flat)
+    }
+    meshes[0] = compound.compound_mesh_def(grid, math.transform_identity(), math.vec3(1.0, not_a_number(), 1.0), null, 0)
+    ensure("a mesh child of NaN scale is refused", compound.create_compound(&cdef) == null)
+    meshes[0] = compound.compound_mesh_def(grid, math.transform_identity(), math.vec3_one(), null, 3)
+    ensure("a mesh child claiming materials it lacks is refused", compound.create_compound(&cdef) == null)
+    mesh.destroy_mesh(grid)
+    basics.free_bytes(spheres_block, 2 * sizeof(CompoundSphereDef))
+    basics.free_bytes(hulls_block, sizeof(CompoundHullDef))
+    basics.free_bytes(meshes_block, sizeof(CompoundMeshDef))
+}
+
 // A chain of eight light links holding a ball ten times as dense, some
 // 180 times a link's mass: the soft step's hard case for joints. It
 // hangs, finite, its joints apart by a few centimetres, as the
@@ -890,6 +957,7 @@ main() {
     test_degenerate_capsule()
     test_bad_geometry()
     test_bad_meshes()
+    test_bad_compounds()
     test_heavy_chain()
     test_motor_and_limits()
     test_flat_hull()
