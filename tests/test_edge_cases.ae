@@ -1,0 +1,529 @@
+// aephysics at its edges. Every number a world takes is refused when it
+// is NaN, infinite or negative where it must not be, and the world is left
+// as it was: the reference asserts at these places (b3IsValidFloat,
+// b3IsValidVec3, b3IsValidQuat), and an assert is gone from a release
+// build. Then the scenes that break engines stay finite and physical: a
+// perfect bounce that never gains height, a free spin that never speeds
+// up, a heavy box resting on a light one, boxes a centimetre wide, a
+// ground a kilometre wide, a capsule of no length, a world stepped by
+// zero, negative and infinite time steps.
+import std.string
+import aephysics.math
+import aephysics.basics
+import aephysics.hull
+import aephysics.manifold
+import aephysics.material
+import aephysics.shape
+import aephysics.dynamics
+import aephysics.joint_solver
+import aephysics.physics_world
+
+extern exit(code: int)
+
+var failures = 0
+var checks = 0
+
+ensure(name: string, ok: bool) {
+    checks = checks + 1
+    if !ok {
+        println("edge_cases: FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+// A NaN and an infinity made at run time, not folded by the compiler.
+var g_zero = 0.0
+not_a_number() -> float { return g_zero / g_zero }
+infinity() -> float { return 1.0 / g_zero }
+
+var g_box: ptr = null
+var g_ground: ptr = null
+var g_tiny: ptr = null
+var g_huge: ptr = null
+
+fixtures_ready() {
+    if g_box == null {
+        g_box = hull.make_box_hull(0.5, 0.5, 0.5) as ptr
+        g_ground = hull.make_box_hull(20.0, 0.5, 20.0) as ptr
+        g_tiny = hull.make_box_hull(0.01, 0.01, 0.01) as ptr
+        g_huge = hull.make_box_hull(500.0, 0.5, 500.0) as ptr
+    }
+}
+
+new_world() -> WorldId {
+    wdef = dynamics.default_world_def()
+    return dynamics.create_world(&wdef)
+}
+
+ground_in(world_id: WorldId, h: ptr) -> BodyId {
+    bdef = dynamics.default_body_def()
+    bdef.position = math.vec3(0.0, 0.0 - 0.5, 0.0)
+    body = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    dynamics.create_hull_shape(body, &sdef, h as *HullData)
+    return body
+}
+
+box_at(world_id: WorldId, p: Vec3, h: ptr, density: float) -> BodyId {
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.position = p
+    body = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    sdef.density = density
+    dynamics.create_hull_shape(body, &sdef, h as *HullData)
+    return body
+}
+
+finite_body(id: BodyId) -> bool {
+    return math.is_valid_vec3(dynamics.body_get_position(id)) && math.is_valid_quat(dynamics.body_get_rotation(id)) &&
+           math.is_valid_vec3(dynamics.body_get_linear_velocity(id)) && math.is_valid_vec3(dynamics.body_get_angular_velocity(id))
+}
+
+steps(world_id: WorldId, count: int) {
+    i = 0
+    while i < count {
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        i = i + 1
+    }
+}
+
+// --- bodies ---------------------------------------------------------------
+
+test_body_definitions() {
+    world_id = new_world()
+    nan = not_a_number()
+    inf = infinity()
+    bdef = dynamics.default_body_def()
+    bdef.position = math.vec3(nan, 0.0, 0.0)
+    ensure("a NaN position makes no body", dynamics.body_is_valid(dynamics.create_body(world_id, &bdef)) == false)
+    bdef = dynamics.default_body_def()
+    bdef.rotation = Quat { x: 0.0, y: 0.0, z: 0.0, w: 2.0 }
+    ensure("an unnormalised rotation makes no body", dynamics.body_is_valid(dynamics.create_body(world_id, &bdef)) == false)
+    bdef = dynamics.default_body_def()
+    bdef.linear_velocity = math.vec3(0.0, inf, 0.0)
+    ensure("an infinite velocity makes no body", dynamics.body_is_valid(dynamics.create_body(world_id, &bdef)) == false)
+    bdef = dynamics.default_body_def()
+    bdef.linear_damping = 0.0 - 1.0
+    ensure("a negative damping makes no body", dynamics.body_is_valid(dynamics.create_body(world_id, &bdef)) == false)
+    bdef = dynamics.default_body_def()
+    bdef.gravity_scale = nan
+    ensure("a NaN gravity scale makes no body", dynamics.body_is_valid(dynamics.create_body(world_id, &bdef)) == false)
+    bdef = dynamics.default_body_def()
+    bdef.sleep_threshold = 0.0 - 0.5
+    ensure("a negative sleep threshold makes no body", dynamics.body_is_valid(dynamics.create_body(world_id, &bdef)) == false)
+    bdef = dynamics.default_body_def()
+    ensure("a valid definition makes a body", dynamics.body_is_valid(dynamics.create_body(world_id, &bdef)))
+    ensure("only the valid body was made", dynamics.world_body_count(dynamics.get_world(world_id.index1 - 1)) == 1)
+    dynamics.destroy_world(world_id)
+}
+
+test_body_setters() {
+    fixtures_ready()
+    world_id = new_world()
+    nan = not_a_number()
+    inf = infinity()
+    body = box_at(world_id, math.vec3(0.0, 2.0, 0.0), g_box, 1.0)
+    dynamics.body_set_linear_velocity(body, math.vec3(1.0, 0.0, 0.0))
+    dynamics.body_set_linear_velocity(body, math.vec3(nan, 0.0, 0.0))
+    ensure("a NaN velocity is refused", dynamics.body_get_linear_velocity(body).x == 1.0)
+    dynamics.body_set_angular_velocity(body, math.vec3(0.0, inf, 0.0))
+    ensure("an infinite spin is refused", math.length(dynamics.body_get_angular_velocity(body)) == 0.0)
+    dynamics.body_set_transform(body, math.vec3(nan, 1.0, 0.0), math.quat_identity())
+    ensure("a NaN position is refused", dynamics.body_get_position(body).y == 2.0)
+    dynamics.body_set_transform(body, math.vec3(0.0, 3.0, 0.0), Quat { x: 1.0, y: 1.0, z: 0.0, w: 0.0 })
+    ensure("an unnormalised rotation is refused", dynamics.body_get_position(body).y == 2.0)
+    dynamics.body_apply_force_to_center(body, math.vec3(inf, 0.0, 0.0), true)
+    dynamics.body_apply_torque(body, math.vec3(nan, 0.0, 0.0), true)
+    dynamics.body_apply_linear_impulse(body, math.vec3(1.0, 0.0, 0.0), math.vec3(nan, 0.0, 0.0), true)
+    dynamics.body_apply_linear_impulse_to_center(body, math.vec3(0.0, nan, 0.0), true)
+    dynamics.body_apply_angular_impulse(body, math.vec3(0.0, 0.0, inf), true)
+    ensure("NaN and infinite impulses are refused", dynamics.body_get_linear_velocity(body).x == 1.0 && math.length(dynamics.body_get_angular_velocity(body)) == 0.0)
+    dynamics.body_set_linear_damping(body, 0.25)
+    dynamics.body_set_linear_damping(body, 0.0 - 1.0)
+    dynamics.body_set_angular_damping(body, nan)
+    ensure("negative and NaN dampings are refused", dynamics.body_get_linear_damping(body) == 0.25 && dynamics.body_get_angular_damping(body) == 0.0)
+    dynamics.body_set_gravity_scale(body, inf)
+    ensure("an infinite gravity scale is refused", dynamics.body_get_gravity_scale(body) == 1.0)
+    mass = dynamics.body_get_mass(body)
+    md = dynamics.body_get_mass_data(body)
+    md.mass = 0.0 - 3.0
+    dynamics.body_set_mass_data(body, md)
+    md = dynamics.body_get_mass_data(body)
+    md.center = math.vec3(nan, 0.0, 0.0)
+    dynamics.body_set_mass_data(body, md)
+    ensure("a negative mass and a NaN centre are refused", dynamics.body_get_mass(body) == mass && math.is_valid_vec3(dynamics.body_get_local_center(body)))
+    dynamics.body_set_target_transform(body, Transform { p: math.vec3(nan, 0.0, 0.0), q: math.quat_identity() }, 1.0 / 60.0, true)
+    dynamics.body_set_target_transform(body, Transform { p: math.vec3(0.0, 2.0, 0.0), q: math.quat_identity() }, inf, true)
+    ensure("a NaN target and an infinite step are refused", dynamics.body_get_linear_velocity(body).x == 1.0)
+    dynamics.body_set_sleep_threshold(body, nan)
+    ensure("a NaN sleep threshold is refused", math.is_valid_float(dynamics.body_get_sleep_threshold(body)))
+    steps(world_id, 30)
+    ensure("the body steps on finite", finite_body(body))
+    dynamics.destroy_world(world_id)
+}
+
+// --- shapes ---------------------------------------------------------------
+
+test_shapes() {
+    fixtures_ready()
+    world_id = new_world()
+    nan = not_a_number()
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    body = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    sdef.density = 0.0 - 1.0
+    ensure("a negative density makes no shape", dynamics.shape_is_valid(dynamics.create_hull_shape(body, &sdef, g_box as *HullData)) == false)
+    sdef = dynamics.default_shape_def()
+    sdef.base_material.friction = nan
+    ensure("a NaN friction makes no shape", dynamics.shape_is_valid(dynamics.create_hull_shape(body, &sdef, g_box as *HullData)) == false)
+    sdef = dynamics.default_shape_def()
+    sdef.base_material.tangent_velocity = math.vec3(infinity(), 0.0, 0.0)
+    ensure("an infinite conveyor makes no shape", dynamics.shape_is_valid(dynamics.create_hull_shape(body, &sdef, g_box as *HullData)) == false)
+    sdef = dynamics.default_shape_def()
+    shape_id = dynamics.create_hull_shape(body, &sdef, g_box as *HullData)
+    ensure("a valid definition makes a shape", dynamics.shape_is_valid(shape_id))
+    ensure("the refused shapes left the body alone", dynamics.body_get_shape_count(body) == 1)
+    dynamics.shape_set_density(shape_id, nan, true)
+    ensure("a NaN density is refused", dynamics.shape_get_density(shape_id) == sdef.density)
+    dynamics.shape_set_friction(shape_id, 0.0 - 0.2)
+    dynamics.shape_set_restitution(shape_id, nan)
+    ensure("a negative friction and a NaN restitution are refused", dynamics.shape_get_friction(shape_id) == sdef.base_material.friction &&
+           dynamics.shape_get_restitution(shape_id) == sdef.base_material.restitution)
+    m = material.default_surface_material()
+    m.rolling_resistance = 0.0 - 1.0
+    dynamics.shape_set_surface_material(shape_id, m)
+    ensure("a negative rolling resistance is refused", dynamics.shape_get_surface_material(shape_id).rolling_resistance == 0.0)
+    dynamics.destroy_world(world_id)
+}
+
+// --- joints ---------------------------------------------------------------
+
+test_joints() {
+    fixtures_ready()
+    world_id = new_world()
+    nan = not_a_number()
+    a = ground_in(world_id, g_ground)
+    b = box_at(world_id, math.vec3(0.0, 2.0, 0.0), g_box, 1.0)
+    ddef = dynamics.default_distance_joint_def()
+    ddef.base.body_id_a = a
+    ddef.base.body_id_b = b
+    ddef.length = nan
+    ensure("a NaN length makes no distance joint", dynamics.joint_is_valid(dynamics.create_distance_joint(world_id, &ddef)) == false)
+    rdef = dynamics.default_revolute_joint_def()
+    rdef.base.body_id_a = a
+    rdef.base.body_id_b = b
+    rdef.hertz = nan
+    ensure("a NaN spring makes no hinge", dynamics.joint_is_valid(dynamics.create_revolute_joint(world_id, &rdef)) == false)
+    rdef = dynamics.default_revolute_joint_def()
+    rdef.base.body_id_a = a
+    rdef.base.body_id_b = b
+    rdef.base.force_threshold = 0.0 - 1.0
+    ensure("a negative event threshold makes no hinge", dynamics.joint_is_valid(dynamics.create_revolute_joint(world_id, &rdef)) == false)
+    sdef = dynamics.default_spherical_joint_def()
+    sdef.base.body_id_a = a
+    sdef.base.body_id_b = b
+    sdef.cone_angle = nan
+    ensure("a NaN cone makes no ball joint", dynamics.joint_is_valid(dynamics.create_spherical_joint(world_id, &sdef)) == false)
+    wdef = dynamics.default_wheel_joint_def()
+    wdef.base.body_id_a = a
+    wdef.base.body_id_b = b
+    wdef.lower_suspension_limit = nan
+    ensure("a NaN suspension limit makes no wheel", dynamics.joint_is_valid(dynamics.create_wheel_joint(world_id, &wdef)) == false)
+    rdef = dynamics.default_revolute_joint_def()
+    rdef.base.body_id_a = a
+    rdef.base.body_id_b = b
+    rdef.enable_limit = true
+    rdef.lower_angle = 0.0 - 0.5
+    rdef.upper_angle = 0.5
+    hinge = dynamics.create_revolute_joint(world_id, &rdef)
+    ensure("a valid hinge is made", dynamics.joint_is_valid(hinge))
+    joint_solver.revolute_joint_set_spring_hertz(hinge, 2.0)
+    joint_solver.revolute_joint_set_spring_hertz(hinge, 0.0 - 1.0)
+    ensure("a negative spring is refused", joint_solver.revolute_joint_get_spring_hertz(hinge) == 2.0)
+    joint_solver.revolute_joint_set_limits(hinge, nan, 0.25)
+    ensure("NaN limits are refused", joint_solver.revolute_joint_get_lower_limit(hinge) == 0.0 - 0.5)
+    joint_solver.revolute_joint_set_max_motor_torque(hinge, infinity())
+    ensure("an infinite motor torque is refused", joint_solver.revolute_joint_get_max_motor_torque(hinge) == 0.0)
+    dynamics.joint_set_constraint_tuning(hinge, nan, 1.0)
+    ensure("a NaN constraint tuning is refused", math.is_valid_float(dynamics.joint_get_constraint_hertz(hinge)))
+    dynamics.joint_set_local_frame_a(hinge, Transform { p: math.vec3(nan, 0.0, 0.0), q: math.quat_identity() })
+    ensure("a NaN frame is refused", math.is_valid_transform(dynamics.joint_get_local_frame_a(hinge)))
+    steps(world_id, 30)
+    ensure("the jointed box steps on finite", finite_body(b))
+    dynamics.destroy_world(world_id)
+}
+
+// --- the world and its queries --------------------------------------------
+
+var g_visits = 0
+count_visit(shape_id: ShapeId, context: ptr) -> bool {
+    g_visits = g_visits + 1
+    return true
+}
+
+test_world_and_queries() {
+    fixtures_ready()
+    world_id = new_world()
+    nan = not_a_number()
+    inf = infinity()
+    ground_in(world_id, g_ground)
+    body = box_at(world_id, math.vec3(0.0, 0.5, 0.0), g_box, 1.0)
+    gravity = physics_world.get_gravity(world_id)
+    physics_world.set_gravity(world_id, math.vec3(0.0, nan, 0.0))
+    ensure("a NaN gravity is refused", physics_world.get_gravity(world_id).y == gravity.y)
+    speed = physics_world.get_maximum_linear_speed(world_id)
+    physics_world.set_maximum_linear_speed(world_id, 0.0)
+    physics_world.set_maximum_linear_speed(world_id, inf)
+    ensure("a zero or infinite speed cap is refused", physics_world.get_maximum_linear_speed(world_id) == speed)
+    physics_world.set_contact_recycle_distance(world_id, nan)
+    ensure("a NaN recycle distance is refused", math.is_valid_float(physics_world.get_contact_recycle_distance(world_id)))
+    edef = physics_world.default_explosion_def()
+    edef.position = math.vec3(nan, 0.0, 0.0)
+    edef.radius = 5.0
+    edef.impulse_per_area = 10.0
+    physics_world.explode(world_id, &edef)
+    ensure("an explosion at NaN moves nothing", math.length(dynamics.body_get_linear_velocity(body)) == 0.0)
+    filter = shape.default_query_filter()
+    ray = physics_world.cast_ray_closest(world_id, math.vec3(nan, 5.0, 0.0), math.vec3(0.0, 0.0 - 10.0, 0.0), filter)
+    ensure("a ray from NaN hits nothing", ray.hit == false)
+    ray = physics_world.cast_ray_closest(world_id, math.vec3(0.0, 5.0, 0.0), math.vec3(0.0, inf, 0.0), filter)
+    ensure("an infinite ray hits nothing", ray.hit == false)
+    g_visits = 0
+    physics_world.overlap_aabb(world_id, AABB { lower: math.vec3(1.0, 1.0, 1.0), upper: math.vec3(0.0, 0.0, 0.0) }, filter, count_visit, null)
+    physics_world.overlap_aabb(world_id, AABB { lower: math.vec3(nan, 0.0, 0.0), upper: math.vec3(1.0, 1.0, 1.0) }, filter, count_visit, null)
+    ensure("inverted and NaN boxes overlap nothing", g_visits == 0)
+    ray = physics_world.cast_ray_closest(world_id, math.vec3(0.0, 5.0, 0.0), math.vec3(0.0, 0.0 - 10.0, 0.0), filter)
+    ensure("a sound ray still hits the box", ray.hit && math.abs_float(ray.point.y - 1.0) < 0.001)
+    // Steps of no time, back in time and of infinite time.
+    before = dynamics.body_get_position(body)
+    physics_world.step(world_id, 0.0, 4)
+    physics_world.step(world_id, 0.0 - 1.0 / 60.0, 4)
+    physics_world.step(world_id, inf, 4)
+    physics_world.step(world_id, nan, 4)
+    physics_world.step(world_id, 1.0 / 60.0, 0)
+    ensure("zero, negative, infinite and NaN steps leave the box finite and in place",
+           finite_body(body) && math.distance(dynamics.body_get_position(body), before) < 0.01)
+    dynamics.destroy_world(world_id)
+}
+
+// --- scenes at the edges --------------------------------------------------
+
+// A sphere of restitution one dropped on a ground of restitution one
+// bounces back to no more than where it began: the restitution passes may
+// lose energy to the soft contact, never make it.
+test_perfect_bounce() {
+    fixtures_ready()
+    world_id = new_world()
+    gdef = dynamics.default_body_def()
+    gdef.position = math.vec3(0.0, 0.0 - 0.5, 0.0)
+    ground = dynamics.create_body(world_id, &gdef)
+    sdef = dynamics.default_shape_def()
+    sdef.base_material.restitution = 1.0
+    dynamics.create_hull_shape(ground, &sdef, g_ground as *HullData)
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.position = math.vec3(0.0, 2.0, 0.0)
+    ball = dynamics.create_body(world_id, &bdef)
+    dynamics.create_sphere_shape(ball, &sdef, manifold.sphere(math.vec3_zero(), 0.25))
+    // The apex of each bounce, read where the ball turns from rising to falling.
+    apexes = 0
+    first_apex = 0.0
+    lowest_apex = 1000.0
+    highest_apex = 0.0
+    previous_vy = 0.0
+    i = 0
+    while i < 900 {
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        p = dynamics.body_get_position(ball)
+        vy = dynamics.body_get_linear_velocity(ball).y
+        if previous_vy > 0.0 && vy <= 0.0 {
+            if apexes == 0 { first_apex = p.y }
+            lowest_apex = math.min_float(lowest_apex, p.y)
+            highest_apex = math.max_float(highest_apex, p.y)
+            apexes = apexes + 1
+        }
+        previous_vy = vy
+        i = i + 1
+    }
+    ensure("the ball bounces again and again (${apexes})", apexes >= 10)
+    // Every apex stays at the drop height, bounce after bounce: neither
+    // gaining nor bleeding energy. Over twelve bounces the apexes read
+    // 1.9989 to 2.0014 m here and 1.9996 to 2.0014 in the reference (the
+    // frame catches each apex at a slightly different moment, and the
+    // sub-stepped semi-implicit Euler is a few g h^2 off the closed form),
+    // and do not climb.
+    ensure("the first bounce returns to the drop height (${first_apex})", math.abs_float(first_apex - 2.0) < 0.005)
+    ensure("no bounce rises over the drop height (${highest_apex})", highest_apex < 2.0 + 0.005)
+    ensure("no bounce falls short of it (${lowest_apex})", lowest_apex > 2.0 - 0.005)
+    ensure("the ball stays finite", finite_body(ball))
+    dynamics.destroy_world(world_id)
+}
+
+// A box spinning fast in no gravity, about all three axes at once: the
+// gyroscopic solve keeps its kinetic energy, so its spin never grows.
+test_free_spin() {
+    fixtures_ready()
+    wdef = dynamics.default_world_def()
+    wdef.gravity = math.vec3_zero()
+    world_id = dynamics.create_world(&wdef)
+    flat = hull.make_box_hull(1.0, 0.2, 0.5)
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.angular_velocity = math.vec3(20.0, 3.0, 11.0)
+    bdef.enable_sleep = false
+    body = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    dynamics.create_hull_shape(body, &sdef, flat)
+    dynamics.body_allow_fast_rotation(body, true)
+    inertia = dynamics.body_get_local_rotational_inertia(body)
+    energy0 = 0.0
+    largest = 0.0
+    i = 0
+    while i < 600 {
+        w_world = dynamics.body_get_angular_velocity(body)
+        w_local = math.inv_rotate_vector(dynamics.body_get_rotation(body), w_world)
+        energy = 0.5 * math.dot(w_local, math.mul_mv(inertia, w_local))
+        if i == 0 { energy0 = energy }
+        if energy > largest { largest = energy }
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        i = i + 1
+    }
+    ensure("a free spin gains no energy (${largest} against ${energy0})", largest <= energy0 * 1.001)
+    ensure("the spinning box stays finite and in place", finite_body(body) && math.length(dynamics.body_get_position(body)) < 0.000001)
+    dynamics.destroy_world(world_id)
+    hull.destroy_hull(flat)
+}
+
+// A box a hundred times heavier resting on a light one, on the ground:
+// the stack holds, finite, the heavy box on top.
+test_mass_ratio() {
+    fixtures_ready()
+    world_id = new_world()
+    ground_in(world_id, g_ground)
+    light = box_at(world_id, math.vec3(0.0, 0.5, 0.0), g_box, 1.0)
+    heavy = box_at(world_id, math.vec3(0.0, 1.5, 0.0), g_box, 100.0)
+    steps(world_id, 240)
+    ensure("both boxes stay finite", finite_body(light) && finite_body(heavy))
+    ensure("the light box holds its place under the heavy one (${dynamics.body_get_position(light).y})",
+           math.abs_float(dynamics.body_get_position(light).y - 0.5) < 0.05)
+    ensure("the heavy box stays on top (${dynamics.body_get_position(heavy).y})",
+           math.abs_float(dynamics.body_get_position(heavy).y - 1.5) < 0.1)
+    dynamics.destroy_world(world_id)
+}
+
+// Boxes a centimetre wide, at the speculative distance's scale, come to
+// rest on the ground without being launched.
+test_tiny_boxes() {
+    fixtures_ready()
+    world_id = new_world()
+    ground_in(world_id, g_ground)
+    a = box_at(world_id, math.vec3(0.0, 0.01, 0.0), g_tiny, 1.0)
+    b = box_at(world_id, math.vec3(0.0, 0.03, 0.0), g_tiny, 1.0)
+    steps(world_id, 240)
+    ensure("tiny boxes stay finite", finite_body(a) && finite_body(b))
+    ensure("the tiny stack rests (${dynamics.body_get_position(a).y}, ${dynamics.body_get_position(b).y})",
+           dynamics.body_get_position(a).y > 0.0 && dynamics.body_get_position(a).y < 0.02 &&
+           dynamics.body_get_position(b).y > dynamics.body_get_position(a).y && dynamics.body_get_position(b).y < 0.04)
+    ensure("and is at rest", math.length(dynamics.body_get_linear_velocity(b)) < 0.01)
+    dynamics.destroy_world(world_id)
+}
+
+// A box on a ground a kilometre wide rests as it does on a small one.
+test_huge_ground() {
+    fixtures_ready()
+    world_id = new_world()
+    ground_in(world_id, g_huge)
+    body = box_at(world_id, math.vec3(300.0, 0.5, 0.0 - 200.0), g_box, 1.0)
+    steps(world_id, 120)
+    ensure("the box on a huge ground stays finite and rests (${dynamics.body_get_position(body).y})",
+           finite_body(body) && math.abs_float(dynamics.body_get_position(body).y - 0.5) < 0.02)
+    dynamics.destroy_world(world_id)
+}
+
+// A capsule whose two centres meet is made a sphere at their midpoint, as
+// the reference makes it: it falls and rests like one.
+test_degenerate_capsule() {
+    fixtures_ready()
+    world_id = new_world()
+    ground_in(world_id, g_ground)
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.position = math.vec3(0.0, 1.0, 0.0)
+    body = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    capsule_id = dynamics.create_capsule_shape(body, &sdef, manifold.capsule(math.vec3(0.0, 0.001, 0.0), math.vec3(0.0, 0.0 - 0.001, 0.0), 0.25))
+    ensure("a capsule of no length is made", dynamics.shape_is_valid(capsule_id))
+    ensure("as a sphere", dynamics.shape_get_type(capsule_id) == shape.SHAPE_SPHERE)
+    ensure("at the midpoint, of the capsule's radius", math.length(dynamics.shape_get_sphere(capsule_id).center) < 0.000001 &&
+           dynamics.shape_get_sphere(capsule_id).radius == 0.25)
+    long_id = dynamics.create_capsule_shape(body, &sdef, manifold.capsule(math.vec3(0.0, 0.1, 0.0), math.vec3(0.0, 0.0 - 0.1, 0.0), 0.2))
+    ensure("a capsule with length stays a capsule", dynamics.shape_get_type(long_id) == shape.SHAPE_CAPSULE)
+    dynamics.destroy_shape(long_id, true)
+    steps(world_id, 240)
+    ensure("it falls and rests like a sphere (${dynamics.body_get_position(body).y})",
+           finite_body(body) && math.abs_float(dynamics.body_get_position(body).y - 0.25) < 0.02)
+    dynamics.destroy_world(world_id)
+}
+
+// Geometry that cannot collide is refused: a NaN or negative radius, a
+// missing hull, a hull of another layout's version.
+test_bad_geometry() {
+    fixtures_ready()
+    world_id = new_world()
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    body = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    ensure("a NaN radius makes no sphere", dynamics.shape_is_valid(dynamics.create_sphere_shape(body, &sdef, manifold.sphere(math.vec3_zero(), not_a_number()))) == false)
+    ensure("a negative radius makes no capsule",
+           dynamics.shape_is_valid(dynamics.create_capsule_shape(body, &sdef, manifold.capsule(math.vec3_zero(), math.vec3(1.0, 0.0, 0.0), 0.0 - 0.1))) == false)
+    ensure("a missing hull makes no shape", dynamics.shape_is_valid(dynamics.create_hull_shape(body, &sdef, null)) == false)
+    stale = hull.clone_hull(g_box as *HullData)
+    stale.version = stale.version + 1
+    ensure("a hull of another version makes no shape", dynamics.shape_is_valid(dynamics.create_hull_shape(body, &sdef, stale)) == false)
+    ensure("the body has no shape", dynamics.body_get_shape_count(body) == 0)
+    sphere_id = dynamics.create_sphere_shape(body, &sdef, manifold.sphere(math.vec3_zero(), 0.5))
+    dynamics.shape_set_sphere(sphere_id, manifold.sphere(math.vec3(not_a_number(), 0.0, 0.0), 0.5))
+    ensure("a NaN sphere is refused by the setter", math.is_valid_vec3(dynamics.shape_get_sphere(sphere_id).center))
+    dynamics.destroy_world(world_id)
+    hull.destroy_hull(stale)
+}
+
+// Points on one plane make no hull, rather than a broken one.
+test_flat_hull() {
+    block = basics.alloc(8 * sizeof(Vec3))
+    points = block as Vec3[]
+    i = 0
+    while i < 8 {
+        points[i] = math.vec3((i % 3) as float, (i / 3) as float, 0.0)
+        i = i + 1
+    }
+    h = hull.create_hull(points, 8, 8)
+    ensure("coplanar points make no hull", h == null)
+    basics.free_bytes(block, 8 * sizeof(Vec3))
+}
+
+main() {
+    test_body_definitions()
+    test_body_setters()
+    test_shapes()
+    test_joints()
+    test_world_and_queries()
+    test_perfect_bounce()
+    test_free_spin()
+    test_mass_ratio()
+    test_tiny_boxes()
+    test_huge_ground()
+    test_degenerate_capsule()
+    test_bad_geometry()
+    test_flat_hull()
+    println("edge_cases: ${checks} checks")
+    if failures == 0 {
+        println("edge_cases: all checks passed")
+    } else {
+        println("edge_cases: ${failures} failure(s)")
+        exit(1)
+    }
+}

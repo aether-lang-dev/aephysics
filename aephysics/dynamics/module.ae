@@ -1679,8 +1679,36 @@ sync_body_flags(w: *World, body: *Body) {
 
 // A body in the set its definition puts it in: disabled, static, awake,
 // or asleep in a set of its own; dynamic and kinematic bodies get an island.
+// --- the inputs a world takes -------------------------------------------------
+//
+// The reference asserts every number that enters a world (b3IsValidVec3,
+// b3IsValidFloat, b3IsValidQuat, non-negative where it must be), so a NaN
+// or an infinity is caught where it comes in, not after it has spread
+// through the solver to every body it touches. Asserts are compiled out
+// of a release build; here such an input is refused instead: a creator
+// returns its null id, a setter leaves what it would have changed.
+
+// A finite number at or above zero.
+valid_nonnegative(x: float) -> bool { return math.is_valid_float(x) && x >= 0.0 }
+
+// A surface material the solver can use: finite, with friction,
+// restitution and rolling resistance not below zero.
+valid_material(m: SurfaceMaterial) -> bool {
+    return valid_nonnegative(m.friction) && valid_nonnegative(m.restitution) && valid_nonnegative(m.rolling_resistance) &&
+           math.is_valid_vec3(m.tangent_velocity)
+}
+
+valid_body_def(def: *BodyDef) -> bool {
+    if math.is_valid_position(def.position) == false || math.is_valid_quat(def.rotation) == false { return false }
+    if math.is_valid_vec3(def.linear_velocity) == false || math.is_valid_vec3(def.angular_velocity) == false { return false }
+    if valid_nonnegative(def.linear_damping) == false || valid_nonnegative(def.angular_damping) == false { return false }
+    if valid_nonnegative(def.sleep_threshold) == false || valid_nonnegative(def.safety_factor) == false { return false }
+    return math.is_valid_float(def.gravity_scale)
+}
+
 create_body(world_id: WorldId, def: *BodyDef) -> BodyId {
     if world_is_valid(world_id) == false { return null_body_id() }
+    if valid_body_def(def) == false { return null_body_id() }
     w = get_world_from_id(world_id)
     if w.locked { return null_body_id() }
     w.locked = true
@@ -1880,6 +1908,21 @@ create_shape_proxy(w: *World, s: *WorldShape, kind: int, t: Transform, force_pai
 // A shape on a body: its slot, its geometry, its materials, its proxy in
 // the broad phase (unless the body is disabled), its place in the body's
 // list, and the body's mass updated or marked dirty.
+// A shape definition's numbers: the density not below zero, every material usable.
+valid_shape_def(def: *ShapeDef) -> bool {
+    if valid_nonnegative(def.density) == false || math.is_valid_float(def.explosion_scale) == false { return false }
+    if valid_material(def.base_material) == false { return false }
+    if def.materials != null {
+        materials = def.materials as SurfaceMaterial[]
+        i = 0
+        while i < def.material_count {
+            if valid_material(materials[i]) == false { return false }
+            i = i + 1
+        }
+    }
+    return true
+}
+
 create_shape(body_id: BodyId, def: *ShapeDef, geometry: Shape) -> ShapeId {
     if body_is_valid(body_id) == false { return null_shape_id() }
     w = world_at(body_id.world0)
@@ -1889,6 +1932,7 @@ create_shape(body_id: BodyId, def: *ShapeDef, geometry: Shape) -> ShapeId {
     // Compounds and height fields go on static bodies only.
     if body.kind != BODY_STATIC && (kind == KIND_COMPOUND || kind == KIND_HEIGHT_FIELD) { return null_shape_id() }
     if kind == KIND_COMPOUND && def.is_sensor { return null_shape_id() }
+    if valid_shape_def(def) == false { return null_shape_id() }
     w.locked = true
     shape_id = basics.idpool_alloc(&w.shape_id_pool)
     if shape_id == w.shapes.count {
@@ -1965,16 +2009,46 @@ create_shape(body_id: BodyId, def: *ShapeDef, geometry: Shape) -> ShapeId {
     return ShapeId { index1: shape_id + 1, world0: w.world_id, generation: s.generation }
 }
 
-create_sphere_shape(body_id: BodyId, def: *ShapeDef, s: Sphere) -> ShapeId { return create_shape(body_id, def, shape.sphere_shape(s, def.density)) }
-create_capsule_shape(body_id: BodyId, def: *ShapeDef, c: Capsule) -> ShapeId { return create_shape(body_id, def, shape.capsule_shape(c, def.density)) }
-create_hull_shape(body_id: BodyId, def: *ShapeDef, h: *HullData) -> ShapeId { return create_shape(body_id, def, shape.hull_shape(h, def.density)) }
+// A sphere or capsule the narrow phase can use: finite centres, a finite
+// radius not below zero.
+valid_sphere(s: Sphere) -> bool { return math.is_valid_vec3(s.center) && valid_nonnegative(s.radius) }
+valid_capsule(c: Capsule) -> bool { return math.is_valid_vec3(c.center1) && math.is_valid_vec3(c.center2) && valid_nonnegative(c.radius) }
+
+create_sphere_shape(body_id: BodyId, def: *ShapeDef, s: Sphere) -> ShapeId {
+    if valid_sphere(s) == false { return null_shape_id() }
+    return create_shape(body_id, def, shape.sphere_shape(s, def.density))
+}
+
+// A capsule whose centres are within the linear slop is made a sphere at
+// their midpoint, as the reference's b3CreateCapsuleShape does: its segment
+// has no direction to collide along.
+create_capsule_shape(body_id: BodyId, def: *ShapeDef, c: Capsule) -> ShapeId {
+    if valid_capsule(c) == false { return null_shape_id() }
+    if math.distance_squared(c.center1, c.center2) <= math.LINEAR_SLOP * math.LINEAR_SLOP {
+        middle = math.lerp(c.center1, c.center2, 0.5)
+        return create_shape(body_id, def, shape.sphere_shape(Sphere { center: middle, radius: c.radius }, def.density))
+    }
+    return create_shape(body_id, def, shape.capsule_shape(c, def.density))
+}
+
+// The baked shapes are refused when they are missing or of another
+// layout's version, as the reference refuses them.
+create_hull_shape(body_id: BodyId, def: *ShapeDef, h: *HullData) -> ShapeId {
+    if h == null || h.version != hull.HULL_VERSION { return null_shape_id() }
+    return create_shape(body_id, def, shape.hull_shape(h, def.density))
+}
 create_mesh_shape(body_id: BodyId, def: *ShapeDef, m: *MeshData, scale: Vec3) -> ShapeId {
+    if m == null || m.version != mesh.MESH_VERSION || math.is_valid_vec3(scale) == false { return null_shape_id() }
     return create_shape(body_id, def, shape.mesh_shape(mesh.mesh(m, math.safe_scale(scale)), math.max_int(def.material_count, 1)))
 }
 create_height_field_shape(body_id: BodyId, def: *ShapeDef, h: *HeightFieldData) -> ShapeId {
+    if h == null || h.version != height_field.HEIGHT_FIELD_VERSION { return null_shape_id() }
     return create_shape(body_id, def, shape.height_field_shape(h, math.max_int(def.material_count, 1)))
 }
-create_compound_shape(body_id: BodyId, def: *ShapeDef, c: *CompoundData) -> ShapeId { return create_shape(body_id, def, shape.compound_shape(c)) }
+create_compound_shape(body_id: BodyId, def: *ShapeDef, c: *CompoundData) -> ShapeId {
+    if c == null || c.version != compound.COMPOUND_VERSION { return null_shape_id() }
+    return create_shape(body_id, def, shape.compound_shape(c))
+}
 
 shape_is_valid(id: ShapeId) -> bool {
     if id.world0 < 0 || id.world0 >= MAX_WORLDS { return false }
@@ -2031,6 +2105,7 @@ shape_get_aabb(id: ShapeId) -> AABB { return get_shape_full_id(world_at(id.world
 shape_get_type(id: ShapeId) -> int { return get_shape_full_id(world_at(id.world0), id).geometry.kind }
 shape_get_density(id: ShapeId) -> float { return get_shape_full_id(world_at(id.world0), id).geometry.density }
 shape_set_density(id: ShapeId, density: float, update_body_mass: bool) {
+    if valid_nonnegative(density) == false { return }
     w = world_at(id.world0)
     // Not mid-step, and an unchanged density spares the mass update (b3Shape_SetDensity).
     if w.locked { return }
@@ -2083,6 +2158,7 @@ reset_shape_proxy(w: *World, s: *WorldShape, wake_bodies: bool, remake: bool) {
 }
 shape_get_surface_material(id: ShapeId) -> SurfaceMaterial { return get_shape_full_id(world_at(id.world0), id).material }
 shape_set_surface_material(id: ShapeId, m: SurfaceMaterial) {
+    if valid_material(m) == false { return }
     s = get_shape_full_id(world_at(id.world0), id)
     s.material = m
     if s.materials != null {
@@ -2111,10 +2187,22 @@ shape_get_height_field(id: ShapeId) -> *HeightFieldData { return get_shape_full_
 // The body's mass is the caller's to update (body_apply_mass_from_shapes),
 // as in the reference. A compound or height field (static-only shapes) is
 // not changed, nor changed into.
-shape_set_sphere(id: ShapeId, s: Sphere) { change_shape_geometry(id, shape.sphere_shape(s, 0.0)) }
-shape_set_capsule(id: ShapeId, c: Capsule) { change_shape_geometry(id, shape.capsule_shape(c, 0.0)) }
-shape_set_hull(id: ShapeId, h: *HullData) { change_shape_geometry(id, shape.hull_shape(h, 0.0)) }
-shape_set_mesh(id: ShapeId, m: *MeshData, scale: Vec3) { change_shape_geometry(id, shape.mesh_shape(mesh.mesh(m, math.safe_scale(scale)), 1)) }
+shape_set_sphere(id: ShapeId, s: Sphere) {
+    if valid_sphere(s) == false { return }
+    change_shape_geometry(id, shape.sphere_shape(s, 0.0))
+}
+shape_set_capsule(id: ShapeId, c: Capsule) {
+    if valid_capsule(c) == false { return }
+    change_shape_geometry(id, shape.capsule_shape(c, 0.0))
+}
+shape_set_hull(id: ShapeId, h: *HullData) {
+    if h == null || h.version != hull.HULL_VERSION { return }
+    change_shape_geometry(id, shape.hull_shape(h, 0.0))
+}
+shape_set_mesh(id: ShapeId, m: *MeshData, scale: Vec3) {
+    if m == null || m.version != mesh.MESH_VERSION || math.is_valid_vec3(scale) == false { return }
+    change_shape_geometry(id, shape.mesh_shape(mesh.mesh(m, math.safe_scale(scale)), 1))
+}
 
 change_shape_geometry(id: ShapeId, geometry: Shape) {
     w = world_at(id.world0)
@@ -2154,6 +2242,7 @@ shape_get_mesh_surface_material(id: ShapeId, index: int) -> SurfaceMaterial {
     return materials[index]
 }
 shape_set_mesh_material(id: ShapeId, m: SurfaceMaterial, index: int) {
+    if valid_material(m) == false { return }
     s = get_shape_full_id(world_at(id.world0), id)
     if index < 0 || index >= s.material_count { return }
     if index == 0 {
@@ -2464,6 +2553,7 @@ body_get_world_vector(id: BodyId, local_vector: Vec3) -> Vec3 { return math.rota
 // its shapes' bounds and proxies are updated at once (a static body's
 // too, so contacts begin without a step).
 body_set_transform(id: BodyId, position: Vec3, rotation: Quat) {
+    if math.is_valid_position(position) == false || math.is_valid_quat(rotation) == false { return }
     w = body_world(id)
     if w.locked { return }
     body = get_body_full_id(w, id)
@@ -2509,6 +2599,7 @@ body_get_angular_velocity(id: BodyId) -> Vec3 {
 
 // A velocity wakes a sleeping body; a static body has none.
 body_set_linear_velocity(id: BodyId, v: Vec3) {
+    if math.is_valid_vec3(v) == false { return }
     w = body_world(id)
     body = get_body_full_id(w, id)
     if body.kind == BODY_STATIC { return }
@@ -2531,6 +2622,7 @@ awake_for_apply(w: *World, body: *Body, wake: bool) -> bool {
 // sleeping body stays asleep when the movement would be below its
 // sleep threshold, unless woken.
 body_set_target_transform(id: BodyId, target: Transform, time_step: float, wake: bool) {
+    if math.is_valid_world_transform(target) == false || math.is_valid_float(time_step) == false { return }
     w = body_world(id)
     body = get_body_full_id(w, id)
     if body.set_index == DISABLED_SET { return }
@@ -2559,6 +2651,7 @@ body_set_target_transform(id: BodyId, target: Transform, time_step: float, wake:
 }
 
 body_apply_force(id: BodyId, force: Vec3, point: Vec3, wake: bool) {
+    if math.is_valid_vec3(force) == false || math.is_valid_position(point) == false { return }
     w = body_world(id)
     body = get_body_full_id(w, id)
     if awake_for_apply(w, body, wake) == false { return }
@@ -2568,6 +2661,7 @@ body_apply_force(id: BodyId, force: Vec3, point: Vec3, wake: bool) {
 }
 
 body_apply_force_to_center(id: BodyId, force: Vec3, wake: bool) {
+    if math.is_valid_vec3(force) == false { return }
     w = body_world(id)
     body = get_body_full_id(w, id)
     if awake_for_apply(w, body, wake) == false { return }
@@ -2576,6 +2670,7 @@ body_apply_force_to_center(id: BodyId, force: Vec3, wake: bool) {
 }
 
 body_apply_torque(id: BodyId, torque: Vec3, wake: bool) {
+    if math.is_valid_vec3(torque) == false { return }
     w = body_world(id)
     body = get_body_full_id(w, id)
     if awake_for_apply(w, body, wake) == false { return }
@@ -2591,6 +2686,7 @@ capped_linear_velocity(w: *World, v: Vec3) -> Vec3 {
 }
 
 body_apply_linear_impulse(id: BodyId, impulse: Vec3, point: Vec3, wake: bool) {
+    if math.is_valid_vec3(impulse) == false || math.is_valid_position(point) == false { return }
     w = body_world(id)
     body = get_body_full_id(w, id)
     if awake_for_apply(w, body, wake) == false { return }
@@ -2602,6 +2698,7 @@ body_apply_linear_impulse(id: BodyId, impulse: Vec3, point: Vec3, wake: bool) {
 }
 
 body_apply_linear_impulse_to_center(id: BodyId, impulse: Vec3, wake: bool) {
+    if math.is_valid_vec3(impulse) == false { return }
     w = body_world(id)
     body = get_body_full_id(w, id)
     if awake_for_apply(w, body, wake) == false { return }
@@ -2612,6 +2709,7 @@ body_apply_linear_impulse_to_center(id: BodyId, impulse: Vec3, wake: bool) {
 
 // The angular impulse through the local inertia, so it is exact under rotation.
 body_apply_angular_impulse(id: BodyId, impulse: Vec3, wake: bool) {
+    if math.is_valid_vec3(impulse) == false { return }
     w = body_world(id)
     body = get_body_full_id(w, id)
     if awake_for_apply(w, body, wake) == false { return }
@@ -2675,6 +2773,7 @@ body_is_contact_recycling_enabled(id: BodyId) -> bool { return (get_body_full_id
 // The share of its smallest extent a body may move in a step before the
 // continuous pass sweeps it (b3Body_SetSafetyFactor).
 body_set_safety_factor(id: BodyId, factor: float) {
+    if valid_nonnegative(factor) == false { return }
     w = body_world(id)
     if w == null { return }
     get_body_full_id(w, id).safety_factor = factor
@@ -2682,6 +2781,7 @@ body_set_safety_factor(id: BodyId, factor: float) {
 body_get_safety_factor(id: BodyId) -> float { return get_body_full_id(body_world(id), id).safety_factor }
 
 body_set_angular_velocity(id: BodyId, v: Vec3) {
+    if math.is_valid_vec3(v) == false { return }
     w = body_world(id)
     body = get_body_full_id(w, id)
     if body.kind == BODY_STATIC { return }
@@ -2736,6 +2836,7 @@ body_get_max_extent_origin(id: BodyId) -> Vec3 {
 // world inertia under the body's rotation, the velocity re-referenced
 // to the new centre, the extents about it; fixed rotation zeroes the inertia.
 body_set_mass_data(id: BodyId, mass_data: MassData) {
+    if valid_nonnegative(mass_data.mass) == false || math.is_valid_matrix3(mass_data.inertia) == false || math.is_valid_vec3(mass_data.center) == false { return }
     w = body_world(id)
     if w.locked { return }
     body = get_body_full_id(w, id)
@@ -2793,11 +2894,23 @@ body_apply_mass_from_shapes(id: BodyId) {
     update_body_mass_data(w, get_body_full_id(w, id))
 }
 
-body_set_linear_damping(id: BodyId, damping: float) { w = body_world(id); get_body_sim(w, get_body_full_id(w, id)).linear_damping = damping }
+body_set_linear_damping(id: BodyId, damping: float) {
+    if valid_nonnegative(damping) == false { return }
+    w = body_world(id)
+    get_body_sim(w, get_body_full_id(w, id)).linear_damping = damping
+}
 body_get_linear_damping(id: BodyId) -> float { w = body_world(id); return get_body_sim(w, get_body_full_id(w, id)).linear_damping }
-body_set_angular_damping(id: BodyId, damping: float) { w = body_world(id); get_body_sim(w, get_body_full_id(w, id)).angular_damping = damping }
+body_set_angular_damping(id: BodyId, damping: float) {
+    if valid_nonnegative(damping) == false { return }
+    w = body_world(id)
+    get_body_sim(w, get_body_full_id(w, id)).angular_damping = damping
+}
 body_get_angular_damping(id: BodyId) -> float { w = body_world(id); return get_body_sim(w, get_body_full_id(w, id)).angular_damping }
-body_set_gravity_scale(id: BodyId, scale: float) { w = body_world(id); get_body_sim(w, get_body_full_id(w, id)).gravity_scale = scale }
+body_set_gravity_scale(id: BodyId, scale: float) {
+    if math.is_valid_float(scale) == false { return }
+    w = body_world(id)
+    get_body_sim(w, get_body_full_id(w, id)).gravity_scale = scale
+}
 body_get_gravity_scale(id: BodyId) -> float { w = body_world(id); return get_body_sim(w, get_body_full_id(w, id)).gravity_scale }
 body_set_user_data(id: BodyId, data: ptr) { get_body_full_id(body_world(id), id).user_data = data }
 body_get_user_data(id: BodyId) -> ptr { return get_body_full_id(body_world(id), id).user_data }
@@ -2805,7 +2918,10 @@ body_is_awake(id: BodyId) -> bool { return get_body_full_id(body_world(id), id).
 body_is_enabled(id: BodyId) -> bool { return get_body_full_id(body_world(id), id).set_index != DISABLED_SET }
 body_is_sleep_enabled(id: BodyId) -> bool { return (get_body_full_id(body_world(id), id).flags & ENABLE_SLEEP) != 0 }
 body_get_sleep_threshold(id: BodyId) -> float { return get_body_full_id(body_world(id), id).sleep_threshold }
-body_set_sleep_threshold(id: BodyId, threshold: float) { get_body_full_id(body_world(id), id).sleep_threshold = threshold }
+body_set_sleep_threshold(id: BodyId, threshold: float) {
+    if valid_nonnegative(threshold) == false { return }
+    get_body_full_id(body_world(id), id).sleep_threshold = threshold
+}
 body_get_shape_count(id: BodyId) -> int { return get_body_full_id(body_world(id), id).shape_count }
 body_get_flags(id: BodyId) -> int { return get_body_full_id(body_world(id), id).flags }
 
@@ -5073,13 +5189,23 @@ joint_world(world_id: WorldId, def: *JointDef) -> *World {
     if def.body_id_a.world0 != w.world_id || def.body_id_b.world0 != w.world_id { return null }
     if def.body_id_a.index1 == def.body_id_b.index1 { return null }
     if math.is_valid_transform(def.local_frame_a) == false || math.is_valid_transform(def.local_frame_b) == false { return null }
+    if valid_nonnegative(def.force_threshold) == false || valid_nonnegative(def.torque_threshold) == false { return null }
+    if valid_nonnegative(def.constraint_hertz) == false || valid_nonnegative(def.constraint_damping_ratio) == false { return null }
     return w
 }
+
+// A spring's stiffness and damping, both finite and not below zero.
+valid_spring(hertz: float, damping_ratio: float) -> bool { return valid_nonnegative(hertz) && valid_nonnegative(damping_ratio) }
+
+// A lower and upper bound, finite and in order.
+valid_range(lower: float, upper: float) -> bool { return math.is_valid_float(lower) && math.is_valid_float(upper) && lower <= upper }
 
 create_distance_joint(world_id: WorldId, def: *DistanceJointDef) -> JointId {
     w = joint_world(world_id, &def.base)
     if w == null { return null_joint_id() }
-    if def.length <= 0.0 || def.lower_spring_force > def.upper_spring_force { return null_joint_id() }
+    if math.is_valid_float(def.length) == false || def.length <= 0.0 || valid_range(def.lower_spring_force, def.upper_spring_force) == false { return null_joint_id() }
+    if valid_spring(def.hertz, def.damping_ratio) == false || math.is_valid_float(def.min_length) == false || math.is_valid_float(def.max_length) == false { return null_joint_id() }
+    if valid_nonnegative(def.max_motor_force) == false || math.is_valid_float(def.motor_speed) == false { return null_joint_id() }
     w.locked = true
     pair = create_joint(w, &def.base, JOINT_DISTANCE)
     d = distance_joint_of(pair.sim)
@@ -5102,6 +5228,10 @@ create_distance_joint(world_id: WorldId, def: *DistanceJointDef) -> JointId {
 create_motor_joint(world_id: WorldId, def: *MotorJointDef) -> JointId {
     w = joint_world(world_id, &def.base)
     if w == null { return null_joint_id() }
+    if math.is_valid_vec3(def.linear_velocity) == false || math.is_valid_vec3(def.angular_velocity) == false { return null_joint_id() }
+    if valid_nonnegative(def.max_velocity_force) == false || valid_nonnegative(def.max_velocity_torque) == false { return null_joint_id() }
+    if valid_spring(def.linear_hertz, def.linear_damping_ratio) == false || valid_spring(def.angular_hertz, def.angular_damping_ratio) == false { return null_joint_id() }
+    if valid_nonnegative(def.max_spring_force) == false || valid_nonnegative(def.max_spring_torque) == false { return null_joint_id() }
     w.locked = true
     pair = create_joint(w, &def.base, JOINT_MOTOR)
     m = motor_joint_of(pair.sim)
@@ -5131,7 +5261,7 @@ create_filter_joint(world_id: WorldId, def: *FilterJointDef) -> JointId {
 create_parallel_joint(world_id: WorldId, def: *ParallelJointDef) -> JointId {
     w = joint_world(world_id, &def.base)
     if w == null { return null_joint_id() }
-    if def.hertz < 0.0 || def.damping_ratio < 0.0 || def.max_torque < 0.0 { return null_joint_id() }
+    if valid_spring(def.hertz, def.damping_ratio) == false || valid_nonnegative(def.max_torque) == false { return null_joint_id() }
     w.locked = true
     pair = create_joint(w, &def.base, JOINT_PARALLEL)
     p = parallel_joint_of(pair.sim)
@@ -5145,7 +5275,8 @@ create_parallel_joint(world_id: WorldId, def: *ParallelJointDef) -> JointId {
 create_prismatic_joint(world_id: WorldId, def: *PrismaticJointDef) -> JointId {
     w = joint_world(world_id, &def.base)
     if w == null { return null_joint_id() }
-    if def.lower_translation > def.upper_translation { return null_joint_id() }
+    if valid_range(def.lower_translation, def.upper_translation) == false || math.is_valid_float(def.target_translation) == false { return null_joint_id() }
+    if valid_spring(def.hertz, def.damping_ratio) == false || valid_nonnegative(def.max_motor_force) == false || math.is_valid_float(def.motor_speed) == false { return null_joint_id() }
     w.locked = true
     pair = create_joint(w, &def.base, JOINT_PRISMATIC)
     p = prismatic_joint_of(pair.sim)
@@ -5166,6 +5297,8 @@ create_prismatic_joint(world_id: WorldId, def: *PrismaticJointDef) -> JointId {
 create_revolute_joint(world_id: WorldId, def: *RevoluteJointDef) -> JointId {
     w = joint_world(world_id, &def.base)
     if w == null { return null_joint_id() }
+    if math.is_valid_float(def.lower_angle) == false || math.is_valid_float(def.upper_angle) == false || math.is_valid_float(def.target_angle) == false { return null_joint_id() }
+    if valid_spring(def.hertz, def.damping_ratio) == false || valid_nonnegative(def.max_motor_torque) == false || math.is_valid_float(def.motor_speed) == false { return null_joint_id() }
     w.locked = true
     pair = create_joint(w, &def.base, JOINT_REVOLUTE)
     r = revolute_joint_of(pair.sim)
@@ -5190,7 +5323,9 @@ create_spherical_joint(world_id: WorldId, def: *SphericalJointDef) -> JointId {
     w = joint_world(world_id, &def.base)
     if w == null { return null_joint_id() }
     pi = math.PI
-    if def.cone_angle < 0.0 || def.cone_angle > 0.99 * pi || math.is_valid_quat(def.target_rotation) == false { return null_joint_id() }
+    if valid_nonnegative(def.cone_angle) == false || def.cone_angle > 0.99 * pi || math.is_valid_quat(def.target_rotation) == false { return null_joint_id() }
+    if math.is_valid_float(def.lower_twist_angle) == false || math.is_valid_float(def.upper_twist_angle) == false { return null_joint_id() }
+    if valid_spring(def.hertz, def.damping_ratio) == false || valid_nonnegative(def.max_motor_torque) == false || math.is_valid_vec3(def.motor_velocity) == false { return null_joint_id() }
     if math.is_valid_vec3(def.cone_axis) == false || math.length(def.cone_axis) < 0.001 { return null_joint_id() }
     w.locked = true
     pair = create_joint(w, &def.base, JOINT_SPHERICAL)
@@ -5241,7 +5376,7 @@ spherical_swing_angle(s: *SphericalJoint, rel_q: Quat) -> float {
 create_weld_joint(world_id: WorldId, def: *WeldJointDef) -> JointId {
     w = joint_world(world_id, &def.base)
     if w == null { return null_joint_id() }
-    if def.angular_hertz < 0.0 || def.angular_damping_ratio < 0.0 || def.linear_hertz < 0.0 || def.linear_damping_ratio < 0.0 { return null_joint_id() }
+    if valid_spring(def.angular_hertz, def.angular_damping_ratio) == false || valid_spring(def.linear_hertz, def.linear_damping_ratio) == false { return null_joint_id() }
     w.locked = true
     pair = create_joint(w, &def.base, JOINT_WELD)
     weld = weld_joint_of(pair.sim)
@@ -5256,9 +5391,12 @@ create_weld_joint(world_id: WorldId, def: *WeldJointDef) -> JointId {
 create_wheel_joint(world_id: WorldId, def: *WheelJointDef) -> JointId {
     w = joint_world(world_id, &def.base)
     if w == null { return null_joint_id() }
-    if def.lower_suspension_limit > def.upper_suspension_limit { return null_joint_id() }
+    if valid_range(def.lower_suspension_limit, def.upper_suspension_limit) == false { return null_joint_id() }
     // Reversed steering limits would push the wheel both ways at once.
-    if def.lower_steering_limit > def.upper_steering_limit { return null_joint_id() }
+    if valid_range(def.lower_steering_limit, def.upper_steering_limit) == false { return null_joint_id() }
+    if valid_spring(def.suspension_hertz, def.suspension_damping_ratio) == false || valid_spring(def.steering_hertz, def.steering_damping_ratio) == false { return null_joint_id() }
+    if valid_nonnegative(def.max_spin_torque) == false || valid_nonnegative(def.max_steering_torque) == false { return null_joint_id() }
+    if math.is_valid_float(def.spin_speed) == false || math.is_valid_float(def.target_steering_angle) == false { return null_joint_id() }
     w.locked = true
     pair = create_joint(w, &def.base, JOINT_WHEEL)
     wheel = wheel_joint_of(pair.sim)
@@ -5347,6 +5485,7 @@ joint_get_world(id: JointId) -> WorldId {
     return WorldId { index1: id.world0 + 1, generation: w.generation }
 }
 joint_set_local_frame_a(id: JointId, frame: Transform) {
+    if math.is_valid_transform(frame) == false { return }
     w = world_at(id.world0)
     get_joint_sim(w, get_joint_full_id(w, id)).local_frame_a = frame
 }
@@ -5355,6 +5494,7 @@ joint_get_local_frame_a(id: JointId) -> Transform {
     return get_joint_sim(w, get_joint_full_id(w, id)).local_frame_a
 }
 joint_set_local_frame_b(id: JointId, frame: Transform) {
+    if math.is_valid_transform(frame) == false { return }
     w = world_at(id.world0)
     get_joint_sim(w, get_joint_full_id(w, id)).local_frame_b = frame
 }
@@ -5368,6 +5508,7 @@ joint_get_collide_connected(id: JointId) -> bool { return get_joint_full_id(worl
 joint_is_awake(id: JointId) -> bool { return get_joint_full_id(world_at(id.world0), id).set_index == AWAKE_SET }
 
 joint_set_constraint_tuning(id: JointId, hertz: float, damping_ratio: float) {
+    if valid_spring(hertz, damping_ratio) == false { return }
     w = world_at(id.world0)
     sim = get_joint_sim(w, get_joint_full_id(w, id))
     sim.constraint_hertz = hertz
@@ -5382,6 +5523,7 @@ joint_get_constraint_damping_ratio(id: JointId) -> float {
     return get_joint_sim(w, get_joint_full_id(w, id)).constraint_damping_ratio
 }
 joint_set_force_threshold(id: JointId, threshold: float) {
+    if valid_nonnegative(threshold) == false { return }
     w = world_at(id.world0)
     get_joint_sim(w, get_joint_full_id(w, id)).force_threshold = threshold
 }
@@ -5390,6 +5532,7 @@ joint_get_force_threshold(id: JointId) -> float {
     return get_joint_sim(w, get_joint_full_id(w, id)).force_threshold
 }
 joint_set_torque_threshold(id: JointId, threshold: float) {
+    if valid_nonnegative(threshold) == false { return }
     w = world_at(id.world0)
     get_joint_sim(w, get_joint_full_id(w, id)).torque_threshold = threshold
 }

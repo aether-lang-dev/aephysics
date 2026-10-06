@@ -141,7 +141,13 @@ falling ragdolls, each run to sleep twice and over four workers and
 compared bit for bit; the query spawn sleeps a step after the
 reference's with its 59 query hits, the mesh drop two; 20 checks) and `test_large_world.ae` (a stack, a bullet and the
 origin-relative queries at x = 0 and at x = 1e7 agree, the whole
-engine being in doubles; 43 checks).
+engine being in doubles; 43 checks) and `test_edge_cases.ae` (every
+number a world takes refused when it is NaN, infinite or negative where
+it must not be, as the reference asserts it, the world left as it was;
+a perfect bounce holding its height over twelve bounces, a free spin
+keeping its energy, a box a hundred times heavier resting on a light one,
+centimetre boxes, a kilometre of ground, a capsule of no length, steps of
+no, negative and infinite time, geometry that cannot collide; 74 checks).
 
 The step is deterministic across platforms and worker counts, not
 only across runs: `AEPHYSICS_TRACE=1 target/test_determinism` prints
