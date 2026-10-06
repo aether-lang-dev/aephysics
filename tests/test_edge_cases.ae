@@ -11,6 +11,8 @@ import std.string
 import aephysics.math
 import aephysics.basics
 import aephysics.hull
+import aephysics.mesh
+import aephysics.height_field
 import aephysics.manifold
 import aephysics.material
 import aephysics.shape
@@ -631,6 +633,89 @@ test_bad_geometry() {
     hull.destroy_hull(stale)
 }
 
+// Meshes and height fields of numbers the reference would read past or
+// sort wrong are not made; sound ones next to them are.
+mesh_of(vertices: ptr, indices: ptr, materials: ptr) -> *MeshData {
+    mdef = mesh.mesh_def()
+    mdef.vertices = vertices
+    mdef.indices = indices
+    mdef.material_indices = materials
+    mdef.vertex_count = 4
+    mdef.triangle_count = 2
+    return mesh.create_mesh(&mdef, null, 0)
+}
+
+field_of(heights: ptr, scale: Vec3, lower: float, upper: float) -> *HeightFieldData {
+    hdef = height_field.height_field_def()
+    hdef.heights = heights
+    hdef.count_x = 2
+    hdef.count_z = 2
+    hdef.scale = scale
+    hdef.global_minimum_height = lower
+    hdef.global_maximum_height = upper
+    return height_field.create_height_field(&hdef)
+}
+
+test_bad_meshes() {
+    vertices_block = basics.alloc(4 * sizeof(Vec3))
+    vertices = vertices_block as Vec3[]
+    vertices[0] = math.vec3(0.0, 0.0, 0.0)
+    vertices[1] = math.vec3(1.0, 0.0, 0.0)
+    vertices[2] = math.vec3(1.0, 0.0, 1.0)
+    vertices[3] = math.vec3(0.0, 0.0, 1.0)
+    indices_block = basics.alloc(6 * 4)
+    indices = indices_block as int[]
+    indices[0] = 0
+    indices[1] = 2
+    indices[2] = 1
+    indices[3] = 0
+    indices[4] = 3
+    indices[5] = 2
+    materials_block = basics.alloc(2 * 4)
+    materials = materials_block as int[]
+    materials[0] = 0
+    materials[1] = 1
+    sound = mesh_of(vertices_block, indices_block, materials_block)
+    ensure("a sound quad makes a mesh", sound != null)
+    if sound != null { mesh.destroy_mesh(sound) }
+    indices[4] = 4
+    ensure("an index past the vertices makes no mesh", mesh_of(vertices_block, indices_block, null) == null)
+    indices[4] = 0 - 1
+    ensure("a negative index makes no mesh", mesh_of(vertices_block, indices_block, null) == null)
+    indices[4] = 3
+    vertices[3] = math.vec3(0.0, not_a_number(), 1.0)
+    ensure("a NaN vertex makes no mesh", mesh_of(vertices_block, indices_block, null) == null)
+    vertices[3] = math.vec3(infinity(), 0.0, 1.0)
+    ensure("an infinite vertex makes no mesh", mesh_of(vertices_block, indices_block, null) == null)
+    vertices[3] = math.vec3(0.0, 0.0, 1.0)
+    materials[1] = 0 - 1
+    ensure("a negative material index makes no mesh", mesh_of(vertices_block, indices_block, materials_block) == null)
+
+    heights_block = basics.alloc(4 * 8)
+    heights = heights_block as float[]
+    heights[0] = 0.0
+    heights[1] = 0.5
+    heights[2] = 0.0 - 0.5
+    heights[3] = 0.25
+    field = field_of(heights_block, math.vec3_one(), 0.0 - 1.0, 1.0)
+    ensure("a sound field is made", field != null)
+    if field != null { height_field.destroy_height_field(field) }
+    refused = 0
+    if field_of(heights_block, math.vec3(1.0, 0.0, 1.0), 0.0 - 1.0, 1.0) == null { refused = refused + 1 }
+    if field_of(heights_block, math.vec3(0.0 - 1.0, 1.0, 1.0), 0.0 - 1.0, 1.0) == null { refused = refused + 1 }
+    if field_of(heights_block, math.vec3(1.0, not_a_number(), 1.0), 0.0 - 1.0, 1.0) == null { refused = refused + 1 }
+    if field_of(heights_block, math.vec3_one(), 1.0, 0.0 - 1.0) == null { refused = refused + 1 }
+    if field_of(heights_block, math.vec3_one(), not_a_number(), 1.0) == null { refused = refused + 1 }
+    if field_of(heights_block, math.vec3_one(), 0.0 - 1.0, infinity()) == null { refused = refused + 1 }
+    heights[2] = not_a_number()
+    if field_of(heights_block, math.vec3_one(), 0.0 - 1.0, 1.0) == null { refused = refused + 1 }
+    ensure("fields of zero, negative or NaN scale, an inverted or unbounded range or a NaN height are refused (${refused} of 7)", refused == 7)
+    basics.free_bytes(vertices_block, 4 * sizeof(Vec3))
+    basics.free_bytes(indices_block, 6 * 4)
+    basics.free_bytes(materials_block, 2 * 4)
+    basics.free_bytes(heights_block, 4 * 8)
+}
+
 // A chain of eight light links holding a ball ten times as dense, some
 // 180 times a link's mass: the soft step's hard case for joints. It
 // hangs, finite, its joints apart by a few centimetres, as the
@@ -776,6 +861,7 @@ main() {
     test_huge_ground()
     test_degenerate_capsule()
     test_bad_geometry()
+    test_bad_meshes()
     test_heavy_chain()
     test_motor_and_limits()
     test_flat_hull()

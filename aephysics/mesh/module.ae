@@ -850,6 +850,28 @@ create_mesh(def: *MeshDef, degenerate_indices: ptr, degenerate_capacity: int) ->
     stride = def.stride
     if stride == 0 { stride = sizeof(Vec3) }
     src_indices = def.indices as int[]
+    // What the reference trusts: an index past the vertices reads (and a
+    // weld writes) out of bounds, a NaN or infinite vertex makes boxes the
+    // tree cannot sort, a negative material index reads before the
+    // shape's materials. Such a mesh is refused.
+    i = 0
+    while i < 3 * triangle_count {
+        if src_indices[i] < 0 || src_indices[i] >= vertex_count { return null }
+        i = i + 1
+    }
+    i = 0
+    while i < vertex_count {
+        if math.is_valid_vec3(strided_vertex(def.vertices, i, stride)) == false { return null }
+        i = i + 1
+    }
+    if def.material_indices != null {
+        source_materials = def.material_indices as int[]
+        i = 0
+        while i < triangle_count {
+            if source_materials[i] < 0 { return null }
+            i = i + 1
+        }
+    }
 
     // Copies of the vertices and indices, welded or not.
     indices_block = basics.alloc(3 * triangle_count * 4)
