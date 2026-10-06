@@ -16,6 +16,7 @@ import aephysics.material
 import aephysics.shape
 import aephysics.dynamics
 import aephysics.joint_solver
+import aephysics.human
 import aephysics.physics_world
 
 extern exit(code: int)
@@ -305,6 +306,108 @@ test_world_and_queries() {
     physics_world.step(world_id, 1.0 / 60.0, 0)
     ensure("zero, negative, infinite and NaN steps leave the box finite and in place",
            finite_body(body) && math.distance(dynamics.body_get_position(body), before) < 0.01)
+    dynamics.destroy_world(world_id)
+}
+
+// A world definition with a number its setters would refuse makes no world.
+test_world_definitions() {
+    nan = not_a_number()
+    inf = infinity()
+    refused = 0
+    k = 0
+    while k < 9 {
+        wdef = dynamics.default_world_def()
+        if k == 0 { wdef.gravity = math.vec3(0.0, nan, 0.0) }
+        if k == 1 { wdef.hit_event_threshold = 0.0 - 1.0 }
+        if k == 2 { wdef.restitution_threshold = nan }
+        if k == 3 { wdef.contact_speed = inf }
+        if k == 4 { wdef.contact_hertz = 0.0 - 30.0 }
+        if k == 5 { wdef.contact_damping_ratio = nan }
+        if k == 6 { wdef.maximum_linear_speed = 0.0 }
+        if k == 7 { wdef.maximum_linear_speed = inf }
+        if k == 8 { wdef.dynamic_body_count = 0 - 1 }
+        world_id = dynamics.create_world(&wdef)
+        if dynamics.world_is_valid(world_id) == false { refused = refused + 1 } else { dynamics.destroy_world(world_id) }
+        k = k + 1
+    }
+    ensure("world definitions with NaN, infinite, negative or zero-cap numbers are refused (${refused} of 9)", refused == 9)
+    world_id = new_world()
+    ensure("the default world definition makes a world", dynamics.world_is_valid(world_id))
+    dynamics.destroy_world(world_id)
+}
+
+// A ragdoll is made whole or not at all.
+var g_figure_world_index = 0
+var g_figure_world_generation = 0
+var g_figure_tries = 0
+var g_figure_spawned = false
+var g_figure_bodies = 0
+
+empty_human() -> Human {
+    return Human { bones: null, filter_joints: null, filter_joint_count: 0, friction_torque: 0.0, is_spawned: false }
+}
+
+// Inside a step the world takes no new bodies: the figure must not come out
+// missing limbs.
+figure_in_step(a: ShapeId, b: ShapeId, point: Vec3, normal: Vec3, context: ptr) -> bool {
+    if g_figure_tries == 0 {
+        g_figure_tries = 1
+        h = empty_human()
+        world_id = WorldId { index1: g_figure_world_index, generation: g_figure_world_generation }
+        human.create_human(&h, world_id, math.vec3(5.0, 1.0, 0.0), 5.0, 1.0, 0.7, 1, null)
+        g_figure_spawned = h.is_spawned
+        g_figure_bodies = physics_world.get_counters(world_id).body_count
+    }
+    return true
+}
+
+test_human_definitions() {
+    fixtures_ready()
+    world_id = new_world()
+    nan = not_a_number()
+    inf = infinity()
+    ground_in(world_id, g_ground)
+    bodies = physics_world.get_counters(world_id).body_count
+    spawned = 0
+    k = 0
+    while k < 5 {
+        h = empty_human()
+        position = math.vec3(0.0, 1.0, 0.0)
+        torque = 5.0
+        hertz = 1.0
+        ratio = 0.7
+        if k == 0 { position = math.vec3(nan, 1.0, 0.0) }
+        if k == 1 { torque = 0.0 - 5.0 }
+        if k == 2 { hertz = inf }
+        if k == 3 { ratio = nan }
+        target = world_id
+        if k == 4 { target = WorldId { index1: 0, generation: 0 } }
+        human.create_human(&h, target, position, torque, hertz, ratio, 1, null)
+        if h.is_spawned { spawned = spawned + 1 }
+        k = k + 1
+    }
+    ensure("figures at NaN, with negative, infinite or NaN joint numbers or in no world are refused (${spawned} spawned)", spawned == 0)
+    ensure("refused figures leave no bodies behind", physics_world.get_counters(world_id).body_count == bodies)
+    // One created inside a step comes out unspawned and leaves nothing.
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.position = math.vec3(0.0, 0.5, 0.0)
+    sdef = dynamics.default_shape_def()
+    sdef.enable_pre_solve_events = true
+    dynamics.create_hull_shape(dynamics.create_body(world_id, &bdef), &sdef, g_box as *HullData)
+    bodies = physics_world.get_counters(world_id).body_count
+    g_figure_world_index = world_id.index1
+    g_figure_world_generation = world_id.generation
+    g_figure_tries = 0
+    physics_world.set_pre_solve_callback(world_id, figure_in_step, null)
+    steps(world_id, 2)
+    ensure("a figure made inside a step is unspawned and leaves no bodies (${g_figure_bodies} of ${bodies})",
+           g_figure_tries == 1 && g_figure_spawned == false && g_figure_bodies == bodies)
+    h = empty_human()
+    human.create_human(&h, world_id, math.vec3(5.0, 1.0, 0.0), 5.0, 1.0, 0.7, 1, null)
+    ensure("a sound figure after them is whole", h.is_spawned && physics_world.get_counters(world_id).body_count == bodies + human.BONE_COUNT)
+    human.destroy_human(&h)
+    ensure("and is taken down whole", physics_world.get_counters(world_id).body_count == bodies)
     dynamics.destroy_world(world_id)
 }
 
@@ -627,6 +730,8 @@ main() {
     test_shapes()
     test_joints()
     test_world_and_queries()
+    test_world_definitions()
+    test_human_definitions()
     test_perfect_bounce()
     test_free_spin()
     test_mass_ratio()

@@ -1316,7 +1316,20 @@ destroy_solver_set(w: *World, set_index: int) {
 
 // A world at the first free slot: its pools, its broad phase, and the
 // static, disabled and awake sets.
+// A world definition's numbers, as its setters take them: finite gravity,
+// thresholds, contact tuning and capacities not below zero, a positive
+// speed cap.
+valid_world_def(def: *WorldDef) -> bool {
+    if math.is_valid_vec3(def.gravity) == false { return false }
+    if valid_nonnegative(def.hit_event_threshold) == false || valid_nonnegative(def.restitution_threshold) == false { return false }
+    if valid_nonnegative(def.contact_speed) == false || valid_nonnegative(def.contact_hertz) == false || valid_nonnegative(def.contact_damping_ratio) == false { return false }
+    if math.is_valid_float(def.maximum_linear_speed) == false || def.maximum_linear_speed <= 0.0 { return false }
+    if def.static_body_count < 0 || def.dynamic_body_count < 0 || def.static_shape_count < 0 || def.dynamic_shape_count < 0 || def.contact_count < 0 { return false }
+    return true
+}
+
 create_world(def: *WorldDef) -> WorldId {
+    if valid_world_def(def) == false { return WorldId { index1: 0, generation: 0 } }
     worlds_ready()
     index = NULL_INDEX
     i = 0
