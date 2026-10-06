@@ -150,6 +150,18 @@ create_height_field(def: *HeightFieldDef) -> *HeightFieldData {
     row_count = def.count_z
     height_count = column_count * row_count
     if column_count < 2 || row_count < 2 || def.heights == null { return null }
+    // A scale not positive and finite, a quantisation range that is not
+    // one, or a height that is not a number has no field to make (a NaN
+    // height would quantise to whatever its cast gives).
+    if math.is_valid_vec3(def.scale) == false || def.scale.x <= 0.0 || def.scale.y <= 0.0 || def.scale.z <= 0.0 { return null }
+    if math.is_valid_float(def.global_minimum_height) == false || math.is_valid_float(def.global_maximum_height) == false { return null }
+    if def.global_minimum_height > def.global_maximum_height { return null }
+    checked = def.heights as float[]
+    i = 0
+    while i < column_count * row_count {
+        if math.is_valid_float(checked[i]) == false { return null }
+        i = i + 1
+    }
     cell_count = (column_count - 1) * (row_count - 1)
     triangle_count = 2 * cell_count
 

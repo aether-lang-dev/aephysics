@@ -37,7 +37,7 @@ exports (
     HumanBone, Human, BoneSpec, bone_at, filter_joint_at, spec_at,
     human_reference_shape, human_anatomical_limits, human_tight_limits, human_chain_child, human_shape_head, human_shape_tail, human_shape_toe, human_fit_shape, create_human_shaped,
     create_human, destroy_human, human_set_velocity, human_apply_angular_impulse, human_set_joint_friction_torque,
-    human_set_joint_spring_hertz, human_set_joint_damping_ratio, human_align_spring, human_create_motor_anchors,
+    human_set_joint_spring_hertz, human_set_joint_damping_ratio, human_align_spring, human_release_align_spring, human_create_motor_anchors,
     human_create_parallel_anchors, human_destroy_anchors, human_has_anchors, human_set_anchor_target, human_set_bullet
 )
 
@@ -584,8 +584,10 @@ create_human(h: *Human, world_id: WorldId, position: Vec3, friction_torque: floa
 
 // A figure of a shape, its space put in the world by `placement`.
 create_human_shaped(h: *Human, world_id: WorldId, placement: Transform, shape: ptr, friction_torque: float, hertz: float, damping_ratio: float, group_index: int, user_data: ptr) {
-    // A figure is made whole or not at all: refused inputs leave it unspawned.
-    h.is_spawned = false
+    // A figure is made whole or not at all: refused inputs leave it
+    // unspawned. One already spawned is not made over (its bodies would
+    // be lost to it): it is destroyed first.
+    if h.is_spawned { return }
     if dynamics.world_is_valid(world_id) == false || shape == null || math.is_valid_world_transform(placement) == false { return }
     if valid_nonnegative(friction_torque) == false || valid_nonnegative(hertz) == false || valid_nonnegative(damping_ratio) == false { return }
     h.bones = calloc(BONE_COUNT, sizeof(HumanBone))
@@ -623,7 +625,7 @@ create_human_shaped(h: *Human, world_id: WorldId, placement: Transform, shape: p
     i = 0
     while i < BONE_COUNT {
         if dynamics.body_is_valid(bone_at(h, i).body_id) == false {
-            destroy_human(h)
+            take_down(h)
             return
         }
         i = i + 1
@@ -693,7 +695,12 @@ add_filter(h: *Human, world_id: WorldId, a: int, b: int) {
 valid_nonnegative(x: float) -> bool { return math.is_valid_float(x) && x >= 0.0 }
 
 // The joints, then the bodies (and their anchors), then the blocks.
+// Nothing happens for a figure not spawned.
 destroy_human(h: *Human) {
+    if h.is_spawned { take_down(h) }
+}
+
+take_down(h: *Human) {
     filters = h.filter_joints as JointId[]
     i = 0
     while i < h.filter_joint_count {
@@ -723,6 +730,7 @@ destroy_human(h: *Human) {
 }
 
 human_set_velocity(h: *Human, velocity: Vec3) {
+    if h.is_spawned == false { return }
     i = 0
     while i < BONE_COUNT {
         bone = bone_at(h, i)
@@ -733,10 +741,12 @@ human_set_velocity(h: *Human, velocity: Vec3) {
 
 // A kick at the lower spine (the reference draws a random one; the caller picks it here).
 human_apply_angular_impulse(h: *Human, impulse: Vec3) {
+    if h.is_spawned == false { return }
     dynamics.body_apply_angular_impulse(bone_at(h, BONE_SPINE_01).body_id, impulse, true)
 }
 
 human_set_joint_friction_torque(h: *Human, torque: float) {
+    if h.is_spawned == false || valid_nonnegative(torque) == false { return }
     h.friction_torque = torque
     i = 1
     while i < BONE_COUNT {
@@ -751,6 +761,7 @@ human_set_joint_friction_torque(h: *Human, torque: float) {
 }
 
 human_set_joint_spring_hertz(h: *Human, hertz: float) {
+    if h.is_spawned == false { return }
     i = 1
     while i < BONE_COUNT {
         bone = bone_at(h, i)
@@ -764,6 +775,7 @@ human_set_joint_spring_hertz(h: *Human, hertz: float) {
 }
 
 human_set_joint_damping_ratio(h: *Human, damping_ratio: float) {
+    if h.is_spawned == false { return }
     i = 1
     while i < BONE_COUNT {
         bone = bone_at(h, i)
@@ -777,9 +789,12 @@ human_set_joint_damping_ratio(h: *Human, damping_ratio: float) {
 }
 
 // A parallel joint from the ground to the pelvis that springs the figure
-// upright: the frames align the ground's y with the pelvis's z.
+// upright: the frames align the ground's y with the pelvis's z. Called
+// again it replaces the spring it made before.
 human_align_spring(h: *Human, world_id: WorldId, ground_id: BodyId, hertz: float, damping_ratio: float) {
+    if h.is_spawned == false { return }
     bone = bone_at(h, BONE_PELVIS)
+    if dynamics.joint_is_valid(bone.joint_id) { dynamics.destroy_joint(bone.joint_id, true) }
     q = math.compute_quat_between_unit_vectors(math.vec3_axis_z(), math.vec3_axis_y())
     qb = dynamics.body_get_rotation(bone.body_id)
     pdef = dynamics.default_parallel_joint_def()
@@ -794,10 +809,21 @@ human_align_spring(h: *Human, world_id: WorldId, ground_id: BodyId, hertz: float
     bone.joint_id = dynamics.create_parallel_joint(world_id, &pdef)
 }
 
+// The align spring let go: the figure falls as a ragdoll would.
+human_release_align_spring(h: *Human) {
+    if h.is_spawned == false { return }
+    bone = bone_at(h, BONE_PELVIS)
+    if dynamics.joint_is_valid(bone.joint_id) { dynamics.destroy_joint(bone.joint_id, true) }
+    bone.joint_id = dynamics.null_joint_id()
+}
+
 // A kinematic anchor per bone at its pose, holding the bone through a
 // motor joint's position and rotation springs: move the anchors and the
 // figure follows (the pose drive of an active ragdoll).
 human_create_motor_anchors(h: *Human, world_id: WorldId) {
+    // One set of anchors at a time: a second would hold the bones twice
+    // and lose the first to the figure.
+    if h.is_spawned == false || human_has_anchors(h) { return }
     adef = dynamics.default_body_def()
     adef.kind = dynamics.BODY_KINEMATIC
     mdef = dynamics.default_motor_joint_def()
@@ -823,6 +849,9 @@ human_create_motor_anchors(h: *Human, world_id: WorldId) {
 
 // The same anchors through parallel joints: rotation only, with a torque limit.
 human_create_parallel_anchors(h: *Human, world_id: WorldId) {
+    // One set of anchors at a time: a second would hold the bones twice
+    // and lose the first to the figure.
+    if h.is_spawned == false || human_has_anchors(h) { return }
     adef = dynamics.default_body_def()
     adef.kind = dynamics.BODY_KINEMATIC
     q_frame_world = math.compute_quat_between_unit_vectors(math.vec3_axis_z(), math.vec3_axis_y())
@@ -849,6 +878,7 @@ human_create_parallel_anchors(h: *Human, world_id: WorldId) {
 
 // Whether the figure is held by anchors of either kind.
 human_has_anchors(h: *Human) -> bool {
+    if h.is_spawned == false { return false }
     return dynamics.body_is_valid(bone_at(h, BONE_PELVIS).anchor_id)
 }
 
@@ -859,6 +889,7 @@ human_has_anchors(h: *Human) -> bool {
 // as the animation does, colliding as the ragdoll it is. Nothing happens
 // for a bone without an anchor.
 human_set_anchor_target(h: *Human, index: int, target: Transform, time_step: float) {
+    if h.is_spawned == false || index < 0 || index >= BONE_COUNT { return }
     bone = bone_at(h, index)
     if dynamics.body_is_valid(bone.anchor_id) == false { return }
     dynamics.body_set_target_transform(bone.anchor_id, target, time_step, true)
@@ -867,6 +898,7 @@ human_set_anchor_target(h: *Human, index: int, target: Transform, time_step: flo
 // The anchors let go, leaving the figure a ragdoll: every anchor joint
 // and body destroyed, the bones' slots cleared.
 human_destroy_anchors(h: *Human) {
+    if h.is_spawned == false { return }
     i = 0
     while i < BONE_COUNT {
         bone = bone_at(h, i)
@@ -879,6 +911,7 @@ human_destroy_anchors(h: *Human) {
 }
 
 human_set_bullet(h: *Human, flag: bool) {
+    if h.is_spawned == false { return }
     i = 0
     while i < BONE_COUNT {
         dynamics.body_set_bullet(bone_at(h, i).body_id, flag)
