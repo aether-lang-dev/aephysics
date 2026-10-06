@@ -162,11 +162,11 @@ a world or a ragdoll of such numbers never made, a ragdoll made whole
 or not at all and never made over, its calls doing nothing unspawned;
 a perfect bounce holding its height over twelve bounces, a free spin
 keeping its energy, a box a hundred times heavier resting on a light one,
-centimetre boxes, a kilometre of ground, a capsule of no length, meshes
-hulls and height fields of indices past their vertices or NaN numbers never
-made, steps of no, negative and infinite time, geometry that cannot
-collide, a heavy chain, an unlimited motor and a hinge whose limits
-meet; 109 checks).
+centimetre boxes, a kilometre of ground, a capsule of no length, meshes,
+hulls, height fields and compounds of indices past their vertices or
+NaN numbers never made, steps of no, negative and infinite time,
+geometry that cannot collide, a heavy chain, an unlimited motor and a
+hinge whose limits meet; 115 checks).
 
 The step is deterministic across platforms and worker counts, not
 only across runs: `AEPHYSICS_TRACE=1 target/test_determinism` prints
