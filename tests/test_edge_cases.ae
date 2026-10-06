@@ -406,8 +406,45 @@ test_human_definitions() {
     h = empty_human()
     human.create_human(&h, world_id, math.vec3(5.0, 1.0, 0.0), 5.0, 1.0, 0.7, 1, null)
     ensure("a sound figure after them is whole", h.is_spawned && physics_world.get_counters(world_id).body_count == bodies + human.BONE_COUNT)
+    // Made over while spawned, it is left as it is rather than losing its bodies.
+    human.create_human(&h, world_id, math.vec3(8.0, 1.0, 0.0), 5.0, 1.0, 0.7, 1, null)
+    ensure("a spawned figure is not made over", physics_world.get_counters(world_id).body_count == bodies + human.BONE_COUNT)
+    // Anchors twice are one set; an align spring twice is one spring.
+    human.human_create_motor_anchors(&h, world_id)
+    human.human_create_parallel_anchors(&h, world_id)
+    ensure("a second set of anchors is refused", physics_world.get_counters(world_id).body_count == bodies + 2 * human.BONE_COUNT)
+    joints = physics_world.get_counters(world_id).joint_count
+    human.human_align_spring(&h, world_id, dynamics.null_body_id(), 25.0, 1.0)
+    ground = ground_in(world_id, g_ground)
+    human.human_align_spring(&h, world_id, ground, 25.0, 1.0)
+    human.human_align_spring(&h, world_id, ground, 10.0, 1.0)
+    ensure("an align spring made again replaces the first", physics_world.get_counters(world_id).joint_count == joints + 1)
+    human.human_release_align_spring(&h)
+    ensure("and lets go", physics_world.get_counters(world_id).joint_count == joints)
+    human.human_set_anchor_target(&h, 0 - 1, Transform { p: math.vec3_zero(), q: math.quat_identity() }, 1.0 / 60.0)
+    human.human_set_anchor_target(&h, human.BONE_COUNT, Transform { p: math.vec3_zero(), q: math.quat_identity() }, 1.0 / 60.0)
+    human.human_set_joint_friction_torque(&h, not_a_number())
+    ensure("bones out of range and a NaN friction are refused", h.friction_torque == 5.0)
+    bodies = bodies + 1
     human.destroy_human(&h)
     ensure("and is taken down whole", physics_world.get_counters(world_id).body_count == bodies)
+    ensure("its springs with it", physics_world.get_counters(world_id).joint_count == 0)
+    // Every call on a figure not spawned is nothing (none reach for its bones).
+    human.destroy_human(&h)
+    human.human_set_velocity(&h, math.vec3(1.0, 0.0, 0.0))
+    human.human_apply_angular_impulse(&h, math.vec3(1.0, 0.0, 0.0))
+    human.human_set_joint_friction_torque(&h, 1.0)
+    human.human_set_joint_spring_hertz(&h, 1.0)
+    human.human_set_joint_damping_ratio(&h, 1.0)
+    human.human_align_spring(&h, world_id, ground, 1.0, 1.0)
+    human.human_release_align_spring(&h)
+    human.human_create_motor_anchors(&h, world_id)
+    human.human_create_parallel_anchors(&h, world_id)
+    human.human_set_anchor_target(&h, 0, Transform { p: math.vec3_zero(), q: math.quat_identity() }, 1.0 / 60.0)
+    human.human_destroy_anchors(&h)
+    human.human_set_bullet(&h, true)
+    ensure("calls on a figure not spawned change nothing", human.human_has_anchors(&h) == false &&
+           physics_world.get_counters(world_id).body_count == bodies && physics_world.get_counters(world_id).joint_count == 0)
     dynamics.destroy_world(world_id)
 }
 
