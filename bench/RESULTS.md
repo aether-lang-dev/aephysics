@@ -745,6 +745,36 @@ the falling ragdolls sleep at step 298 (307 in doubles), the soak's
 fastest body and overlaps are unchanged to the printed digits, and every
 check holds. `tests/golden/determinism_trace.txt` is the new record (#125).
 
+### Manifolds and contacts in float (2026-10-07, #121, #37)
+
+The stored manifold and the contact's cached values are single precision
+now, the reference's `b3ManifoldPoint` and `b3Manifold` byte for byte
+(56 and 268 bytes, from 104 and 504) and its cached rotations, relative
+pose, friction, restitution, rolling resistance and tangent velocity
+(the contact 344 bytes to 256; the reference's is 216). The narrow phase
+still computes in double and narrows once as it stores; the recycling,
+the prepare and the store, which read and write these records for every
+contact every step, move half the bytes, and the lanes load them with no
+conversion.
+
+Interleaved, AVX2 builds, one thread, ms per step (a noisy machine; read
+across a row):
+
+| scene | main (float states) | + float manifolds | + float contacts |
+|---|---|---|---|
+| large pyramid | 9.83-10.43 | 8.60-11.40 | 8.76-10.36 |
+| many pyramids | 25.1-26.3 | 22.1-23.7 | 21.1-22.7 |
+| collide, many pyramids | 5.71-6.38 | 4.59-4.94 | 4.04-4.47 |
+| prepare, many pyramids | 3.64-3.81 | 2.75-2.87 | 2.45-2.84 |
+| store, many pyramids | 1.68-1.86 | 1.25-1.38 | 1.23-1.38 |
+| joint grid (pinned, best of 8) | 12.25 | 12.19 | -- |
+
+The collide phase on the many pyramids is a quarter shorter, the
+prepare a quarter, the store a quarter; the joint grid, which has no
+contacts, is level. The soak test against the reference stays as close
+as it was (seed 1's farthest body 6.89911 m against 6.89907), and the
+determinism golden is regenerated for the new rounding.
+
 ### The joint grid, stage by stage (2026-10-05)
 
 The joint grid has no contacts, so the eight-wide lanes don't explain its
