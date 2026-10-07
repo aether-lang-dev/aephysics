@@ -27,21 +27,35 @@ jobs:
       - name: Run the tests with ae
         run: scripts/test.sh
 
-      # The wide contact solver as one AVX2 register per eight lanes: the
-      # scenes that cross it, built with -mavx2, must keep their checksums.
-      - name: The eight lanes in AVX2
+      # The wide contact solver as one AVX2 register per eight lanes, with
+      # FMA on the machine as well: the scenes that cross the lanes keep
+      # their checks, and the determinism trace its bits (-ffp-contract=off
+      # keeps the compiler from fusing, #125).
+      - name: The eight lanes in AVX2 with FMA
         env:
-          AETHER_AEPHYSICS_CFLAGS: -mavx2
+          AETHER_AEPHYSICS_CFLAGS: -mavx2 -mfma
         run: |
           for t in test_determinism test_contact_solver_wide test_soak test_solver; do
             ae build "tests/$t.ae" -o "target/avx2_$t"
             "target/avx2_$t"
           done
+          cp target/avx2_test_determinism target/test_determinism
+          scripts/golden_trace.sh check
 
-      # The determinism scenes' per-step checksums, for a diff against a
-      # run on another platform (issue #27): the log is the record.
-      - name: Trace the determinism scenes
+  # arm64, where the compiler fuses multiply-adds unless told not to: the
+  # whole suite, the golden trace included (#125).
+  macos:
+    name: aephysics tests (macOS arm64)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout aephysics
+        uses: actions/checkout@v4
+
+      - name: Install the released Aether toolchain and aeb
         run: |
-          AEPHYSICS_TRACE=1 target/test_determinism > target/trace_linux.txt
-          wc -l target/trace_linux.txt
-          cat target/trace_linux.txt
+          curl -fsSL https://raw.githubusercontent.com/aether-lang-dev/aeb/main/get.sh \
+            | AE_PIN=0.788.0 AEB_REF=v0.325 sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Run the tests with ae
+        run: scripts/test.sh

@@ -14,8 +14,17 @@ modules = "."
 # headers do; the joint grid runs 1.6x faster than at -O2 for it. The
 # numbers are in bench/RESULTS.md under "Build flags".
 #
+# -ffp-contract=off keeps the C compiler from fusing a multiply and an add
+# into one rounding: GCC fuses by default wherever the target has FMA
+# (arm64 always, x86-64 with -mfma or -march=native), and a fused step
+# gives other bits than the unfused one, so the same scene would part
+# between machines from the first step (#125). The reference builds the
+# same way (its CMakeLists), and a consumer that builds aephysics into its
+# own program needs the flag too: ae reads only the root manifest's cflags.
+#
 # AETHER_AEPHYSICS_CFLAGS adds to them: -mavx2 (or -march=native) makes
 # the wide contact solver's eight lanes one 256-bit register each, as the
 # reference's AVX2 build has them; unset, the build runs on any x86-64 or
-# arm64 with the lanes as two four-wide halves. Results are the same bits.
-cflags = "-O3 --param max-inline-insns-auto=400 --param inline-unit-growth=400 ${AETHER_AEPHYSICS_CFLAGS}"
+# arm64 with the lanes as two four-wide halves. With fusing off, every
+# such build steps to the same bits (tests/golden/determinism_trace.txt).
+cflags = "-O3 --param max-inline-insns-auto=400 --param inline-unit-growth=400 -ffp-contract=off ${AETHER_AEPHYSICS_CFLAGS}"

@@ -148,7 +148,7 @@ test_normal() {
     // Falling at 2 m/s: the biased solve stops it (the bias pushes a hundredth out, slowly), the total impulse is 2.
     s = scene(0.6, 0.0, false)
     state = cube_state(&s)
-    state.linear_velocity = math.vec3(0.0, 0.0 - 2.0, 0.0)
+    state.v = math.narrow3(math.vec3(0.0, 0.0 - 2.0, 0.0))
     prepare(&s)
     cc = contact_solver.contact_constraint_at(s.constraints, 0)
     m = contact_solver.manifold_constraint_at(cc.constraints, 0)
@@ -156,19 +156,19 @@ test_normal() {
     small("no restitution, no relative velocity", contact_solver.constraint_point_at(m, 0).relative_velocity, 0.000001)
     i = 0
     while i < 8 { solve(&s, true); i = i + 1 }
-    ensure("falling stopped, pushed out gently (${state.linear_velocity.y})", state.linear_velocity.y > 0.0 && state.linear_velocity.y < 0.3)
+    ensure("falling stopped, pushed out gently (${math.widen3(state.v).y})", math.widen3(state.v).y > 0.0 && math.widen3(state.v).y < 0.3)
     total = 0.0
     j = 0
     while j < 4 {
         total = total + contact_solver.constraint_point_at(m, j).normal_impulse
         j = j + 1
     }
-    small("impulse equals the momentum plus the push-out", total - 2.0 - state.linear_velocity.y, 0.001)
+    small("impulse equals the momentum plus the push-out", total - 2.0 - math.widen3(state.v).y, 0.001)
     ensure("spread over the four points", contact_solver.constraint_point_at(m, 0).normal_impulse > 0.3 && contact_solver.constraint_point_at(m, 3).normal_impulse > 0.3)
-    ensure("no spin to speak of (${math.length(state.angular_velocity)})", math.length(state.angular_velocity) < 0.05)
+    ensure("no spin to speak of (${math.length(math.widen3(state.w))})", math.length(math.widen3(state.w)) < 0.05)
     // The relax pass keeps a resting cube at rest.
     solve(&s, false)
-    small("relaxed: the push-out speed removed", state.linear_velocity.y, 0.01)
+    small("relaxed: the push-out speed removed", math.widen3(state.v).y, 0.01)
     total2 = 0.0
     j = 0
     while j < 4 {
@@ -186,7 +186,7 @@ test_normal() {
     state = cube_state(&s)
     prepare(&s)
     solve(&s, true)
-    ensure("pushed out (${state.linear_velocity.y})", state.linear_velocity.y > 0.5 && state.linear_velocity.y <= 3.0001)
+    ensure("pushed out (${math.widen3(state.v).y})", math.widen3(state.v).y > 0.5 && math.widen3(state.v).y <= 3.0001)
     finish(&s)
 
     // Apart by a centimetre: the speculative bias lets the cube fall the gap and no further in one sub-step.
@@ -195,18 +195,18 @@ test_normal() {
     dynamics.update_pairs(s.w)
     dynamics.collide(s.w)
     state = cube_state(&s)
-    state.linear_velocity = math.vec3(0.0, 0.0 - 10.0, 0.0)
+    state.v = math.narrow3(math.vec3(0.0, 0.0 - 10.0, 0.0))
     prepare(&s)
     i = 0
     while i < 8 { solve(&s, true); i = i + 1 }
     gap = dynamics.manifold_point_at(dynamics.manifold_at(s.contact, 0), 0).separation
     ensure("speculative: a gap of about a centimetre", gap > 0.009 && gap < 0.012)
-    small("speculative: falls the gap in the sub-step", state.linear_velocity.y + gap * 240.0, 0.01)
+    small("speculative: falls the gap in the sub-step", math.widen3(state.v).y + gap * 240.0, 0.01)
     finish(&s)
     // With restitution the approach is recorded for the bounce.
     s = scene(0.6, 0.5, false)
     state = cube_state(&s)
-    state.linear_velocity = math.vec3(0.0, 0.0 - 2.0, 0.0)
+    state.v = math.narrow3(math.vec3(0.0, 0.0 - 2.0, 0.0))
     prepare(&s)
     m = contact_solver.manifold_constraint_at(contact_solver.contact_constraint_at(s.constraints, 0).constraints, 0)
     small("restitution: relative velocity recorded", contact_solver.constraint_point_at(m, 0).relative_velocity + 2.0, 0.000001)
@@ -217,13 +217,13 @@ test_friction() {
     // Sliding at 10 m/s with the weight's impulse: friction takes what it may (mu * N).
     s = scene(0.6, 0.0, false)
     state = cube_state(&s)
-    state.linear_velocity = math.vec3(10.0, 0.0 - 2.0, 0.0)
+    state.v = math.narrow3(math.vec3(10.0, 0.0 - 2.0, 0.0))
     prepare(&s)
     cc = contact_solver.contact_constraint_at(s.constraints, 0)
     m = contact_solver.manifold_constraint_at(cc.constraints, 0)
     i = 0
     while i < 8 { solve(&s, true); i = i + 1 }
-    ensure("biased passes apply no friction", m.friction_impulse.x == 0.0 && m.friction_impulse.y == 0.0 && math.abs_float(state.linear_velocity.x - 10.0) < 0.000001)
+    ensure("biased passes apply no friction", m.friction_impulse.x == 0.0 && m.friction_impulse.y == 0.0 && math.abs_float(math.widen3(state.v).x - 10.0) < 0.000001)
     solve(&s, false)
     total = 0.0
     j = 0
@@ -233,21 +233,21 @@ test_friction() {
     }
     fmag = math.sqrt_float(math.dot2(m.friction_impulse, m.friction_impulse))
     ensure("friction impulse at the bound mu N (${fmag} of ${0.6 * total})", math.abs_float(fmag - 0.6 * total) < 0.001 && fmag < 1.5)
-    small("slowed by the bound", state.linear_velocity.x - (10.0 - 0.6 * total), 0.01)
-    ensure("the friction at the bottom makes it tumble forward", state.angular_velocity.z < 0.0 && state.angular_velocity.z > 0.0 - 5.0)
+    small("slowed by the bound", math.widen3(state.v).x - (10.0 - 0.6 * total), 0.01)
+    ensure("the friction at the bottom makes it tumble forward", math.widen3(state.w).z < 0.0 && math.widen3(state.w).z > 0.0 - 5.0)
     finish(&s)
 
     // A slow slide: one relax pass zeroes the velocity at the friction centre (mu N is not reached).
     s = scene(0.6, 0.0, false)
     state = cube_state(&s)
-    state.linear_velocity = math.vec3(0.1, 0.0 - 2.0, 0.0)
+    state.v = math.narrow3(math.vec3(0.1, 0.0 - 2.0, 0.0))
     prepare(&s)
     cc = contact_solver.contact_constraint_at(s.constraints, 0)
     m = contact_solver.manifold_constraint_at(cc.constraints, 0)
     i = 0
     while i < 8 { solve(&s, true); i = i + 1 }
     solve(&s, false)
-    at_center = math.add(state.linear_velocity, math.cross(state.angular_velocity, m.center_b))
+    at_center = math.add(math.widen3(state.v), math.cross(math.widen3(state.w), m.center_b))
     small("slow slide: the friction centre stops", at_center.x, 0.000001)
     ensure("slow slide: under the bound", math.sqrt_float(math.dot2(m.friction_impulse, m.friction_impulse)) < 0.6 * 2.0)
     finish(&s)
@@ -255,8 +255,8 @@ test_friction() {
     // Spinning about the normal: the twist bound (mu * sum(arm * impulse)) slows it.
     s = scene(0.6, 0.0, false)
     state = cube_state(&s)
-    state.linear_velocity = math.vec3(0.0, 0.0 - 2.0, 0.0)
-    state.angular_velocity = math.vec3(0.0, 10.0, 0.0)
+    state.v = math.narrow3(math.vec3(0.0, 0.0 - 2.0, 0.0))
+    state.w = math.narrow3(math.vec3(0.0, 10.0, 0.0))
     prepare(&s)
     cc = contact_solver.contact_constraint_at(s.constraints, 0)
     m = contact_solver.manifold_constraint_at(cc.constraints, 0)
@@ -264,18 +264,18 @@ test_friction() {
     while i < 8 { solve(&s, true); i = i + 1 }
     solve(&s, false)
     ensure("twist impulse against the spin", m.twist_impulse < 0.0)
-    ensure("spin slowed (${state.angular_velocity.y})", state.angular_velocity.y < 10.0 && state.angular_velocity.y > 0.0)
+    ensure("spin slowed (${math.widen3(state.w).y})", math.widen3(state.w).y < 10.0 && math.widen3(state.w).y > 0.0)
     finish(&s)
 
     // Frictionless: nothing slows the slide.
     s = scene(0.0, 0.0, false)
     state = cube_state(&s)
-    state.linear_velocity = math.vec3(1.0, 0.0 - 2.0, 0.0)
+    state.v = math.narrow3(math.vec3(1.0, 0.0 - 2.0, 0.0))
     prepare(&s)
     i = 0
     while i < 8 { solve(&s, true); i = i + 1 }
     solve(&s, false)
-    small("frictionless slide", state.linear_velocity.x - 1.0, 0.000001)
+    small("frictionless slide", math.widen3(state.v).x - 1.0, 0.000001)
     finish(&s)
 }
 
@@ -283,13 +283,13 @@ test_restitution_and_store() {
     // Falling at 2 m/s onto a bouncy slab: after the solve the restitution pass reflects the recorded approach.
     s = scene(0.6, 0.5, true)
     state = cube_state(&s)
-    state.linear_velocity = math.vec3(0.0, 0.0 - 2.0, 0.0)
+    state.v = math.narrow3(math.vec3(0.0, 0.0 - 2.0, 0.0))
     prepare(&s)
     i = 0
     while i < 8 { solve(&s, true); i = i + 1 }
     solve(&s, false)
     contact_solver.apply_restitution(&s.ctx, s.constraints, 1)
-    small("bounces up at half the approach", state.linear_velocity.y - 1.0, 0.05)
+    small("bounces up at half the approach", math.widen3(state.v).y - 1.0, 0.05)
     // Stored: the manifold carries the impulses and the approach velocity; a hit event is flagged.
     bits = basics.bitset_create(8)
     hit = contact_solver.store_impulses(&s.ctx, s.constraints, 1, &bits)
@@ -300,14 +300,14 @@ test_restitution_and_store() {
     ensure("hit event flagged (2 m/s over the 1 m/s threshold)", hit && basics.bitset_get(&bits, s.contact.contact_id))
     basics.bitset_destroy(&bits)
     // Warm start: the next prepare takes the stored impulses and applies them at once.
-    state.linear_velocity = math.vec3_zero()
-    state.angular_velocity = math.vec3_zero()
+    state.v = math.narrow3(math.vec3_zero())
+    state.w = math.narrow3(math.vec3_zero())
     prepare(&s)
     cc = contact_solver.contact_constraint_at(s.constraints, 0)
     mc = contact_solver.manifold_constraint_at(cc.constraints, 0)
     ensure("warm started impulses", contact_solver.constraint_point_at(mc, 0).normal_impulse == p.normal_impulse)
     contact_solver.warm_start_contacts(&s.ctx, s.constraints, 1)
-    ensure("warm start pushed the cube up", state.linear_velocity.y > 2.0)
+    ensure("warm start pushed the cube up", math.widen3(state.v).y > 2.0)
     // Warm starting off: nothing carried.
     s.ctx.enable_warm_starting = false
     prepare(&s)
@@ -317,13 +317,13 @@ test_restitution_and_store() {
     // Below the threshold (0.5 m/s of 1): no bounce, and no hit event.
     s = scene(0.6, 0.5, true)
     state = cube_state(&s)
-    state.linear_velocity = math.vec3(0.0, 0.0 - 0.5, 0.0)
+    state.v = math.narrow3(math.vec3(0.0, 0.0 - 0.5, 0.0))
     prepare(&s)
     i = 0
     while i < 8 { solve(&s, true); i = i + 1 }
     solve(&s, false)
     contact_solver.apply_restitution(&s.ctx, s.constraints, 1)
-    ensure("no bounce under the threshold", state.linear_velocity.y < 0.01)
+    ensure("no bounce under the threshold", math.widen3(state.v).y < 0.01)
     bits = basics.bitset_create(8)
     ensure("no hit event under the threshold", contact_solver.store_impulses(&s.ctx, s.constraints, 1, &bits) == false)
     basics.bitset_destroy(&bits)

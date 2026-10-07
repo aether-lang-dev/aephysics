@@ -147,8 +147,8 @@ integrate_velocities_range(ctx: *StepContext, start: int, end: int) {
     while i < end {
         sim = sim_at(ctx.sims, i)
         state = state_at(ctx.states, i)
-        v = state.linear_velocity
-        wv = state.angular_velocity
+        v = math.widen3(state.v)
+        wv = math.widen3(state.w)
         linear_damping = 1.0 / (1.0 + h * sim.linear_damping)
         angular_damping = 1.0 / (1.0 + h * sim.angular_damping)
         gravity_scale = 0.0
@@ -158,7 +158,7 @@ integrate_velocities_range(ctx: *StepContext, start: int, end: int) {
         angular_delta = math.mul_sv(h, math.mul_mv(sim.inv_inertia_world, sim.torque))
         wv = math.mul_add(angular_delta, angular_damping, wv)
         // Gyroscopic: I (w2 - w1) + h w2 x (I w2) = 0, solved for w2 in the body's frame.
-        q = math.mul_quat(state.delta_rotation, sim.transform.q)
+        q = math.mul_quat(math.widen_quat(state.dq), sim.transform.q)
         inertia = math.invert_matrix(sim.inv_inertia_local)
         omega1 = math.inv_rotate_vector(q, wv)
         omega2 = omega1
@@ -187,8 +187,8 @@ integrate_velocities_range(ctx: *StepContext, start: int, end: int) {
             iteration = iteration + 1
         }
         wv = math.rotate_vector(q, omega2)
-        state.linear_velocity = v
-        state.angular_velocity = wv
+        state.v = math.narrow3(v)
+        state.w = math.narrow3(wv)
         i = i + 1
     }
 }
@@ -210,8 +210,8 @@ integrate_positions_range(ctx: *StepContext, start: int, end: int) {
     i = start
     while i < end {
         state = state_at(ctx.states, i)
-        v = state.linear_velocity
-        wv = state.angular_velocity
+        v = math.widen3(state.v)
+        wv = math.widen3(state.w)
         flags = state.flags
         if (flags & dynamics.LOCK_LINEAR_X) != 0 { v.x = 0.0 }
         if (flags & dynamics.LOCK_LINEAR_Y) != 0 { v.y = 0.0 }
@@ -227,10 +227,10 @@ integrate_positions_range(ctx: *StepContext, start: int, end: int) {
             wv = math.mul_sv(max_angular_speed / math.length(wv), wv)
             state.flags = state.flags | dynamics.IS_SPEED_CAPPED
         }
-        state.linear_velocity = v
-        state.angular_velocity = wv
-        state.delta_position = math.mul_add(state.delta_position, h, v)
-        state.delta_rotation = math.integrate_rotation(state.delta_rotation, math.mul_sv(h, wv))
+        state.v = math.narrow3(v)
+        state.w = math.narrow3(wv)
+        state.dp = math.narrow3(math.mul_add(math.widen3(state.dp), h, v))
+        state.dq = math.narrow_quat(math.integrate_rotation(math.widen_quat(state.dq), math.mul_sv(h, wv)))
         i = i + 1
     }
 }
@@ -379,7 +379,7 @@ solve_continuous(w: *World, sim_index: int, dt: float) {
         if (state.flags & dynamics.LOCK_LINEAR_X) != 0 { dv.x = 0.0 }
         if (state.flags & dynamics.LOCK_LINEAR_Y) != 0 { dv.y = 0.0 }
         if (state.flags & dynamics.LOCK_LINEAR_Z) != 0 { dv.z = 0.0 }
-        state.linear_velocity = math.add(state.linear_velocity, dv)
+        state.v = math.narrow3(math.add(math.widen3(state.v), dv))
         dynamics.body_move_event_at(w, sim_index).transform = t
         shape_id = fast_body.head_shape_id
         while shape_id != NULL_INDEX {
@@ -452,19 +452,19 @@ finalize_range(start: int, end: int, worker: int, context: ptr) {
     while sim_index < end {
         state = state_at(ctx.states, sim_index)
         sim = sim_at(ctx.sims, sim_index)
-        v = state.linear_velocity
-        wv = state.angular_velocity
+        v = math.widen3(state.v)
+        wv = math.widen3(state.w)
         local_omega = math.inv_rotate_vector(sim.transform.q, wv)
-        local_delta_rotation = math.inv_rotate_vector(sim.transform.q, math.qv(state.delta_rotation))
-        sim.center = math.add(sim.center, state.delta_position)
-        sim.transform.q = math.normalize_quat(math.mul_quat(state.delta_rotation, sim.transform.q))
+        local_delta_rotation = math.inv_rotate_vector(sim.transform.q, math.qv(math.widen_quat(state.dq)))
+        sim.center = math.add(sim.center, math.widen3(state.dp))
+        sim.transform.q = math.normalize_quat(math.mul_quat(math.widen_quat(state.dq), sim.transform.q))
         velocity_arc = math.modified_cross(math.abs_vec3(local_omega), sim.max_extent)
         max_velocity = math.length(v) + math.length(velocity_arc)
         rotation_arc = math.modified_cross(math.abs_vec3(local_delta_rotation), sim.max_extent)
-        max_delta_position = math.length(state.delta_position) + 2.0 * math.length(rotation_arc)
+        max_delta_position = math.length(math.widen3(state.dp)) + 2.0 * math.length(rotation_arc)
         sleep_velocity = math.max_float(max_velocity, 0.5 * inv_time_step * max_delta_position)
-        state.delta_position = math.vec3_zero()
-        state.delta_rotation = math.quat_identity()
+        state.dp = math.vec3f_zero()
+        state.dq = math.quatf_identity()
         sim.transform.p = math.sub(sim.center, math.rotate_vector(sim.transform.q, sim.local_center))
         body = dynamics.body_at(w, sim.body_id)
         body.body_move_index = sim_index

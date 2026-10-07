@@ -387,11 +387,13 @@ struct Body {
 
 // What the solver reads and writes for an awake body.
 struct BodyState {
-    linear_velocity: Vec3
-    angular_velocity: Vec3
-    delta_position: Vec3
-    delta_rotation: Quat
+    v: Vec3f                       // the linear velocity
+    padding1: f32
+    w: Vec3f                       // the angular velocity
+    padding2: f32
+    dp: Vec3f                      // the position's change this step (round-off stays small far out)
     flags: int
+    dq: Quatf                      // the rotation's change this step (identity for a static body)
 }
 
 // What integration and collision need of a body.
@@ -1767,10 +1769,10 @@ create_body(world_id: WorldId, def: *BodyDef) -> BodyId {
     if set_id == AWAKE_SET {
         state_index = basics.buffer_push(&set.body_states)
         state = body_state_at(set, state_index)
-        state.linear_velocity = def.linear_velocity
-        state.angular_velocity = def.angular_velocity
-        state.delta_position = math.vec3_zero()
-        state.delta_rotation = math.quat_identity()
+        state.v = math.narrow3(def.linear_velocity)
+        state.w = math.narrow3(def.angular_velocity)
+        state.dp = math.vec3f_zero()
+        state.dq = math.quatf_identity()
         state.flags = flags
     }
 
@@ -2299,7 +2301,7 @@ shape_apply_wind(id: ShapeId, wind: Vec3, drag: float, lift: float, max_speed: f
     torque = math.vec3_zero()
     if kind == KIND_SPHERE || kind == KIND_CAPSULE {
         lever = math.rotate_vector(q, math.sub(s.local_centroid, sim.local_center))
-        relative = math.mul_sub(wind, drag, math.add(state.linear_velocity, math.cross(state.angular_velocity, lever)))
+        relative = math.mul_sub(wind, drag, math.add(math.widen3(state.v), math.cross(math.widen3(state.w), lever)))
         speed = math.length(relative)
         direction = math.normalize(relative)
         speed = math.min_float(speed, max_speed)
@@ -2342,7 +2344,7 @@ shape_apply_wind(id: ShapeId, wind: Vec3, drag: float, lift: float, max_speed: f
                 v3 = math.mul_mv(m, p3)
                 centre = math.mul_sv(1.0 / 3.0, math.add(p1, math.add(p2, p3)))
                 lever = math.mul_mv(m, math.sub(centre, sim.local_center))
-                relative = math.mul_sub(wind, drag, math.add(state.linear_velocity, math.cross(state.angular_velocity, lever)))
+                relative = math.mul_sub(wind, drag, math.add(math.widen3(state.v), math.cross(math.widen3(state.w), lever)))
                 speed = math.length(relative)
                 direction = math.normalize(relative)
                 if math.dot(normal, direction) < 0.0 - math.EPSILON {
@@ -2528,7 +2530,7 @@ update_body_mass_data(w: *World, body: *Body) {
     sim.center0 = sim.center
     state = get_body_state(w, body)
     if state != null {
-        state.linear_velocity = math.add(state.linear_velocity, math.cross(state.angular_velocity, math.sub(sim.center, old_center)))
+        state.v = math.narrow3(math.add(math.widen3(state.v), math.cross(math.widen3(state.w), math.sub(sim.center, old_center))))
     }
     shape_id = body.head_shape_id
     while shape_id != NULL_INDEX {
@@ -2597,14 +2599,14 @@ body_get_linear_velocity(id: BodyId) -> Vec3 {
     w = body_world(id)
     state = get_body_state(w, get_body_full_id(w, id))
     if state == null { return math.vec3_zero() }
-    return state.linear_velocity
+    return math.widen3(state.v)
 }
 
 body_get_angular_velocity(id: BodyId) -> Vec3 {
     w = body_world(id)
     state = get_body_state(w, get_body_full_id(w, id))
     if state == null { return math.vec3_zero() }
-    return state.angular_velocity
+    return math.widen3(state.w)
 }
 
 // A velocity wakes a sleeping body; a static body has none.
@@ -2615,7 +2617,7 @@ body_set_linear_velocity(id: BodyId, v: Vec3) {
     if body.kind == BODY_STATIC { return }
     if math.length_squared(v) > 0.0 { wake_body(w, body) }
     state = get_body_state(w, body)
-    if state != null { state.linear_velocity = v }
+    if state != null { state.v = math.narrow3(v) }
 }
 
 // Forces and torques accumulate on the sim for the next step's
@@ -2656,8 +2658,8 @@ body_set_target_transform(id: BodyId, target: Transform, time_step: float, wake:
         wake_body(w, body)
     }
     state = get_body_state(w, body)
-    state.linear_velocity = linear_velocity
-    state.angular_velocity = angular_velocity
+    state.v = math.narrow3(linear_velocity)
+    state.w = math.narrow3(angular_velocity)
 }
 
 body_apply_force(id: BodyId, force: Vec3, point: Vec3, wake: bool) {
@@ -2702,9 +2704,9 @@ body_apply_linear_impulse(id: BodyId, impulse: Vec3, point: Vec3, wake: bool) {
     if awake_for_apply(w, body, wake) == false { return }
     sim = get_body_sim(w, body)
     state = get_body_state(w, body)
-    state.linear_velocity = capped_linear_velocity(w, math.mul_add(state.linear_velocity, sim.inv_mass, impulse))
+    state.v = math.narrow3(capped_linear_velocity(w, math.mul_add(math.widen3(state.v), sim.inv_mass, impulse)))
     delta = math.mul_mv(sim.inv_inertia_world, math.cross(math.sub(point, sim.center), impulse))
-    state.angular_velocity = math.add(state.angular_velocity, delta)
+    state.w = math.narrow3(math.add(math.widen3(state.w), delta))
 }
 
 body_apply_linear_impulse_to_center(id: BodyId, impulse: Vec3, wake: bool) {
@@ -2714,7 +2716,7 @@ body_apply_linear_impulse_to_center(id: BodyId, impulse: Vec3, wake: bool) {
     if awake_for_apply(w, body, wake) == false { return }
     sim = get_body_sim(w, body)
     state = get_body_state(w, body)
-    state.linear_velocity = capped_linear_velocity(w, math.mul_add(state.linear_velocity, sim.inv_mass, impulse))
+    state.v = math.narrow3(capped_linear_velocity(w, math.mul_add(math.widen3(state.v), sim.inv_mass, impulse)))
 }
 
 // The angular impulse through the local inertia, so it is exact under rotation.
@@ -2727,7 +2729,7 @@ body_apply_angular_impulse(id: BodyId, impulse: Vec3, wake: bool) {
     state = get_body_state(w, body)
     local_impulse = math.inv_rotate_vector(sim.transform.q, impulse)
     local_delta = math.mul_mv(sim.inv_inertia_local, local_impulse)
-    state.angular_velocity = math.add(state.angular_velocity, math.rotate_vector(sim.transform.q, local_delta))
+    state.w = math.narrow3(math.add(math.widen3(state.w), math.rotate_vector(sim.transform.q, local_delta)))
 }
 
 body_set_bullet(id: BodyId, flag: bool) {
@@ -2805,7 +2807,7 @@ body_set_angular_velocity(id: BodyId, v: Vec3) {
     locked = math.vec3(wx, wy, wz)
     if math.length_squared(locked) != 0.0 { wake_body(w, body) }
     state = get_body_state(w, body)
-    if state != null { state.angular_velocity = locked }
+    if state != null { state.w = math.narrow3(locked) }
 }
 
 body_get_local_point_velocity(id: BodyId, local_point: Vec3) -> Vec3 {
@@ -2824,7 +2826,7 @@ body_get_world_point_velocity(id: BodyId, world_point: Vec3) -> Vec3 {
     state = get_body_state(w, body)
     if state == null { return math.vec3_zero() }
     sim = get_body_sim(w, body)
-    return math.add(state.linear_velocity, math.cross(state.angular_velocity, math.sub(world_point, sim.center)))
+    return math.add(math.widen3(state.v), math.cross(math.widen3(state.w), math.sub(world_point, sim.center)))
 }
 
 body_get_type(id: BodyId) -> int { return get_body_full_id(body_world(id), id).kind }
@@ -2863,7 +2865,7 @@ body_set_mass_data(id: BodyId, mass_data: MassData) {
     if body.mass > 0.0 { sim.inv_mass = 1.0 / body.mass }
     state = get_body_state(w, body)
     if state != null {
-        state.linear_velocity = math.add(state.linear_velocity, math.cross(state.angular_velocity, math.sub(sim.center, old_center)))
+        state.v = math.narrow3(math.add(math.widen3(state.v), math.cross(math.widen3(state.w), math.sub(sim.center, old_center))))
     }
     determinant = math.det(body.inertia)
     if determinant > 0.0 {
@@ -2984,12 +2986,12 @@ body_set_motion_locks(id: BodyId, locks: MotionLocks) {
     // A locked axis stops now, not after the next step's positions.
     state = get_body_state(w, body)
     if state != null {
-        if locks.linear_x { state.linear_velocity.x = 0.0 }
-        if locks.linear_y { state.linear_velocity.y = 0.0 }
-        if locks.linear_z { state.linear_velocity.z = 0.0 }
-        if locks.angular_x { state.angular_velocity.x = 0.0 }
-        if locks.angular_y { state.angular_velocity.y = 0.0 }
-        if locks.angular_z { state.angular_velocity.z = 0.0 }
+        if locks.linear_x { state.v.x = 0.0 }
+        if locks.linear_y { state.v.y = 0.0 }
+        if locks.linear_z { state.v.z = 0.0 }
+        if locks.angular_x { state.w.x = 0.0 }
+        if locks.angular_y { state.w.y = 0.0 }
+        if locks.angular_z { state.w.z = 0.0 }
     }
     // Only fixing or freeing the rotation changes the mass (its inertia);
     // any other lock leaves the mass alone, a custom one included.
@@ -4246,10 +4248,10 @@ wake_solver_set(w: *World, set_index: int) {
         memcpy(awake.body_sims.data + target * sizeof(BodySim), sim as ptr, sizeof(BodySim))
         state_index = basics.buffer_push(&awake.body_states)
         state = body_state_at(awake, state_index)
-        state.linear_velocity = math.vec3_zero()
-        state.angular_velocity = math.vec3_zero()
-        state.delta_position = math.vec3_zero()
-        state.delta_rotation = math.quat_identity()
+        state.v = math.vec3f_zero()
+        state.w = math.vec3f_zero()
+        state.dp = math.vec3f_zero()
+        state.dq = math.quatf_identity()
         state.flags = body.flags
         body.set_index = AWAKE_SET
         body.local_index = target
@@ -5789,10 +5791,10 @@ transfer_body(w: *World, target: *SolverSet, source: *SolverSet, body: *Body) {
     } else if target.set_index == AWAKE_SET {
         state_index = basics.buffer_push(&target.body_states)
         state = body_state_at(target, state_index)
-        state.linear_velocity = math.vec3_zero()
-        state.angular_velocity = math.vec3_zero()
-        state.delta_position = math.vec3_zero()
-        state.delta_rotation = math.quat_identity()
+        state.v = math.narrow3(math.vec3_zero())
+        state.w = math.narrow3(math.vec3_zero())
+        state.dp = math.narrow3(math.vec3_zero())
+        state.dq = math.narrow_quat(math.quat_identity())
         state.flags = body.flags
     }
     body.set_index = target.set_index
