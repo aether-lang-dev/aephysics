@@ -375,12 +375,12 @@ lane_softness(ctx: *StepContext, index_a1: int, index_b1: int) -> Softness {
 // Eight bodies' inverse world inertias, the upper triangles.
 gather_inertia(s0: *BodySim, s1: *BodySim, s2: *BodySim, s3: *BodySim, s4: *BodySim, s5: *BodySim, s6: *BodySim, s7: *BodySim) -> SymMatrix3W {
     return SymMatrix3W {
-        cxx: f8(s0.inv_inertia_world.cx.x, s1.inv_inertia_world.cx.x, s2.inv_inertia_world.cx.x, s3.inv_inertia_world.cx.x, s4.inv_inertia_world.cx.x, s5.inv_inertia_world.cx.x, s6.inv_inertia_world.cx.x, s7.inv_inertia_world.cx.x),
-        cxy: f8(s0.inv_inertia_world.cx.y, s1.inv_inertia_world.cx.y, s2.inv_inertia_world.cx.y, s3.inv_inertia_world.cx.y, s4.inv_inertia_world.cx.y, s5.inv_inertia_world.cx.y, s6.inv_inertia_world.cx.y, s7.inv_inertia_world.cx.y),
-        cxz: f8(s0.inv_inertia_world.cx.z, s1.inv_inertia_world.cx.z, s2.inv_inertia_world.cx.z, s3.inv_inertia_world.cx.z, s4.inv_inertia_world.cx.z, s5.inv_inertia_world.cx.z, s6.inv_inertia_world.cx.z, s7.inv_inertia_world.cx.z),
-        cyy: f8(s0.inv_inertia_world.cy.y, s1.inv_inertia_world.cy.y, s2.inv_inertia_world.cy.y, s3.inv_inertia_world.cy.y, s4.inv_inertia_world.cy.y, s5.inv_inertia_world.cy.y, s6.inv_inertia_world.cy.y, s7.inv_inertia_world.cy.y),
-        cyz: f8(s0.inv_inertia_world.cy.z, s1.inv_inertia_world.cy.z, s2.inv_inertia_world.cy.z, s3.inv_inertia_world.cy.z, s4.inv_inertia_world.cy.z, s5.inv_inertia_world.cy.z, s6.inv_inertia_world.cy.z, s7.inv_inertia_world.cy.z),
-        czz: f8(s0.inv_inertia_world.cz.z, s1.inv_inertia_world.cz.z, s2.inv_inertia_world.cz.z, s3.inv_inertia_world.cz.z, s4.inv_inertia_world.cz.z, s5.inv_inertia_world.cz.z, s6.inv_inertia_world.cz.z, s7.inv_inertia_world.cz.z)
+        cxx: lanes.f32x8(s0.inv_inertia_world.cx.x, s1.inv_inertia_world.cx.x, s2.inv_inertia_world.cx.x, s3.inv_inertia_world.cx.x, s4.inv_inertia_world.cx.x, s5.inv_inertia_world.cx.x, s6.inv_inertia_world.cx.x, s7.inv_inertia_world.cx.x),
+        cxy: lanes.f32x8(s0.inv_inertia_world.cx.y, s1.inv_inertia_world.cx.y, s2.inv_inertia_world.cx.y, s3.inv_inertia_world.cx.y, s4.inv_inertia_world.cx.y, s5.inv_inertia_world.cx.y, s6.inv_inertia_world.cx.y, s7.inv_inertia_world.cx.y),
+        cxz: lanes.f32x8(s0.inv_inertia_world.cx.z, s1.inv_inertia_world.cx.z, s2.inv_inertia_world.cx.z, s3.inv_inertia_world.cx.z, s4.inv_inertia_world.cx.z, s5.inv_inertia_world.cx.z, s6.inv_inertia_world.cx.z, s7.inv_inertia_world.cx.z),
+        cyy: lanes.f32x8(s0.inv_inertia_world.cy.y, s1.inv_inertia_world.cy.y, s2.inv_inertia_world.cy.y, s3.inv_inertia_world.cy.y, s4.inv_inertia_world.cy.y, s5.inv_inertia_world.cy.y, s6.inv_inertia_world.cy.y, s7.inv_inertia_world.cy.y),
+        cyz: lanes.f32x8(s0.inv_inertia_world.cy.z, s1.inv_inertia_world.cy.z, s2.inv_inertia_world.cy.z, s3.inv_inertia_world.cy.z, s4.inv_inertia_world.cy.z, s5.inv_inertia_world.cy.z, s6.inv_inertia_world.cy.z, s7.inv_inertia_world.cy.z),
+        czz: lanes.f32x8(s0.inv_inertia_world.cz.z, s1.inv_inertia_world.cz.z, s2.inv_inertia_world.cz.z, s3.inv_inertia_world.cz.z, s4.inv_inertia_world.cz.z, s5.inv_inertia_world.cz.z, s6.inv_inertia_world.cz.z, s7.inv_inertia_world.cz.z)
     }
 }
 
@@ -499,8 +499,8 @@ prepare_wide_slot(ctx: *StepContext, color: *GraphColor, slot: int, end: int) {
     sb5 = lane_sim(ctx, c.index_b.l5)
     sb6 = lane_sim(ctx, c.index_b.l6)
     sb7 = lane_sim(ctx, c.index_b.l7)
-    m_a = f8(sa0.inv_mass, sa1.inv_mass, sa2.inv_mass, sa3.inv_mass, sa4.inv_mass, sa5.inv_mass, sa6.inv_mass, sa7.inv_mass)
-    m_b = f8(sb0.inv_mass, sb1.inv_mass, sb2.inv_mass, sb3.inv_mass, sb4.inv_mass, sb5.inv_mass, sb6.inv_mass, sb7.inv_mass)
+    m_a = lanes.f32x8(sa0.inv_mass, sa1.inv_mass, sa2.inv_mass, sa3.inv_mass, sa4.inv_mass, sa5.inv_mass, sa6.inv_mass, sa7.inv_mass)
+    m_b = lanes.f32x8(sb0.inv_mass, sb1.inv_mass, sb2.inv_mass, sb3.inv_mass, sb4.inv_mass, sb5.inv_mass, sb6.inv_mass, sb7.inv_mass)
     i_a = gather_inertia(sa0, sa1, sa2, sa3, sa4, sa5, sa6, sa7)
     i_b = gather_inertia(sb0, sb1, sb2, sb3, sb4, sb5, sb6, sb7)
     c.inv_mass_a = m_a

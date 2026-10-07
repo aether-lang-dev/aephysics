@@ -861,7 +861,7 @@ body_time_of_impact_mover(id: BodyId, origin: Vec3, mover: Capsule, mover_transl
     xf1 = Transform { p: math.sub(transform1.p, origin), q: transform1.q }
     xf2 = Transform { p: math.sub(transform2.p, origin), q: transform2.q }
     body = dynamics.get_body_full_id(w, id)
-    local_center = dynamics.get_body_sim(w, body).local_center
+    local_center = math.widen3(dynamics.get_body_sim(w, body).local_center)
     input = TOIInput { proxy_a: distance.shape_proxy(null, 0, 0.0), proxy_b: distance.shape_proxy(mover_points(), 2, mover.radius),
                        sweep_a: Sweep { local_center: local_center, c1: math.transform_point(xf1, local_center), c2: math.transform_point(xf2, local_center), q1: transform1.q, q2: transform2.q },
                        sweep_b: Sweep { local_center: math.vec3_zero(), c1: math.vec3_zero(), c2: mover_translation, q1: math.quat_identity(), q2: math.quat_identity() },
@@ -931,8 +931,8 @@ explosion_visitor(proxy_id: int, user_data: long, context: ptr) -> bool {
     state = dynamics.body_state_at(set, body.local_index)
     sim = dynamics.body_sim_at(set, body.local_index)
     state.v = math.narrow3(math.mul_add(math.widen3(state.v), sim.inv_mass, impulse))
-    r = math.rotate_vector(xf.q, math.sub(closest, sim.local_center))
-    state.w = math.narrow3(math.add(math.widen3(state.w), math.mul_mv(sim.inv_inertia_world, math.cross(r, impulse))))
+    r = math.rotate_vector(xf.q, math.sub(closest, math.widen3(sim.local_center)))
+    state.w = math.narrow3(math.add(math.widen3(state.w), math.mul_mv(math.widen_mat3(sim.inv_inertia_world), math.cross(r, impulse))))
     return true
 }
 
