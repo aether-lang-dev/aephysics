@@ -677,8 +677,46 @@ the eight-wide (AVX2) contact stages:
 | relax | 2.24 | 1.02 |
 | store | 0.48 | 0.38 |
 
-Matching that needs eight float lanes. Aether's `std.lanes` has `f32x4`
-and no `f32x8` (aether-lang-dev/aether#2428).
+Matching that needs eight float lanes: Aether 0.788 has them (aether#2428),
+and the solver uses them (below, "Eight lanes").
+
+### Eight lanes (2026-10-07, #96)
+
+Aether 0.788 has `f32x8` (aether#2428) and the wide contact solver is
+written in it: eight contacts to a slot, one 256-bit register a lane
+group when built with AVX2 (`AETHER_AEPHYSICS_CFLAGS=-mavx2`), two
+four-lane halves otherwise. Every lane computes what it computed at four,
+so the checksums are the same bits at either width and either build.
+
+The reference's three scenes, interleaved, one thread, the reference at
+`e77352c` (its AVX2 path picked at run time):
+
+| scene | Box3D `e77352c` | aephysics, four lanes | aephysics, eight lanes, AVX2 |
+|---|---|---|---|
+| large pyramid | 5.86-6.45 ms | 10.76-11.57 | 9.73-9.93 |
+| many pyramids | 15.1-17.7 | 26.5-28.1 | 23.8-25.3 |
+| joint grid | 11.1-11.3 | 12.5-13.3 | 12.2-12.7 |
+
+Without AVX2 the eight-lane build steps as the four-lane one did, as the
+lanes promise. With it the large pyramid's contact stages, against the
+reference's:
+
+| stage | four lanes | eight lanes, AVX2 | Box3D `e77352c` |
+|---|---|---|---|
+| prepare | 1.28 ms | 1.17 | 0.64 |
+| warm start | 1.04 | 1.06 | 0.60 |
+| solve | 1.97 | 1.52 | 0.98 |
+| relax | 2.39 | 1.63 | 1.06 |
+| store | 0.66 | 0.70 | 0.43 |
+
+The solve and relax gain a quarter and a third; the warm start, nearly all
+gather and scatter, nothing. What is left is the bodies' states: ours are
+doubles, converted lane by lane into the floats the lanes hold and back,
+where the reference's are floats it loads and transposes (#95).
+
+On Windows the AVX2 build needs GCC 16: MinGW GCC 15.2 spills 256-bit
+values with aligned moves to a stack it cannot align to 32 bytes and the
+program faults (aether#2476).
 
 ### The joint grid, stage by stage (2026-10-05)
 
@@ -925,48 +963,48 @@ either engine. The rain's total is chaos, not a contact difference.
 
 ## soak (a mixed pile)
 
-`bench/soak.ae` against `bench/soak_box3d.c` (2026-10-06, i7-13700K, one
-thread): 2,048 bodies of every convex kind -- boxes, spheres, capsules,
-hulls of twelve random points, restitution up to 0.6, a little rolling
-resistance -- thrown spinning from eight layers into a walled pen, 600
-steps, the same dice drawn in the same order in both. The reference's own
-benchmarks are cubes; this is the pile a game throws.
+`bench/soak.ae` against `bench/soak_box3d.c` (2026-10-07, i7-13700K, one
+thread, Box3D `e77352c` with its AVX2 dispatch): 2,048 bodies of every
+convex kind -- boxes, spheres, capsules, hulls of twelve random points,
+restitution up to 0.6, a little rolling resistance -- thrown spinning
+from eight layers into a walled pen, 600 steps, the same dice drawn in
+the same order in both. The reference's own benchmarks are cubes; this is
+the pile a game throws.
 
-| | Box3D | aephysics |
+| | Box3D `e77352c` | aephysics (eight lanes, AVX2) |
 |---|---|---|
-| sleeping, ms per step | 1.74-1.76 | 2.27-2.47 |
-| awake throughout, ms per step | 2.78-2.87 | 3.23-3.49 |
-| pairs | 0.075 | 0.104 |
-| collide | 0.563 | 0.679 |
-| solve (constraints) | 2.14 (1.98) | 2.45 (2.24) |
-| transforms | 0.154 | 0.198 |
-| height sum, contacts | 615.8, 9,041 | 621.9, 8,927 |
+| sleeping, ms per step | 1.25-1.48 | 2.33-2.39 |
+| awake throughout, ms per step | 2.26-2.43 | 3.49-3.93 |
+| pairs | 0.08 | 0.12 |
+| collide | 0.53-0.58 | 0.89-0.93 |
+| solve (constraints) | 1.64-1.76 (1.42-1.52) | 2.49-2.88 (2.22-2.61) |
+| transforms | 0.21-0.23 | 0.25 |
+| height sum, contacts | 618.6, 9,061 | 621.9, 8,927 |
 
-Awake, the like-for-like cost, we are 1.14-1.22x the reference, the gap
-spread over every phase: the solve's share is the eight-lane gap (#96,
-#95), the pairs, the narrow phase of the mixed pairings and the
+Awake, the like-for-like cost, we are 1.5-1.7x the reference, the gap in
+every phase: the solve's share is the body states' gather and scatter in
+doubles (#95), the pairs, the narrow phase of the mixed pairings and the
 transforms are their own (#121).
 
-The sleeping times differ by when each pile happens to sleep, and why is
-worth knowing. A random hull resting on an edge rocks between two faces:
-when the floor's manifold flips to the other incident face, the corner
-that comes down was not among the old manifold's speculative points and
-is found 5 mm deep; the soft contact pushes it out, lifting the body, and
-it falls back the other way. In the reference a hull does this for good
-(its body 912, at 0.09 m/s and 0.5 rad/s, keeps itself and a sphere it
-touches awake through 1,500 steps); in ours the pile's rocker (body 1098,
-0.12 m/s, 0.4 rad/s) holds an island of 1,330 awake until step 1,150, then
-settles. The same algorithm, the same behaviour, a different body by
-chaos (#122).
+The sleeping times differ by more than when each pile happens to sleep.
+The reference's pile is asleep by step 500. In ours a random hull resting
+on an edge rocks between two faces and holds an island of 1,330 awake
+until step 1,150: when the floor's manifold flips to the other incident
+face, the corner that comes down was not among the old manifold's points
+and is found 5 mm deep, the soft contact pushes it out, lifting the body,
+and it falls back the other way (body 1098, 0.12 m/s, 0.4 rad/s). The old
+pin `f555ee4` had a hull rocking for good in the same pile; `e77352c`
+does not, so ours is to be explained against main (#122).
 
 `tests/test_soak.ae` holds the small version to account on four seeds
 (64 bodies, 900 steps), and the reference's port on the same dice agrees
-on everything it checks: the same starting energies to the joule, none
-ever gained, the fastest bodies at 11.3-12.4 m/s (ours 11.3-11.4), the
-deepest overlap in the fall 13-16 cm (ours 12-16: dynamic bodies have no
-continuous collision in either, so a body meeting another at 9 m/s is a
-step's 15 cm in before its contact exists), at rest 1.0-5.7 mm (ours
-0.6-5.0), every body asleep at the end.
+with it nearly to the digit: the same starting energies to the joule,
+none ever gained, the fastest body 11.3546 m/s on seed 1 in both, the
+deepest overlap in the fall 0.160931 m against our 0.160922 (dynamic
+bodies have no continuous collision in either, so a body meeting another
+at 9 m/s is a step's 15 cm in before its contact exists), the farthest
+body 6.8991 m against 6.8992, at rest 0.8-4.7 mm against our 0.6-5.0,
+every body asleep at the end in both.
 
 ## Build flags (inlining)
 

@@ -7,6 +7,9 @@
 set -uo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
+# The build's extra C flags (aether.toml), empty unless the caller sets them:
+# AETHER_AEPHYSICS_CFLAGS=-mavx2 builds the wide contact solver at eight lanes a register.
+export AETHER_AEPHYSICS_CFLAGS="${AETHER_AEPHYSICS_CFLAGS:-}"
 mkdir -p target
 layers="${1:-tree}"
 for layer in $layers; do
@@ -15,6 +18,8 @@ for layer in $layers; do
     # aether.toml gives ae build so both sides are compiled alike.
     if [ -f "bench/${layer}_native.c" ]; then
         native_cflags="$(sed -n 's/^cflags = "\(.*\)"/\1/p' aether.toml)"
+        # aether.toml's ${AETHER_AEPHYSICS_CFLAGS}, expanded as ae expands it (empty when unset).
+        native_cflags="${native_cflags//'${AETHER_AEPHYSICS_CFLAGS}'/${AETHER_AEPHYSICS_CFLAGS:-}}"
         gcc $native_cflags "bench/${layer}_native.c" -o "target/${layer}_native" -lm || exit 1
         native="target/${layer}_native"; [ -x "$native" ] || native="$native.exe"
         "$native"

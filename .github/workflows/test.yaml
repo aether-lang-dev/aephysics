@@ -15,18 +15,28 @@ jobs:
       - name: Checkout aephysics
         uses: actions/checkout@v4
 
-      # Tracking pin: 0.778.0, the floor shared by the whole Aether family.
-      # The complete suite passed with 0.778.0 on macOS arm64 on 2026-10-05.
-      # Linux remains verified by this job, not by that run.
-      # This is a reproducible bootstrap version, not a claimed API floor.
+      # Pin: 0.788.0, the first release with std.lanes' f32x8 (aether#2428),
+      # which the wide contact solver is written in. A reproducible bootstrap
+      # version: the floor this code needs, verified on Linux by this job.
       - name: Install the released Aether toolchain and aeb
         run: |
           curl -fsSL https://raw.githubusercontent.com/aether-lang-dev/aeb/main/get.sh \
-            | AE_PIN=0.778.0 AEB_REF=v0.325 sh
+            | AE_PIN=0.788.0 AEB_REF=v0.325 sh
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Run the tests with ae
         run: scripts/test.sh
+
+      # The wide contact solver as one AVX2 register per eight lanes: the
+      # scenes that cross it, built with -mavx2, must keep their checksums.
+      - name: The eight lanes in AVX2
+        env:
+          AETHER_AEPHYSICS_CFLAGS: -mavx2
+        run: |
+          for t in test_determinism test_contact_solver_wide test_soak test_solver; do
+            ae build "tests/$t.ae" -o "target/avx2_$t"
+            "target/avx2_$t"
+          done
 
       # The determinism scenes' per-step checksums, for a diff against a
       # run on another platform (issue #27): the log is the record.

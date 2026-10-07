@@ -15,6 +15,10 @@ JOLT_REF="${JOLT_REF:-v5.3.0}"
 if [ ! -d reference/box3d ]; then
     git clone -q https://github.com/erincatto/box3d.git reference/box3d
 fi
+# A clone made at an older pin lacks the newer commit: fetched when missing.
+if ! git -C reference/box3d cat-file -e "$BOX3D_REF^{commit}" 2>/dev/null; then
+    git -C reference/box3d fetch -q origin
+fi
 git -C reference/box3d checkout -q "$BOX3D_REF"
 
 if [ ! -d reference/jolt ]; then

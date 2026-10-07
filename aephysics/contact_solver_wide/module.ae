@@ -1,8 +1,8 @@
 // aephysics.contact_solver_wide -- the convex contacts of a graph
-// colour solved four at a time: the constraints of four contacts laid
+// colour solved eight at a time: the constraints of eight contacts laid
 // side by side, one lane each (a structure of arrays: every scalar of
-// the constraint is four floats), so the prepare, warm start, solve,
-// restitution and store run the same instruction on four contacts at
+// the constraint is eight floats), so the prepare, warm start, solve,
+// restitution and store run the same instruction on eight contacts at
 // once. The bodies' states are gathered into lanes before a constraint
 // and the velocities scattered back after; a colour's contacts share
 // no body, so the lanes never alias. A static body is lane zero of the
@@ -12,12 +12,14 @@
 // This is Box3D's wide contact path (contact_solver.c, Erin Catto,
 // MIT): b3PrepareContacts_Convex is prepare_wide_contacts,
 // b3SolveContacts_Convex is solve_wide_contacts, and the lane types
-// (b3FloatW, b3Vec3W, b3ContactConstraintWide) are f32x4, Vec3W and
-// WideConstraint. A lane here is the language's `f32x4` (std.lanes,
-// Aether 0.706) -- four floats in a register, which is what the
-// reference's SSE2 and NEON lanes are -- where it used to be four
-// doubles in a record, left to the C compiler to vectorise. The mesh and
-// overflow contacts stay with aephysics.contact_solver.
+// (b3FloatW, b3Vec3W, b3ContactConstraintWide) are f32x8, Vec3W and
+// WideConstraint. A lane here is the language's `f32x8` (std.lanes,
+// Aether 0.788): eight floats, one 256-bit register when the build has
+// AVX2 (AETHER_AEPHYSICS_CFLAGS=-mavx2, the reference's wide8.c) and two
+// four-lane halves otherwise (its SSE2 and NEON width, at the same cost
+// as four lanes twice). Each lane's arithmetic is the same either way,
+// so the width changes the speed, never a result. The mesh and overflow
+// contacts stay with aephysics.contact_solver.
 import std.lanes
 import std.string
 import aephysics.math
@@ -32,67 +34,73 @@ exports (
     prepare_wide_contacts, prepare_wide_range, zero_wide_tail, warm_start_wide_contacts, solve_wide_contacts, apply_wide_restitution, store_wide_impulses, store_wide_range
 )
 
-const WIDTH = 4
+const WIDTH = 8
 const NULL_INDEX = 0 - 1
 
 // --- lanes ---------------------------------------------------------------------------------------------------
 
-// A lane of four is `f32x4`, the language's (std.lanes, Aether 0.706):
-// four single-precision lanes in one register, where this module used to
-// carry four doubles in a record and leave the vectorising to the C
-// compiler. Single precision is what the reference computes a contact in
+// A lane of eight is `f32x8`, the language's (std.lanes, Aether 0.788).
+// Single precision is what the reference computes a contact in
 // and what the native file's lanes already computed; the constraint is
 // the same record in both, so there is one arithmetic here, not two.
 struct Vec2W {
-    x: f32x4
-    y: f32x4
+    x: f32x8
+    y: f32x8
 }
 
 struct Vec3W {
-    x: f32x4
-    y: f32x4
-    z: f32x4
+    x: f32x8
+    y: f32x8
+    z: f32x8
 }
 
 struct QuatW {
     v: Vec3W
-    s: f32x4
+    s: f32x8
 }
 
 // Symmetric matrices: the upper triangles.
 struct SymMatrix2W {
-    cxx: f32x4
-    cxy: f32x4
-    cyy: f32x4
+    cxx: f32x8
+    cxy: f32x8
+    cyy: f32x8
 }
 
 struct SymMatrix3W {
-    cxx: f32x4
-    cxy: f32x4
-    cxz: f32x4
-    cyy: f32x4
-    cyz: f32x4
-    czz: f32x4
+    cxx: f32x8
+    cxy: f32x8
+    cxz: f32x8
+    cyy: f32x8
+    cyz: f32x8
+    czz: f32x8
 }
 
-// Four ints and four pointers, one per contact.
+// Eight ints and eight pointers, one per contact.
 struct IntW {
-    x: int
-    y: int
-    z: int
-    w: int
+    l0: int
+    l1: int
+    l2: int
+    l3: int
+    l4: int
+    l5: int
+    l6: int
+    l7: int
 }
 
 struct PtrW {
-    x: ptr
-    y: ptr
-    z: ptr
-    w: ptr
+    l0: ptr
+    l1: ptr
+    l2: ptr
+    l3: ptr
+    l4: ptr
+    l5: ptr
+    l6: ptr
+    l7: ptr
 }
 
 // A lane of a wide value, read by index: the store works a contact at
-// a time, where the stages before it work four.
-lane(f: f32x4, index: int) -> float { return (lanes.lane4(f, index as long)) as float }
+// a time, where the stages before it work eight.
+lane(f: f32x8, index: int) -> float { return (lanes.lane8(f, index as long)) as float }
 
 int_lane(v: *IntW, index: int) -> int {
     lanes = (v as ptr) as int[]
@@ -104,36 +112,36 @@ ptr_lane(v: *PtrW, index: int) -> ptr {
     return lanes[index]
 }
 
-zero_w() -> f32x4 { return lanes.splat4(0.0) }
-splat_w(s: float) -> f32x4 { return lanes.splat4(s as f32) }
-neg_w(a: f32x4) -> f32x4 { return lanes.splat4(0.0) - a }
-add_w(a: f32x4, b: f32x4) -> f32x4 { return a + b }
-sub_w(a: f32x4, b: f32x4) -> f32x4 { return a - b }
-mul_w(a: f32x4, b: f32x4) -> f32x4 { return a * b }
-div_w(a: f32x4, b: f32x4) -> f32x4 { return a / b }
+zero_w() -> f32x8 { return lanes.splat8(0.0) }
+splat_w(s: float) -> f32x8 { return lanes.splat8(s as f32) }
+neg_w(a: f32x8) -> f32x8 { return lanes.splat8(0.0) - a }
+add_w(a: f32x8, b: f32x8) -> f32x8 { return a + b }
+sub_w(a: f32x8, b: f32x8) -> f32x8 { return a - b }
+mul_w(a: f32x8, b: f32x8) -> f32x8 { return a * b }
+div_w(a: f32x8, b: f32x8) -> f32x8 { return a / b }
 // One instruction, and exact: an IEEE square root is correctly rounded,
-// so it is the four scalar roots (std.lanes.sqrt4, aether#2158).
-sqrt_w(a: f32x4) -> f32x4 { return lanes.sqrt4(a) }
+// so it is the eight scalar roots (std.lanes.sqrt8, aether#2158).
+sqrt_w(a: f32x8) -> f32x8 { return lanes.sqrt8(a) }
 // a + b * c, as two operations: a fused multiply-add would differ from the scalar path.
-mul_add_w(a: f32x4, b: f32x4, c: f32x4) -> f32x4 { return a + b * c }
-min_w(a: f32x4, b: f32x4) -> f32x4 { return lanes.min4(a, b) }
-max_w(a: f32x4, b: f32x4) -> f32x4 { return lanes.max4(a, b) }
+mul_add_w(a: f32x8, b: f32x8, c: f32x8) -> f32x8 { return a + b * c }
+min_w(a: f32x8, b: f32x8) -> f32x8 { return lanes.min8(a, b) }
+max_w(a: f32x8, b: f32x8) -> f32x8 { return lanes.max8(a, b) }
 // a clamped to [-b, b].
-sym_clamp_w(a: f32x4, b: f32x4) -> f32x4 { return max_w(neg_w(b), min_w(a, b)) }
+sym_clamp_w(a: f32x8, b: f32x8) -> f32x8 { return max_w(neg_w(b), min_w(a, b)) }
 // A mask is the lanes a comparison sets, and blend picks by it.
-or_w(a: i32x4, b: i32x4) -> i32x4 { return lanes.mask_or(a, b) }
-greater_w(a: f32x4, b: f32x4) -> i32x4 { return lanes.gt4(a, b) }
-equals_w(a: f32x4, b: f32x4) -> i32x4 { return lanes.eq4(a, b) }
-all_zero_w(a: f32x4) -> bool { return lanes.all4(lanes.eq4(a, lanes.splat4(0.0))) }
+or_w(a: i32x8, b: i32x8) -> i32x8 { return lanes.mask8_or(a, b) }
+greater_w(a: f32x8, b: f32x8) -> i32x8 { return lanes.gt8(a, b) }
+equals_w(a: f32x8, b: f32x8) -> i32x8 { return lanes.eq8(a, b) }
+all_zero_w(a: f32x8) -> bool { return lanes.all8(lanes.eq8(a, lanes.splat8(0.0))) }
 // Per lane: b where the mask is set, a elsewhere.
-blend_w(a: f32x4, b: f32x4, m: i32x4) -> f32x4 { return lanes.select4(m, b, a) }
+blend_w(a: f32x8, b: f32x8, m: i32x8) -> f32x8 { return lanes.select8(m, b, a) }
 
-mul_sv_w(s: f32x4, a: Vec3W) -> Vec3W { return Vec3W { x: mul_w(s, a.x), y: mul_w(s, a.y), z: mul_w(s, a.z) } }
+mul_sv_w(s: f32x8, a: Vec3W) -> Vec3W { return Vec3W { x: mul_w(s, a.x), y: mul_w(s, a.y), z: mul_w(s, a.z) } }
 // a - s * b and a + s * b.
-mul_sub_sv_w(a: Vec3W, s: f32x4, b: Vec3W) -> Vec3W {
+mul_sub_sv_w(a: Vec3W, s: f32x8, b: Vec3W) -> Vec3W {
     return Vec3W { x: sub_w(a.x, mul_w(s, b.x)), y: sub_w(a.y, mul_w(s, b.y)), z: sub_w(a.z, mul_w(s, b.z)) }
 }
-mul_add_sv_w(a: Vec3W, s: f32x4, b: Vec3W) -> Vec3W {
+mul_add_sv_w(a: Vec3W, s: f32x8, b: Vec3W) -> Vec3W {
     return Vec3W { x: add_w(a.x, mul_w(s, b.x)), y: add_w(a.y, mul_w(s, b.y)), z: add_w(a.z, mul_w(s, b.z)) }
 }
 add_v2_w(a: Vec2W, b: Vec2W) -> Vec2W { return Vec2W { x: add_w(a.x, b.x), y: add_w(a.y, b.y) } }
@@ -150,7 +158,7 @@ mul_mv_w(m: SymMatrix3W, a: Vec3W) -> Vec3W {
 // a - m * b and a + m * b.
 mul_sub_mv_w(a: Vec3W, m: SymMatrix3W, b: Vec3W) -> Vec3W { return sub_v_w(a, mul_mv_w(m, b)) }
 mul_add_mv_w(a: Vec3W, m: SymMatrix3W, b: Vec3W) -> Vec3W { return add_v_w(a, mul_mv_w(m, b)) }
-dot_w(a: Vec3W, b: Vec3W) -> f32x4 { return add_w(add_w(mul_w(a.x, b.x), mul_w(a.y, b.y)), mul_w(a.z, b.z)) }
+dot_w(a: Vec3W, b: Vec3W) -> f32x8 { return add_w(add_w(mul_w(a.x, b.x), mul_w(a.y, b.y)), mul_w(a.z, b.z)) }
 cross_w(a: Vec3W, b: Vec3W) -> Vec3W {
     return Vec3W { x: sub_w(mul_w(a.y, b.z), mul_w(a.z, b.y)),
                    y: sub_w(mul_w(a.z, b.x), mul_w(a.x, b.z)),
@@ -167,28 +175,28 @@ rotate_vector_w(q: QuatW, a: Vec3W) -> Vec3W {
 
 // --- the constraint ------------------------------------------------------------------------------------------
 
-// One manifold point of four contacts (b3ContactConstraintPointWide).
+// One manifold point of eight contacts (b3ContactConstraintPointWide).
 struct WideConstraintPoint {
     anchor_a: Vec3W
     anchor_b: Vec3W
-    base_separation: f32x4
-    normal_impulse: f32x4
-    total_normal_impulse: f32x4
-    normal_mass: f32x4
-    lever_arm: f32x4
-    relative_velocity: f32x4
-    restitution_impulse: f32x4     // what the restitution passes added beyond the approach
+    base_separation: f32x8
+    normal_impulse: f32x8
+    total_normal_impulse: f32x8
+    normal_mass: f32x8
+    lever_arm: f32x8
+    relative_velocity: f32x8
+    restitution_impulse: f32x8     // what the restitution passes added beyond the approach
 }
 
-// Four convex contacts' constraints (b3ContactConstraintWide): the body
+// Eight convex contacts' constraints (b3ContactConstraintWide): the body
 // indices base 1 (0 for a static body), the point counts, and every
 // scalar of the constraint by lane.
 struct WideConstraint {
     index_a: IntW
     index_b: IntW
     point_counts: IntW
-    inv_mass_a: f32x4
-    inv_mass_b: f32x4
+    inv_mass_a: f32x8
+    inv_mass_b: f32x8
     inv_inertia_a: SymMatrix3W
     inv_inertia_b: SymMatrix3W
     normal: Vec3W
@@ -196,20 +204,20 @@ struct WideConstraint {
     tangent2: Vec3W
     center_a: Vec3W                // the friction centres
     center_b: Vec3W
-    twist_mass: f32x4
-    twist_impulse: f32x4
+    twist_mass: f32x8
+    twist_impulse: f32x8
     tangent_mass: SymMatrix2W
     friction_impulse: Vec2W
     rolling_mass: SymMatrix3W
     rolling_impulse: Vec3W
-    friction: f32x4
-    rolling_resistance: f32x4
-    tangent_velocity1: f32x4
-    tangent_velocity2: f32x4
-    bias_rate: f32x4
-    mass_scale: f32x4
-    impulse_scale: f32x4
-    restitution: f32x4
+    friction: f32x8
+    rolling_resistance: f32x8
+    tangent_velocity1: f32x8
+    tangent_velocity2: f32x8
+    bias_rate: f32x8
+    mass_scale: f32x8
+    impulse_scale: f32x8
+    restitution: f32x8
     manifolds: PtrW                // *Manifold per lane, null in a spare lane
     hit_lanes: int                 // bit l: lane l's contact wants hit events
     point0: WideConstraintPoint
@@ -223,7 +231,7 @@ wide_point_at(c: *WideConstraint, index: int) -> *WideConstraintPoint {
     return ((&c.point0) as ptr + index * sizeof(WideConstraintPoint)) as *WideConstraintPoint
 }
 
-// The wide constraints a colour's convex contacts fill: four to a slot.
+// The wide constraints a colour's convex contacts fill: eight to a slot.
 wide_constraint_count(convex_contact_count: int) -> int {
     if convex_contact_count == 0 { return 0 }
     return ((convex_contact_count - 1) / WIDTH) + 1
@@ -232,12 +240,20 @@ wide_constraint_count(convex_contact_count: int) -> int {
 // The most points any lane has: the loops run over that many, the
 // spare lanes' zeroed masses and anchors keeping them inert.
 max_point_count(c: *WideConstraint) -> int {
-    return math.max_int(math.max_int(c.point_counts.x, c.point_counts.y), math.max_int(c.point_counts.z, c.point_counts.w))
+    m = c.point_counts.l0
+    m = math.max_int(m, c.point_counts.l1)
+    m = math.max_int(m, c.point_counts.l2)
+    m = math.max_int(m, c.point_counts.l3)
+    m = math.max_int(m, c.point_counts.l4)
+    m = math.max_int(m, c.point_counts.l5)
+    m = math.max_int(m, c.point_counts.l6)
+    m = math.max_int(m, c.point_counts.l7)
+    return m
 }
 
 // --- gather and scatter --------------------------------------------------------------------------------------
 
-// Four bodies' states in lanes (b3BodyStateW).
+// Eight bodies' states in lanes (b3BodyStateW).
 struct BodyStateW {
     v: Vec3W
     w: Vec3W
@@ -251,23 +267,27 @@ state_or_identity(states: ptr, index1: int) -> *BodyState {
 }
 
 gather_bodies(states: ptr, indices: *IntW) -> BodyStateW {
-    s0 = state_or_identity(states, indices.x)
-    s1 = state_or_identity(states, indices.y)
-    s2 = state_or_identity(states, indices.z)
-    s3 = state_or_identity(states, indices.w)
-    v = Vec3W { x: lanes.f32x4(s0.linear_velocity.x as f32, s1.linear_velocity.x as f32, s2.linear_velocity.x as f32, s3.linear_velocity.x as f32),
-                y: lanes.f32x4(s0.linear_velocity.y as f32, s1.linear_velocity.y as f32, s2.linear_velocity.y as f32, s3.linear_velocity.y as f32),
-                z: lanes.f32x4(s0.linear_velocity.z as f32, s1.linear_velocity.z as f32, s2.linear_velocity.z as f32, s3.linear_velocity.z as f32) }
-    w = Vec3W { x: lanes.f32x4(s0.angular_velocity.x as f32, s1.angular_velocity.x as f32, s2.angular_velocity.x as f32, s3.angular_velocity.x as f32),
-                y: lanes.f32x4(s0.angular_velocity.y as f32, s1.angular_velocity.y as f32, s2.angular_velocity.y as f32, s3.angular_velocity.y as f32),
-                z: lanes.f32x4(s0.angular_velocity.z as f32, s1.angular_velocity.z as f32, s2.angular_velocity.z as f32, s3.angular_velocity.z as f32) }
-    dp = Vec3W { x: lanes.f32x4(s0.delta_position.x as f32, s1.delta_position.x as f32, s2.delta_position.x as f32, s3.delta_position.x as f32),
-                 y: lanes.f32x4(s0.delta_position.y as f32, s1.delta_position.y as f32, s2.delta_position.y as f32, s3.delta_position.y as f32),
-                 z: lanes.f32x4(s0.delta_position.z as f32, s1.delta_position.z as f32, s2.delta_position.z as f32, s3.delta_position.z as f32) }
-    dqv = Vec3W { x: lanes.f32x4(s0.delta_rotation.x as f32, s1.delta_rotation.x as f32, s2.delta_rotation.x as f32, s3.delta_rotation.x as f32),
-                  y: lanes.f32x4(s0.delta_rotation.y as f32, s1.delta_rotation.y as f32, s2.delta_rotation.y as f32, s3.delta_rotation.y as f32),
-                  z: lanes.f32x4(s0.delta_rotation.z as f32, s1.delta_rotation.z as f32, s2.delta_rotation.z as f32, s3.delta_rotation.z as f32) }
-    dqs = lanes.f32x4(s0.delta_rotation.w as f32, s1.delta_rotation.w as f32, s2.delta_rotation.w as f32, s3.delta_rotation.w as f32)
+    s0 = state_or_identity(states, indices.l0)
+    s1 = state_or_identity(states, indices.l1)
+    s2 = state_or_identity(states, indices.l2)
+    s3 = state_or_identity(states, indices.l3)
+    s4 = state_or_identity(states, indices.l4)
+    s5 = state_or_identity(states, indices.l5)
+    s6 = state_or_identity(states, indices.l6)
+    s7 = state_or_identity(states, indices.l7)
+    v = Vec3W { x: lanes.f32x8(s0.linear_velocity.x as f32, s1.linear_velocity.x as f32, s2.linear_velocity.x as f32, s3.linear_velocity.x as f32, s4.linear_velocity.x as f32, s5.linear_velocity.x as f32, s6.linear_velocity.x as f32, s7.linear_velocity.x as f32),
+          y: lanes.f32x8(s0.linear_velocity.y as f32, s1.linear_velocity.y as f32, s2.linear_velocity.y as f32, s3.linear_velocity.y as f32, s4.linear_velocity.y as f32, s5.linear_velocity.y as f32, s6.linear_velocity.y as f32, s7.linear_velocity.y as f32),
+          z: lanes.f32x8(s0.linear_velocity.z as f32, s1.linear_velocity.z as f32, s2.linear_velocity.z as f32, s3.linear_velocity.z as f32, s4.linear_velocity.z as f32, s5.linear_velocity.z as f32, s6.linear_velocity.z as f32, s7.linear_velocity.z as f32) }
+    w = Vec3W { x: lanes.f32x8(s0.angular_velocity.x as f32, s1.angular_velocity.x as f32, s2.angular_velocity.x as f32, s3.angular_velocity.x as f32, s4.angular_velocity.x as f32, s5.angular_velocity.x as f32, s6.angular_velocity.x as f32, s7.angular_velocity.x as f32),
+          y: lanes.f32x8(s0.angular_velocity.y as f32, s1.angular_velocity.y as f32, s2.angular_velocity.y as f32, s3.angular_velocity.y as f32, s4.angular_velocity.y as f32, s5.angular_velocity.y as f32, s6.angular_velocity.y as f32, s7.angular_velocity.y as f32),
+          z: lanes.f32x8(s0.angular_velocity.z as f32, s1.angular_velocity.z as f32, s2.angular_velocity.z as f32, s3.angular_velocity.z as f32, s4.angular_velocity.z as f32, s5.angular_velocity.z as f32, s6.angular_velocity.z as f32, s7.angular_velocity.z as f32) }
+    dp = Vec3W { x: lanes.f32x8(s0.delta_position.x as f32, s1.delta_position.x as f32, s2.delta_position.x as f32, s3.delta_position.x as f32, s4.delta_position.x as f32, s5.delta_position.x as f32, s6.delta_position.x as f32, s7.delta_position.x as f32),
+          y: lanes.f32x8(s0.delta_position.y as f32, s1.delta_position.y as f32, s2.delta_position.y as f32, s3.delta_position.y as f32, s4.delta_position.y as f32, s5.delta_position.y as f32, s6.delta_position.y as f32, s7.delta_position.y as f32),
+          z: lanes.f32x8(s0.delta_position.z as f32, s1.delta_position.z as f32, s2.delta_position.z as f32, s3.delta_position.z as f32, s4.delta_position.z as f32, s5.delta_position.z as f32, s6.delta_position.z as f32, s7.delta_position.z as f32) }
+    dqv = Vec3W { x: lanes.f32x8(s0.delta_rotation.x as f32, s1.delta_rotation.x as f32, s2.delta_rotation.x as f32, s3.delta_rotation.x as f32, s4.delta_rotation.x as f32, s5.delta_rotation.x as f32, s6.delta_rotation.x as f32, s7.delta_rotation.x as f32),
+          y: lanes.f32x8(s0.delta_rotation.y as f32, s1.delta_rotation.y as f32, s2.delta_rotation.y as f32, s3.delta_rotation.y as f32, s4.delta_rotation.y as f32, s5.delta_rotation.y as f32, s6.delta_rotation.y as f32, s7.delta_rotation.y as f32),
+          z: lanes.f32x8(s0.delta_rotation.z as f32, s1.delta_rotation.z as f32, s2.delta_rotation.z as f32, s3.delta_rotation.z as f32, s4.delta_rotation.z as f32, s5.delta_rotation.z as f32, s6.delta_rotation.z as f32, s7.delta_rotation.z as f32) }
+    dqs = lanes.f32x8(s0.delta_rotation.w as f32, s1.delta_rotation.w as f32, s2.delta_rotation.w as f32, s3.delta_rotation.w as f32, s4.delta_rotation.w as f32, s5.delta_rotation.w as f32, s6.delta_rotation.w as f32, s7.delta_rotation.w as f32)
     return BodyStateW { v: v, w: w, dp: dp, dq: QuatW { v: dqv, s: dqs } }
 }
 
@@ -281,17 +301,21 @@ scatter_lane(states: ptr, index1: int, body: *BodyStateW, l: int) {
 }
 
 scatter_bodies(states: ptr, indices: *IntW, body: *BodyStateW) {
-    scatter_lane(states, indices.x, body, 0)
-    scatter_lane(states, indices.y, body, 1)
-    scatter_lane(states, indices.z, body, 2)
-    scatter_lane(states, indices.w, body, 3)
+    scatter_lane(states, indices.l0, body, 0)
+    scatter_lane(states, indices.l1, body, 1)
+    scatter_lane(states, indices.l2, body, 2)
+    scatter_lane(states, indices.l3, body, 3)
+    scatter_lane(states, indices.l4, body, 4)
+    scatter_lane(states, indices.l5, body, 5)
+    scatter_lane(states, indices.l6, body, 6)
+    scatter_lane(states, indices.l7, body, 7)
 }
 
 // --- the stages ----------------------------------------------------------------------------------------------
 
 // A zeroed block the size of the largest of a contact, a manifold and a
 // body record: what a spare lane and a static body gather from, so the
-// prepare reads four lanes without a branch per field (the reference's
+// prepare reads eight lanes without a branch per field (the reference's
 // b3_zeroContact, b3_zeroManifold and b3_zeroBodySim). Made before any
 // worker runs (zero_wide_tail), never written and never freed: a static,
 // so it is outside the counted allocator.
@@ -305,7 +329,7 @@ zero_record() -> ptr {
     return g_zero_record
 }
 
-f4(a: float, b: float, c: float, d: float) -> f32x4 { return lanes.f32x4(a as f32, b as f32, c as f32, d as f32) }
+f8(a0: float, a1: float, a2: float, a3: float, a4: float, a5: float, a6: float, a7: float) -> f32x8 { return lanes.f32x8(a0 as f32, a1 as f32, a2 as f32, a3 as f32, a4 as f32, a5 as f32, a6 as f32, a7 as f32) }
 
 // The contact of a lane: index `index` of the colour's convex contacts, or
 // the zero record for a spare lane past `end`.
@@ -348,20 +372,22 @@ lane_softness(ctx: *StepContext, index_a1: int, index_b1: int) -> Softness {
     return ctx.contact_softness
 }
 
-// Four bodies' inverse world inertias, the upper triangles.
-gather_inertia(s0: *BodySim, s1: *BodySim, s2: *BodySim, s3: *BodySim) -> SymMatrix3W {
+// Eight bodies' inverse world inertias, the upper triangles.
+gather_inertia(s0: *BodySim, s1: *BodySim, s2: *BodySim, s3: *BodySim, s4: *BodySim, s5: *BodySim, s6: *BodySim, s7: *BodySim) -> SymMatrix3W {
     return SymMatrix3W {
-        cxx: f4(s0.inv_inertia_world.cx.x, s1.inv_inertia_world.cx.x, s2.inv_inertia_world.cx.x, s3.inv_inertia_world.cx.x),
-        cxy: f4(s0.inv_inertia_world.cx.y, s1.inv_inertia_world.cx.y, s2.inv_inertia_world.cx.y, s3.inv_inertia_world.cx.y),
-        cxz: f4(s0.inv_inertia_world.cx.z, s1.inv_inertia_world.cx.z, s2.inv_inertia_world.cx.z, s3.inv_inertia_world.cx.z),
-        cyy: f4(s0.inv_inertia_world.cy.y, s1.inv_inertia_world.cy.y, s2.inv_inertia_world.cy.y, s3.inv_inertia_world.cy.y),
-        cyz: f4(s0.inv_inertia_world.cy.z, s1.inv_inertia_world.cy.z, s2.inv_inertia_world.cy.z, s3.inv_inertia_world.cy.z),
-        czz: f4(s0.inv_inertia_world.cz.z, s1.inv_inertia_world.cz.z, s2.inv_inertia_world.cz.z, s3.inv_inertia_world.cz.z)
+        cxx: f8(s0.inv_inertia_world.cx.x, s1.inv_inertia_world.cx.x, s2.inv_inertia_world.cx.x, s3.inv_inertia_world.cx.x, s4.inv_inertia_world.cx.x, s5.inv_inertia_world.cx.x, s6.inv_inertia_world.cx.x, s7.inv_inertia_world.cx.x),
+        cxy: f8(s0.inv_inertia_world.cx.y, s1.inv_inertia_world.cx.y, s2.inv_inertia_world.cx.y, s3.inv_inertia_world.cx.y, s4.inv_inertia_world.cx.y, s5.inv_inertia_world.cx.y, s6.inv_inertia_world.cx.y, s7.inv_inertia_world.cx.y),
+        cxz: f8(s0.inv_inertia_world.cx.z, s1.inv_inertia_world.cx.z, s2.inv_inertia_world.cx.z, s3.inv_inertia_world.cx.z, s4.inv_inertia_world.cx.z, s5.inv_inertia_world.cx.z, s6.inv_inertia_world.cx.z, s7.inv_inertia_world.cx.z),
+        cyy: f8(s0.inv_inertia_world.cy.y, s1.inv_inertia_world.cy.y, s2.inv_inertia_world.cy.y, s3.inv_inertia_world.cy.y, s4.inv_inertia_world.cy.y, s5.inv_inertia_world.cy.y, s6.inv_inertia_world.cy.y, s7.inv_inertia_world.cy.y),
+        cyz: f8(s0.inv_inertia_world.cy.z, s1.inv_inertia_world.cy.z, s2.inv_inertia_world.cy.z, s3.inv_inertia_world.cy.z, s4.inv_inertia_world.cy.z, s5.inv_inertia_world.cy.z, s6.inv_inertia_world.cy.z, s7.inv_inertia_world.cy.z),
+        czz: f8(s0.inv_inertia_world.cz.z, s1.inv_inertia_world.cz.z, s2.inv_inertia_world.cz.z, s3.inv_inertia_world.cz.z, s4.inv_inertia_world.cz.z, s5.inv_inertia_world.cz.z, s6.inv_inertia_world.cz.z, s7.inv_inertia_world.cz.z)
     }
 }
 
-gather_vec3(a: Vec3, b: Vec3, c: Vec3, d: Vec3) -> Vec3W {
-    return Vec3W { x: f4(a.x, b.x, c.x, d.x), y: f4(a.y, b.y, c.y, d.y), z: f4(a.z, b.z, c.z, d.z) }
+gather_vec3(a: Vec3, b: Vec3, c: Vec3, d: Vec3, e: Vec3, f: Vec3, g: Vec3, h: Vec3) -> Vec3W {
+    return Vec3W { x: f8(a.x, b.x, c.x, d.x, e.x, f.x, g.x, h.x),
+                   y: f8(a.y, b.y, c.y, d.y, e.y, f.y, g.y, h.y),
+                   z: f8(a.z, b.z, c.z, d.z, e.z, f.z, g.z, h.z) }
 }
 
 add_sym_w(a: SymMatrix3W, b: SymMatrix3W) -> SymMatrix3W {
@@ -378,7 +404,7 @@ invert_sym_w(m: SymMatrix3W) -> SymMatrix3W {
     cyz = sub_w(mul_w(m.cxy, m.cxz), mul_w(m.cxx, m.cyz))
     czz = sub_w(mul_w(m.cxx, m.cyy), mul_w(m.cxy, m.cxy))
     det = add_w(mul_w(m.cxx, cxx), add_w(mul_w(m.cxy, cxy), mul_w(m.cxz, cxz)))
-    valid = greater_w(lanes.abs4(det), splat_w(1000.0 * math.TINY_F32))
+    valid = greater_w(lanes.abs8(det), splat_w(1000.0 * math.TINY_F32))
     inv_det = blend_w(zero_w(), div_w(splat_w(1.0), det), valid)
     return SymMatrix3W { cxx: mul_w(inv_det, cxx), cxy: mul_w(inv_det, cxy), cxz: mul_w(inv_det, cxz),
                          cyy: mul_w(inv_det, cyy), cyz: mul_w(inv_det, cyz), czz: mul_w(inv_det, czz) }
@@ -393,31 +419,35 @@ perp_w(a: Vec3W) -> Vec3W {
     p = Vec3W { x: blend_w(zero, a.y, mask), y: blend_w(a.z, neg_w(a.x), mask), z: blend_w(neg_w(a.y), zero, mask) }
     length_squared = dot_w(p, p)
     valid = greater_w(length_squared, splat_w(1000.0 * math.TINY_F32))
-    s = blend_w(zero, div_w(splat_w(1.0), lanes.sqrt4(length_squared)), valid)
+    s = blend_w(zero, div_w(splat_w(1.0), lanes.sqrt8(length_squared)), valid)
     return mul_sv_w(s, p)
 }
 
-// One manifold point of the four lanes' manifolds.
-gather_point(m0: *Manifold, m1: *Manifold, m2: *Manifold, m3: *Manifold, index: int) -> WideConstraintPoint {
+// One manifold point of the eight lanes' manifolds.
+gather_point(m0: *Manifold, m1: *Manifold, m2: *Manifold, m3: *Manifold, m4: *Manifold, m5: *Manifold, m6: *Manifold, m7: *Manifold, index: int) -> WideConstraintPoint {
     p0 = dynamics.manifold_point_at(m0, index)
     p1 = dynamics.manifold_point_at(m1, index)
     p2 = dynamics.manifold_point_at(m2, index)
     p3 = dynamics.manifold_point_at(m3, index)
+    p4 = dynamics.manifold_point_at(m4, index)
+    p5 = dynamics.manifold_point_at(m5, index)
+    p6 = dynamics.manifold_point_at(m6, index)
+    p7 = dynamics.manifold_point_at(m7, index)
     zero = zero_w()
     return WideConstraintPoint {
-        anchor_a: gather_vec3(p0.anchor_a, p1.anchor_a, p2.anchor_a, p3.anchor_a),
-        anchor_b: gather_vec3(p0.anchor_b, p1.anchor_b, p2.anchor_b, p3.anchor_b),
-        base_separation: f4(p0.separation, p1.separation, p2.separation, p3.separation),
-        normal_impulse: f4(p0.normal_impulse, p1.normal_impulse, p2.normal_impulse, p3.normal_impulse),
+        anchor_a: gather_vec3(p0.anchor_a, p1.anchor_a, p2.anchor_a, p3.anchor_a, p4.anchor_a, p5.anchor_a, p6.anchor_a, p7.anchor_a),
+        anchor_b: gather_vec3(p0.anchor_b, p1.anchor_b, p2.anchor_b, p3.anchor_b, p4.anchor_b, p5.anchor_b, p6.anchor_b, p7.anchor_b),
+        base_separation: f8(p0.separation, p1.separation, p2.separation, p3.separation, p4.separation, p5.separation, p6.separation, p7.separation),
+        normal_impulse: f8(p0.normal_impulse, p1.normal_impulse, p2.normal_impulse, p3.normal_impulse, p4.normal_impulse, p5.normal_impulse, p6.normal_impulse, p7.normal_impulse),
         total_normal_impulse: zero, normal_mass: zero, lever_arm: zero, relative_velocity: zero, restitution_impulse: zero
     }
 }
 
-blend_vec3_w(a: Vec3W, b: Vec3W, m: i32x4) -> Vec3W {
+blend_vec3_w(a: Vec3W, b: Vec3W, m: i32x8) -> Vec3W {
     return Vec3W { x: blend_w(a.x, b.x, m), y: blend_w(a.y, b.y, m), z: blend_w(a.z, b.z, m) }
 }
 
-// One slot's four convex contacts gathered into lanes and prepared four
+// One slot's eight convex contacts gathered into lanes and prepared eight
 // at a time (b3PrepareContacts_Convex): the contacts at `slot * WIDTH`
 // on, a lane past `end` spare and zero throughout.
 prepare_wide_slot(ctx: *StepContext, color: *GraphColor, slot: int, end: int) {
@@ -427,71 +457,89 @@ prepare_wide_slot(ctx: *StepContext, color: *GraphColor, slot: int, end: int) {
     k1 = lane_contact(ctx, color, first + 1, end)
     k2 = lane_contact(ctx, color, first + 2, end)
     k3 = lane_contact(ctx, color, first + 3, end)
-    c.manifolds = PtrW { x: lane_manifold(k0) as ptr, y: lane_manifold(k1) as ptr, z: lane_manifold(k2) as ptr, w: lane_manifold(k3) as ptr }
-    m0 = gather_manifold(c.manifolds.x as *Manifold)
-    m1 = gather_manifold(c.manifolds.y as *Manifold)
-    m2 = gather_manifold(c.manifolds.z as *Manifold)
-    m3 = gather_manifold(c.manifolds.w as *Manifold)
-    c.index_a = IntW { x: lane_index1(k0, k0.body_sim_index_a), y: lane_index1(k1, k1.body_sim_index_a),
-                       z: lane_index1(k2, k2.body_sim_index_a), w: lane_index1(k3, k3.body_sim_index_a) }
-    c.index_b = IntW { x: lane_index1(k0, k0.body_sim_index_b), y: lane_index1(k1, k1.body_sim_index_b),
-                       z: lane_index1(k2, k2.body_sim_index_b), w: lane_index1(k3, k3.body_sim_index_b) }
-    c.point_counts = IntW { x: m0.point_count, y: m1.point_count, z: m2.point_count, w: m3.point_count }
+    k4 = lane_contact(ctx, color, first + 4, end)
+    k5 = lane_contact(ctx, color, first + 5, end)
+    k6 = lane_contact(ctx, color, first + 6, end)
+    k7 = lane_contact(ctx, color, first + 7, end)
+    c.manifolds = PtrW { l0: lane_manifold(k0) as ptr, l1: lane_manifold(k1) as ptr, l2: lane_manifold(k2) as ptr, l3: lane_manifold(k3) as ptr, l4: lane_manifold(k4) as ptr, l5: lane_manifold(k5) as ptr, l6: lane_manifold(k6) as ptr, l7: lane_manifold(k7) as ptr }
+    m0 = gather_manifold(c.manifolds.l0 as *Manifold)
+    m1 = gather_manifold(c.manifolds.l1 as *Manifold)
+    m2 = gather_manifold(c.manifolds.l2 as *Manifold)
+    m3 = gather_manifold(c.manifolds.l3 as *Manifold)
+    m4 = gather_manifold(c.manifolds.l4 as *Manifold)
+    m5 = gather_manifold(c.manifolds.l5 as *Manifold)
+    m6 = gather_manifold(c.manifolds.l6 as *Manifold)
+    m7 = gather_manifold(c.manifolds.l7 as *Manifold)
+    c.index_a = IntW { l0: lane_index1(k0, k0.body_sim_index_a), l1: lane_index1(k1, k1.body_sim_index_a), l2: lane_index1(k2, k2.body_sim_index_a), l3: lane_index1(k3, k3.body_sim_index_a), l4: lane_index1(k4, k4.body_sim_index_a), l5: lane_index1(k5, k5.body_sim_index_a), l6: lane_index1(k6, k6.body_sim_index_a), l7: lane_index1(k7, k7.body_sim_index_a) }
+    c.index_b = IntW { l0: lane_index1(k0, k0.body_sim_index_b), l1: lane_index1(k1, k1.body_sim_index_b), l2: lane_index1(k2, k2.body_sim_index_b), l3: lane_index1(k3, k3.body_sim_index_b), l4: lane_index1(k4, k4.body_sim_index_b), l5: lane_index1(k5, k5.body_sim_index_b), l6: lane_index1(k6, k6.body_sim_index_b), l7: lane_index1(k7, k7.body_sim_index_b) }
+    c.point_counts = IntW { l0: m0.point_count, l1: m1.point_count, l2: m2.point_count, l3: m3.point_count, l4: m4.point_count, l5: m5.point_count, l6: m6.point_count, l7: m7.point_count }
     // The store reads this rather than go back out to the contacts.
-    c.hit_lanes = hit_bit(k0, 0) | hit_bit(k1, 1) | hit_bit(k2, 2) | hit_bit(k3, 3)
+    c.hit_lanes = hit_bit(k0, 0) | hit_bit(k1, 1) | hit_bit(k2, 2) | hit_bit(k3, 3) | hit_bit(k4, 4) | hit_bit(k5, 5) | hit_bit(k6, 6) | hit_bit(k7, 7)
 
-    sa0 = lane_sim(ctx, c.index_a.x)
-    sa1 = lane_sim(ctx, c.index_a.y)
-    sa2 = lane_sim(ctx, c.index_a.z)
-    sa3 = lane_sim(ctx, c.index_a.w)
-    sb0 = lane_sim(ctx, c.index_b.x)
-    sb1 = lane_sim(ctx, c.index_b.y)
-    sb2 = lane_sim(ctx, c.index_b.z)
-    sb3 = lane_sim(ctx, c.index_b.w)
-    m_a = f4(sa0.inv_mass, sa1.inv_mass, sa2.inv_mass, sa3.inv_mass)
-    m_b = f4(sb0.inv_mass, sb1.inv_mass, sb2.inv_mass, sb3.inv_mass)
-    i_a = gather_inertia(sa0, sa1, sa2, sa3)
-    i_b = gather_inertia(sb0, sb1, sb2, sb3)
+    sa0 = lane_sim(ctx, c.index_a.l0)
+    sa1 = lane_sim(ctx, c.index_a.l1)
+    sa2 = lane_sim(ctx, c.index_a.l2)
+    sa3 = lane_sim(ctx, c.index_a.l3)
+    sa4 = lane_sim(ctx, c.index_a.l4)
+    sa5 = lane_sim(ctx, c.index_a.l5)
+    sa6 = lane_sim(ctx, c.index_a.l6)
+    sa7 = lane_sim(ctx, c.index_a.l7)
+    sb0 = lane_sim(ctx, c.index_b.l0)
+    sb1 = lane_sim(ctx, c.index_b.l1)
+    sb2 = lane_sim(ctx, c.index_b.l2)
+    sb3 = lane_sim(ctx, c.index_b.l3)
+    sb4 = lane_sim(ctx, c.index_b.l4)
+    sb5 = lane_sim(ctx, c.index_b.l5)
+    sb6 = lane_sim(ctx, c.index_b.l6)
+    sb7 = lane_sim(ctx, c.index_b.l7)
+    m_a = f8(sa0.inv_mass, sa1.inv_mass, sa2.inv_mass, sa3.inv_mass, sa4.inv_mass, sa5.inv_mass, sa6.inv_mass, sa7.inv_mass)
+    m_b = f8(sb0.inv_mass, sb1.inv_mass, sb2.inv_mass, sb3.inv_mass, sb4.inv_mass, sb5.inv_mass, sb6.inv_mass, sb7.inv_mass)
+    i_a = gather_inertia(sa0, sa1, sa2, sa3, sa4, sa5, sa6, sa7)
+    i_b = gather_inertia(sb0, sb1, sb2, sb3, sb4, sb5, sb6, sb7)
     c.inv_mass_a = m_a
     c.inv_mass_b = m_b
     c.inv_inertia_a = i_a
     c.inv_inertia_b = i_b
 
-    soft0 = lane_softness(ctx, c.index_a.x, c.index_b.x)
-    soft1 = lane_softness(ctx, c.index_a.y, c.index_b.y)
-    soft2 = lane_softness(ctx, c.index_a.z, c.index_b.z)
-    soft3 = lane_softness(ctx, c.index_a.w, c.index_b.w)
-    c.bias_rate = f4(soft0.bias_rate, soft1.bias_rate, soft2.bias_rate, soft3.bias_rate)
-    c.mass_scale = f4(soft0.mass_scale, soft1.mass_scale, soft2.mass_scale, soft3.mass_scale)
-    c.impulse_scale = f4(soft0.impulse_scale, soft1.impulse_scale, soft2.impulse_scale, soft3.impulse_scale)
-    c.friction = f4(k0.friction, k1.friction, k2.friction, k3.friction)
-    c.restitution = f4(k0.restitution, k1.restitution, k2.restitution, k3.restitution)
-    c.rolling_resistance = f4(k0.rolling_resistance, k1.rolling_resistance, k2.rolling_resistance, k3.rolling_resistance)
+    soft0 = lane_softness(ctx, c.index_a.l0, c.index_b.l0)
+    soft1 = lane_softness(ctx, c.index_a.l1, c.index_b.l1)
+    soft2 = lane_softness(ctx, c.index_a.l2, c.index_b.l2)
+    soft3 = lane_softness(ctx, c.index_a.l3, c.index_b.l3)
+    soft4 = lane_softness(ctx, c.index_a.l4, c.index_b.l4)
+    soft5 = lane_softness(ctx, c.index_a.l5, c.index_b.l5)
+    soft6 = lane_softness(ctx, c.index_a.l6, c.index_b.l6)
+    soft7 = lane_softness(ctx, c.index_a.l7, c.index_b.l7)
+    c.bias_rate = f8(soft0.bias_rate, soft1.bias_rate, soft2.bias_rate, soft3.bias_rate, soft4.bias_rate, soft5.bias_rate, soft6.bias_rate, soft7.bias_rate)
+    c.mass_scale = f8(soft0.mass_scale, soft1.mass_scale, soft2.mass_scale, soft3.mass_scale, soft4.mass_scale, soft5.mass_scale, soft6.mass_scale, soft7.mass_scale)
+    c.impulse_scale = f8(soft0.impulse_scale, soft1.impulse_scale, soft2.impulse_scale, soft3.impulse_scale, soft4.impulse_scale, soft5.impulse_scale, soft6.impulse_scale, soft7.impulse_scale)
+    c.friction = f8(k0.friction, k1.friction, k2.friction, k3.friction, k4.friction, k5.friction, k6.friction, k7.friction)
+    c.restitution = f8(k0.restitution, k1.restitution, k2.restitution, k3.restitution, k4.restitution, k5.restitution, k6.restitution, k7.restitution)
+    c.rolling_resistance = f8(k0.rolling_resistance, k1.rolling_resistance, k2.rolling_resistance, k3.rolling_resistance, k4.rolling_resistance, k5.rolling_resistance, k6.rolling_resistance, k7.rolling_resistance)
     if all_zero_w(c.restitution) == false { contact_solver.note_restitution(ctx, 1.0) }
 
     zero = zero_w()
     one = splat_w(1.0)
     warm_start_scale = zero
     if ctx.enable_warm_starting { warm_start_scale = one }
-    normal = gather_vec3(m0.normal, m1.normal, m2.normal, m3.normal)
+    normal = gather_vec3(m0.normal, m1.normal, m2.normal, m3.normal, m4.normal, m5.normal, m6.normal, m7.normal)
     tangent1 = perp_w(normal)
     tangent2 = cross_w(tangent1, normal)
     c.normal = normal
     c.tangent1 = tangent1
     c.tangent2 = tangent2
-    tangent_velocity = gather_vec3(k0.tangent_velocity, k1.tangent_velocity, k2.tangent_velocity, k3.tangent_velocity)
+    tangent_velocity = gather_vec3(k0.tangent_velocity, k1.tangent_velocity, k2.tangent_velocity, k3.tangent_velocity, k4.tangent_velocity, k5.tangent_velocity, k6.tangent_velocity, k7.tangent_velocity)
     c.tangent_velocity1 = dot_w(tangent_velocity, tangent1)
     c.tangent_velocity2 = dot_w(tangent_velocity, tangent2)
-    friction_impulse = gather_vec3(m0.friction_impulse, m1.friction_impulse, m2.friction_impulse, m3.friction_impulse)
+    friction_impulse = gather_vec3(m0.friction_impulse, m1.friction_impulse, m2.friction_impulse, m3.friction_impulse, m4.friction_impulse, m5.friction_impulse, m6.friction_impulse, m7.friction_impulse)
     c.friction_impulse = Vec2W { x: mul_w(warm_start_scale, dot_w(friction_impulse, tangent1)),
                                  y: mul_w(warm_start_scale, dot_w(friction_impulse, tangent2)) }
-    c.twist_impulse = mul_w(warm_start_scale, f4(m0.twist_impulse, m1.twist_impulse, m2.twist_impulse, m3.twist_impulse))
-    c.rolling_impulse = mul_sv_w(warm_start_scale, gather_vec3(m0.rolling_impulse, m1.rolling_impulse, m2.rolling_impulse, m3.rolling_impulse))
+    c.twist_impulse = mul_w(warm_start_scale, f8(m0.twist_impulse, m1.twist_impulse, m2.twist_impulse, m3.twist_impulse, m4.twist_impulse, m5.twist_impulse, m6.twist_impulse, m7.twist_impulse))
+    c.rolling_impulse = mul_sv_w(warm_start_scale, gather_vec3(m0.rolling_impulse, m1.rolling_impulse, m2.rolling_impulse, m3.rolling_impulse, m4.rolling_impulse, m5.rolling_impulse, m6.rolling_impulse, m7.rolling_impulse))
 
     inv_tau = splat_w(1.0 / dynamics.SPECULATIVE_DISTANCE)
     two = splat_w(2.0)
     min_weight = splat_w(contact_solver.MIN_FRICTION_WEIGHT)
-    point_counts = f4(c.point_counts.x as float, c.point_counts.y as float, c.point_counts.z as float, c.point_counts.w as float)
+    point_counts = f8(c.point_counts.l0 as float, c.point_counts.l1 as float, c.point_counts.l2 as float, c.point_counts.l3 as float, c.point_counts.l4 as float, c.point_counts.l5 as float, c.point_counts.l6 as float, c.point_counts.l7 as float)
     zero_v = Vec3W { x: zero, y: zero, z: zero }
     center_a = zero_v
     center_b = zero_v
@@ -500,7 +548,7 @@ prepare_wide_slot(ctx: *StepContext, color: *GraphColor, slot: int, end: int) {
     while point_index < dynamics.MAX_MANIFOLD_POINTS {
         // A point the lane's manifold lacks is zero: nothing reaches the bodies through it.
         has_point = greater_w(point_counts, splat_w(point_index as float))
-        g = gather_point(m0, m1, m2, m3, point_index)
+        g = gather_point(m0, m1, m2, m3, m4, m5, m6, m7, point_index)
         r_a = blend_vec3_w(zero_v, g.anchor_a, has_point)
         r_b = blend_vec3_w(zero_v, g.anchor_b, has_point)
         s = blend_w(zero, g.base_separation, has_point)
@@ -519,7 +567,7 @@ prepare_wide_slot(ctx: *StepContext, color: *GraphColor, slot: int, end: int) {
         rn_a = cross_w(r_a, normal)
         rn_b = cross_w(r_b, normal)
         k_normal = add_w(add_w(add_w(m_a, m_b), dot_w(rn_a, mul_mv_w(i_a, rn_a))), dot_w(rn_b, mul_mv_w(i_b, rn_b)))
-        valid = lanes.mask_and(greater_w(k_normal, zero), has_point)
+        valid = lanes.mask8_and(greater_w(k_normal, zero), has_point)
         cp.normal_mass = blend_w(zero, div_w(one, k_normal), valid)
         cp.relative_velocity = zero
         point_index = point_index + 1
@@ -551,7 +599,7 @@ prepare_wide_slot(ctx: *StepContext, color: *GraphColor, slot: int, end: int) {
         cp = wide_point_at(c, point_index)
         has_point = greater_w(point_counts, splat_w(point_index as float))
         d = sub_v_w(cp.anchor_a, center_a)
-        cp.lever_arm = blend_w(zero, lanes.sqrt4(dot_w(d, d)), has_point)
+        cp.lever_arm = blend_w(zero, lanes.sqrt8(dot_w(d, d)), has_point)
         point_index = point_index + 1
     }
 
@@ -567,7 +615,7 @@ prepare_wide_slot(ctx: *StepContext, color: *GraphColor, slot: int, end: int) {
     kyy = add_w(add_w(add_w(m_a, m_b), dot_w(rt_a2, i_rt_a2)), dot_w(rt_b2, i_rt_b2))
     kxy = add_w(dot_w(rt_a1, i_rt_a2), dot_w(rt_b1, i_rt_b2))
     det = sub_w(mul_w(kxx, kyy), mul_w(kxy, kxy))
-    inv_det = blend_w(zero, div_w(one, det), greater_w(lanes.abs4(det), splat_w(1000.0 * math.TINY_F32)))
+    inv_det = blend_w(zero, div_w(one, det), greater_w(lanes.abs8(det), splat_w(1000.0 * math.TINY_F32)))
     c.tangent_mass = SymMatrix2W { cxx: mul_w(inv_det, kyy), cxy: neg_w(mul_w(inv_det, kxy)), cyy: mul_w(inv_det, kxx) }
 
     i_ab = add_sym_w(i_a, i_b)
@@ -581,7 +629,7 @@ prepare_wide_slot(ctx: *StepContext, color: *GraphColor, slot: int, end: int) {
     }
 }
 
-// A colour's convex contacts into its wide constraints, four to a slot
+// A colour's convex contacts into its wide constraints, eight to a slot
 // in the order of the colour's array.
 prepare_wide_contacts(ctx: *StepContext, color: *GraphColor) {
     prepare_wide_range(ctx, color, 0, color.convex_contacts.count)
@@ -660,7 +708,7 @@ warm_start_wide_contacts(ctx: *StepContext, constraints: ptr, count: int) {
     }
 }
 
-// One sequential impulse pass over four contacts at a time
+// One sequential impulse pass over eight contacts at a time
 // (b3SolveContacts_Convex): the scalar solve's steps with the branches
 // as masks: a lane apart gets the speculative bias, a lane penetrating
 // the soft constraint's when biased; then, without bias only, the
@@ -780,7 +828,7 @@ solve_wide_contacts(ctx: *StepContext, constraints: ptr, count: int, use_bias: b
     }
 }
 
-// The bounce (b3ApplyRestitution_Convex, Box3D main), four contacts at a
+// The bounce (b3ApplyRestitution_Convex, Box3D main), eight contacts at a
 // time: one pass of the world's restitution iterations, the scalar
 // apply_restitution's rule per lane. With propagation off, a slot with no
 // restitution in any lane is skipped and a lane without restitution gets
@@ -808,7 +856,7 @@ apply_wide_restitution(ctx: *StepContext, constraints: ptr, count: int) {
                 normal_mass = cp.normal_mass
                 if propagate == false { normal_mass = blend_w(zero, cp.normal_mass, has_restitution) }
                 compression = sub_w(cp.total_normal_impulse, cp.restitution_impulse)
-                armed = lanes.mask_and(lanes.mask_and(has_restitution, greater_w(neg_threshold, cp.relative_velocity)), greater_w(compression, zero))
+                armed = lanes.mask8_and(lanes.mask8_and(has_restitution, greater_w(neg_threshold, cp.relative_velocity)), greater_w(compression, zero))
                 ds = add_v_w(dp, sub_v_w(rotate_vector_w(b_b.dq, r_b), rotate_vector_w(b_a.dq, r_a)))
                 s = add_w(dot_w(c.normal, ds), cp.base_separation)
                 spec_bias = max_w(zero, mul_w(s, inv_h))
@@ -860,10 +908,14 @@ store_wide_range(ctx: *StepContext, color: *GraphColor, start: int, end: int, hi
         // collide pass, fetched while this slot's are written.
         if l == 0 && i + WIDTH < end {
             next = wide_constraint_at(color.wide_constraints, i / WIDTH + 1)
-            native.prefetch(next.manifolds.x)
-            native.prefetch(next.manifolds.y)
-            native.prefetch(next.manifolds.z)
-            native.prefetch(next.manifolds.w)
+            native.prefetch(next.manifolds.l0)
+            native.prefetch(next.manifolds.l1)
+            native.prefetch(next.manifolds.l2)
+            native.prefetch(next.manifolds.l3)
+            native.prefetch(next.manifolds.l4)
+            native.prefetch(next.manifolds.l5)
+            native.prefetch(next.manifolds.l6)
+            native.prefetch(next.manifolds.l7)
         }
         m = ptr_lane(&c.manifolds, l) as *Manifold
         f1 = lane(c.friction_impulse.x, l)
