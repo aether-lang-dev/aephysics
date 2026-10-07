@@ -275,19 +275,19 @@ gather_bodies(states: ptr, indices: *IntW) -> BodyStateW {
     s5 = state_or_identity(states, indices.l5)
     s6 = state_or_identity(states, indices.l6)
     s7 = state_or_identity(states, indices.l7)
-    v = Vec3W { x: lanes.f32x8(s0.linear_velocity.x as f32, s1.linear_velocity.x as f32, s2.linear_velocity.x as f32, s3.linear_velocity.x as f32, s4.linear_velocity.x as f32, s5.linear_velocity.x as f32, s6.linear_velocity.x as f32, s7.linear_velocity.x as f32),
-          y: lanes.f32x8(s0.linear_velocity.y as f32, s1.linear_velocity.y as f32, s2.linear_velocity.y as f32, s3.linear_velocity.y as f32, s4.linear_velocity.y as f32, s5.linear_velocity.y as f32, s6.linear_velocity.y as f32, s7.linear_velocity.y as f32),
-          z: lanes.f32x8(s0.linear_velocity.z as f32, s1.linear_velocity.z as f32, s2.linear_velocity.z as f32, s3.linear_velocity.z as f32, s4.linear_velocity.z as f32, s5.linear_velocity.z as f32, s6.linear_velocity.z as f32, s7.linear_velocity.z as f32) }
-    w = Vec3W { x: lanes.f32x8(s0.angular_velocity.x as f32, s1.angular_velocity.x as f32, s2.angular_velocity.x as f32, s3.angular_velocity.x as f32, s4.angular_velocity.x as f32, s5.angular_velocity.x as f32, s6.angular_velocity.x as f32, s7.angular_velocity.x as f32),
-          y: lanes.f32x8(s0.angular_velocity.y as f32, s1.angular_velocity.y as f32, s2.angular_velocity.y as f32, s3.angular_velocity.y as f32, s4.angular_velocity.y as f32, s5.angular_velocity.y as f32, s6.angular_velocity.y as f32, s7.angular_velocity.y as f32),
-          z: lanes.f32x8(s0.angular_velocity.z as f32, s1.angular_velocity.z as f32, s2.angular_velocity.z as f32, s3.angular_velocity.z as f32, s4.angular_velocity.z as f32, s5.angular_velocity.z as f32, s6.angular_velocity.z as f32, s7.angular_velocity.z as f32) }
-    dp = Vec3W { x: lanes.f32x8(s0.delta_position.x as f32, s1.delta_position.x as f32, s2.delta_position.x as f32, s3.delta_position.x as f32, s4.delta_position.x as f32, s5.delta_position.x as f32, s6.delta_position.x as f32, s7.delta_position.x as f32),
-          y: lanes.f32x8(s0.delta_position.y as f32, s1.delta_position.y as f32, s2.delta_position.y as f32, s3.delta_position.y as f32, s4.delta_position.y as f32, s5.delta_position.y as f32, s6.delta_position.y as f32, s7.delta_position.y as f32),
-          z: lanes.f32x8(s0.delta_position.z as f32, s1.delta_position.z as f32, s2.delta_position.z as f32, s3.delta_position.z as f32, s4.delta_position.z as f32, s5.delta_position.z as f32, s6.delta_position.z as f32, s7.delta_position.z as f32) }
-    dqv = Vec3W { x: lanes.f32x8(s0.delta_rotation.x as f32, s1.delta_rotation.x as f32, s2.delta_rotation.x as f32, s3.delta_rotation.x as f32, s4.delta_rotation.x as f32, s5.delta_rotation.x as f32, s6.delta_rotation.x as f32, s7.delta_rotation.x as f32),
-          y: lanes.f32x8(s0.delta_rotation.y as f32, s1.delta_rotation.y as f32, s2.delta_rotation.y as f32, s3.delta_rotation.y as f32, s4.delta_rotation.y as f32, s5.delta_rotation.y as f32, s6.delta_rotation.y as f32, s7.delta_rotation.y as f32),
-          z: lanes.f32x8(s0.delta_rotation.z as f32, s1.delta_rotation.z as f32, s2.delta_rotation.z as f32, s3.delta_rotation.z as f32, s4.delta_rotation.z as f32, s5.delta_rotation.z as f32, s6.delta_rotation.z as f32, s7.delta_rotation.z as f32) }
-    dqs = lanes.f32x8(s0.delta_rotation.w as f32, s1.delta_rotation.w as f32, s2.delta_rotation.w as f32, s3.delta_rotation.w as f32, s4.delta_rotation.w as f32, s5.delta_rotation.w as f32, s6.delta_rotation.w as f32, s7.delta_rotation.w as f32)
+    v = Vec3W { x: lanes.f32x8(s0.v.x, s1.v.x, s2.v.x, s3.v.x, s4.v.x, s5.v.x, s6.v.x, s7.v.x),
+          y: lanes.f32x8(s0.v.y, s1.v.y, s2.v.y, s3.v.y, s4.v.y, s5.v.y, s6.v.y, s7.v.y),
+          z: lanes.f32x8(s0.v.z, s1.v.z, s2.v.z, s3.v.z, s4.v.z, s5.v.z, s6.v.z, s7.v.z) }
+    w = Vec3W { x: lanes.f32x8(s0.w.x, s1.w.x, s2.w.x, s3.w.x, s4.w.x, s5.w.x, s6.w.x, s7.w.x),
+          y: lanes.f32x8(s0.w.y, s1.w.y, s2.w.y, s3.w.y, s4.w.y, s5.w.y, s6.w.y, s7.w.y),
+          z: lanes.f32x8(s0.w.z, s1.w.z, s2.w.z, s3.w.z, s4.w.z, s5.w.z, s6.w.z, s7.w.z) }
+    dp = Vec3W { x: lanes.f32x8(s0.dp.x, s1.dp.x, s2.dp.x, s3.dp.x, s4.dp.x, s5.dp.x, s6.dp.x, s7.dp.x),
+          y: lanes.f32x8(s0.dp.y, s1.dp.y, s2.dp.y, s3.dp.y, s4.dp.y, s5.dp.y, s6.dp.y, s7.dp.y),
+          z: lanes.f32x8(s0.dp.z, s1.dp.z, s2.dp.z, s3.dp.z, s4.dp.z, s5.dp.z, s6.dp.z, s7.dp.z) }
+    dqv = Vec3W { x: lanes.f32x8(s0.dq.x, s1.dq.x, s2.dq.x, s3.dq.x, s4.dq.x, s5.dq.x, s6.dq.x, s7.dq.x),
+          y: lanes.f32x8(s0.dq.y, s1.dq.y, s2.dq.y, s3.dq.y, s4.dq.y, s5.dq.y, s6.dq.y, s7.dq.y),
+          z: lanes.f32x8(s0.dq.z, s1.dq.z, s2.dq.z, s3.dq.z, s4.dq.z, s5.dq.z, s6.dq.z, s7.dq.z) }
+    dqs = lanes.f32x8(s0.dq.w, s1.dq.w, s2.dq.w, s3.dq.w, s4.dq.w, s5.dq.w, s6.dq.w, s7.dq.w)
     return BodyStateW { v: v, w: w, dp: dp, dq: QuatW { v: dqv, s: dqs } }
 }
 
@@ -296,8 +296,8 @@ scatter_lane(states: ptr, index1: int, body: *BodyStateW, l: int) {
     if index1 == 0 { return }
     state = (states + (index1 - 1) * sizeof(BodyState)) as *BodyState
     if (state.flags & dynamics.DYNAMIC_FLAG) == 0 { return }
-    state.linear_velocity = math.vec3(lane(body.v.x, l), lane(body.v.y, l), lane(body.v.z, l))
-    state.angular_velocity = math.vec3(lane(body.w.x, l), lane(body.w.y, l), lane(body.w.z, l))
+    state.v = Vec3f { x: lanes.lane8(body.v.x, l as long), y: lanes.lane8(body.v.y, l as long), z: lanes.lane8(body.v.z, l as long) }
+    state.w = Vec3f { x: lanes.lane8(body.w.x, l as long), y: lanes.lane8(body.w.y, l as long), z: lanes.lane8(body.w.z, l as long) }
 }
 
 scatter_bodies(states: ptr, indices: *IntW, body: *BodyStateW) {

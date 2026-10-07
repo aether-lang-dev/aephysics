@@ -28,6 +28,12 @@ for test in tests/test_*.ae; do
         failures=$((failures + 1))
     fi
 done
+# The determinism scenes' every step against the golden trace: the same
+# bits on every platform and build (#125). A deliberate change of results
+# regenerates it with scripts/golden_trace.sh and says why in its commit.
+if ! scripts/golden_trace.sh check; then
+    failures=$((failures + 1))
+fi
 if [ "$failures" -ne 0 ]; then
     echo "$failures failure(s)"
     exit 1

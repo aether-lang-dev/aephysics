@@ -718,6 +718,33 @@ On Windows the AVX2 build needs GCC 16: MinGW GCC 15.2 spills 256-bit
 values with aligned moves to a stack it cannot align to 32 bytes and the
 program faults (aether#2476).
 
+### Body states in float (2026-10-07, #95)
+
+The solver's body states (velocities, the step's change of position and
+rotation) are single precision now, laid out as the reference's
+`b3BodyState`: 64 bytes a body, one cache line, where the doubles took
+136 over three. The lanes gather them without a conversion and scatter
+them back the same way; the scalar solvers and the integration widen to
+double for their arithmetic and narrow on the store, as the reference
+computes in float throughout. Positions stay double.
+
+Interleaved, one thread, the same machine minutes apart:
+
+| scene, ms per step | doubles, AVX2 | floats, AVX2 | doubles | floats |
+|---|---|---|---|---|
+| large pyramid | 8.18-8.69 | 7.71-8.00 | 8.78-8.99 | 8.24-8.76 |
+| many pyramids | 19.9-20.9 | 18.8-19.7 | 22.0-24.3 | 20.0-22.3 |
+| joint grid (pinned, best of 8) | 16.59 | 16.57 | 17.48 | 17.13 |
+
+The large pyramid's stages in AVX2: warm start 0.91-1.00 to 0.76-0.78 ms,
+solve 1.43-1.46 to 1.20-1.22, relax 1.57-1.62 to 1.30-1.34. The joint grid
+is level: its joints widen what they read and narrow what they write.
+
+The results change, as rounding a velocity to float each sub-step must:
+the falling ragdolls sleep at step 298 (307 in doubles), the soak's
+fastest body and overlaps are unchanged to the printed digits, and every
+check holds. `tests/golden/determinism_trace.txt` is the new record (#125).
+
 ### The joint grid, stage by stage (2026-10-05)
 
 The joint grid has no contacts, so the eight-wide lanes don't explain its

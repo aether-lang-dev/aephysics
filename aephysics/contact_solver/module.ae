@@ -151,7 +151,7 @@ dummy_state() -> *BodyState {
     if g_dummy == null {
         g_dummy = basics.alloc(sizeof(BodyState))
         d = g_dummy as *BodyState
-        d.delta_rotation = math.quat_identity()
+        d.dq = math.quatf_identity()
     }
     return g_dummy as *BodyState
 }
@@ -208,8 +208,8 @@ prepare_contact(ctx: *StepContext, c: *Contact, cc: *ContactConstraint, manifold
         m_a = sim_a.inv_mass
         i_a = sim_a.inv_inertia_world
         state_a = state_at(ctx.states, index_a)
-        v_a = state_a.linear_velocity
-        w_a = state_a.angular_velocity
+        v_a = math.widen3(state_a.v)
+        w_a = math.widen3(state_a.w)
     }
     m_b = 0.0
     i_b = math.mat3_zero()
@@ -220,8 +220,8 @@ prepare_contact(ctx: *StepContext, c: *Contact, cc: *ContactConstraint, manifold
         m_b = sim_b.inv_mass
         i_b = sim_b.inv_inertia_world
         state_b = state_at(ctx.states, index_b)
-        v_b = state_b.linear_velocity
-        w_b = state_b.angular_velocity
+        v_b = math.widen3(state_b.v)
+        w_b = math.widen3(state_b.w)
     }
     manifold_count = c.manifold_count
     cc.contact = c
@@ -368,10 +368,10 @@ warm_start_contacts(ctx: *StepContext, constraints: ptr, count: int) {
         if cc.index_a != NULL_INDEX { state_a = state_at(states, cc.index_a) }
         state_b = dummy
         if cc.index_b != NULL_INDEX { state_b = state_at(states, cc.index_b) }
-        v_a = state_a.linear_velocity
-        w_a = state_a.angular_velocity
-        v_b = state_b.linear_velocity
-        w_b = state_b.angular_velocity
+        v_a = math.widen3(state_a.v)
+        w_a = math.widen3(state_a.w)
+        v_b = math.widen3(state_b.v)
+        w_b = math.widen3(state_b.w)
         m_a = cc.inv_mass_a
         i_a = cc.inv_inertia_a
         m_b = cc.inv_mass_b
@@ -405,12 +405,12 @@ warm_start_contacts(ctx: *StepContext, constraints: ptr, count: int) {
             manifold_index = manifold_index + 1
         }
         if (state_a.flags & dynamics.DYNAMIC_FLAG) != 0 {
-            state_a.linear_velocity = v_a
-            state_a.angular_velocity = w_a
+            state_a.v = math.narrow3(v_a)
+            state_a.w = math.narrow3(w_a)
         }
         if (state_b.flags & dynamics.DYNAMIC_FLAG) != 0 {
-            state_b.linear_velocity = v_b
-            state_b.angular_velocity = w_b
+            state_b.v = math.narrow3(v_b)
+            state_b.w = math.narrow3(w_b)
         }
         index = index + 1
     }
@@ -439,13 +439,13 @@ solve_contacts(ctx: *StepContext, constraints: ptr, count: int, use_bias: bool) 
         if cc.index_a != NULL_INDEX { state_a = state_at(states, cc.index_a) }
         state_b = dummy
         if cc.index_b != NULL_INDEX { state_b = state_at(states, cc.index_b) }
-        v_a = state_a.linear_velocity
-        w_a = state_a.angular_velocity
-        dq_a = state_a.delta_rotation
-        v_b = state_b.linear_velocity
-        w_b = state_b.angular_velocity
-        dq_b = state_b.delta_rotation
-        dp = math.sub(state_b.delta_position, state_a.delta_position)
+        v_a = math.widen3(state_a.v)
+        w_a = math.widen3(state_a.w)
+        dq_a = math.widen_quat(state_a.dq)
+        v_b = math.widen3(state_b.v)
+        w_b = math.widen3(state_b.w)
+        dq_b = math.widen_quat(state_b.dq)
+        dp = math.sub(math.widen3(state_b.dp), math.widen3(state_a.dp))
         softness = cc.softness
         friction = cc.friction
         rolling_resistance = cc.rolling_resistance
@@ -542,12 +542,12 @@ solve_contacts(ctx: *StepContext, constraints: ptr, count: int, use_bias: bool) 
             manifold_index = manifold_index + 1
         }
         if (state_a.flags & dynamics.DYNAMIC_FLAG) != 0 {
-            state_a.linear_velocity = v_a
-            state_a.angular_velocity = w_a
+            state_a.v = math.narrow3(v_a)
+            state_a.w = math.narrow3(w_a)
         }
         if (state_b.flags & dynamics.DYNAMIC_FLAG) != 0 {
-            state_b.linear_velocity = v_b
-            state_b.angular_velocity = w_b
+            state_b.v = math.narrow3(v_b)
+            state_b.w = math.narrow3(w_b)
         }
         index = index + 1
     }
@@ -576,13 +576,13 @@ apply_restitution(ctx: *StepContext, constraints: ptr, count: int) {
             if cc.index_a != NULL_INDEX { state_a = state_at(states, cc.index_a) }
             state_b = dummy
             if cc.index_b != NULL_INDEX { state_b = state_at(states, cc.index_b) }
-            v_a = state_a.linear_velocity
-            w_a = state_a.angular_velocity
-            dq_a = state_a.delta_rotation
-            v_b = state_b.linear_velocity
-            w_b = state_b.angular_velocity
-            dq_b = state_b.delta_rotation
-            dp = math.sub(state_b.delta_position, state_a.delta_position)
+            v_a = math.widen3(state_a.v)
+            w_a = math.widen3(state_a.w)
+            dq_a = math.widen_quat(state_a.dq)
+            v_b = math.widen3(state_b.v)
+            w_b = math.widen3(state_b.w)
+            dq_b = math.widen_quat(state_b.dq)
+            dp = math.sub(math.widen3(state_b.dp), math.widen3(state_a.dp))
             m_a = cc.inv_mass_a
             i_a = cc.inv_inertia_a
             m_b = cc.inv_mass_b
@@ -632,12 +632,12 @@ apply_restitution(ctx: *StepContext, constraints: ptr, count: int) {
                 manifold_index = manifold_index + 1
             }
             if (state_a.flags & dynamics.DYNAMIC_FLAG) != 0 {
-                state_a.linear_velocity = v_a
-                state_a.angular_velocity = w_a
+                state_a.v = math.narrow3(v_a)
+                state_a.w = math.narrow3(w_a)
             }
             if (state_b.flags & dynamics.DYNAMIC_FLAG) != 0 {
-                state_b.linear_velocity = v_b
-                state_b.angular_velocity = w_b
+                state_b.v = math.narrow3(v_b)
+                state_b.w = math.narrow3(w_b)
             }
         }
         index = index + 1

@@ -930,9 +930,9 @@ explosion_visitor(proxy_id: int, user_data: long, context: ptr) -> bool {
     set = dynamics.get_solver_set(w, dynamics.AWAKE_SET)
     state = dynamics.body_state_at(set, body.local_index)
     sim = dynamics.body_sim_at(set, body.local_index)
-    state.linear_velocity = math.mul_add(state.linear_velocity, sim.inv_mass, impulse)
+    state.v = math.narrow3(math.mul_add(math.widen3(state.v), sim.inv_mass, impulse))
     r = math.rotate_vector(xf.q, math.sub(closest, sim.local_center))
-    state.angular_velocity = math.add(state.angular_velocity, math.mul_mv(sim.inv_inertia_world, math.cross(r, impulse)))
+    state.w = math.narrow3(math.add(math.widen3(state.w), math.mul_mv(sim.inv_inertia_world, math.cross(r, impulse))))
     return true
 }
 

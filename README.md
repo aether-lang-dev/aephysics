@@ -177,13 +177,17 @@ the end -- [the reference on the same dice agrees on each](bench/RESULTS.md#soak
 
 The step is deterministic across platforms and worker counts, not
 only across runs: `AEPHYSICS_TRACE=1 target/test_determinism` prints
-every body's checksum after every step with its bits, CI records the
-Linux trace in its log, and the Windows trace (MinGW, a different gcc)
-matches it bit for bit on every step of the four scenes. The engine's own maths
-(the reference's cos, sin and atan2 approximations, `sqrt`, `floor`
-and `remainder` as the only libm calls, no fused multiply-adds in the
-lanes) is what makes that hold; the one divergence seen so far was an
-older `aetherc` folding `1.0 / 60.0` to ten digits (issue #27).
+every body's checksum after every step with its bits, and
+`scripts/golden_trace.sh check` (run by `scripts/test.sh`) diffs that
+against `tests/golden/determinism_trace.txt` on every step of the four
+scenes. CI checks it on Linux, on Linux with `-mavx2 -mfma` and on macOS
+arm64; Windows (MinGW) gives the same bits. The engine's own maths (the
+reference's cos, sin and atan2 approximations, `sqrt`, `floor` and
+`remainder` as the only libm calls) and `-ffp-contract=off` are what make
+that hold: without the flag GCC and clang fuse multiply-adds wherever the
+target has FMA, and arm64 parted from Linux on the first step (#125). A
+program that builds aephysics into itself must pass `-ffp-contract=off`
+in its own `[build] cflags`, as `ae` reads only the root manifest's.
 
 ## Where it is going
 
