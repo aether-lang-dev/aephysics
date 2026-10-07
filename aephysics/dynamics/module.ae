@@ -469,13 +469,18 @@ struct Contact {
     flags: int
     manifolds: ptr                 // Manifold[manifold_count], a heap block of the contact's
     manifold_count: int
-    cached_rotation_a: Quat        // for the recycling
-    cached_rotation_b: Quat
-    cached_relative_pose: Transform
-    friction: float
-    restitution: float
-    rolling_resistance: float
-    tangent_velocity: Vec3
+    // For the recycling, single precision as the reference's: the bodies'
+    // rotations and B's pose relative to A at the last narrow phase (a
+    // relative pose of touching bodies is small; the world positions stay
+    // in the body sims, in double).
+    cached_rotation_a: Quatf
+    cached_rotation_b: Quatf
+    cached_relative_p: Vec3f
+    cached_relative_q: Quatf
+    friction: f32
+    restitution: f32
+    rolling_resistance: f32
+    tangent_velocity: Vec3f
     // A mesh contact's triangles or a convex contact's simplex or axis, in
     // the same bytes (the reference's union): mesh_cache_of and
     // convex_cache_of, by SIM_MESH_CONTACT. CONTACT_CACHE_WORDS words cover
@@ -489,30 +494,34 @@ mesh_cache_of(c: *Contact) -> *MeshContactCache { return (&c.caches) as *MeshCon
 convex_cache_of(c: *Contact) -> *TriangleCache { return (&c.caches) as *TriangleCache }
 
 // A contact point the solver works on: anchors relative to the bodies'
-// centres of mass in world space, the separation, the impulses.
+// centres of mass in world space, the separation, the impulses. Single
+// precision, the reference's b3ManifoldPoint (56 bytes): the anchors are
+// offsets of a body's size, never world positions, and a contact's
+// numbers are what the float lanes solve in.
 struct ManifoldPoint {
-    anchor_a: Vec3
-    anchor_b: Vec3
-    separation: float
-    base_separation: float
-    normal_impulse: float
-    total_normal_impulse: float
-    normal_velocity: float
+    anchor_a: Vec3f
+    anchor_b: Vec3f
+    separation: f32
+    base_separation: f32
+    normal_impulse: f32
+    total_normal_impulse: f32
+    normal_velocity: f32
     feature_id: int
     triangle_index: int
     persisted: bool
 }
 
-// Up to four points on a normal, with the accumulated friction and rolling.
+// Up to four points on a normal, with the accumulated friction and
+// rolling (the reference's b3Manifold, 268 bytes).
 struct Manifold {
     point0: ManifoldPoint
     point1: ManifoldPoint
     point2: ManifoldPoint
     point3: ManifoldPoint
-    normal: Vec3
-    twist_impulse: float
-    friction_impulse: Vec3
-    rolling_impulse: Vec3
+    normal: Vec3f
+    twist_impulse: f32
+    friction_impulse: Vec3f
+    rolling_impulse: Vec3f
     point_count: int
 }
 
@@ -3572,14 +3581,15 @@ compute_convex_manifold(w: *World, c: *Contact, geometry_a: *Shape, xf_a: Transf
     target = manifold_at(c, 0)
     target.point_count = m.point_count
     matrix_a = math.make_matrix_from_quat(xf_a.q)
-    target.normal = math.mul_mv(matrix_a, m.normal)
+    target.normal = math.narrow3(math.mul_mv(matrix_a, m.normal))
     offset = math.sub(xf_a.p, xf_b.p)
     i = 0
     while i < m.point_count {
         source = manifold.manifold_point(&m, i)
         p = manifold_point_at(target, i)
-        p.anchor_a = math.mul_mv(matrix_a, source.point)
-        p.anchor_b = math.add(p.anchor_a, offset)
+        anchor_a = math.mul_mv(matrix_a, source.point)
+        p.anchor_a = math.narrow3(anchor_a)
+        p.anchor_b = math.narrow3(math.add(anchor_a, offset))
         p.separation = source.separation
         p.feature_id = manifold.make_feature_id(source.pair)
         p.triangle_index = NULL_INDEX
@@ -3624,7 +3634,7 @@ update_convex_contact(w: *World, c: *Contact, geometry_a: *Shape, material_a: Su
     if flip {
         // The feature ids need only match, and flipping is consistent.
         m = manifold_at(c, 0)
-        m.normal = math.neg(m.normal)
+        m.normal = Vec3f { x: 0.0 - m.normal.x, y: 0.0 - m.normal.y, z: 0.0 - m.normal.z }
         i = 0
         while i < m.point_count {
             p = manifold_point_at(m, i)
@@ -3648,7 +3658,7 @@ update_convex_contact(w: *World, c: *Contact, geometry_a: *Shape, material_a: Su
     } else {
         c.rolling_resistance = 0.0
     }
-    c.tangent_velocity = math.sub(math.rotate_vector(xf_a.q, material_a.tangent_velocity), math.rotate_vector(xf_b.q, material_b.tangent_velocity))
+    c.tangent_velocity = math.narrow3(math.sub(math.rotate_vector(xf_a.q, material_a.tangent_velocity), math.rotate_vector(xf_b.q, material_b.tangent_velocity)))
     if (flags_a & SHAPE_ENABLE_HIT_EVENTS) != 0 || (flags_b & SHAPE_ENABLE_HIT_EVENTS) != 0 {
         c.flags = c.flags | SIM_ENABLE_HIT_EVENT
     } else {
@@ -3706,14 +3716,14 @@ update_mesh_contact(w: *World, c: *Contact, mesh_geometry: *Shape, mesh_shape: *
         cluster = clusters[i]
         m = manifold_at(c, i)
         m.point_count = cluster.point_count
-        m.normal = math.mul_mv(matrix_b, cluster.manifold_normal)
+        m.normal = math.narrow3(math.mul_mv(matrix_b, cluster.manifold_normal))
         best_dot = normal_match_tolerance
         best_index = NULL_INDEX
         j = 0
         while j < old_count {
             if consumed[j] == 0 {
                 old_m = (old_block + j * sizeof(Manifold)) as *Manifold
-                d = math.dot(old_m.normal, m.normal)
+                d = math.dot(math.widen3(old_m.normal), math.widen3(m.normal))
                 if d > best_dot {
                     best_index = j
                     best_dot = d
@@ -3735,8 +3745,9 @@ update_mesh_contact(w: *World, c: *Contact, mesh_geometry: *Shape, mesh_shape: *
             source = points[j]
             p = manifold_point_at(m, j)
             // The points were computed in B's frame.
-            p.anchor_b = math.mul_mv(matrix_b, source.point)
-            p.anchor_a = math.add(p.anchor_b, offset_a)
+            anchor_b = math.mul_mv(matrix_b, source.point)
+            p.anchor_b = math.narrow3(anchor_b)
+            p.anchor_a = math.narrow3(math.add(anchor_b, offset_a))
             p.separation = source.separation - mesh_contact.MESH_REST_OFFSET
             p.feature_id = manifold.make_feature_id(source.pair)
             p.triangle_index = source.triangle_index
@@ -3814,7 +3825,7 @@ update_mesh_contact(w: *World, c: *Contact, mesh_geometry: *Shape, mesh_shape: *
     else if shape_b.geometry.kind == KIND_CAPSULE { radius_b = shape_b.geometry.capsule.radius }
     else if shape_b.geometry.kind == KIND_HULL { radius_b = shape_b.geometry.hull.inner_radius }
     c.rolling_resistance = material_b.rolling_resistance * radius_b
-    c.tangent_velocity = math.sub(tangent_velocity_a, math.rotate_vector(xf_b.q, material_b.tangent_velocity))
+    c.tangent_velocity = math.narrow3(math.sub(tangent_velocity_a, math.rotate_vector(xf_b.q, material_b.tangent_velocity)))
     tc.arena.index = mark
     return true
 }
@@ -3882,7 +3893,7 @@ update_contact(w: *World, c: *Contact, shape_a: *WorldShape, local_center_a: Vec
             j = 0
             while j < m.point_count {
                 p = manifold_point_at(m, j)
-                p.anchor_a = math.add(p.anchor_a, offset)
+                p.anchor_a = math.narrow3(math.add(math.widen3(p.anchor_a), offset))
                 j = j + 1
             }
             i = i + 1
@@ -3901,8 +3912,8 @@ update_contact(w: *World, c: *Contact, shape_a: *WorldShape, local_center_a: Vec
     if touching && convex && w.has_pre_solve && (c.flags & SIM_ENABLE_PRE_SOLVE_EVENTS) != 0 {
         pre_solve = w.pre_solve
         m = manifold_at(c, 0)
-        point = math.add(xf_a.p, manifold_point_at(m, 0).anchor_a)
-        if pre_solve(make_shape_id(w, shape_a), make_shape_id(w, shape_b), point, m.normal, w.pre_solve_context) == false {
+        point = math.add(xf_a.p, math.widen3(manifold_point_at(m, 0).anchor_a))
+        if pre_solve(make_shape_id(w, shape_a), make_shape_id(w, shape_b), point, math.widen3(m.normal), w.pre_solve_context) == false {
             free_manifolds(w, c)
             touching = false
         }
@@ -3916,8 +3927,8 @@ update_contact(w: *World, c: *Contact, shape_a: *WorldShape, local_center_a: Vec
             j = 0
             while j < m.point_count {
                 p = manifold_point_at(m, j)
-                p.anchor_a = math.sub(p.anchor_a, center_a)
-                p.anchor_b = math.sub(p.anchor_b, center_b)
+                p.anchor_a = math.narrow3(math.sub(math.widen3(p.anchor_a), center_a))
+                p.anchor_b = math.narrow3(math.sub(math.widen3(p.anchor_b), center_b))
                 j = j + 1
             }
             i = i + 1
@@ -4497,11 +4508,13 @@ update_pairs(w: *World) -> int {
 try_recycle_contact(w: *World, c: *Contact, sim_a: *BodySim, sim_b: *BodySim, static_a: bool, static_b: bool, tolerance: float) -> bool {
     xf_a = sim_a.transform
     xf_b = sim_b.transform
-    angle_a = math.dot_quat(xf_a.q, c.cached_rotation_a)
-    angle_b = math.dot_quat(xf_b.q, c.cached_rotation_b)
+    rotation_a = math.widen_quat(c.cached_rotation_a)
+    rotation_b = math.widen_quat(c.cached_rotation_b)
+    angle_a = math.dot_quat(xf_a.q, rotation_a)
+    angle_b = math.dot_quat(xf_b.q, rotation_b)
     angular_distance = math.min_float(angle_a * angle_a, angle_b * angle_b)
     xf = math.inv_mul_transforms(xf_a, xf_b)
-    xfc = c.cached_relative_pose
+    xfc = Transform { p: math.widen3(c.cached_relative_p), q: math.widen_quat(c.cached_relative_q) }
     max_extent_a = sim_a.max_extent
     if static_a { max_extent_a = math.vec3_zero() }
     max_extent_b = sim_b.max_extent
@@ -4514,21 +4527,22 @@ try_recycle_contact(w: *World, c: *Contact, sim_a: *BodySim, sim_b: *BodySim, st
     a = math.abs_vec3(math.qv(qr))
     arc = math.vec3(a.y * max_extent.z + a.z * max_extent.y, a.z * max_extent.x + a.x * max_extent.z, a.x * max_extent.y + a.y * max_extent.x)
     if 4.0 * math.length_squared(arc) >= slack * slack { return false }
-    dq_a = math.mul_quat(xf_a.q, math.conjugate(c.cached_rotation_a))
-    dq_b = math.mul_quat(xf_b.q, math.conjugate(c.cached_rotation_b))
+    dq_a = math.mul_quat(xf_a.q, math.conjugate(rotation_a))
+    dq_b = math.mul_quat(xf_b.q, math.conjugate(rotation_b))
     matrix_a = math.make_matrix_from_quat(dq_a)
     matrix_b = math.make_matrix_from_quat(dq_b)
     dc = math.sub(sim_b.center, sim_a.center)
     i = 0
     while i < c.manifold_count {
         m = manifold_at(c, i)
+        normal = math.widen3(m.normal)
         j = 0
         while j < m.point_count {
             p = manifold_point_at(m, j)
-            r_a = math.mul_mv(matrix_a, p.anchor_a)
-            r_b = math.mul_mv(matrix_b, p.anchor_b)
+            r_a = math.mul_mv(matrix_a, math.widen3(p.anchor_a))
+            r_b = math.mul_mv(matrix_b, math.widen3(p.anchor_b))
             dp = math.add(dc, math.sub(r_b, r_a))
-            p.separation = p.base_separation + math.dot(dp, m.normal)
+            p.separation = p.base_separation + math.dot(dp, normal)
             p.persisted = true
             j = j + 1
         }
@@ -4569,9 +4583,11 @@ collide_contact(w: *World, contact_id: int) {
     if is_fast == false && recycle_distance > 0.0 && (c.flags & RELATIVE_TRANSFORM_VALID) != 0 && (c.flags & CONTACT_RECYCLE) != 0 {
         if try_recycle_contact(w, c, sim_a, sim_b, static_a, static_b, tolerance) { return }
     }
-    c.cached_rotation_a = sim_a.transform.q
-    c.cached_rotation_b = sim_b.transform.q
-    c.cached_relative_pose = math.inv_mul_transforms(sim_a.transform, sim_b.transform)
+    c.cached_rotation_a = math.narrow_quat(sim_a.transform.q)
+    c.cached_rotation_b = math.narrow_quat(sim_b.transform.q)
+    relative = math.inv_mul_transforms(sim_a.transform, sim_b.transform)
+    c.cached_relative_p = math.narrow3(relative.p)
+    c.cached_relative_q = math.narrow_quat(relative.q)
     c.flags = c.flags | RELATIVE_TRANSFORM_VALID
     touching = update_contact(w, c, shape_a, sim_a.local_center, sim_a.transform, shape_b, sim_b.local_center, sim_b.transform, is_fast)
     if touching && was_touching && (c.flags & SIM_MESH_CONTACT) != 0 {

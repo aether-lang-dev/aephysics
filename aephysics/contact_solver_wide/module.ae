@@ -390,6 +390,13 @@ gather_vec3(a: Vec3, b: Vec3, c: Vec3, d: Vec3, e: Vec3, f: Vec3, g: Vec3, h: Ve
                    z: f8(a.z, b.z, c.z, d.z, e.z, f.z, g.z, h.z) }
 }
 
+// The manifolds' single-precision vectors, eight into lanes as they are.
+gather_vec3f(a: Vec3f, b: Vec3f, c: Vec3f, d: Vec3f, e: Vec3f, f: Vec3f, g: Vec3f, h: Vec3f) -> Vec3W {
+    return Vec3W { x: lanes.f32x8(a.x, b.x, c.x, d.x, e.x, f.x, g.x, h.x),
+                   y: lanes.f32x8(a.y, b.y, c.y, d.y, e.y, f.y, g.y, h.y),
+                   z: lanes.f32x8(a.z, b.z, c.z, d.z, e.z, f.z, g.z, h.z) }
+}
+
 add_sym_w(a: SymMatrix3W, b: SymMatrix3W) -> SymMatrix3W {
     return SymMatrix3W { cxx: add_w(a.cxx, b.cxx), cxy: add_w(a.cxy, b.cxy), cxz: add_w(a.cxz, b.cxz),
                          cyy: add_w(a.cyy, b.cyy), cyz: add_w(a.cyz, b.cyz), czz: add_w(a.czz, b.czz) }
@@ -435,10 +442,10 @@ gather_point(m0: *Manifold, m1: *Manifold, m2: *Manifold, m3: *Manifold, m4: *Ma
     p7 = dynamics.manifold_point_at(m7, index)
     zero = zero_w()
     return WideConstraintPoint {
-        anchor_a: gather_vec3(p0.anchor_a, p1.anchor_a, p2.anchor_a, p3.anchor_a, p4.anchor_a, p5.anchor_a, p6.anchor_a, p7.anchor_a),
-        anchor_b: gather_vec3(p0.anchor_b, p1.anchor_b, p2.anchor_b, p3.anchor_b, p4.anchor_b, p5.anchor_b, p6.anchor_b, p7.anchor_b),
-        base_separation: f8(p0.separation, p1.separation, p2.separation, p3.separation, p4.separation, p5.separation, p6.separation, p7.separation),
-        normal_impulse: f8(p0.normal_impulse, p1.normal_impulse, p2.normal_impulse, p3.normal_impulse, p4.normal_impulse, p5.normal_impulse, p6.normal_impulse, p7.normal_impulse),
+        anchor_a: gather_vec3f(p0.anchor_a, p1.anchor_a, p2.anchor_a, p3.anchor_a, p4.anchor_a, p5.anchor_a, p6.anchor_a, p7.anchor_a),
+        anchor_b: gather_vec3f(p0.anchor_b, p1.anchor_b, p2.anchor_b, p3.anchor_b, p4.anchor_b, p5.anchor_b, p6.anchor_b, p7.anchor_b),
+        base_separation: lanes.f32x8(p0.separation, p1.separation, p2.separation, p3.separation, p4.separation, p5.separation, p6.separation, p7.separation),
+        normal_impulse: lanes.f32x8(p0.normal_impulse, p1.normal_impulse, p2.normal_impulse, p3.normal_impulse, p4.normal_impulse, p5.normal_impulse, p6.normal_impulse, p7.normal_impulse),
         total_normal_impulse: zero, normal_mass: zero, lever_arm: zero, relative_velocity: zero, restitution_impulse: zero
     }
 }
@@ -512,29 +519,29 @@ prepare_wide_slot(ctx: *StepContext, color: *GraphColor, slot: int, end: int) {
     c.bias_rate = f8(soft0.bias_rate, soft1.bias_rate, soft2.bias_rate, soft3.bias_rate, soft4.bias_rate, soft5.bias_rate, soft6.bias_rate, soft7.bias_rate)
     c.mass_scale = f8(soft0.mass_scale, soft1.mass_scale, soft2.mass_scale, soft3.mass_scale, soft4.mass_scale, soft5.mass_scale, soft6.mass_scale, soft7.mass_scale)
     c.impulse_scale = f8(soft0.impulse_scale, soft1.impulse_scale, soft2.impulse_scale, soft3.impulse_scale, soft4.impulse_scale, soft5.impulse_scale, soft6.impulse_scale, soft7.impulse_scale)
-    c.friction = f8(k0.friction, k1.friction, k2.friction, k3.friction, k4.friction, k5.friction, k6.friction, k7.friction)
-    c.restitution = f8(k0.restitution, k1.restitution, k2.restitution, k3.restitution, k4.restitution, k5.restitution, k6.restitution, k7.restitution)
-    c.rolling_resistance = f8(k0.rolling_resistance, k1.rolling_resistance, k2.rolling_resistance, k3.rolling_resistance, k4.rolling_resistance, k5.rolling_resistance, k6.rolling_resistance, k7.rolling_resistance)
+    c.friction = lanes.f32x8(k0.friction, k1.friction, k2.friction, k3.friction, k4.friction, k5.friction, k6.friction, k7.friction)
+    c.restitution = lanes.f32x8(k0.restitution, k1.restitution, k2.restitution, k3.restitution, k4.restitution, k5.restitution, k6.restitution, k7.restitution)
+    c.rolling_resistance = lanes.f32x8(k0.rolling_resistance, k1.rolling_resistance, k2.rolling_resistance, k3.rolling_resistance, k4.rolling_resistance, k5.rolling_resistance, k6.rolling_resistance, k7.rolling_resistance)
     if all_zero_w(c.restitution) == false { contact_solver.note_restitution(ctx, 1.0) }
 
     zero = zero_w()
     one = splat_w(1.0)
     warm_start_scale = zero
     if ctx.enable_warm_starting { warm_start_scale = one }
-    normal = gather_vec3(m0.normal, m1.normal, m2.normal, m3.normal, m4.normal, m5.normal, m6.normal, m7.normal)
+    normal = gather_vec3f(m0.normal, m1.normal, m2.normal, m3.normal, m4.normal, m5.normal, m6.normal, m7.normal)
     tangent1 = perp_w(normal)
     tangent2 = cross_w(tangent1, normal)
     c.normal = normal
     c.tangent1 = tangent1
     c.tangent2 = tangent2
-    tangent_velocity = gather_vec3(k0.tangent_velocity, k1.tangent_velocity, k2.tangent_velocity, k3.tangent_velocity, k4.tangent_velocity, k5.tangent_velocity, k6.tangent_velocity, k7.tangent_velocity)
+    tangent_velocity = gather_vec3f(k0.tangent_velocity, k1.tangent_velocity, k2.tangent_velocity, k3.tangent_velocity, k4.tangent_velocity, k5.tangent_velocity, k6.tangent_velocity, k7.tangent_velocity)
     c.tangent_velocity1 = dot_w(tangent_velocity, tangent1)
     c.tangent_velocity2 = dot_w(tangent_velocity, tangent2)
-    friction_impulse = gather_vec3(m0.friction_impulse, m1.friction_impulse, m2.friction_impulse, m3.friction_impulse, m4.friction_impulse, m5.friction_impulse, m6.friction_impulse, m7.friction_impulse)
+    friction_impulse = gather_vec3f(m0.friction_impulse, m1.friction_impulse, m2.friction_impulse, m3.friction_impulse, m4.friction_impulse, m5.friction_impulse, m6.friction_impulse, m7.friction_impulse)
     c.friction_impulse = Vec2W { x: mul_w(warm_start_scale, dot_w(friction_impulse, tangent1)),
                                  y: mul_w(warm_start_scale, dot_w(friction_impulse, tangent2)) }
-    c.twist_impulse = mul_w(warm_start_scale, f8(m0.twist_impulse, m1.twist_impulse, m2.twist_impulse, m3.twist_impulse, m4.twist_impulse, m5.twist_impulse, m6.twist_impulse, m7.twist_impulse))
-    c.rolling_impulse = mul_sv_w(warm_start_scale, gather_vec3(m0.rolling_impulse, m1.rolling_impulse, m2.rolling_impulse, m3.rolling_impulse, m4.rolling_impulse, m5.rolling_impulse, m6.rolling_impulse, m7.rolling_impulse))
+    c.twist_impulse = mul_w(warm_start_scale, lanes.f32x8(m0.twist_impulse, m1.twist_impulse, m2.twist_impulse, m3.twist_impulse, m4.twist_impulse, m5.twist_impulse, m6.twist_impulse, m7.twist_impulse))
+    c.rolling_impulse = mul_sv_w(warm_start_scale, gather_vec3f(m0.rolling_impulse, m1.rolling_impulse, m2.rolling_impulse, m3.rolling_impulse, m4.rolling_impulse, m5.rolling_impulse, m6.rolling_impulse, m7.rolling_impulse))
 
     inv_tau = splat_w(1.0 / dynamics.SPECULATIVE_DISTANCE)
     two = splat_w(2.0)
@@ -920,11 +927,11 @@ store_wide_range(ctx: *StepContext, color: *GraphColor, start: int, end: int, hi
         m = ptr_lane(&c.manifolds, l) as *Manifold
         f1 = lane(c.friction_impulse.x, l)
         f2 = lane(c.friction_impulse.y, l)
-        m.friction_impulse = math.vec3(f1 * lane(c.tangent1.x, l) + f2 * lane(c.tangent2.x, l),
+        m.friction_impulse = math.narrow3(math.vec3(f1 * lane(c.tangent1.x, l) + f2 * lane(c.tangent2.x, l),
                                        f1 * lane(c.tangent1.y, l) + f2 * lane(c.tangent2.y, l),
-                                       f1 * lane(c.tangent1.z, l) + f2 * lane(c.tangent2.z, l))
+                                       f1 * lane(c.tangent1.z, l) + f2 * lane(c.tangent2.z, l)))
         m.twist_impulse = lane(c.twist_impulse, l)
-        m.rolling_impulse = math.vec3(lane(c.rolling_impulse.x, l), lane(c.rolling_impulse.y, l), lane(c.rolling_impulse.z, l))
+        m.rolling_impulse = Vec3f { x: lanes.lane8(c.rolling_impulse.x, l as long), y: lanes.lane8(c.rolling_impulse.y, l as long), z: lanes.lane8(c.rolling_impulse.z, l as long) }
         point_count = m.point_count
         point_index = 0
         while point_index < point_count {

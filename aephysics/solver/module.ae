@@ -603,8 +603,8 @@ report_hit_events(w: *World) {
                     speed = 0.0 - mp.normal_velocity
                     if speed > approach && mp.total_normal_impulse > 0.0 {
                         approach = speed
-                        point = math.add(mid, math.lerp(mp.anchor_a, mp.anchor_b, 0.5))
-                        normal = m.normal
+                        point = math.add(mid, math.lerp(math.widen3(mp.anchor_a), math.widen3(mp.anchor_b), 0.5))
+                        normal = math.widen3(m.normal)
                         triangle_index = mp.triangle_index
                         found = true
                     }

@@ -251,15 +251,15 @@ prepare_contact(ctx: *StepContext, c: *Contact, cc: *ContactConstraint, manifold
         manifold = dynamics.manifold_at(c, manifold_index)
         constraint = manifold_constraint_at(manifolds, manifold_index)
         point_count = manifold.point_count
-        normal = manifold.normal
+        normal = math.widen3(manifold.normal)
         tangent1 = math.perp(normal)
         tangent2 = math.cross(tangent1, normal)
         constraint.point_count = point_count
         constraint.normal = normal
         constraint.tangent1 = tangent1
         constraint.tangent2 = tangent2
-        constraint.tangent_velocity1 = math.dot(c.tangent_velocity, tangent1)
-        constraint.tangent_velocity2 = math.dot(c.tangent_velocity, tangent2)
+        constraint.tangent_velocity1 = math.dot(math.widen3(c.tangent_velocity), tangent1)
+        constraint.tangent_velocity2 = math.dot(math.widen3(c.tangent_velocity), tangent2)
         center_a = math.vec3_zero()
         center_b = math.vec3_zero()
         total_weight = 0.0
@@ -267,8 +267,8 @@ prepare_contact(ctx: *StepContext, c: *Contact, cc: *ContactConstraint, manifold
         while point_index < point_count {
             cp = constraint_point_at(constraint, point_index)
             mp = dynamics.manifold_point_at(manifold, point_index)
-            cp.r_a = mp.anchor_a
-            cp.r_b = mp.anchor_b
+            cp.r_a = math.widen3(mp.anchor_a)
+            cp.r_b = math.widen3(mp.anchor_b)
             s = mp.separation
             cp.base_separation = s - math.dot(math.sub(cp.r_b, cp.r_a), normal)
             cp.normal_impulse = warm_start_scale * mp.normal_impulse
@@ -316,13 +316,13 @@ prepare_contact(ctx: *StepContext, c: *Contact, cc: *ContactConstraint, manifold
         kxy = math.dot(rt_a1, math.mul_mv(i_a, rt_a2)) + math.dot(rt_b1, math.mul_mv(i_b, rt_b2))
         k = Matrix2 { cx: Vec2 { x: kxx, y: kxy }, cy: Vec2 { x: kxy, y: kyy } }
         constraint.tangent_mass = math.invert2(k)
-        constraint.friction_impulse = Vec2 { x: warm_start_scale * math.dot(manifold.friction_impulse, tangent1),
-                                             y: warm_start_scale * math.dot(manifold.friction_impulse, tangent2) }
+        constraint.friction_impulse = Vec2 { x: warm_start_scale * math.dot(math.widen3(manifold.friction_impulse), tangent1),
+                                             y: warm_start_scale * math.dot(math.widen3(manifold.friction_impulse), tangent2) }
         k_twist = math.dot(normal, math.mul_mv(math.add_mm(i_a, i_b), normal))
         constraint.twist_mass = 0.0
         if k_twist > 0.0 { constraint.twist_mass = 1.0 / k_twist }
         constraint.twist_impulse = warm_start_scale * manifold.twist_impulse
-        constraint.rolling_impulse = math.mul_sv(warm_start_scale, manifold.rolling_impulse)
+        constraint.rolling_impulse = math.mul_sv(warm_start_scale, math.widen3(manifold.rolling_impulse))
         manifold_index = manifold_index + 1
     }
 }
@@ -661,8 +661,8 @@ store_impulses(ctx: *StepContext, constraints: ptr, count: int, hit_bits: *BitSe
             manifold = dynamics.manifold_at(c, manifold_index)
             constraint = manifold_constraint_at(cc.constraints, manifold_index)
             manifold.twist_impulse = constraint.twist_impulse
-            manifold.friction_impulse = math.blend2(constraint.friction_impulse.x, constraint.tangent1, constraint.friction_impulse.y, constraint.tangent2)
-            manifold.rolling_impulse = constraint.rolling_impulse
+            manifold.friction_impulse = math.narrow3(math.blend2(constraint.friction_impulse.x, constraint.tangent1, constraint.friction_impulse.y, constraint.tangent2))
+            manifold.rolling_impulse = math.narrow3(constraint.rolling_impulse)
             point_index = 0
             while point_index < constraint.point_count {
                 cp = constraint_point_at(constraint, point_index)

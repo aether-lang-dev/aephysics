@@ -126,7 +126,8 @@ test_prepare() {
     small("the cube's inverse mass", cc.inv_mass_b - 1.0, 0.000001)
     small("the cube's inverse inertia (1/6 per axis)", cc.inv_inertia_b.cy.y - 6.0, 0.00001)
     ensure("a static contact takes the static softness", cc.softness.bias_rate == s.ctx.static_softness.bias_rate)
-    ensure("the materials", cc.friction == 0.6 && cc.restitution == 0.0 && cc.rolling_resistance == 0.0)
+    // A contact keeps its material in single precision, as the reference does.
+    ensure("the materials", cc.friction == ((0.6 as f32) as float) && cc.restitution == 0.0 && cc.rolling_resistance == 0.0)
     m = contact_solver.manifold_constraint_at(cc.constraints, 0)
     ensure("four points", m.point_count == 4)
     small("normal up", m.normal.y - 1.0, 0.000001)

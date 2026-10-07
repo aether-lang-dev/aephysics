@@ -163,7 +163,7 @@ test_build_and_fall() {
     ensure("fall: bones touch the slab or each other (${touching} contacts)", touching >= 4)
     count = dynamics.body_get_contact_data(human.bone_at(&h, human.BONE_PELVIS).body_id, contacts, 8)
     if count > 0 {
-        ensure("fall: the pelvis's first contact has a manifold with points and a normal", contacts[0].manifold_count >= 1 && (contacts[0].manifolds as *Manifold).point_count >= 1 && math.is_normalized((contacts[0].manifolds as *Manifold).normal))
+        ensure("fall: the pelvis's first contact has a manifold with points and a normal", contacts[0].manifold_count >= 1 && (contacts[0].manifolds as *Manifold).point_count >= 1 && math.is_normalized(math.widen3((contacts[0].manifolds as *Manifold).normal)))
     }
     free(contacts_block)
 
