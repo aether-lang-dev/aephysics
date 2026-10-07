@@ -20,6 +20,8 @@ name="$(basename "$source" .ae)"
 mkdir -p target/profile
 out="target/profile"
 cflags="$(sed -n 's/^cflags = "\(.*\)"/\1/p' aether.toml)"
+# aether.toml's ${AETHER_AEPHYSICS_CFLAGS}, expanded as ae expands it (empty when unset).
+cflags="${cflags//'${AETHER_AEPHYSICS_CFLAGS}'/${AETHER_AEPHYSICS_CFLAGS:-}}"
 includes="$(ae cflags | tr ' ' '\n' | grep '^-[Ifw]' | tr '\n' ' ')"
 libs="$(ae cflags | tr ' ' '\n' | grep '^-[Ll]' | tr '\n' ' ')"
 AETHER_LIB_DIR="$root" aetherc "$source" "$out/$name.c" >"$out/$name.log" 2>&1 || { cat "$out/$name.log"; exit 1; }

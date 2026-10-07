@@ -6,6 +6,9 @@
 set -uo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
+# The build's extra C flags (aether.toml), empty unless the caller sets them:
+# AETHER_AEPHYSICS_CFLAGS=-mavx2 builds the wide contact solver at eight lanes a register.
+export AETHER_AEPHYSICS_CFLAGS="${AETHER_AEPHYSICS_CFLAGS:-}"
 mkdir -p target
 failures=0
 for test in tests/test_*.ae; do

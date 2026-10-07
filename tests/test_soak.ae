@@ -8,13 +8,14 @@
 // checks a crazy result fails: an explosion, a tunnel, a jitter that
 // never settles.
 //
-// The reference on the same dice (its port draws them in the same
-// order): the same starting energies to the joule, none gained, fastest
-// bodies at 11.3 to 12.4 m/s (ours 11.3 to 11.4), the deepest overlap in
-// the fall 13 to 16 cm (ours 12 to 16: dynamic bodies have no continuous
-// collision in either, so a body meeting another at 9 m/s goes a step's
-// 15 cm in before its contact exists), at rest 1.0 to 5.7 mm (ours 0.6
-// to 5.0), every body asleep at the end in both.
+// The reference (e77352c) on the same dice, its port drawing them in the
+// same order, agrees nearly to the digit: the same starting energies to
+// the joule, none gained, the fastest body 11.3546 m/s on seed 1 in both,
+// the deepest overlap in the fall 0.160931 m against our 0.160922
+// (dynamic bodies have no continuous collision in either, so a body
+// meeting another at 9 m/s goes a step's 15 cm in before its contact
+// exists), at rest 0.8 to 4.7 mm against our 0.6 to 5.0, every body
+// asleep at the end in both.
 import std.string
 import aephysics.math
 import aephysics.basics

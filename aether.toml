@@ -13,4 +13,9 @@ modules = "."
 # product) inline into the solvers as the reference's static inline
 # headers do; the joint grid runs 1.6x faster than at -O2 for it. The
 # numbers are in bench/RESULTS.md under "Build flags".
-cflags = "-O3 --param max-inline-insns-auto=400 --param inline-unit-growth=400"
+#
+# AETHER_AEPHYSICS_CFLAGS adds to them: -mavx2 (or -march=native) makes
+# the wide contact solver's eight lanes one 256-bit register each, as the
+# reference's AVX2 build has them; unset, the build runs on any x86-64 or
+# arm64 with the lanes as two four-wide halves. Results are the same bits.
+cflags = "-O3 --param max-inline-insns-auto=400 --param inline-unit-growth=400 ${AETHER_AEPHYSICS_CFLAGS}"
