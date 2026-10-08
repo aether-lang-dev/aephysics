@@ -237,6 +237,8 @@ prepare_contact(ctx: *StepContext, c: *Contact, cc: *ContactConstraint, manifold
     if c.rolling_resistance > 0.0 { cc.rolling_mass = math.invert_matrix(math.add_mm(i_a, i_b)) }
     cc.softness = ctx.contact_softness
     if (c.flags & dynamics.CONTACT_STATIC) != 0 { cc.softness = ctx.static_softness }
+    // A kinematic body, of no inverse mass as a static one, when the world asks.
+    if ctx.world.enable_kinematic_static_softness && (m_a == 0.0 || m_b == 0.0) { cc.softness = ctx.static_softness }
     cc.friction = c.friction
     cc.restitution = c.restitution
     note_restitution(ctx, c.restitution)

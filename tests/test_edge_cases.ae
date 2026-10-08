@@ -885,6 +885,160 @@ test_heavy_chain() {
 
 // A hinge driven by a motor of all but unlimited torque spins its box at
 // the motor's speed and no faster; a hinge whose limits meet holds still.
+// A hinge's motor driving it past its limit (#131): the soft limit settles
+// past itself by the motor's torque over the limit's stiffness, as the
+// reference's does (its port of this scene: 31.1372 degrees at 100 N m),
+// and a stiffer limit, a higher constraint hertz where the sub-steps allow
+// it, takes a quarter of the excess for twice the hertz.
+hinge_past_limit(torque: float, sub_steps: int, hertz: float) -> float {
+    world_id = new_world()
+    adef = dynamics.default_body_def()
+    anchor = dynamics.create_body(world_id, &adef)
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.position = math.vec3(0.0, 0.0 - 0.2, 0.0)
+    calf = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    dynamics.create_capsule_shape(calf, &sdef, manifold.capsule(math.vec3(0.0, 0.0 - 0.15, 0.0), math.vec3(0.0, 0.15, 0.0), 0.05))
+    jdef = dynamics.default_revolute_joint_def()
+    jdef.base.body_id_a = anchor
+    jdef.base.body_id_b = calf
+    jdef.base.local_frame_b.p = math.vec3(0.0, 0.2, 0.0)
+    jdef.base.constraint_hertz = hertz
+    jdef.enable_limit = true
+    jdef.lower_angle = 0.0 - 0.5235988
+    jdef.upper_angle = 0.5235988
+    jdef.enable_motor = true
+    jdef.motor_speed = 5.0
+    jdef.max_motor_torque = torque
+    joint = dynamics.create_revolute_joint(world_id, &jdef)
+    s = 0
+    while s < 180 {
+        physics_world.step(world_id, 1.0 / 60.0, sub_steps)
+        s = s + 1
+    }
+    angle = joint_solver.revolute_joint_get_angle(joint) * math.RAD_TO_DEG
+    dynamics.destroy_world(world_id)
+    return angle
+}
+
+test_limit_stiffness() {
+    soft = hinge_past_limit(100.0, 4, 60.0)
+    ensure("a hinge driven past its limit settles where the reference's does (${soft}, the reference 31.1372)", math.abs_float(soft - 31.1372) < 0.01)
+    light = hinge_past_limit(5.0, 4, 60.0)
+    ensure("a light motor barely passes it (${light})", light - 30.0 < 0.05)
+    capped = hinge_past_limit(100.0, 4, 120.0)
+    ensure("at four sub-steps the hertz is capped at a quarter of their rate (${capped})", capped == soft)
+    stiff = hinge_past_limit(100.0, 8, 120.0)
+    ensure("at eight, twice the hertz takes a quarter of the excess (${stiff - 30.0} of ${soft - 30.0})", stiff - 30.0 < 0.3 * (soft - 30.0))
+}
+
+// An elliptical cone (#129): a capsule hung from a fixed point, its cone
+// centred straight down, 60 degrees toward +z and 20 toward +x; the motor
+// swings it each way and it stops at each half-angle. With the angles
+// equal it is the circle, bit for bit.
+cone_swing(major: float, minor: float, toward: Vec3, elliptical: bool) -> float {
+    world_id = new_world()
+    physics_world.set_gravity(world_id, math.vec3_zero())
+    adef = dynamics.default_body_def()
+    anchor = dynamics.create_body(world_id, &adef)
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.position = math.vec3(0.0, 0.0 - 0.3, 0.0)
+    bob = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    dynamics.create_capsule_shape(bob, &sdef, manifold.capsule(math.vec3(0.0, 0.0 - 0.2, 0.0), math.vec3(0.0, 0.2, 0.0), 0.05))
+    jdef = dynamics.default_spherical_joint_def()
+    jdef.base.body_id_a = anchor
+    jdef.base.body_id_b = bob
+    // Both frames' z down the capsule, so the swing is the capsule's.
+    down = math.compute_quat_between_unit_vectors(math.vec3_axis_z(), math.vec3(0.0, 0.0 - 1.0, 0.0))
+    jdef.base.local_frame_a.q = down
+    jdef.base.local_frame_b = Transform { p: math.vec3(0.0, 0.3, 0.0), q: down }
+    jdef.enable_cone_limit = true
+    jdef.cone_angle = major * math.DEG_TO_RAD
+    if elliptical {
+        jdef.cone_minor_angle = minor * math.DEG_TO_RAD
+        jdef.cone_major_axis = math.inv_rotate_vector(down, math.vec3_axis_z())
+    }
+    jdef.enable_motor = true
+    jdef.max_motor_torque = 2.0
+    // Spinning about the axis square to down and `toward` swings the capsule toward it.
+    jdef.motor_velocity = math.mul_sv(3.0, math.normalize(math.cross(math.vec3(0.0, 0.0 - 1.0, 0.0), toward)))
+    dynamics.create_spherical_joint(world_id, &jdef)
+    s = 0
+    while s < 120 {
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        s = s + 1
+    }
+    line = math.rotate_vector(dynamics.body_get_rotation(bob), math.vec3(0.0, 0.0 - 1.0, 0.0))
+    swing = math.atan2_approx(math.length(math.cross(line, math.vec3(0.0, 0.0 - 1.0, 0.0))), math.dot(line, math.vec3(0.0, 0.0 - 1.0, 0.0))) * math.RAD_TO_DEG
+    dynamics.destroy_world(world_id)
+    return swing
+}
+
+test_elliptical_cone() {
+    toward_major = cone_swing(60.0, 20.0, math.vec3_axis_z(), true)
+    toward_minor = cone_swing(60.0, 20.0, math.vec3_axis_x(), true)
+    ensure("an elliptical cone stops a swing toward its major axis near 60 (${toward_major})", toward_major > 58.0 && toward_major < 62.5)
+    ensure("and one across it near 20 (${toward_minor})", toward_minor > 18.0 && toward_minor < 22.5)
+    circle = cone_swing(40.0, 0.0, math.vec3_axis_x(), false)
+    as_ellipse = cone_swing(40.0, 40.0, math.vec3_axis_x(), true)
+    ensure("equal half-angles are the circle, bit for bit (${circle} ${as_ellipse})", circle == as_ellipse)
+}
+
+// A kinematic box driven at 7 m/s into a resting sphere (#130): with the
+// world's kinematic static softness on, the sphere sinks less into it.
+kinematic_plow(stiff: bool) -> float {
+    fixtures_ready()
+    wdef = dynamics.default_world_def()
+    wdef.gravity = math.vec3_zero()
+    wdef.enable_kinematic_static_softness = stiff
+    world_id = dynamics.create_world(&wdef)
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_KINEMATIC
+    bdef.position = math.vec3(0.0 - 2.0, 0.5, 0.0)
+    bdef.linear_velocity = math.vec3(7.0, 0.0, 0.0)
+    car = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    dynamics.create_hull_shape(car, &sdef, g_box as *HullData)
+    ball_def = dynamics.default_body_def()
+    ball_def.kind = dynamics.BODY_DYNAMIC
+    ball_def.position = math.vec3(0.0, 0.5, 0.0)
+    ball = dynamics.create_body(world_id, &ball_def)
+    dynamics.create_sphere_shape(ball, &sdef, manifold.sphere(math.vec3_zero(), 0.3))
+    // The strike's first frame is the step's travel (7 m/s is 12 cm a step,
+    // past the speculative distance), the same either way: what differs is
+    // how fast the contact pushes the ball back out. The sink four frames on.
+    sink = 0.0
+    first = 0 - 1
+    s = 0
+    while s < 30 {
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        // The ball's centre against the car's front face: radius 0.3 out when just touching.
+        gap = dynamics.body_get_position(ball).x - (dynamics.body_get_position(car).x + 0.5) - 0.3
+        if gap < 0.0 && first < 0 { first = s }
+        if first >= 0 && s == first + 4 { sink = gap }
+        s = s + 1
+    }
+    flag = physics_world.is_kinematic_static_softness_enabled(world_id)
+    dynamics.destroy_world(world_id)
+    if flag != stiff { return 1.0 }
+    return sink
+}
+
+test_kinematic_softness() {
+    soft = kinematic_plow(false)
+    stiff = kinematic_plow(true)
+    ensure("a ball a kinematic box plows into is out to within 1 cm four frames on with the static softness (${stiff} m)", stiff > 0.0 - 0.01)
+    ensure("and still 3 cm in without it, the reference's (${soft} m)", soft < 0.0 - 0.03)
+    world_id = new_world()
+    ensure("off by default, the reference's", physics_world.is_kinematic_static_softness_enabled(world_id) == false)
+    physics_world.enable_kinematic_static_softness(world_id, true)
+    ensure("and a world turns it on", physics_world.is_kinematic_static_softness_enabled(world_id))
+    dynamics.destroy_world(world_id)
+}
+
 test_motor_and_limits() {
     fixtures_ready()
     wdef = dynamics.default_world_def()
@@ -961,6 +1115,9 @@ main() {
     test_heavy_chain()
     test_motor_and_limits()
     test_flat_hull()
+    test_limit_stiffness()
+    test_elliptical_cone()
+    test_kinematic_softness()
     println("edge_cases: ${checks} checks")
     if failures == 0 {
         println("edge_cases: all checks passed")

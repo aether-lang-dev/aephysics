@@ -38,7 +38,7 @@ exports (
     joint_event_count, joint_event,
     enable_sleeping, is_sleeping_enabled, enable_warm_starting, is_warm_starting_enabled, enable_continuous, is_continuous_enabled,
     enable_speculative, set_restitution_threshold, get_restitution_threshold, set_restitution_iterations, get_restitution_iterations,
-    enable_restitution_propagation, is_restitution_propagation_enabled, set_hit_event_threshold, get_hit_event_threshold,
+    enable_restitution_propagation, is_restitution_propagation_enabled, enable_kinematic_static_softness, is_kinematic_static_softness_enabled, set_hit_event_threshold, get_hit_event_threshold,
     set_contact_tuning, set_contact_recycle_distance, get_contact_recycle_distance, set_maximum_linear_speed, get_maximum_linear_speed,
     set_gravity, get_gravity, set_user_data, get_user_data, set_friction_callback, set_restitution_callback,
     set_custom_filter_callback, set_pre_solve_callback, get_awake_body_count, get_counters, get_bounds, rebuild_static_tree,
@@ -311,6 +311,13 @@ enable_restitution_propagation(id: WorldId, flag: bool) {
     if w != null { w.enable_restitution_propagation = flag }
 }
 is_restitution_propagation_enabled(id: WorldId) -> bool { return dynamics.get_world(id.index1 - 1).enable_restitution_propagation }
+// Whether contacts with a kinematic body take the static softness, so a body
+// the game drives hard does not sink into what it meets (off: the reference's).
+enable_kinematic_static_softness(id: WorldId, flag: bool) {
+    w = world_of(id)
+    if w != null { w.enable_kinematic_static_softness = flag }
+}
+is_kinematic_static_softness_enabled(id: WorldId) -> bool { return dynamics.get_world(id.index1 - 1).enable_kinematic_static_softness }
 set_hit_event_threshold(id: WorldId, value: float) {
     if math.is_valid_float(value) == false { return }
     w = world_of(id)

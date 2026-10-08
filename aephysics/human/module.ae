@@ -81,6 +81,8 @@ struct HumanBone {
     shape_id: ShapeId              // the bone's own capsule
     foot_shape_id: ShapeId         // a calf's foot; null on the rest
     cone_axis: Vec3                // the cone's centre in local_frame_a
+    swing_minor_limit: float       // an elliptical cone's half angle across cone_major_axis; 0 for a circle
+    cone_major_axis: Vec3          // in local_frame_a
 }
 
 // The ragdoll: a heap block of bones and filter joints (create allocates, destroy frees).
@@ -121,6 +123,11 @@ struct BoneSpec {
     foot: Capsule
     foot_friction: float           // the sole's
     cone_axis: Vec3                // the cone's centre in the joint's frame on the parent: z, the rest, or off it
+    // An elliptical cone: swing_degrees toward cone_major_axis (in the
+    // joint's frame on the parent, across the centre) and
+    // swing_minor_degrees across it; 0 for a circle of swing_degrees.
+    swing_minor_degrees: float
+    cone_major_axis: Vec3
 }
 
 // A figure's shape is BONE_COUNT BoneSpecs in one heap block: the
@@ -158,35 +165,35 @@ reference_tight_shape() -> ptr {
         parent: 0 - 1, reference: transform_of(0.0, 0.996219, 0.0 - 0.023868, 1.0, 0.0, 0.0, 0.0), group: 0, friction: 0.6,
         capsule: manifold.capsule(math.vec3(0.04, 0.000001, 0.0), math.vec3(0.0 - 0.04, 0.0 - 0.000001, 0.0), 0.15),
         joint_kind: dynamics.JOINT_PARALLEL, frame_a: no_joint, frame_b: no_joint, swing_degrees: 0.0, lower_degrees: 0.0, upper_degrees: 0.0, joint_friction: 1.0,
-        density: 1.0, has_foot: false, foot: no_foot(), foot_friction: 0.0, cone_axis: on_axis })
+        density: 1.0, has_foot: false, foot: no_foot(), foot_friction: 0.0, cone_axis: on_axis, swing_minor_degrees: 0.0, cone_major_axis: math.vec3_zero() })
     set_spec(shape, BONE_SPINE_01, BoneSpec {
         parent: BONE_PELVIS, reference: transform_of(0.0, 1.017288, 0.0 - 0.024882, 1.0, 0.0, 0.0, 0.0), group: 0 - 1, friction: 0.5,
         capsule: manifold.capsule(math.vec3(0.029876, 0.0 - 0.146581, 0.00626), math.vec3(0.0 - 0.029876, 0.0 - 0.146574, 0.00626), 0.145663),
         joint_kind: dynamics.JOINT_SPHERICAL,
         frame_a: transform_of(0.0, 0.0 - 0.021069, 0.001014, 0.0 - 0.642737, 0.0, 0.0, 0.0 - 0.766087),
         frame_b: transform_of(0.0, 0.0, 0.0, 0.0 - 0.707107, 0.0, 0.0, 0.0 - 0.707107),
-        swing_degrees: 35.0, lower_degrees: 0.0 - 17.5, upper_degrees: 17.5, joint_friction: 1.0, density: 1.0, has_foot: false, foot: no_foot(), foot_friction: 0.0, cone_axis: on_axis })
+        swing_degrees: 35.0, lower_degrees: 0.0 - 17.5, upper_degrees: 17.5, joint_friction: 1.0, density: 1.0, has_foot: false, foot: no_foot(), foot_friction: 0.0, cone_axis: on_axis, swing_minor_degrees: 0.0, cone_major_axis: math.vec3_zero() })
     set_spec(shape, BONE_SPINE_03, BoneSpec {
         parent: BONE_SPINE_01, reference: transform_of(0.0, 1.267766, 0.0 - 0.02232, 1.0, 0.0, 0.0, 0.0), group: 0, friction: 0.5,
         capsule: manifold.capsule(math.vec3(0.063996, 0.0 - 0.117434, 0.0 - 0.040199), math.vec3(0.0 - 0.063996, 0.0 - 0.117432, 0.0 - 0.040199), 0.165004),
         joint_kind: dynamics.JOINT_SPHERICAL,
         frame_a: transform_of(0.0, 0.0 - 0.250478, 0.0 - 0.002562, 0.0 - 0.642766, 0.0, 0.0, 0.0 - 0.766063),
         frame_b: transform_of(0.0, 0.0, 0.0, 0.0 - 0.707107, 0.0, 0.0, 0.0 - 0.707107),
-        swing_degrees: 35.0, lower_degrees: 0.0 - 17.5, upper_degrees: 17.5, joint_friction: 1.0, density: 1.0, has_foot: false, foot: no_foot(), foot_friction: 0.0, cone_axis: on_axis })
+        swing_degrees: 35.0, lower_degrees: 0.0 - 17.5, upper_degrees: 17.5, joint_friction: 1.0, density: 1.0, has_foot: false, foot: no_foot(), foot_friction: 0.0, cone_axis: on_axis, swing_minor_degrees: 0.0, cone_major_axis: math.vec3_zero() })
     set_spec(shape, BONE_NECK, BoneSpec {
         parent: BONE_SPINE_03, reference: transform_of(0.0, 1.498783, 0.024462, 0.987879, 0.0, 0.0, 0.155228), group: 0, friction: 0.2,
         capsule: manifold.capsule(math.vec3(0.0, 0.0 - 0.21234, 0.0), math.vec3(0.0, 0.0 - 0.08734, 0.0), 0.11),
         joint_kind: dynamics.JOINT_SPHERICAL,
         frame_a: transform_of(0.0, 0.0 - 0.231017, 0.0 - 0.046781, 0.0 - 0.516157, 0.0 - 0.000002, 0.000003, 0.0 - 0.856494),
         frame_b: transform_of(0.0, 0.0, 0.0, 0.0 - 0.707108, 0.0 - 0.000002, 0.000002, 0.0 - 0.707106),
-        swing_degrees: 30.0, lower_degrees: 0.0 - 17.5, upper_degrees: 17.5, joint_friction: 1.0, density: 1.0, has_foot: false, foot: no_foot(), foot_friction: 0.0, cone_axis: on_axis })
+        swing_degrees: 30.0, lower_degrees: 0.0 - 17.5, upper_degrees: 17.5, joint_friction: 1.0, density: 1.0, has_foot: false, foot: no_foot(), foot_friction: 0.0, cone_axis: on_axis, swing_minor_degrees: 0.0, cone_major_axis: math.vec3_zero() })
     set_spec(shape, BONE_THIGH_L, BoneSpec {
         parent: BONE_PELVIS, reference: transform_of(0.092175, 0.971562, 0.0 - 0.011177, 0.471412, 0.52951, 0.0 - 0.499888, 0.0 - 0.497495), group: 0 - 1, friction: 0.6,
         capsule: manifold.capsule(math.vec3(0.0 - 0.047269, 0.000001, 0.0), math.vec3(0.0 - 0.379769, 0.000005, 0.0), 0.091539),
         joint_kind: dynamics.JOINT_SPHERICAL,
         frame_a: transform_of(0.092175, 0.024656, 0.0 - 0.012691, 0.0 - 0.460186, 0.0 - 0.365368, 0.0 - 0.637662, 0.498118),
         frame_b: transform_of(0.0, 0.0, 0.0, 0.0 - 0.499997, 0.0 - 0.500003, 0.500002, 0.499998),
-        swing_degrees: 30.0, lower_degrees: 0.0 - 10.0, upper_degrees: 10.0, joint_friction: 1.0, density: 1.0, has_foot: false, foot: no_foot(), foot_friction: 0.0, cone_axis: on_axis })
+        swing_degrees: 30.0, lower_degrees: 0.0 - 10.0, upper_degrees: 10.0, joint_friction: 1.0, density: 1.0, has_foot: false, foot: no_foot(), foot_friction: 0.0, cone_axis: on_axis, swing_minor_degrees: 0.0, cone_major_axis: math.vec3_zero() })
     // The calves carry the shins at half density and the feet at full.
     set_spec(shape, BONE_CALF_L, BoneSpec {
         parent: BONE_THIGH_L, reference: transform_of(0.11872, 0.534541, 0.0 - 0.035362, 0.521188, 0.480597, 0.0 - 0.54638, 0.0 - 0.445935), group: 0, friction: SHIN_FRICTION,
@@ -195,14 +202,14 @@ reference_tight_shape() -> ptr {
         frame_a: transform_of(0.0 - 0.438494, 0.0 - 0.000175, 0.0, 0.344866, 0.0 - 0.938652, 0.000002, 0.0 - 0.000008),
         frame_b: transform_of(0.0, 0.0, 0.0, 0.0 - 0.008182, 0.0 - 0.999967, 0.000001, 0.0 - 0.000007),
         swing_degrees: 0.0, lower_degrees: 0.0 - 30.0, upper_degrees: 30.0, joint_friction: 1.0, density: 0.5,
-        has_foot: true, foot: manifold.capsule(math.vec3(0.0 - 0.456371, 0.129321, 0.000013), math.vec3(0.0 - 0.359977, 0.014394, 0.000013), 0.07), foot_friction: FOOT_FRICTION, cone_axis: on_axis })
+        has_foot: true, foot: manifold.capsule(math.vec3(0.0 - 0.456371, 0.129321, 0.000013), math.vec3(0.0 - 0.359977, 0.014394, 0.000013), 0.07), foot_friction: FOOT_FRICTION, cone_axis: on_axis, swing_minor_degrees: 0.0, cone_major_axis: math.vec3_zero() })
     set_spec(shape, BONE_THIGH_R, BoneSpec {
         parent: BONE_PELVIS, reference: transform_of(0.0 - 0.092175, 0.971562, 0.0 - 0.011177, 0.0 - 0.497495, 0.499888, 0.52951, 0.0 - 0.471412), group: 0 - 1, friction: 0.6,
         capsule: manifold.capsule(math.vec3(0.047269, 0.0 - 0.000001, 0.0), math.vec3(0.379769, 0.0 - 0.000005, 0.0), 0.092587),
         joint_kind: dynamics.JOINT_SPHERICAL,
         frame_a: transform_of(0.0 - 0.092175, 0.024656, 0.0 - 0.012691, 0.380666, 0.491846, 0.488644, 0.0 - 0.611889),
         frame_b: transform_of(0.0, 0.0, 0.0, 0.0 - 0.500002, 0.499998, 0.0 - 0.499998, 0.500002),
-        swing_degrees: 30.0, lower_degrees: 0.0 - 10.0, upper_degrees: 10.0, joint_friction: 1.0, density: 1.0, has_foot: false, foot: no_foot(), foot_friction: 0.0, cone_axis: on_axis })
+        swing_degrees: 30.0, lower_degrees: 0.0 - 10.0, upper_degrees: 10.0, joint_friction: 1.0, density: 1.0, has_foot: false, foot: no_foot(), foot_friction: 0.0, cone_axis: on_axis, swing_minor_degrees: 0.0, cone_major_axis: math.vec3_zero() })
     set_spec(shape, BONE_CALF_R, BoneSpec {
         parent: BONE_THIGH_R, reference: transform_of(0.0 - 0.11872, 0.534541, 0.0 - 0.035362, 0.0 - 0.445935, 0.54638, 0.480597, 0.0 - 0.521188), group: 0, friction: SHIN_FRICTION,
         capsule: manifold.capsule(math.vec3(0.445, 0.0 - 0.000002, 0.000003), math.vec3(0.0 - 0.005, 0.0, 0.000003), 0.08),
@@ -210,35 +217,35 @@ reference_tight_shape() -> ptr {
         frame_a: transform_of(0.438494, 0.000175, 0.0, 0.000007, 0.000005, 0.0 - 0.34486, 0.0 - 0.938654),
         frame_b: transform_of(0.0, 0.0, 0.0, 0.000006, 0.000005, 0.008188, 0.0 - 0.999966),
         swing_degrees: 0.0, lower_degrees: 0.0 - 30.0, upper_degrees: 30.0, joint_friction: 1.0, density: 0.5,
-        has_foot: true, foot: manifold.capsule(math.vec3(0.369113, 0.0 - 0.00683, 0.000017), math.vec3(0.465507, 0.0 - 0.121757, 0.000017), 0.07), foot_friction: FOOT_FRICTION, cone_axis: on_axis })
+        has_foot: true, foot: manifold.capsule(math.vec3(0.369113, 0.0 - 0.00683, 0.000017), math.vec3(0.465507, 0.0 - 0.121757, 0.000017), 0.07), foot_friction: FOOT_FRICTION, cone_axis: on_axis, swing_minor_degrees: 0.0, cone_major_axis: math.vec3_zero() })
     set_spec(shape, BONE_UPPER_ARM_L, BoneSpec {
         parent: BONE_SPINE_03, reference: transform_of(0.185817, 1.44363, 0.031306, 0.56022, 0.0 - 0.307179, 0.366233, 0.0 - 0.676512), group: 0, friction: 0.6,
         capsule: manifold.capsule(math.vec3(0.296038, 0.004386, 0.0 - 0.000794), math.vec3(0.0 - 0.016086, 0.004384, 0.0 - 0.016127), 0.065),
         joint_kind: dynamics.JOINT_SPHERICAL,
         frame_a: transform_of(0.185817, 0.0 - 0.175865, 0.0 - 0.053625, 0.0 - 0.559466, 0.0 - 0.213784, 0.0 - 0.670199, 0.438323),
         frame_b: transform_of(0.0, 0.0, 0.0, 0.0 - 0.500953, 0.0 - 0.502617, 0.0 - 0.509318, 0.0 - 0.486844),
-        swing_degrees: 45.0, lower_degrees: 0.0 - 20.0, upper_degrees: 20.0, joint_friction: 0.8, density: 1.0, has_foot: false, foot: no_foot(), foot_friction: 0.0, cone_axis: on_axis })
+        swing_degrees: 45.0, lower_degrees: 0.0 - 20.0, upper_degrees: 20.0, joint_friction: 0.8, density: 1.0, has_foot: false, foot: no_foot(), foot_friction: 0.0, cone_axis: on_axis, swing_minor_degrees: 0.0, cone_major_axis: math.vec3_zero() })
     set_spec(shape, BONE_LOWER_ARM_L, BoneSpec {
         parent: BONE_UPPER_ARM_L, reference: transform_of(0.347683, 1.193455, 0.029378, 0.406736, 0.0 - 0.493012, 0.089135, 0.0 - 0.763911), group: 0, friction: 0.3,
         capsule: manifold.capsule(math.vec3(0.312329, 0.0 - 0.008256, 0.0 - 0.016454), math.vec3(0.033153, 0.008259, 0.0 - 0.002741), 0.06),
         joint_kind: dynamics.JOINT_REVOLUTE,
         frame_a: transform_of(0.297979, 0.000361, 0.0, 0.916726, 0.399352, 0.000839, 0.0 - 0.011456),
         frame_b: transform_of(0.0, 0.0, 0.0, 0.999922, 0.0 - 0.003857, 0.004659, 0.0 - 0.010908),
-        swing_degrees: 0.0, lower_degrees: 0.0 - 35.0, upper_degrees: 35.0, joint_friction: 0.06, density: 1.0, has_foot: false, foot: no_foot(), foot_friction: 0.0, cone_axis: on_axis })
+        swing_degrees: 0.0, lower_degrees: 0.0 - 35.0, upper_degrees: 35.0, joint_friction: 0.06, density: 1.0, has_foot: false, foot: no_foot(), foot_friction: 0.0, cone_axis: on_axis, swing_minor_degrees: 0.0, cone_major_axis: math.vec3_zero() })
     set_spec(shape, BONE_UPPER_ARM_R, BoneSpec {
         parent: BONE_SPINE_03, reference: transform_of(0.0 - 0.185817, 1.44363, 0.031306, 0.676512, 0.366233, 0.307179, 0.56022), group: 0, friction: 0.6,
         capsule: manifold.capsule(math.vec3(0.0 - 0.300237, 0.0 - 0.000001, 0.0 - 0.000319), math.vec3(0.011887, 0.000001, 0.015013), 0.065),
         joint_kind: dynamics.JOINT_SPHERICAL,
         frame_a: transform_of(0.0 - 0.185817, 0.0 - 0.175865, 0.0 - 0.053625, 0.213793, 0.559449, 0.438334, 0.0 - 0.670204),
         frame_b: transform_of(0.0, 0.0, 0.0, 0.0 - 0.509319, 0.486843, 0.500954, 0.0 - 0.502617),
-        swing_degrees: 45.0, lower_degrees: 0.0 - 20.0, upper_degrees: 20.0, joint_friction: 0.8, density: 1.0, has_foot: false, foot: no_foot(), foot_friction: 0.0, cone_axis: on_axis })
+        swing_degrees: 45.0, lower_degrees: 0.0 - 20.0, upper_degrees: 20.0, joint_friction: 0.8, density: 1.0, has_foot: false, foot: no_foot(), foot_friction: 0.0, cone_axis: on_axis, swing_minor_degrees: 0.0, cone_major_axis: math.vec3_zero() })
     set_spec(shape, BONE_LOWER_ARM_R, BoneSpec {
         parent: BONE_UPPER_ARM_R, reference: transform_of(0.0 - 0.347683, 1.193455, 0.029378, 0.763911, 0.089135, 0.493012, 0.406736), group: 0, friction: 0.3,
         capsule: manifold.capsule(math.vec3(0.0 - 0.312649, 0.0 - 0.000003, 0.016471), math.vec3(0.0 - 0.032986, 0.0, 0.002732), 0.06),
         joint_kind: dynamics.JOINT_REVOLUTE,
         frame_a: transform_of(0.0 - 0.297979, 0.0 - 0.000361, 0.0, 0.0 - 0.405444, 0.914059, 0.010541, 0.000852),
         frame_b: transform_of(0.0, 0.0, 0.0, 0.0 - 0.002794, 0.999936, 0.010042, 0.004364),
-        swing_degrees: 0.0, lower_degrees: 0.0 - 35.0, upper_degrees: 35.0, joint_friction: 0.06, density: 1.0, has_foot: false, foot: no_foot(), foot_friction: 0.0, cone_axis: on_axis })
+        swing_degrees: 0.0, lower_degrees: 0.0 - 35.0, upper_degrees: 35.0, joint_friction: 0.06, density: 1.0, has_foot: false, foot: no_foot(), foot_friction: 0.0, cone_axis: on_axis, swing_minor_degrees: 0.0, cone_major_axis: math.vec3_zero() })
     return shape
 }
 
@@ -371,11 +378,15 @@ human_fit_shape(shape: ptr, heads: ptr, tails: ptr, toes: ptr) {
         if spec.parent >= 0 {
             parent = spec_at(shape, spec.parent)
             centre = math.rotate_vector(spec.frame_a.q, spec.cone_axis)
+            major = math.rotate_vector(spec.frame_a.q, spec.cone_major_axis)
             spec.frame_a.p = math.inv_rotate_vector(parent.reference.q, math.sub(head_at[i], head_at[spec.parent]))
             spec.frame_a.q = math.normalize_quat(math.inv_mul_quat(parent.reference.q, math.mul_quat(turn[i], math.mul_quat(old[spec.parent], spec.frame_a.q))))
             // A cone centred off the rest stays where it was on the parent;
             // one about the rest turns with it, as the reference's does.
-            if cone_off_axis(spec.cone_axis) { spec.cone_axis = math.inv_rotate_vector(spec.frame_a.q, centre) }
+            if cone_off_axis(spec.cone_axis) {
+                spec.cone_axis = math.inv_rotate_vector(spec.frame_a.q, centre)
+                spec.cone_major_axis = math.inv_rotate_vector(spec.frame_a.q, major)
+            }
         }
         i = i + 1
     }
@@ -424,7 +435,12 @@ cone_off_axis(axis: Vec3) -> bool { return axis.x != 0.0 || axis.y != 0.0 || axi
 // them as well as the reference's.
 const SHOULDER_CONE = 120.0
 const SHOULDER_TWIST = 60.0
-const HIP_CONE = 78.0
+// A person's hip, from standing: the thigh flexes ahead to 125 degrees
+// and extends back to 25; it abducts out to 45 and adducts across to 30.
+const HIP_FLEXION = 125.0
+const HIP_EXTENSION = 25.0
+const HIP_ABDUCTION = 45.0
+const HIP_ADDUCTION = 30.0
 const KNEE_FLEXION = 150.0
 const ELBOW_FLEXION = 145.0
 
@@ -439,8 +455,8 @@ human_anatomical_limits(shape: ptr) {
     spec_at(shape, BONE_UPPER_ARM_L).upper_degrees = SHOULDER_TWIST
     spec_at(shape, BONE_UPPER_ARM_R).lower_degrees = 0.0 - SHOULDER_TWIST
     spec_at(shape, BONE_UPPER_ARM_R).upper_degrees = SHOULDER_TWIST
-    aim_cone(shape, BONE_THIGH_L, up, forward, HIP_CONE, 0.3, 0.0 - 0.62, 0.725)
-    aim_cone(shape, BONE_THIGH_R, up, forward, HIP_CONE, 0.3, 0.0 - 0.62, 0.725)
+    aim_ellipse(shape, BONE_THIGH_L, up, forward, HIP_FLEXION, HIP_EXTENSION, HIP_ABDUCTION, HIP_ADDUCTION)
+    aim_ellipse(shape, BONE_THIGH_R, up, forward, HIP_FLEXION, HIP_EXTENSION, HIP_ABDUCTION, HIP_ADDUCTION)
     set_hinge(shape, BONE_CALF_L, math.neg(forward), KNEE_FLEXION)
     set_hinge(shape, BONE_CALF_R, math.neg(forward), KNEE_FLEXION)
     set_hinge(shape, BONE_LOWER_ARM_L, forward, ELBOW_FLEXION)
@@ -461,6 +477,8 @@ human_tight_limits(shape: ptr) {
         spec.lower_degrees = t.lower_degrees
         spec.upper_degrees = t.upper_degrees
         spec.cone_axis = t.cone_axis
+        spec.swing_minor_degrees = t.swing_minor_degrees
+        spec.cone_major_axis = t.cone_major_axis
         i = i + 1
     }
     free(tight)
@@ -479,6 +497,51 @@ aim_cone(shape: ptr, index: int, up: Vec3, forward: Vec3, degrees: float, out: f
     centre = math.normalize(math.add(math.add(math.mul_sv(out, side), math.mul_sv(along_up, up)), math.mul_sv(ahead, forward)))
     spec.cone_axis = math.inv_rotate_vector(math.mul_quat(parent.reference.q, spec.frame_a.q), centre)
     spec.swing_degrees = degrees
+}
+
+// A bone's elliptical cone from a person's ranges, degrees from hanging
+// straight down: `ahead` and `back` along the figure's forward, `out` and
+// `across` along its side. The ellipse is centred between each pair and
+// passes through all four from straight down, so a bone swung straight
+// out stops at `out` (an ellipse of half each sum would touch each range
+// only half way along the other: a hip of 125/25 and 45/30 so centred
+// lets a straight thigh out only 35 degrees, and reaches 45 flexed 50).
+// Its major axis lies along the forward.
+aim_ellipse(shape: ptr, index: int, up: Vec3, forward: Vec3, ahead: float, back: float, out: float, across_degrees: float) {
+    spec = spec_at(shape, index)
+    parent = spec_at(shape, spec.parent)
+    side = math.normalize(across(across(math.sub(spec.reference.p, parent.reference.p), up), forward))
+    down = math.neg(up)
+    // The centre, turned from straight down by the two ranges' midpoints,
+    // the forward and side parts of one rotation off the down.
+    offset = math.add(math.mul_sv(0.5 * (ahead - back) * math.DEG_TO_RAD, forward), math.mul_sv(0.5 * (out - across_degrees) * math.DEG_TO_RAD, side))
+    turn = math.length(offset)
+    centre = down
+    if turn > 0.0 {
+        cs = math.compute_cos_sin(turn)
+        centre = math.add(math.mul_sv(cs.cosine, down), math.mul_sv(cs.sine / turn, offset))
+    }
+    major = math.normalize(across(forward, centre))
+    to_joint = math.mul_quat(parent.reference.q, spec.frame_a.q)
+    spec.cone_axis = math.inv_rotate_vector(to_joint, math.normalize(centre))
+    spec.cone_major_axis = math.inv_rotate_vector(to_joint, major)
+    // The half-angles through the four points: with the centre (cf, cs)
+    // off straight down, A^2 (1 - cs^2 / B^2) = hf^2 and
+    // B^2 (1 - cf^2 / A^2) = hs^2, by a fixed point from the half-ranges.
+    cf = 0.5 * (ahead - back)
+    cs = 0.5 * (out - across_degrees)
+    hf = 0.5 * (ahead + back)
+    hs = 0.5 * (out + across_degrees)
+    major_degrees = hf
+    minor_degrees = hs
+    iteration = 0
+    while iteration < 32 {
+        minor_degrees = hs / sqrt(math.max_float(1.0 - (cf * cf) / (major_degrees * major_degrees), 0.01))
+        major_degrees = hf / sqrt(math.max_float(1.0 - (cs * cs) / (minor_degrees * minor_degrees), 0.01))
+        iteration = iteration + 1
+    }
+    spec.swing_degrees = major_degrees
+    spec.swing_minor_degrees = minor_degrees
 }
 
 // A hinge's axis in the figure's space: its frame on the parent's z.
@@ -572,6 +635,8 @@ place_bone(h: *Human, world_id: WorldId, index: int, placement: Transform, spec:
     bone.swing_limit = spec.swing_degrees * math.DEG_TO_RAD
     bone.twist_limit = Vec2 { x: spec.lower_degrees * math.DEG_TO_RAD, y: spec.upper_degrees * math.DEG_TO_RAD }
     bone.cone_axis = spec.cone_axis
+    bone.swing_minor_limit = spec.swing_minor_degrees * math.DEG_TO_RAD
+    bone.cone_major_axis = spec.cone_major_axis
     bone.joint_friction = spec.joint_friction
 }
 
@@ -603,6 +668,8 @@ create_human_shaped(h: *Human, world_id: WorldId, placement: Transform, shape: p
         bone.shape_id = dynamics.null_shape_id()
         bone.foot_shape_id = dynamics.null_shape_id()
         bone.cone_axis = math.vec3_axis_z()
+        bone.swing_minor_limit = 0.0
+        bone.cone_major_axis = math.vec3_zero()
         bone.joint_friction = 1.0
         bone.parent_index = 0 - 1
         i = i + 1
@@ -663,6 +730,8 @@ create_human_shaped(h: *Human, world_id: WorldId, placement: Transform, shape: p
             sdef.enable_cone_limit = true
             sdef.cone_angle = bone.swing_limit
             sdef.cone_axis = bone.cone_axis
+            sdef.cone_minor_angle = bone.swing_minor_limit
+            sdef.cone_major_axis = bone.cone_major_axis
             sdef.enable_twist_limit = true
             sdef.lower_twist_angle = bone.twist_limit.x
             sdef.upper_twist_angle = bone.twist_limit.y
