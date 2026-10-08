@@ -1039,6 +1039,57 @@ test_kinematic_softness() {
     dynamics.destroy_world(world_id)
 }
 
+// A hull of twelve random points rocking on the floor about one of its
+// vertices (#134), from its state at step 800 of the soak's seed 1. The
+// reference, and this engine before, rocked it in a cycle of 400 steps for
+// good: the corner about to land was on the other face, outside the
+// manifold, so it was found a step deep when the incident face flipped and
+// the soft contact lifted it back out. With the near vertices in the face
+// contact it lands speculatively and the hull sleeps.
+test_rocking_hull() {
+    fixtures_ready()
+    world_id = new_world()
+    ground_in(world_id, g_ground)
+    points_block = basics.alloc(12 * sizeof(Vec3))
+    p = points_block as Vec3[]
+    p[0] = math.vec3(0.220136, 0.0 - 0.36411, 0.0 - 0.246699)
+    p[1] = math.vec3(0.275777, 0.320701, 0.0 - 0.125163)
+    p[2] = math.vec3(0.365331, 0.1893, 0.296603)
+    p[3] = math.vec3(0.0 - 0.294259, 0.0304819, 0.0 - 0.345116)
+    p[4] = math.vec3(0.0 - 0.108805, 0.0 - 0.0106571, 0.0 - 0.0166387)
+    p[5] = math.vec3(0.323313, 0.0991119, 0.0 - 0.129044)
+    p[6] = math.vec3(0.0 - 0.0213752, 0.164373, 0.0 - 0.268892)
+    p[7] = math.vec3(0.0 - 0.298703, 0.181976, 0.217499)
+    p[8] = math.vec3(0.366845, 0.36118, 0.0 - 0.240938)
+    p[9] = math.vec3(0.0 - 0.210321, 0.0 - 0.23581, 0.0498428)
+    p[10] = math.vec3(0.0 - 0.0156377, 0.0 - 0.331248, 0.0 - 0.312473)
+    p[11] = math.vec3(0.0 - 0.221967, 0.368188, 0.0 - 0.37495)
+    rock = hull.create_hull(p, 12, 12)
+    basics.free_bytes(points_block, 12 * sizeof(Vec3))
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.position = math.vec3(0.0 - 1.79998, 0.251883, 0.0 - 5.57335)
+    bdef.rotation = math.normalize_quat(Quat { x: 0.0 - 0.805268, y: 0.0 - 0.111744, z: 0.572006, w: 0.0 - 0.108931 })
+    bdef.linear_velocity = math.vec3(0.0133746, 0.0 - 0.00310028, 0.0128988)
+    bdef.angular_velocity = math.vec3(0.0574453, 0.0 - 0.00689895, 0.0 - 0.0473872)
+    body = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    sdef.base_material.restitution = 0.530985
+    sdef.base_material.rolling_resistance = 0.05
+    dynamics.create_hull_shape(body, &sdef, rock)
+    asleep_at = 0 - 1
+    s = 0
+    while s < 300 {
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        if asleep_at < 0 && dynamics.body_is_awake(body) == false { asleep_at = s + 1 }
+        s = s + 1
+    }
+    ensure("a hull rocking about a vertex on the floor comes to rest and sleeps (step ${asleep_at})", asleep_at > 0)
+    ensure("resting on the floor, finite (y ${dynamics.body_get_position(body).y})", finite_body(body) && dynamics.body_get_position(body).y > 0.1)
+    dynamics.destroy_world(world_id)
+    hull.destroy_hull(rock)
+}
+
 test_motor_and_limits() {
     fixtures_ready()
     wdef = dynamics.default_world_def()
@@ -1118,6 +1169,7 @@ main() {
     test_limit_stiffness()
     test_elliptical_cone()
     test_kinematic_softness()
+    test_rocking_hull()
     println("edge_cases: ${checks} checks")
     if failures == 0 {
         println("edge_cases: all checks passed")
