@@ -714,9 +714,10 @@ gather and scatter, nothing. What is left is the bodies' states: ours are
 doubles, converted lane by lane into the floats the lanes hold and back,
 where the reference's are floats it loads and transposes (#95).
 
-On Windows the AVX2 build needs GCC 16: MinGW GCC 15.2 spills 256-bit
-values with aligned moves to a stack it cannot align to 32 bytes and the
-program faults (aether#2476).
+On Windows, before Aether 0.793, the AVX2 build needed GCC 16: MinGW GCC
+15.2 spilled 256-bit values with aligned moves to a stack it could not
+align to 32 bytes, and the program faulted (aether#2476). Aether 0.793
+fixes that; MinGW GCC 15.2 now builds and runs it with the same checksums.
 
 ### Body states in float (2026-10-07, #95)
 
