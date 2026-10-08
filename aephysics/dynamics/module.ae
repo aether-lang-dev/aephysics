@@ -431,18 +431,21 @@ struct BodySim {
 
 // A shape in the world: its geometry (the shape module's Shape, with
 // its density) and its place among its body's shapes and in the broad phase.
+// What the collide pass reads of every contact's two shapes comes first,
+// in one cache line: the id, the body and the fat box; then what finalize
+// reads to refit it; the geometry and the rest after.
 struct WorldShape {
     id: int                        // NULL_INDEX when the slot is free
     body_id: int
+    fat_aabb: AABB
+    aabb: AABB
+    aabb_margin: float
+    proxy_key: int
     prev_shape_id: int
     next_shape_id: int
     sensor_index: int
-    proxy_key: int
     geometry: Shape
     explosion_scale: float
-    aabb_margin: float
-    aabb: AABB
-    fat_aabb: AABB
     local_centroid: Vec3
     material_count: int
     material: SurfaceMaterial      // the one material when materials is null
@@ -4664,7 +4667,6 @@ struct CollideTask {
 // body id and its bounds, a body's set and index and its kind.
 prefetch_shape(s: *WorldShape) {
     native.prefetch(s as ptr)
-    native.prefetch((&s.fat_aabb) as ptr)
 }
 
 prefetch_body(b: *Body) {
