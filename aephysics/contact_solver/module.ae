@@ -206,7 +206,7 @@ prepare_contact(ctx: *StepContext, c: *Contact, cc: *ContactConstraint, manifold
     if index_a != NULL_INDEX {
         sim_a = sim_at(ctx.sims, index_a)
         m_a = sim_a.inv_mass
-        i_a = sim_a.inv_inertia_world
+        i_a = math.widen_mat3(sim_a.inv_inertia_world)
         state_a = state_at(ctx.states, index_a)
         v_a = math.widen3(state_a.v)
         w_a = math.widen3(state_a.w)
@@ -218,7 +218,7 @@ prepare_contact(ctx: *StepContext, c: *Contact, cc: *ContactConstraint, manifold
     if index_b != NULL_INDEX {
         sim_b = sim_at(ctx.sims, index_b)
         m_b = sim_b.inv_mass
-        i_b = sim_b.inv_inertia_world
+        i_b = math.widen_mat3(sim_b.inv_inertia_world)
         state_b = state_at(ctx.states, index_b)
         v_b = math.widen3(state_b.v)
         w_b = math.widen3(state_b.w)

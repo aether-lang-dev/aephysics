@@ -396,28 +396,31 @@ struct BodyState {
     dq: Quatf                      // the rotation's change this step (identity for a static body)
 }
 
-// What integration and collision need of a body.
-// What every constraint prepare reads first (the pose, the masses), then
-// the collide pass's extents, the integration's loads, and the time of
-// impact's start pose.
+// What integration and collision need of a body, the reference's
+// b3BodySim with its positions in double: the pose, the centre of mass
+// and the time of impact's start centre are world positions; everything
+// else is a body's own scale or a rate, single precision as the
+// reference keeps it. What the recycling and the constraint prepares read
+// first comes first: the pose, the centre, the flags and extents, the
+// masses (the first three cache lines).
 struct BodySim {
     transform: Transform           // of the body's origin
     center: Vec3                   // of mass, in world space
-    local_center: Vec3
-    inv_mass: float
-    inv_inertia_world: Matrix3
-    body_id: int
     flags: int
-    max_extent: Vec3
-    min_extent: float
-    force: Vec3
-    torque: Vec3
-    linear_damping: float
-    angular_damping: float
-    gravity_scale: float
-    inv_inertia_local: Matrix3
-    rotation0: Quat                // for the time of impact
+    min_extent: f32
+    max_extent: Vec3f
+    inv_mass: f32
+    inv_inertia_world: Matrix3f
+    local_center: Vec3f
+    rotation0: Quatf               // for the time of impact
     center0: Vec3
+    force: Vec3f
+    torque: Vec3f
+    linear_damping: f32
+    angular_damping: f32
+    gravity_scale: f32
+    inv_inertia_local: Matrix3f
+    body_id: int
 }
 
 // A shape in the world: its geometry (the shape module's Shape, with
@@ -1754,16 +1757,16 @@ create_body(world_id: WorldId, def: *BodyDef) -> BodyId {
     sim = body_sim_at(set, sim_index)
     sim.transform = Transform { p: def.position, q: def.rotation }
     sim.center = def.position
-    sim.rotation0 = def.rotation
+    sim.rotation0 = math.narrow_quat(def.rotation)
     sim.center0 = def.position
-    sim.local_center = math.vec3_zero()
-    sim.force = math.vec3_zero()
-    sim.torque = math.vec3_zero()
+    sim.local_center = math.narrow3(math.vec3_zero())
+    sim.force = math.narrow3(math.vec3_zero())
+    sim.torque = math.narrow3(math.vec3_zero())
     sim.inv_mass = 0.0
-    sim.inv_inertia_local = math.mat3_zero()
-    sim.inv_inertia_world = math.mat3_zero()
+    sim.inv_inertia_local = math.narrow_mat3(math.mat3_zero())
+    sim.inv_inertia_world = math.narrow_mat3(math.mat3_zero())
     sim.min_extent = math.HUGE
-    sim.max_extent = math.vec3_zero()
+    sim.max_extent = math.narrow3(math.vec3_zero())
     sim.linear_damping = def.linear_damping
     sim.angular_damping = def.angular_damping
     sim.gravity_scale = def.gravity_scale
@@ -2309,7 +2312,7 @@ shape_apply_wind(id: ShapeId, wind: Vec3, drag: float, lift: float, max_speed: f
     force = math.vec3_zero()
     torque = math.vec3_zero()
     if kind == KIND_SPHERE || kind == KIND_CAPSULE {
-        lever = math.rotate_vector(q, math.sub(s.local_centroid, sim.local_center))
+        lever = math.rotate_vector(q, math.sub(s.local_centroid, math.widen3(sim.local_center)))
         relative = math.mul_sub(wind, drag, math.add(math.widen3(state.v), math.cross(math.widen3(state.w), lever)))
         speed = math.length(relative)
         direction = math.normalize(relative)
@@ -2352,7 +2355,7 @@ shape_apply_wind(id: ShapeId, wind: Vec3, drag: float, lift: float, max_speed: f
                 p3 = points[edges[e3].origin]
                 v3 = math.mul_mv(m, p3)
                 centre = math.mul_sv(1.0 / 3.0, math.add(p1, math.add(p2, p3)))
-                lever = math.mul_mv(m, math.sub(centre, sim.local_center))
+                lever = math.mul_mv(m, math.sub(centre, math.widen3(sim.local_center)))
                 relative = math.mul_sub(wind, drag, math.add(math.widen3(state.v), math.cross(math.widen3(state.w), lever)))
                 speed = math.length(relative)
                 direction = math.normalize(relative)
@@ -2371,8 +2374,8 @@ shape_apply_wind(id: ShapeId, wind: Vec3, drag: float, lift: float, max_speed: f
             f = f + 1
         }
     }
-    sim.force = math.add(sim.force, force)
-    sim.torque = math.add(sim.torque, torque)
+    sim.force = math.narrow3(math.add(math.widen3(sim.force), force))
+    sim.torque = math.narrow3(math.add(math.widen3(sim.torque), torque))
 }
 
 // A label for debugging (b3Body_SetName and its siblings): copied, so the
@@ -2466,11 +2469,11 @@ update_body_mass_data(w: *World, body: *Body) {
     body.mass = 0.0
     body.inertia = math.mat3_zero()
     sim.inv_mass = 0.0
-    sim.inv_inertia_local = math.mat3_zero()
-    sim.inv_inertia_world = math.mat3_zero()
-    sim.local_center = math.vec3_zero()
+    sim.inv_inertia_local = math.narrow_mat3(math.mat3_zero())
+    sim.inv_inertia_world = math.narrow_mat3(math.mat3_zero())
+    sim.local_center = math.narrow3(math.vec3_zero())
     sim.min_extent = math.HUGE
-    sim.max_extent = math.vec3_zero()
+    sim.max_extent = math.narrow3(math.vec3_zero())
     if body.head_shape_id == NULL_INDEX { return }
 
     if body.kind != BODY_DYNAMIC {
@@ -2482,7 +2485,7 @@ update_body_mass_data(w: *World, body: *Body) {
                 s = world_shape_at(w, shape_id)
                 extent = shape.compute_shape_extent(&s.geometry, math.vec3_zero())
                 sim.min_extent = math.min_float(sim.min_extent, extent.min_extent)
-                sim.max_extent = math.max_vec3(sim.max_extent, extent.max_extent)
+                sim.max_extent = math.narrow3(math.max_vec3(math.widen3(sim.max_extent), extent.max_extent))
                 shape_id = s.next_shape_id
             }
         }
@@ -2528,13 +2531,13 @@ update_body_mass_data(w: *World, body: *Body) {
     }
     determinant = math.det(body.inertia)
     if determinant > 0.0 {
-        sim.inv_inertia_local = math.invert_t(body.inertia)
+        sim.inv_inertia_local = math.narrow_mat3(math.invert_t(body.inertia))
         rotation = math.make_matrix_from_quat(sim.transform.q)
-        sim.inv_inertia_world = math.mul_mm(math.mul_mm(rotation, sim.inv_inertia_local), math.transpose(rotation))
+        sim.inv_inertia_world = math.narrow_mat3(math.mul_mm(math.mul_mm(rotation, math.widen_mat3(sim.inv_inertia_local)), math.transpose(rotation)))
     }
     // The centre of mass moves: the velocity follows the new material point.
     old_center = sim.center
-    sim.local_center = local_center
+    sim.local_center = math.narrow3(local_center)
     sim.center = math.transform_point(sim.transform, local_center)
     sim.center0 = sim.center
     state = get_body_state(w, body)
@@ -2546,15 +2549,15 @@ update_body_mass_data(w: *World, body: *Body) {
         s = world_shape_at(w, shape_id)
         extent = shape.compute_shape_extent(&s.geometry, local_center)
         sim.min_extent = math.min_float(sim.min_extent, extent.min_extent)
-        sim.max_extent = math.max_vec3(sim.max_extent, extent.max_extent)
+        sim.max_extent = math.narrow3(math.max_vec3(math.widen3(sim.max_extent), extent.max_extent))
         shape_id = s.next_shape_id
     }
     // A moved centre of mass invalidates every cached manifold.
     invalidate_body_contacts(w, body)
     if (sim.flags & FIXED_ROTATION) == FIXED_ROTATION {
         body.inertia = math.mat3_zero()
-        sim.inv_inertia_local = math.mat3_zero()
-        sim.inv_inertia_world = math.mat3_zero()
+        sim.inv_inertia_local = math.narrow_mat3(math.mat3_zero())
+        sim.inv_inertia_world = math.narrow_mat3(math.mat3_zero())
     }
 }
 
@@ -2580,11 +2583,11 @@ body_set_transform(id: BodyId, position: Vec3, rotation: Quat) {
     body = get_body_full_id(w, id)
     sim = get_body_sim(w, body)
     sim.transform = Transform { p: position, q: rotation }
-    sim.center = math.transform_point(sim.transform, sim.local_center)
-    sim.rotation0 = rotation
+    sim.center = math.transform_point(sim.transform, math.widen3(sim.local_center))
+    sim.rotation0 = math.narrow_quat(rotation)
     sim.center0 = sim.center
     r = math.make_matrix_from_quat(rotation)
-    sim.inv_inertia_world = math.mul_mm(math.mul_mm(r, sim.inv_inertia_local), math.transpose(r))
+    sim.inv_inertia_world = math.narrow_mat3(math.mul_mm(math.mul_mm(r, math.widen_mat3(sim.inv_inertia_local)), math.transpose(r)))
     shape_id = body.head_shape_id
     while shape_id != NULL_INDEX {
         s = world_shape_at(w, shape_id)
@@ -2651,7 +2654,7 @@ body_set_target_transform(id: BodyId, target: Transform, time_step: float, wake:
     if body.set_index != AWAKE_SET && wake == false { return }
     sim = get_body_sim(w, body)
     center1 = sim.center
-    center2 = math.transform_point(target, sim.local_center)
+    center2 = math.transform_point(target, math.widen3(sim.local_center))
     inv_time_step = 1.0 / time_step
     linear_velocity = math.mul_sv(inv_time_step, math.sub(center2, center1))
     // q' = 0.5 w q, so w = 2 (q2 - q1) conj(q1) / dt, along the shorter arc.
@@ -2662,7 +2665,7 @@ body_set_target_transform(id: BodyId, target: Transform, time_step: float, wake:
     omega = math.mul_quat(dq, math.conjugate(q1))
     angular_velocity = math.mul_sv(2.0 * inv_time_step, math.qv(omega))
     if body.set_index != AWAKE_SET {
-        max_velocity = math.length(linear_velocity) + math.length(math.mul(angular_velocity, sim.max_extent))
+        max_velocity = math.length(linear_velocity) + math.length(math.mul(angular_velocity, math.widen3(sim.max_extent)))
         if max_velocity < body.sleep_threshold { return }
         wake_body(w, body)
     }
@@ -2687,7 +2690,7 @@ body_apply_force_to_center(id: BodyId, force: Vec3, wake: bool) {
     body = get_body_full_id(w, id)
     if awake_for_apply(w, body, wake) == false { return }
     sim = get_body_sim(w, body)
-    sim.force = math.add(sim.force, force)
+    sim.force = math.narrow3(math.add(math.widen3(sim.force), force))
 }
 
 body_apply_torque(id: BodyId, torque: Vec3, wake: bool) {
@@ -2696,7 +2699,7 @@ body_apply_torque(id: BodyId, torque: Vec3, wake: bool) {
     body = get_body_full_id(w, id)
     if awake_for_apply(w, body, wake) == false { return }
     sim = get_body_sim(w, body)
-    sim.torque = math.add(sim.torque, torque)
+    sim.torque = math.narrow3(math.add(math.widen3(sim.torque), torque))
 }
 
 // The linear velocity after an impulse, capped at the world's maximum speed.
@@ -2714,7 +2717,7 @@ body_apply_linear_impulse(id: BodyId, impulse: Vec3, point: Vec3, wake: bool) {
     sim = get_body_sim(w, body)
     state = get_body_state(w, body)
     state.v = math.narrow3(capped_linear_velocity(w, math.mul_add(math.widen3(state.v), sim.inv_mass, impulse)))
-    delta = math.mul_mv(sim.inv_inertia_world, math.cross(math.sub(point, sim.center), impulse))
+    delta = math.mul_mv(math.widen_mat3(sim.inv_inertia_world), math.cross(math.sub(point, sim.center), impulse))
     state.w = math.narrow3(math.add(math.widen3(state.w), delta))
 }
 
@@ -2737,7 +2740,7 @@ body_apply_angular_impulse(id: BodyId, impulse: Vec3, wake: bool) {
     sim = get_body_sim(w, body)
     state = get_body_state(w, body)
     local_impulse = math.inv_rotate_vector(sim.transform.q, impulse)
-    local_delta = math.mul_mv(sim.inv_inertia_local, local_impulse)
+    local_delta = math.mul_mv(math.widen_mat3(sim.inv_inertia_local), local_impulse)
     state.w = math.narrow3(math.add(math.widen3(state.w), math.rotate_vector(sim.transform.q, local_delta)))
 }
 
@@ -2842,15 +2845,15 @@ body_get_type(id: BodyId) -> int { return get_body_full_id(body_world(id), id).k
 body_get_mass(id: BodyId) -> float { return get_body_full_id(body_world(id), id).mass }
 body_get_inverse_mass(id: BodyId) -> float { w = body_world(id); return get_body_sim(w, get_body_full_id(w, id)).inv_mass }
 body_get_local_rotational_inertia(id: BodyId) -> Matrix3 { return get_body_full_id(body_world(id), id).inertia }
-body_get_world_inverse_rotational_inertia(id: BodyId) -> Matrix3 { w = body_world(id); return get_body_sim(w, get_body_full_id(w, id)).inv_inertia_world }
-body_get_local_center(id: BodyId) -> Vec3 { w = body_world(id); return get_body_sim(w, get_body_full_id(w, id)).local_center }
+body_get_world_inverse_rotational_inertia(id: BodyId) -> Matrix3 { w = body_world(id); return math.widen_mat3(get_body_sim(w, get_body_full_id(w, id)).inv_inertia_world) }
+body_get_local_center(id: BodyId) -> Vec3 { w = body_world(id); return math.widen3(get_body_sim(w, get_body_full_id(w, id)).local_center) }
 body_get_world_center(id: BodyId) -> Vec3 { w = body_world(id); return get_body_sim(w, get_body_full_id(w, id)).center }
 body_get_min_extent(id: BodyId) -> float { w = body_world(id); return get_body_sim(w, get_body_full_id(w, id)).min_extent }
-body_get_max_extent(id: BodyId) -> Vec3 { w = body_world(id); return get_body_sim(w, get_body_full_id(w, id)).max_extent }
+body_get_max_extent(id: BodyId) -> Vec3 { w = body_world(id); return math.widen3(get_body_sim(w, get_body_full_id(w, id)).max_extent) }
 body_get_max_extent_origin(id: BodyId) -> Vec3 {
     w = body_world(id)
     sim = get_body_sim(w, get_body_full_id(w, id))
-    return math.add(sim.max_extent, math.abs_vec3(sim.local_center))
+    return math.add(math.widen3(sim.max_extent), math.abs_vec3(math.widen3(sim.local_center)))
 }
 
 // Mass properties set by hand, bypassing the shapes: the inverses, the
@@ -2866,7 +2869,7 @@ body_set_mass_data(id: BodyId, mass_data: MassData) {
     sync_body_flags(w, body)
     body.mass = mass_data.mass
     body.inertia = mass_data.inertia
-    sim.local_center = mass_data.center
+    sim.local_center = math.narrow3(mass_data.center)
     old_center = sim.center
     sim.center = math.transform_point(sim.transform, mass_data.center)
     sim.center0 = sim.center
@@ -2878,26 +2881,26 @@ body_set_mass_data(id: BodyId, mass_data: MassData) {
     }
     determinant = math.det(body.inertia)
     if determinant > 0.0 {
-        sim.inv_inertia_local = math.invert_t(body.inertia)
+        sim.inv_inertia_local = math.narrow_mat3(math.invert_t(body.inertia))
         r = math.make_matrix_from_quat(sim.transform.q)
-        sim.inv_inertia_world = math.mul_mm(math.mul_mm(r, sim.inv_inertia_local), math.transpose(r))
+        sim.inv_inertia_world = math.narrow_mat3(math.mul_mm(math.mul_mm(r, math.widen_mat3(sim.inv_inertia_local)), math.transpose(r)))
     } else {
-        sim.inv_inertia_local = math.mat3_zero()
-        sim.inv_inertia_world = math.mat3_zero()
+        sim.inv_inertia_local = math.narrow_mat3(math.mat3_zero())
+        sim.inv_inertia_world = math.narrow_mat3(math.mat3_zero())
     }
     if (sim.flags & FIXED_ROTATION) == FIXED_ROTATION {
         body.inertia = math.mat3_zero()
-        sim.inv_inertia_local = math.mat3_zero()
-        sim.inv_inertia_world = math.mat3_zero()
+        sim.inv_inertia_local = math.narrow_mat3(math.mat3_zero())
+        sim.inv_inertia_world = math.narrow_mat3(math.mat3_zero())
     }
     sim.min_extent = math.HUGE
-    sim.max_extent = math.vec3_zero()
+    sim.max_extent = math.narrow3(math.vec3_zero())
     shape_id = body.head_shape_id
     while shape_id != NULL_INDEX {
         s = world_shape_at(w, shape_id)
         extent = shape.compute_shape_extent(&s.geometry, mass_data.center)
         sim.min_extent = math.min_float(sim.min_extent, extent.min_extent)
-        sim.max_extent = math.max_vec3(sim.max_extent, extent.max_extent)
+        sim.max_extent = math.narrow3(math.max_vec3(math.widen3(sim.max_extent), extent.max_extent))
         shape_id = s.next_shape_id
     }
     invalidate_body_contacts(w, body)
@@ -2906,7 +2909,7 @@ body_set_mass_data(id: BodyId, mass_data: MassData) {
 body_get_mass_data(id: BodyId) -> MassData {
     w = body_world(id)
     body = get_body_full_id(w, id)
-    return MassData { mass: body.mass, center: get_body_sim(w, body).local_center, inertia: body.inertia }
+    return MassData { mass: body.mass, center: math.widen3(get_body_sim(w, body).local_center), inertia: body.inertia }
 }
 
 body_apply_mass_from_shapes(id: BodyId) {
@@ -4515,9 +4518,9 @@ try_recycle_contact(w: *World, c: *Contact, sim_a: *BodySim, sim_b: *BodySim, st
     angular_distance = math.min_float(angle_a * angle_a, angle_b * angle_b)
     xf = math.inv_mul_transforms(xf_a, xf_b)
     xfc = Transform { p: math.widen3(c.cached_relative_p), q: math.widen_quat(c.cached_relative_q) }
-    max_extent_a = sim_a.max_extent
+    max_extent_a = math.widen3(sim_a.max_extent)
     if static_a { max_extent_a = math.vec3_zero() }
-    max_extent_b = sim_b.max_extent
+    max_extent_b = math.widen3(sim_b.max_extent)
     if static_b { max_extent_b = math.vec3_zero() }
     max_extent = math.max_vec3(max_extent_a, max_extent_b)
     dist_squared = math.distance_squared(xf.p, xfc.p)
@@ -4589,7 +4592,7 @@ collide_contact(w: *World, contact_id: int) {
     c.cached_relative_p = math.narrow3(relative.p)
     c.cached_relative_q = math.narrow_quat(relative.q)
     c.flags = c.flags | RELATIVE_TRANSFORM_VALID
-    touching = update_contact(w, c, shape_a, sim_a.local_center, sim_a.transform, shape_b, sim_b.local_center, sim_b.transform, is_fast)
+    touching = update_contact(w, c, shape_a, math.widen3(sim_a.local_center), sim_a.transform, shape_b, math.widen3(sim_b.local_center), sim_b.transform, is_fast)
     if touching && was_touching && (c.flags & SIM_MESH_CONTACT) != 0 {
         contact_spec_at(graph_color(w, c.color_index), c.local_index).manifold_count = c.manifold_count
     }
@@ -6527,8 +6530,8 @@ shape_user_material_id(s: *WorldShape, child_index: int, triangle_index: int) ->
 // A body's motion over the step relative to a base point (the sweep in
 // single precision near the base).
 make_relative_sweep(sim: *BodySim, base: Vec3) -> Sweep {
-    return Sweep { local_center: sim.local_center, c1: math.sub(sim.center0, base), c2: math.sub(sim.center, base),
-                   q1: sim.rotation0, q2: sim.transform.q }
+    return Sweep { local_center: math.widen3(sim.local_center), c1: math.sub(sim.center0, base), c2: math.sub(sim.center, base),
+                   q1: math.widen_quat(sim.rotation0), q2: sim.transform.q }
 }
 
 // --- joint and sensor validation ------------------------------------------------------------------------------

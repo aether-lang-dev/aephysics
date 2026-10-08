@@ -473,7 +473,9 @@ test_sets_and_shapes() {
     dynamics.body_set_linear_damping(awake_id, 0.3)
     dynamics.body_set_angular_damping(awake_id, 0.4)
     dynamics.body_set_gravity_scale(awake_id, 0.5)
-    ensure("damping and gravity scale", dynamics.body_get_linear_damping(awake_id) == 0.3 && dynamics.body_get_angular_damping(awake_id) == 0.4 && dynamics.body_get_gravity_scale(awake_id) == 0.5)
+    // Kept in single precision, as the reference keeps them.
+    ensure("damping and gravity scale", dynamics.body_get_linear_damping(awake_id) == ((0.3 as f32) as float) &&
+           dynamics.body_get_angular_damping(awake_id) == ((0.4 as f32) as float) && dynamics.body_get_gravity_scale(awake_id) == 0.5)
     dynamics.body_enable_sleep(awake_id, false)
     ensure("sleep disabled", dynamics.body_is_sleep_enabled(awake_id) == false)
     dynamics.body_set_sleep_threshold(awake_id, 0.1)
@@ -1278,21 +1280,21 @@ test_shape_api() {
     // Wind (#68): 10 m/s at the ball (r 0.5) pushes 0.5 x 1.225 x pi 0.25 x 100;
     // at a unit cube, only the face toward it, 0.5 x 1.225 x 1 x 100, square on.
     ball_sim = dynamics.get_body_sim(w, dynamics.get_body_full_id(w, ball))
-    before = ball_sim.force
+    before = math.widen3(ball_sim.force)
     dynamics.shape_apply_wind(id, math.vec3(10.0, 0.0, 0.0), 1.0, 0.0, 100.0, true)
-    pushed = math.sub(ball_sim.force, before)
+    pushed = math.sub(math.widen3(ball_sim.force), before)
     small("wind: the ball's drag (${pushed.x})", pushed.x - 0.5 * dynamics.AIR_DENSITY * math.PI * 0.25 * 100.0, 0.0001)
     small("wind: along the wind only", math.abs_float(pushed.y) + math.abs_float(pushed.z), 0.000001)
     cube = cube_at(world_id, math.vec3(5.0, 2.0, 0.0), false)
     cube_shapes = calloc(1, sizeof(ShapeId))
     dynamics.body_get_shapes(cube, cube_shapes as ShapeId[], 1)
     cube_sim = dynamics.get_body_sim(w, dynamics.get_body_full_id(w, cube))
-    force_before = cube_sim.force
-    torque_before = cube_sim.torque
+    force_before = math.widen3(cube_sim.force)
+    torque_before = math.widen3(cube_sim.torque)
     dynamics.shape_apply_wind((cube_shapes as ShapeId[])[0], math.vec3(10.0, 0.0, 0.0), 1.0, 0.0, 100.0, true)
-    cube_push = math.sub(cube_sim.force, force_before)
+    cube_push = math.sub(math.widen3(cube_sim.force), force_before)
     small("wind: the cube's face toward it, square on (${cube_push.x} ${cube_push.y} ${cube_push.z})", math.length(math.sub(cube_push, math.vec3(0.5 * dynamics.AIR_DENSITY * 100.0, 0.0, 0.0))), 0.0001)
-    small("wind: no turn on a face met square", math.length(math.sub(cube_sim.torque, torque_before)), 0.0001)
+    small("wind: no turn on a face met square", math.length(math.sub(math.widen3(cube_sim.torque), torque_before)), 0.0001)
     free(cube_shapes)
     // Names (#68): copied, so a built string may go; renamed, the old freed;
     // none reads empty; a destroyed shape's slot reused starts nameless.

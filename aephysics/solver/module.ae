@@ -153,13 +153,13 @@ integrate_velocities_range(ctx: *StepContext, start: int, end: int) {
         angular_damping = 1.0 / (1.0 + h * sim.angular_damping)
         gravity_scale = 0.0
         if sim.inv_mass > 0.0 { gravity_scale = sim.gravity_scale }
-        linear_delta = math.blend2(h * sim.inv_mass, sim.force, h * gravity_scale, gravity)
+        linear_delta = math.blend2(h * sim.inv_mass, math.widen3(sim.force), h * gravity_scale, gravity)
         v = math.mul_add(linear_delta, linear_damping, v)
-        angular_delta = math.mul_sv(h, math.mul_mv(sim.inv_inertia_world, sim.torque))
+        angular_delta = math.mul_sv(h, math.mul_mv(math.widen_mat3(sim.inv_inertia_world), math.widen3(sim.torque)))
         wv = math.mul_add(angular_delta, angular_damping, wv)
         // Gyroscopic: I (w2 - w1) + h w2 x (I w2) = 0, solved for w2 in the body's frame.
         q = math.mul_quat(math.widen_quat(state.dq), sim.transform.q)
-        inertia = math.invert_matrix(sim.inv_inertia_local)
+        inertia = math.invert_matrix(math.widen_mat3(sim.inv_inertia_local))
         omega1 = math.inv_rotate_vector(q, wv)
         omega2 = omega1
         i00 = inertia.cx.x
@@ -369,7 +369,7 @@ solve_continuous(w: *World, sim_index: int, dt: float) {
         center = math.add(base, c)
         fast_sim.transform = t
         fast_sim.center = center
-        fast_sim.rotation0 = q
+        fast_sim.rotation0 = math.narrow_quat(q)
         fast_sim.center0 = center
         // The time lost to the impact is gravity the body never fell through
         // (current Box3D's b3SolveContinuous; other forces are ignored): its
@@ -389,7 +389,7 @@ solve_continuous(w: *World, sim_index: int, dt: float) {
             shape_id = s.next_shape_id
         }
     } else {
-        fast_sim.rotation0 = fast_sim.transform.q
+        fast_sim.rotation0 = math.narrow_quat(fast_sim.transform.q)
         fast_sim.center0 = fast_sim.center
         shape_id = fast_body.head_shape_id
         while shape_id != NULL_INDEX {
@@ -458,14 +458,14 @@ finalize_range(start: int, end: int, worker: int, context: ptr) {
         local_delta_rotation = math.inv_rotate_vector(sim.transform.q, math.qv(math.widen_quat(state.dq)))
         sim.center = math.add(sim.center, math.widen3(state.dp))
         sim.transform.q = math.normalize_quat(math.mul_quat(math.widen_quat(state.dq), sim.transform.q))
-        velocity_arc = math.modified_cross(math.abs_vec3(local_omega), sim.max_extent)
+        velocity_arc = math.modified_cross(math.abs_vec3(local_omega), math.widen3(sim.max_extent))
         max_velocity = math.length(v) + math.length(velocity_arc)
-        rotation_arc = math.modified_cross(math.abs_vec3(local_delta_rotation), sim.max_extent)
+        rotation_arc = math.modified_cross(math.abs_vec3(local_delta_rotation), math.widen3(sim.max_extent))
         max_delta_position = math.length(math.widen3(state.dp)) + 2.0 * math.length(rotation_arc)
         sleep_velocity = math.max_float(max_velocity, 0.5 * inv_time_step * max_delta_position)
         state.dp = math.vec3f_zero()
         state.dq = math.quatf_identity()
-        sim.transform.p = math.sub(sim.center, math.rotate_vector(sim.transform.q, sim.local_center))
+        sim.transform.p = math.sub(sim.center, math.rotate_vector(sim.transform.q, math.widen3(sim.local_center)))
         body = dynamics.body_at(w, sim.body_id)
         body.body_move_index = sim_index
         body.sleep_velocity = sleep_velocity
@@ -474,8 +474,8 @@ finalize_range(start: int, end: int, worker: int, context: ptr) {
         event.transform = sim.transform
         event.body_id = dynamics.make_body_id(w, sim.body_id)
         event.fell_asleep = false
-        sim.force = math.vec3_zero()
-        sim.torque = math.vec3_zero()
+        sim.force = math.narrow3(math.vec3_zero())
+        sim.torque = math.narrow3(math.vec3_zero())
         transient = dynamics.IS_SPEED_CAPPED | dynamics.HAD_TIME_OF_IMPACT
         body.flags = body.flags & (0 - 1 - dynamics.BODY_TRANSIENT_FLAGS)
         body.flags = body.flags | (sim.flags & transient) | (state.flags & transient)
@@ -493,15 +493,15 @@ finalize_range(start: int, end: int, worker: int, context: ptr) {
                 }
             } else {
                 sim.center0 = sim.center
-                sim.rotation0 = sim.transform.q
+                sim.rotation0 = math.narrow_quat(sim.transform.q)
             }
         } else {
             sim.center0 = sim.center
-            sim.rotation0 = sim.transform.q
+            sim.rotation0 = math.narrow_quat(sim.transform.q)
             body.sleep_time = body.sleep_time + time_step
         }
         rotation = math.make_matrix_from_quat(sim.transform.q)
-        sim.inv_inertia_world = math.mul_mm(math.mul_mm(rotation, sim.inv_inertia_local), math.transpose(rotation))
+        sim.inv_inertia_world = math.narrow_mat3(math.mul_mm(math.mul_mm(rotation, math.widen_mat3(sim.inv_inertia_local)), math.transpose(rotation)))
         island = dynamics.island_at(w, body.island_id)
         if body.sleep_time < dynamics.TIME_TO_SLEEP {
             basics.bitset_set(&tc.awake_island_bits, island.local_index)

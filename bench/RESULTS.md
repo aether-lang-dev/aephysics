@@ -775,6 +775,30 @@ contacts, is level. The soak test against the reference stays as close
 as it was (seed 1's farthest body 6.89911 m against 6.89907), and the
 determinism golden is regenerated for the new rounding.
 
+### Body sims in float (2026-10-07, #121, #37)
+
+`BodySim` keeps its world positions in double (the origin's transform,
+the centre of mass and the time of impact's start centre) and the rest
+in single precision as the reference's `b3BodySim` does: the inverse
+inertias, the local centre, the extents, the forces, the dampings and the
+start rotation. It shrinks from 424 bytes to 272 (the reference's is 216,
+its positions in float), and what the recycling and the prepares read
+comes first.
+
+A quiet machine, AVX2 builds, interleaved, ms per step:
+
+| scene | main | float body sims | Box3D `e77352c` |
+|---|---|---|---|
+| large pyramid | 7.29-7.37 | 7.04-7.13 | 5.54-5.74 |
+| many pyramids | 16.5-16.9 | 16.1-16.3 (15.6 best) | 13.0-13.8 |
+| joint grid | 11.66-11.77 | 11.68-11.98 | 10.63-10.76 |
+
+Collide is 7% shorter and the prepare 10%; the velocity integration a
+few percent longer (it widens the inertias for the gyroscopic solve, the
+reference's algorithm in double). After this morning's #124, #126, #127
+and this, the reference's three scenes stand at 1.25x, 1.2x and 1.1x its
+AVX2 build, from 1.8x, 1.8x and 1.2x.
+
 ### The joint grid, stage by stage (2026-10-05)
 
 The joint grid has no contacts, so the eight-wide lanes don't explain its

@@ -125,8 +125,8 @@ prepare_base(base: *JointSim, ctx: *StepContext) -> JointBodies {
     sim_b = dynamics.get_body_sim(w, body_b)
     base.inv_mass_a = sim_a.inv_mass
     base.inv_mass_b = sim_b.inv_mass
-    base.inv_inertia_a = sim_a.inv_inertia_world
-    base.inv_inertia_b = sim_b.inv_inertia_world
+    base.inv_inertia_a = math.widen_mat3(sim_a.inv_inertia_world)
+    base.inv_inertia_b = math.widen_mat3(sim_b.inv_inertia_world)
     base.fixed_rotation = math.det(math.add_mm(base.inv_inertia_a, base.inv_inertia_b)) < 1000.0 * math.TINY
     index_a = NULL_INDEX
     if body_a.set_index == dynamics.AWAKE_SET { index_a = body_a.local_index }
@@ -137,7 +137,7 @@ prepare_base(base: *JointSim, ctx: *StepContext) -> JointBodies {
 
 // A joint frame in world rotation, its origin relative to the centre of mass.
 world_frame(sim: *BodySim, local_frame: Transform) -> Transform {
-    return Transform { p: math.rotate_vector(sim.transform.q, math.sub(local_frame.p, sim.local_center)),
+    return Transform { p: math.rotate_vector(sim.transform.q, math.sub(local_frame.p, math.widen3(sim.local_center))),
                        q: math.mul_quat(sim.transform.q, local_frame.q) }
 }
 
@@ -223,8 +223,8 @@ prepare_distance_joint(base: *JointSim, ctx: *StepContext) {
     j.index_b = bodies.index_b
     sim_a = bodies.sim_a
     sim_b = bodies.sim_b
-    j.anchor_a = math.rotate_vector(sim_a.transform.q, math.sub(base.local_frame_a.p, sim_a.local_center))
-    j.anchor_b = math.rotate_vector(sim_b.transform.q, math.sub(base.local_frame_b.p, sim_b.local_center))
+    j.anchor_a = math.rotate_vector(sim_a.transform.q, math.sub(base.local_frame_a.p, math.widen3(sim_a.local_center)))
+    j.anchor_b = math.rotate_vector(sim_b.transform.q, math.sub(base.local_frame_b.p, math.widen3(sim_b.local_center)))
     j.delta_center = math.sub(sim_b.center, sim_a.center)
     r_a = j.anchor_a
     r_b = j.anchor_b
@@ -1126,8 +1126,8 @@ prismatic_joint_get_speed(id: JointId) -> float {
     state_a = dynamics.get_body_state(w, body_a)
     state_b = dynamics.get_body_state(w, body_b)
     axis_a = math.rotate_vector(sim_a.transform.q, math.rotate_vector(base.local_frame_a.q, math.vec3_axis_x()))
-    r_a = math.rotate_vector(sim_a.transform.q, math.sub(base.local_frame_a.p, sim_a.local_center))
-    r_b = math.rotate_vector(sim_b.transform.q, math.sub(base.local_frame_b.p, sim_b.local_center))
+    r_a = math.rotate_vector(sim_a.transform.q, math.sub(base.local_frame_a.p, math.widen3(sim_a.local_center)))
+    r_b = math.rotate_vector(sim_b.transform.q, math.sub(base.local_frame_b.p, math.widen3(sim_b.local_center)))
     d = math.add(math.sub(sim_b.center, sim_a.center), math.sub(r_b, r_a))
     v_a = math.vec3_zero()
     w_a = math.vec3_zero()
