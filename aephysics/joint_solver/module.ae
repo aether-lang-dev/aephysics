@@ -1463,7 +1463,10 @@ warm_start_spherical_joint(base: *JointSim, ctx: *StepContext) {
     state_b = state_of(ctx, j.index_b)
     r_a = math.rotate_vector(math.widen_quat(state_a.dq), j.frame_a.p)
     r_b = math.rotate_vector(math.widen_quat(state_b.dq), j.frame_b.p)
-    angular = spherical_angular_impulse(j)
+    // The angular impulses are each zeroed when their part is off, so a
+    // plain point (no spring, motor or limit) has none to give back.
+    angular = math.vec3_zero()
+    if j.enable_spring || j.enable_motor || j.enable_cone_limit || j.enable_twist_limit { angular = spherical_angular_impulse(j) }
     v_a = math.mul_sub(math.widen3(state_a.v), base.inv_mass_a, j.linear_impulse)
     w_a = math.sub(math.widen3(state_a.w), math.mul_mv(math.widen_mat3(base.inv_inertia_a), math.add(math.cross(r_a, j.linear_impulse), angular)))
     v_b = math.mul_add(math.widen3(state_b.v), base.inv_mass_b, j.linear_impulse)

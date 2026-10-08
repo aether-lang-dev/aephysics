@@ -799,6 +799,54 @@ reference's algorithm in double). After this morning's #124, #126, #127
 and this, the reference's three scenes stand at 1.25x, 1.2x and 1.1x its
 AVX2 build, from 1.8x, 1.8x and 1.2x.
 
+### The joint grid's warm start (2026-10-08, #121)
+
+The joint grid's solve and relax were already ahead of the reference's;
+its gap was the warm start and the prepare. Two changes, neither of which
+moves a bit of any result:
+
+- `JointSim` keeps the bodies' world inertias in float, as the body sims
+  hold them, and the joint solvers widen them where they read them. They
+  were floats widened at the prepare, so nothing rounds differently, and
+  the record shrinks from 912 bytes to 840.
+- The spherical joint's warm start adds its angular impulses (the
+  spring's, the motor's, the cone's and the twist limits') only when one
+  of those parts is on. Each is zeroed when its part is off, so the sum
+  it skips is exactly zero; a plain point joint, the grid's, no longer
+  reads the 120 bytes of impulses and axes behind it.
+
+Pinned to one core, 8 runs each interleaved, ms per step:
+
+| | min | median |
+|---|---|---|
+| main | 11.23 | 11.91 |
+| this change | 10.78 | 10.90 |
+| Box3D `e77352c`, AVX2 | 10.21 | 10.34 |
+
+Stage by stage, three rounds:
+
+| stage | main | this change | Box3D |
+|---|---|---|---|
+| prepare joints | 1.10-1.23 | 0.93-0.95 | 0.51-0.58 |
+| integrate velocities | 1.21-1.25 | 1.20-1.22 | 1.09 |
+| warm start | 1.97-2.23 | 1.37-1.40 | 1.17-1.26 |
+| solve | 3.23-3.48 | 3.14-3.19 | 3.32-3.34 |
+| integrate positions | 0.30-0.31 | 0.30-0.31 | 0.20 |
+| relax | 3.12-3.36 | 3.06-3.11 | 3.22-3.23 |
+
+The grid stands at 1.05x the reference, from 1.1x. Two more things were
+tried and dropped. Keeping the spherical joint's frames, impulses, axes
+and masses in float, as the reference does (a 664-byte record), took the
+warm start only to 1.5-1.6 ms and cost the solve and the relax 0.3 ms
+each: the solve is bound by its chain from the impulse to the
+velocities, and that chain gains a narrowing and a widening every
+iteration. Computing the limits' axes only for a joint with a limit
+gained nothing, since GCC already sinks them. What remains (the prepare,
+the two integrations, a fifth of the warm start) is the arithmetic in
+double over float records, each read widened and each store narrowed,
+where the reference computes in float throughout; a line-level sample
+of the warm start puts a fifth of it in those conversions.
+
 ### The joint grid, stage by stage (2026-10-05)
 
 The joint grid has no contacts, so the eight-wide lanes don't explain its
