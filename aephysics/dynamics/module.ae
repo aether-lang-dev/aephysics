@@ -123,6 +123,7 @@ exports (
     default_weld_joint_def, default_wheel_joint_def, null_joint_id,
     distance_joint_of, motor_joint_of, parallel_joint_of, prismatic_joint_of, revolute_joint_of, spherical_joint_of, weld_joint_of, wheel_joint_of,
     set_spherical_cone_axis, spherical_cone_off_axis, clamp_spherical_cone, spherical_swing_angle,
+    spherical_cone_elliptical, spherical_cone_minor, spherical_cone_gap, spherical_cone_push_axis,
     joint_is_valid, get_joint_full_id, make_joint_id, get_joint_sim, get_joint_sim_of_kind, joint_edge_next,
     create_distance_joint, create_motor_joint, create_filter_joint, create_parallel_joint, create_prismatic_joint,
     create_revolute_joint, create_spherical_joint, create_weld_joint, create_wheel_joint, destroy_joint, destroy_joint_internal,
@@ -194,7 +195,7 @@ const JOINT_SPHERICAL = 6
 const JOINT_WELD = 7
 const JOINT_WHEEL = 8
 const TIME_TO_SLEEP = 0.5
-const JOINT_DATA_BYTES = 544   // JointSim.data: room for the largest kind's data (the spherical joint's 544)
+const JOINT_DATA_BYTES = 560   // JointSim.data: room for the largest kind's data (the spherical joint's 560)
 // The shape kinds (the shape module's, restated).
 const KIND_SPHERE = 0
 const KIND_CAPSULE = 1
@@ -240,6 +241,11 @@ struct WorldDef {
     restitution_threshold: float   // the approach speed under which there is no bounce
     restitution_iterations: int    // the restitution passes after the sub-steps, 0 to 63
     enable_restitution_propagation: bool // restitution passes reach contacts without restitution too
+    // Contacts with a kinematic body take the static softness (twice the
+    // contact hertz), as contacts with a static one do: a body the game
+    // drives hard does not sink into what it meets. Off, the reference's
+    // choice (a kinematic body's contacts are soft).
+    enable_kinematic_static_softness: bool
     contact_speed: float           // the push-out speed
     contact_hertz: float           // the contact spring
     contact_damping_ratio: float
@@ -331,7 +337,7 @@ default_restitution(restitution_a: float, user_a: long, restitution_b: float, us
 
 default_world_def() -> WorldDef {
     return WorldDef { gravity: math.vec3(0.0, 0.0 - 10.0, 0.0), hit_event_threshold: 1.0, restitution_threshold: 1.0, contact_speed: 3.0,
-                      restitution_iterations: 2, enable_restitution_propagation: false,
+                      restitution_iterations: 2, enable_restitution_propagation: false, enable_kinematic_static_softness: false,
                       contact_hertz: 30.0, contact_damping_ratio: 10.0, maximum_linear_speed: 400.0,
                       friction_callback: default_friction, restitution_callback: default_restitution,
                       enable_sleep: true, enable_continuous: true, static_body_count: 0, dynamic_body_count: 0,
@@ -691,6 +697,11 @@ struct SphericalJointDef {
     enable_cone_limit: bool        // the cone about frame A's z axis
     cone_angle: float
     cone_axis: Vec3                // the cone's centre in frame A: its z, the reference's, or any way off it
+    // An elliptical cone: cone_angle reaches toward cone_major_axis (in
+    // frame A, taken across the centre; zero for frame A's x) and
+    // cone_minor_angle across it. 0 for the reference's circular cone.
+    cone_minor_angle: float
+    cone_major_axis: Vec3
     enable_twist_limit: bool       // the twist about frame B's z axis
     lower_twist_angle: float
     upper_twist_angle: float
@@ -885,6 +896,8 @@ struct SphericalJoint {
     upper_twist_angle: float
     cone_angle: float
     cone_axis: Vec3                // unit, in frame A
+    cone_major_axis: Vec3f         // in frame A: where an elliptical cone reaches cone_angle; zero for x
+    cone_minor_angle: f32          // across it; 0 for a circular cone
     target_rotation: Quat
     rotation_mass: Matrix3
     swing_mass: float
@@ -966,7 +979,7 @@ struct JointSim {
     constraint_softness: Softness
     force_threshold: float         // the solve's joint event test
     torque_threshold: float
-    data: long[68]                 // JOINT_DATA_BYTES
+    data: long[70]                 // JOINT_DATA_BYTES
     joint_id: int
     body_id_a: int
     body_id_b: int
@@ -1213,6 +1226,7 @@ struct World {
     restitution_threshold: float
     restitution_iterations: int
     enable_restitution_propagation: bool
+    enable_kinematic_static_softness: bool
     max_linear_speed: float
     contact_speed: float
     contact_hertz: float
@@ -1442,6 +1456,7 @@ create_world(def: *WorldDef) -> WorldId {
     w.restitution_threshold = def.restitution_threshold
     w.restitution_iterations = math.clamp_int(def.restitution_iterations, 0, MAX_RESTITUTION_ITERATIONS)
     w.enable_restitution_propagation = def.enable_restitution_propagation
+    w.enable_kinematic_static_softness = def.enable_kinematic_static_softness
     w.max_linear_speed = def.maximum_linear_speed
     w.contact_speed = def.contact_speed
     w.contact_hertz = def.contact_hertz
@@ -4963,7 +4978,8 @@ default_revolute_joint_def() -> RevoluteJointDef {
 default_spherical_joint_def() -> SphericalJointDef {
     return SphericalJointDef { base: default_joint_def(), enable_spring: false, hertz: 0.0, damping_ratio: 0.0,
                                target_rotation: math.quat_identity(), enable_cone_limit: false, cone_angle: 0.0,
-                               cone_axis: math.vec3_axis_z(), enable_twist_limit: false, lower_twist_angle: 0.0, upper_twist_angle: 0.0, enable_motor: false,
+                               cone_axis: math.vec3_axis_z(), cone_minor_angle: 0.0, cone_major_axis: math.vec3_zero(),
+                               enable_twist_limit: false, lower_twist_angle: 0.0, upper_twist_angle: 0.0, enable_motor: false,
                                max_motor_torque: 0.0, motor_velocity: math.vec3_zero() }
 }
 
@@ -5326,6 +5342,7 @@ create_spherical_joint(world_id: WorldId, def: *SphericalJointDef) -> JointId {
     if math.is_valid_float(def.lower_twist_angle) == false || math.is_valid_float(def.upper_twist_angle) == false { return null_joint_id() }
     if valid_spring(def.hertz, def.damping_ratio) == false || valid_nonnegative(def.max_motor_torque) == false || math.is_valid_vec3(def.motor_velocity) == false { return null_joint_id() }
     if math.is_valid_vec3(def.cone_axis) == false || math.length(def.cone_axis) < 0.001 { return null_joint_id() }
+    if valid_nonnegative(def.cone_minor_angle) == false || def.cone_minor_angle > 0.99 * pi || math.is_valid_vec3(def.cone_major_axis) == false { return null_joint_id() }
     w.locked = true
     pair = create_joint(w, &def.base, JOINT_SPHERICAL)
     s = spherical_joint_of(pair.sim)
@@ -5334,6 +5351,8 @@ create_spherical_joint(world_id: WorldId, def: *SphericalJointDef) -> JointId {
     s.target_rotation = def.target_rotation
     set_spherical_cone_axis(s, def.cone_axis)
     s.cone_angle = clamp_spherical_cone(s, def.cone_angle)
+    s.cone_major_axis = math.narrow3(def.cone_major_axis)
+    s.cone_minor_angle = spherical_cone_minor(s, def.cone_minor_angle)
     lower = math.min_float(def.lower_twist_angle, def.upper_twist_angle)
     upper = math.max_float(def.lower_twist_angle, def.upper_twist_angle)
     s.lower_twist_angle = math.clamp_float(lower, 0.0 - 0.99 * pi, 0.99 * pi)
@@ -5370,6 +5389,94 @@ spherical_swing_angle(s: *SphericalJoint, rel_q: Quat) -> float {
     if spherical_cone_off_axis(s) == false { return math.get_swing_angle(rel_q) }
     b = math.rotate_vector(rel_q, math.vec3_axis_z())
     return math.atan2_approx(math.length(math.cross(s.cone_axis, b)), math.dot(s.cone_axis, b))
+}
+
+// Whether a spherical joint's cone is an ellipse (two half-angles) rather
+// than the reference's circle.
+spherical_cone_elliptical(s: *SphericalJoint) -> bool { return s.cone_minor_angle > 0.0 }
+
+// An ellipse's minor half-angle as stored: 0 (the circle) when it is the
+// major one in the precision it is kept in, so equal angles are the
+// reference's circle, bit for bit.
+spherical_cone_minor(s: *SphericalJoint, minor: float) -> f32 {
+    clamped = clamp_spherical_cone(s, minor)
+    if (clamped as f32) == (s.cone_angle as f32) { return 0.0 }
+    return clamped as f32
+}
+
+// Where frame B's z is against an elliptical cone, in frame A: the angle
+// from the centre, the direction it lies in (unit, across the centre) and
+// that direction's parts along the ellipse's axes.
+struct ConeReach {
+    theta: float
+    sin_theta: float
+    cos_theta: float
+    across: Vec3
+    along_major: float
+    along_minor: float
+}
+
+cone_reach(s: *SphericalJoint, b: Vec3) -> ConeReach {
+    c = s.cone_axis
+    cos_t = math.dot(c, b)
+    lateral = math.sub(b, math.mul_sv(cos_t, c))
+    sin_t = math.length(lateral)
+    reach = ConeReach { theta: math.atan2_approx(sin_t, cos_t), sin_theta: sin_t, cos_theta: cos_t, across: math.vec3_zero(), along_major: 1.0, along_minor: 0.0 }
+    if sin_t < math.EPSILON { return reach }
+    d = math.mul_sv(1.0 / sin_t, lateral)
+    // The ellipse's axes across the centre: the major one from
+    // cone_major_axis (frame A's x when zero, its y when x lies along the
+    // centre), the minor one square to it.
+    major = math.widen3(s.cone_major_axis)
+    if math.length_squared(major) == 0.0 { major = math.vec3_axis_x() }
+    major = math.sub(major, math.mul_sv(math.dot(major, c), c))
+    if math.length_squared(major) < 0.000001 { major = math.sub(math.vec3_axis_y(), math.mul_sv(c.y, c)) }
+    major = math.normalize(major)
+    minor = math.cross(c, major)
+    reach.across = d
+    reach.along_major = math.dot(d, major)
+    reach.along_minor = math.dot(d, minor)
+    return reach
+}
+
+// The ellipse's half-angle in a direction: the polar radius of an ellipse
+// of half-angles a (along the major axis) and b (across it).
+cone_radius(a: float, b: float, along_major: float, along_minor: float) -> float {
+    return a * b / sqrt((b * along_major) * (b * along_major) + (a * along_minor) * (a * along_minor))
+}
+
+// How far frame B's z is inside the cone, radians: the limit's separation
+// (negative past it). The circle's is the reference's, bit for bit; the
+// ellipse's is its radius in frame B's direction less the angle there.
+spherical_cone_gap(s: *SphericalJoint, rel_q: Quat) -> float {
+    if spherical_cone_elliptical(s) == false { return s.cone_angle - spherical_swing_angle(s, rel_q) }
+    reach = cone_reach(s, math.rotate_vector(rel_q, math.vec3_axis_z()))
+    if reach.sin_theta < math.EPSILON { return math.min_float(s.cone_angle, s.cone_minor_angle as float) }
+    return cone_radius(s.cone_angle, s.cone_minor_angle as float, reach.along_major, reach.along_minor) - reach.theta
+}
+
+// The world axis the cone limit pushes about, with frame B's z at
+// `twist_axis` (world): for the circle the reference's, the centre crossed
+// with B's z; for the ellipse the rotation that carries B's z along the
+// ellipse's normal there (in the angles' plane, the gradient of
+// (x/a)^2 + (y/b)^2), which is the circle's when a = b.
+spherical_cone_push_axis(s: *SphericalJoint, frame_a_q: Quat, twist_axis: Vec3) -> Vec3 {
+    if spherical_cone_elliptical(s) == false { return math.normalize(math.cross(math.rotate_vector(frame_a_q, s.cone_axis), twist_axis)) }
+    b = math.inv_rotate_vector(frame_a_q, twist_axis)
+    reach = cone_reach(s, b)
+    if reach.sin_theta < math.EPSILON { return math.vec3_zero() }
+    a = s.cone_angle
+    minor = s.cone_minor_angle as float
+    normal_major = reach.theta * reach.along_major / (a * a)
+    normal_minor = reach.theta * reach.along_minor / (minor * minor)
+    radial = normal_major * reach.along_major + normal_minor * reach.along_minor
+    around = normal_minor * reach.along_major - normal_major * reach.along_minor
+    // B's z moves along `outward` as the angle grows and along `sideways`
+    // as the direction turns about the centre.
+    outward = math.sub(math.mul_sv(reach.cos_theta, reach.across), math.mul_sv(reach.sin_theta, s.cone_axis))
+    sideways = math.cross(s.cone_axis, reach.across)
+    tangent = math.add(math.mul_sv(radial, outward), math.mul_sv(around, sideways))
+    return math.rotate_vector(frame_a_q, math.normalize(math.cross(b, tangent)))
 }
 
 create_weld_joint(world_id: WorldId, def: *WeldJointDef) -> JointId {

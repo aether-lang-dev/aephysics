@@ -367,8 +367,10 @@ lane_sim(ctx: *StepContext, index1: int) -> *BodySim {
     return contact_solver.sim_at(ctx.sims, index1 - 1)
 }
 
-lane_softness(ctx: *StepContext, index_a1: int, index_b1: int) -> Softness {
+lane_softness(ctx: *StepContext, index_a1: int, index_b1: int, sim_a: *BodySim, sim_b: *BodySim) -> Softness {
     if index_a1 == 0 || index_b1 == 0 { return ctx.static_softness }
+    // A kinematic body, of no inverse mass as a static one, when the world asks.
+    if ctx.world.enable_kinematic_static_softness && (sim_a.inv_mass == 0.0 || sim_b.inv_mass == 0.0) { return ctx.static_softness }
     return ctx.contact_softness
 }
 
@@ -508,14 +510,14 @@ prepare_wide_slot(ctx: *StepContext, color: *GraphColor, slot: int, end: int) {
     c.inv_inertia_a = i_a
     c.inv_inertia_b = i_b
 
-    soft0 = lane_softness(ctx, c.index_a.l0, c.index_b.l0)
-    soft1 = lane_softness(ctx, c.index_a.l1, c.index_b.l1)
-    soft2 = lane_softness(ctx, c.index_a.l2, c.index_b.l2)
-    soft3 = lane_softness(ctx, c.index_a.l3, c.index_b.l3)
-    soft4 = lane_softness(ctx, c.index_a.l4, c.index_b.l4)
-    soft5 = lane_softness(ctx, c.index_a.l5, c.index_b.l5)
-    soft6 = lane_softness(ctx, c.index_a.l6, c.index_b.l6)
-    soft7 = lane_softness(ctx, c.index_a.l7, c.index_b.l7)
+    soft0 = lane_softness(ctx, c.index_a.l0, c.index_b.l0, sa0, sb0)
+    soft1 = lane_softness(ctx, c.index_a.l1, c.index_b.l1, sa1, sb1)
+    soft2 = lane_softness(ctx, c.index_a.l2, c.index_b.l2, sa2, sb2)
+    soft3 = lane_softness(ctx, c.index_a.l3, c.index_b.l3, sa3, sb3)
+    soft4 = lane_softness(ctx, c.index_a.l4, c.index_b.l4, sa4, sb4)
+    soft5 = lane_softness(ctx, c.index_a.l5, c.index_b.l5, sa5, sb5)
+    soft6 = lane_softness(ctx, c.index_a.l6, c.index_b.l6, sa6, sb6)
+    soft7 = lane_softness(ctx, c.index_a.l7, c.index_b.l7, sa7, sb7)
     c.bias_rate = f8(soft0.bias_rate, soft1.bias_rate, soft2.bias_rate, soft3.bias_rate, soft4.bias_rate, soft5.bias_rate, soft6.bias_rate, soft7.bias_rate)
     c.mass_scale = f8(soft0.mass_scale, soft1.mass_scale, soft2.mass_scale, soft3.mass_scale, soft4.mass_scale, soft5.mass_scale, soft6.mass_scale, soft7.mass_scale)
     c.impulse_scale = f8(soft0.impulse_scale, soft1.impulse_scale, soft2.impulse_scale, soft3.impulse_scale, soft4.impulse_scale, soft5.impulse_scale, soft6.impulse_scale, soft7.impulse_scale)

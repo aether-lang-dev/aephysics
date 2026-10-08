@@ -627,6 +627,124 @@ test_reach() {
     free(shape)
 }
 
+// A thigh sprung toward `degrees` from hanging down, ahead or out to its
+// side, weightless for two seconds: where it ends up, degrees from down
+// (against the pelvis as it ends up), and how far that is ahead or out.
+struct ThighReach {
+    from_down: float
+    off_aim: float
+    flexion: float                 // ahead of down, in the plane of up and forward
+    abduction: float               // out from down, in the plane of up and the side
+}
+
+thigh_reach(index: int, out_side: bool, degrees: float) -> ThighReach {
+    shape = human.human_reference_shape()
+    axes = figure_axes(shape)
+    world_id = world_with_ground()
+    physics_world.set_gravity(world_id, math.vec3_zero())
+    h = Human { bones: null, filter_joints: null, filter_joint_count: 0, friction_torque: 0.0, is_spawned: false }
+    human.create_human_shaped(&h, world_id, Transform { p: math.vec3(0.0, 1.5, 0.0), q: math.quat_identity() }, shape, 0.5, 1.0, 0.7, 1, null)
+    spec = human.spec_at(shape, index)
+    parent = human.spec_at(shape, spec.parent)
+    bone = human.bone_at(&h, index)
+    out = math.normalize(math.sub(human.human_shape_head(shape, index), human.human_shape_head(shape, spec.parent)))
+    out = math.normalize(math.sub(out, math.mul_sv(math.dot(out, axes.up), axes.up)))
+    out = math.normalize(math.sub(out, math.mul_sv(math.dot(out, axes.forward), axes.forward)))
+    way = axes.forward
+    if out_side { way = out }
+    a = degrees * math.DEG_TO_RAD
+    aim = math.add(math.mul_sv(0.0 - cos(a), axes.up), math.mul_sv(sin(a), way))
+    rest = math.normalize(math.sub(human.human_shape_tail(shape, index), human.human_shape_head(shape, index)))
+    posed = math.mul_quat(math.compute_quat_between_unit_vectors(rest, aim), spec.reference.q)
+    target = math.inv_mul_quat(math.mul_quat(parent.reference.q, bone.local_frame_a.q), math.mul_quat(posed, bone.local_frame_b.q))
+    joint_solver.spherical_joint_set_target_rotation(bone.joint_id, math.normalize_quat(target))
+    joint_solver.spherical_joint_set_spring_hertz(bone.joint_id, 10.0)
+    joint_solver.spherical_joint_set_spring_damping_ratio(bone.joint_id, 1.0)
+    steps(world_id, 120)
+    parent_q = dynamics.body_get_rotation(human.bone_at(&h, spec.parent).body_id)
+    have = math.rotate_vector(dynamics.body_get_rotation(bone.body_id), math.inv_rotate_vector(spec.reference.q, rest))
+    down = math.rotate_vector(parent_q, math.inv_rotate_vector(parent.reference.q, math.neg(axes.up)))
+    want = math.rotate_vector(parent_q, math.inv_rotate_vector(parent.reference.q, aim))
+    ahead_w = math.rotate_vector(parent_q, math.inv_rotate_vector(parent.reference.q, axes.forward))
+    out_w = math.rotate_vector(parent_q, math.inv_rotate_vector(parent.reference.q, out))
+    result = ThighReach { from_down: angle_between(have, down) * math.RAD_TO_DEG, off_aim: angle_between(have, want) * math.RAD_TO_DEG,
+                          flexion: math.atan2_approx(math.dot(have, ahead_w), math.dot(have, down)) * math.RAD_TO_DEG,
+                          abduction: math.atan2_approx(math.dot(have, out_w), math.dot(have, down)) * math.RAD_TO_DEG }
+    human.destroy_human(&h)
+    dynamics.destroy_world(world_id)
+    free(shape)
+    return result
+}
+
+// How far a direction (in the figure's space, the figure placed with no
+// turn) is inside a bone's cone, degrees: the joint's own measure of its
+// limit, negative past it.
+hip_gap(h: *Human, shape: ptr, index: int, dir: Vec3) -> float {
+    spec = human.spec_at(shape, index)
+    bone = human.bone_at(h, index)
+    parent_q = dynamics.body_get_rotation(human.bone_at(h, spec.parent).body_id)
+    b = math.inv_rotate_vector(math.mul_quat(parent_q, bone.local_frame_a.q), math.normalize(dir))
+    rel_q = math.compute_quat_between_unit_vectors(math.vec3_axis_z(), b)
+    j = dynamics.spherical_joint_of(dynamics.get_joint_sim_of_kind(bone.joint_id, dynamics.JOINT_SPHERICAL))
+    return dynamics.spherical_cone_gap(j, rel_q) * math.RAD_TO_DEG
+}
+
+swung(axes: Axes, way: Vec3, degrees: float) -> Vec3 {
+    a = degrees * math.DEG_TO_RAD
+    return math.add(math.mul_sv(0.0 - cos(a), axes.up), math.mul_sv(sin(a), way))
+}
+
+// The hips move as a person's (#129): an elliptical cone through the
+// ranges from standing, 125 ahead, 25 back, 45 out and 30 across, where
+// the old circle of 78 let a thigh fall 98 out.
+test_hips() {
+    shape = human.human_reference_shape()
+    axes = figure_axes(shape)
+    world_id = world_with_ground()
+    physics_world.set_gravity(world_id, math.vec3_zero())
+    h = Human { bones: null, filter_joints: null, filter_joint_count: 0, friction_torque: 0.0, is_spawned: false }
+    human.create_human_shaped(&h, world_id, Transform { p: math.vec3(0.0, 1.5, 0.0), q: math.quat_identity() }, shape, 0.5, 1.0, 0.7, 1, null)
+    k = 0
+    while k < 2 {
+        index = human.BONE_THIGH_L
+        if k == 1 { index = human.BONE_THIGH_R }
+        spec = human.spec_at(shape, index)
+        out = math.sub(human.human_shape_head(shape, index), human.human_shape_head(shape, spec.parent))
+        out = math.sub(out, math.mul_sv(math.dot(out, axes.up), axes.up))
+        out = math.normalize(math.sub(out, math.mul_sv(math.dot(out, axes.forward), axes.forward)))
+        back = math.neg(axes.forward)
+        across_way = math.neg(out)
+        ahead_gap = hip_gap(&h, shape, index, swung(axes, axes.forward, 125.0))
+        back_gap = hip_gap(&h, shape, index, swung(axes, back, 25.0))
+        out_gap = hip_gap(&h, shape, index, swung(axes, out, 45.0))
+        across_gap = hip_gap(&h, shape, index, swung(axes, across_way, 30.0))
+        ensure("hips (${k}): the cone's edge at 125 ahead, 25 back, 45 out, 30 across from standing (${ahead_gap} ${back_gap} ${out_gap} ${across_gap})",
+               math.abs_float(ahead_gap) < 3.0 && math.abs_float(back_gap) < 3.0 && math.abs_float(out_gap) < 3.0 && math.abs_float(across_gap) < 3.0)
+        split_gap = hip_gap(&h, shape, index, swung(axes, out, 98.0))
+        ensure("hips (${k}): a thigh 98 out, the old circle's split, is well past the edge (${split_gap})", split_gap < 0.0 - 30.0)
+        k = k + 1
+    }
+    human.destroy_human(&h)
+    dynamics.destroy_world(world_id)
+    free(shape)
+    // Moved by springs: flexion reaches, and a thigh pushed out sideways
+    // slides along the edge toward its widest, short of a split.
+    ahead = thigh_reach(human.BONE_THIGH_L, false, 120.0)
+    ensure("hips: a thigh flexes ahead to 120 within 5 degrees (${ahead.off_aim})", ahead.off_aim < 5.0)
+    pushed = thigh_reach(human.BONE_THIGH_L, true, 90.0)
+    ensure("hips: a thigh sprung out to 90 stays short of a split (abduction ${pushed.abduction}, flexion ${pushed.flexion})", pushed.abduction < 66.0)
+    pushed_r = thigh_reach(human.BONE_THIGH_R, true, 90.0)
+    ensure("hips: the right as the left (${pushed_r.abduction})", math.abs_float(pushed_r.abduction - pushed.abduction) < 2.0)
+    within = thigh_reach(human.BONE_THIGH_L, true, 35.0)
+    ensure("hips: out to 35, inside the limit, it gets there (${within.off_aim})", within.off_aim < 3.0)
+    // The reference's tight preset keeps its circle.
+    tight = human.human_reference_shape()
+    human.human_tight_limits(tight)
+    thigh = human.spec_at(tight, human.BONE_THIGH_L)
+    ensure("hips: the tight preset's cone is the reference's circle", thigh.swing_minor_degrees == 0.0 && thigh.cone_axis.z == 1.0)
+    free(tight)
+}
+
 // A hinge sprung far past either end of its range, weightless: the bone's
 // bend from its parent's line, degrees, positive the way it flexes
 // (`toward`, in the figure's space: back for a knee, ahead for an elbow).
@@ -706,6 +824,7 @@ main() {
     test_fit_curved()
     test_reach()
     test_hinges()
+    test_hips()
     test_grip()
     hull.destroy_hull(g_slab as *HullData)
     println("human: ${checks} checks")
