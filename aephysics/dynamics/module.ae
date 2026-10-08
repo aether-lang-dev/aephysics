@@ -365,10 +365,14 @@ null_shape_id() -> ShapeId { return ShapeId { index1: 0, world0: 0, generation: 
 // --- the state --------------------------------------------------------------------------------------
 
 // A body's organisation: where its sim lives, its lists, its island.
+// What the collide pass and the constraint prepares read of every body
+// comes first (its set, its sim's index, its kind), in one cache line with
+// the lists the contacts walk.
 struct Body {
-    user_data: ptr
     set_index: int                 // the solver set, or NULL_INDEX when the slot is free
     local_index: int               // the sim (and state) within the set
+    kind: int
+    flags: int
     head_contact_key: int          // [contact id : 31 | edge : 1]
     contact_count: int
     head_shape_id: int
@@ -385,9 +389,8 @@ struct Body {
     inertia: Matrix3               // about the centre of mass, in the body's frame
     body_move_index: int
     id: int
-    flags: int
-    kind: int
     generation: int
+    user_data: ptr
     name: ptr                      // a plain C copy the world owns (native.name_copy), or null
 }
 
@@ -464,23 +467,18 @@ struct ContactEdge {
 }
 
 // The persistent interaction of two shapes (its update comes with the next layer).
+// What the collide pass reads and writes of every awake contact comes
+// first: the shapes, the flags, the manifolds, the sims' indices and the
+// recycling's cached pose (two cache lines); the graph's and the islands'
+// bookkeeping after.
 struct Contact {
-    set_index: int
-    color_index: int
-    local_index: int
-    edge_a: ContactEdge
-    edge_b: ContactEdge
     shape_id_a: int
     shape_id_b: int
-    child_index: int
-    island_id: int
-    island_index: int
-    contact_id: int
+    flags: int
+    manifold_count: int
+    manifolds: ptr                 // Manifold[manifold_count], a heap block of the contact's
     body_sim_index_a: int
     body_sim_index_b: int
-    flags: int
-    manifolds: ptr                 // Manifold[manifold_count], a heap block of the contact's
-    manifold_count: int
     // For the recycling, single precision as the reference's: the bodies'
     // rotations and B's pose relative to A at the last narrow phase (a
     // relative pose of touching bodies is small; the world positions stay
@@ -489,6 +487,15 @@ struct Contact {
     cached_rotation_b: Quatf
     cached_relative_p: Vec3f
     cached_relative_q: Quatf
+    set_index: int
+    color_index: int
+    local_index: int
+    edge_a: ContactEdge
+    edge_b: ContactEdge
+    child_index: int
+    island_id: int
+    island_index: int
+    contact_id: int
     friction: f32
     restitution: f32
     rolling_resistance: f32
@@ -4671,7 +4678,6 @@ prefetch_shape(s: *WorldShape) {
 
 prefetch_body(b: *Body) {
     native.prefetch(b as ptr)
-    native.prefetch((&b.kind) as ptr)
 }
 
 collide_range(start: int, end: int, worker: int, context: ptr) {
