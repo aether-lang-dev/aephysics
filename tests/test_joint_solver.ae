@@ -611,6 +611,31 @@ test_spherical() {
     set_velocity(&f, math.vec3_zero(), math.vec3_zero())
     solve_biased(&f, id)
     ensure("twist: pushed back (${math.widen3(state.w).z})", math.widen3(state.w).z < 0.0 - 0.1)
+    // Every angular part off again (the motor and the cone above, the twist
+    // here, a spring after one step): each zeroes its impulse as it goes
+    // off, so the angular sum the warm start skips for a plain point is
+    // exactly zero.
+    j = dynamics.spherical_joint_of(sim(&f, id))
+    ensure("twist: an impulse to drop", j.lower_twist_impulse > 0.0 || j.upper_twist_impulse > 0.0)
+    joint_solver.spherical_joint_enable_twist_limit(id, false)
+    joint_solver.spherical_joint_enable_spring(id, true)
+    joint_solver.spherical_joint_set_spring_hertz(id, 2.0)
+    set_velocity(&f, math.vec3_zero(), math.vec3(1.0, 0.0, 0.0))
+    solve_biased(&f, id)
+    ensure("spring: an impulse to drop", math.length(j.spring_impulse) > 0.0)
+    joint_solver.spherical_joint_enable_spring(id, false)
+    ensure("every angular part off: no angular impulse left to warm-start",
+           math.length(j.spring_impulse) == 0.0 && math.length(j.motor_impulse) == 0.0 && j.swing_impulse == 0.0 &&
+           j.lower_twist_impulse == 0.0 && j.upper_twist_impulse == 0.0)
+    // The warm start of the plain point gives back the point's impulse
+    // alone: the cube, held at its centre, moves by it and does not turn.
+    linear = j.linear_impulse
+    ensure("plain point: an impulse to give back", math.length(linear) > 0.0)
+    set_velocity(&f, math.vec3_zero(), math.vec3_zero())
+    joint_solver.warm_start_joint(sim(&f, id), &f.ctx)
+    v = math.narrow3(math.mul_sv(sim(&f, id).inv_mass_b, linear))
+    ensure("plain point: the warm start moves the cube by the point's impulse", state.v.x == v.x && state.v.y == v.y && state.v.z == v.z)
+    ensure("plain point: and does not turn it", state.w.x == 0.0 && state.w.y == 0.0 && state.w.z == 0.0)
     dynamics.destroy_world(f.world_id)
 }
 

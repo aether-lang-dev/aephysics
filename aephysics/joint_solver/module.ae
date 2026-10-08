@@ -126,9 +126,9 @@ prepare_base(base: *JointSim, ctx: *StepContext) -> JointBodies {
     sim_b = dynamics.get_body_sim(w, body_b)
     base.inv_mass_a = sim_a.inv_mass
     base.inv_mass_b = sim_b.inv_mass
-    base.inv_inertia_a = math.widen_mat3(sim_a.inv_inertia_world)
-    base.inv_inertia_b = math.widen_mat3(sim_b.inv_inertia_world)
-    base.fixed_rotation = math.det(math.add_mm(base.inv_inertia_a, base.inv_inertia_b)) < 1000.0 * math.TINY
+    base.inv_inertia_a = sim_a.inv_inertia_world
+    base.inv_inertia_b = sim_b.inv_inertia_world
+    base.fixed_rotation = math.det(math.add_mm(math.widen_mat3(sim_a.inv_inertia_world), math.widen_mat3(sim_b.inv_inertia_world))) < 1000.0 * math.TINY
     index_a = NULL_INDEX
     if body_a.set_index == dynamics.AWAKE_SET { index_a = body_a.local_index }
     index_b = NULL_INDEX
@@ -232,7 +232,7 @@ prepare_distance_joint(base: *JointSim, ctx: *StepContext) {
     axis = math.normalize(math.add(math.sub(r_b, r_a), j.delta_center))
     cr_a = math.cross(r_a, axis)
     cr_b = math.cross(r_b, axis)
-    k = base.inv_mass_a + base.inv_mass_b + math.dot(cr_a, math.mul_mv(base.inv_inertia_a, cr_a)) + math.dot(cr_b, math.mul_mv(base.inv_inertia_b, cr_b))
+    k = base.inv_mass_a + base.inv_mass_b + math.dot(cr_a, math.mul_mv(math.widen_mat3(base.inv_inertia_a), cr_a)) + math.dot(cr_b, math.mul_mv(math.widen_mat3(base.inv_inertia_b), cr_b))
     j.axial_mass = 0.0
     if k > 0.0 { j.axial_mass = 1.0 / k }
     j.distance_softness = dynamics.make_soft(j.hertz, j.damping_ratio, ctx.h)
@@ -269,11 +269,11 @@ warm_start_distance_joint(base: *JointSim, ctx: *StepContext) {
     p = math.mul_sv(j.impulse + j.lower_impulse - j.upper_impulse + j.motor_impulse, axis)
     if (state_a.flags & dynamics.DYNAMIC_FLAG) != 0 {
         state_a.v = math.narrow3(math.mul_sub(math.widen3(state_a.v), base.inv_mass_a, p))
-        state_a.w = math.narrow3(math.sub(math.widen3(state_a.w), math.mul_mv(base.inv_inertia_a, math.cross(r_a, p))))
+        state_a.w = math.narrow3(math.sub(math.widen3(state_a.w), math.mul_mv(math.widen_mat3(base.inv_inertia_a), math.cross(r_a, p))))
     }
     if (state_b.flags & dynamics.DYNAMIC_FLAG) != 0 {
         state_b.v = math.narrow3(math.mul_add(math.widen3(state_b.v), base.inv_mass_b, p))
-        state_b.w = math.narrow3(math.add(math.widen3(state_b.w), math.mul_mv(base.inv_inertia_b, math.cross(r_b, p))))
+        state_b.w = math.narrow3(math.add(math.widen3(state_b.w), math.mul_mv(math.widen_mat3(base.inv_inertia_b), math.cross(r_b, p))))
     }
 }
 
@@ -282,8 +282,8 @@ warm_start_distance_joint(base: *JointSim, ctx: *StepContext) {
 solve_distance_joint(base: *JointSim, ctx: *StepContext, use_bias: bool) {
     m_a = base.inv_mass_a
     m_b = base.inv_mass_b
-    i_a = base.inv_inertia_a
-    i_b = base.inv_inertia_b
+    i_a = math.widen_mat3(base.inv_inertia_a)
+    i_b = math.widen_mat3(base.inv_inertia_b)
     j = dynamics.distance_joint_of(base)
     state_a = state_of(ctx, j.index_a)
     state_b = state_of(ctx, j.index_b)
@@ -495,7 +495,7 @@ prepare_motor_joint(base: *JointSim, ctx: *StepContext) {
     j.delta_center = math.sub(bodies.sim_b.center, bodies.sim_a.center)
     j.linear_spring = dynamics.make_soft(j.linear_hertz, j.linear_damping_ratio, ctx.h)
     j.angular_spring = dynamics.make_soft(j.angular_hertz, j.angular_damping_ratio, ctx.h)
-    j.angular_mass = math.invert_matrix(math.add_mm(base.inv_inertia_a, base.inv_inertia_b))
+    j.angular_mass = math.invert_matrix(math.add_mm(math.widen_mat3(base.inv_inertia_a), math.widen_mat3(base.inv_inertia_b)))
     if ctx.enable_warm_starting == false {
         j.linear_velocity_impulse = math.vec3_zero()
         j.angular_velocity_impulse = math.vec3_zero()
@@ -534,11 +534,11 @@ warm_start_motor_joint(base: *JointSim, ctx: *StepContext) {
     // static body's dummy state is written and forgotten).
     if (state_a.flags & dynamics.DYNAMIC_FLAG) != 0 {
         state_a.v = math.narrow3(math.mul_sub(math.widen3(state_a.v), base.inv_mass_a, linear))
-        state_a.w = math.narrow3(math.sub(math.widen3(state_a.w), math.mul_mv(base.inv_inertia_a, math.add(math.cross(r_a, linear), angular))))
+        state_a.w = math.narrow3(math.sub(math.widen3(state_a.w), math.mul_mv(math.widen_mat3(base.inv_inertia_a), math.add(math.cross(r_a, linear), angular))))
     }
     if (state_b.flags & dynamics.DYNAMIC_FLAG) != 0 {
         state_b.v = math.narrow3(math.mul_add(math.widen3(state_b.v), base.inv_mass_b, linear))
-        state_b.w = math.narrow3(math.add(math.widen3(state_b.w), math.mul_mv(base.inv_inertia_b, math.add(math.cross(r_b, linear), angular))))
+        state_b.w = math.narrow3(math.add(math.widen3(state_b.w), math.mul_mv(math.widen_mat3(base.inv_inertia_b), math.add(math.cross(r_b, linear), angular))))
     }
 }
 
@@ -548,8 +548,8 @@ warm_start_motor_joint(base: *JointSim, ctx: *StepContext) {
 solve_motor_joint(base: *JointSim, ctx: *StepContext) {
     m_a = base.inv_mass_a
     m_b = base.inv_mass_b
-    i_a = base.inv_inertia_a
-    i_b = base.inv_inertia_b
+    i_a = math.widen_mat3(base.inv_inertia_a)
+    i_b = math.widen_mat3(base.inv_inertia_b)
     j = dynamics.motor_joint_of(base)
     state_a = state_of(ctx, j.index_a)
     state_b = state_of(ctx, j.index_b)
@@ -723,15 +723,15 @@ warm_start_parallel_joint(base: *JointSim, ctx: *StepContext) {
     state_a = state_of(ctx, j.index_a)
     state_b = state_of(ctx, j.index_b)
     angular = math.blend2(j.perp_impulse.x, j.perp_axis_x, j.perp_impulse.y, j.perp_axis_y)
-    if (state_a.flags & dynamics.DYNAMIC_FLAG) != 0 { state_a.w = math.narrow3(math.sub(math.widen3(state_a.w), math.mul_mv(base.inv_inertia_a, angular))) }
-    if (state_b.flags & dynamics.DYNAMIC_FLAG) != 0 { state_b.w = math.narrow3(math.add(math.widen3(state_b.w), math.mul_mv(base.inv_inertia_b, angular))) }
+    if (state_a.flags & dynamics.DYNAMIC_FLAG) != 0 { state_a.w = math.narrow3(math.sub(math.widen3(state_a.w), math.mul_mv(math.widen_mat3(base.inv_inertia_a), angular))) }
+    if (state_b.flags & dynamics.DYNAMIC_FLAG) != 0 { state_b.w = math.narrow3(math.add(math.widen3(state_b.w), math.mul_mv(math.widen_mat3(base.inv_inertia_b), angular))) }
 }
 
 // The z axes kept collinear by a two-row spring on the perpendicular
 // axes, bounded by the maximum torque over the sub-step.
 solve_parallel_joint(base: *JointSim, ctx: *StepContext) {
-    i_a = base.inv_inertia_a
-    i_b = base.inv_inertia_b
+    i_a = math.widen_mat3(base.inv_inertia_a)
+    i_b = math.widen_mat3(base.inv_inertia_b)
     j = dynamics.parallel_joint_of(base)
     state_a = state_of(ctx, j.index_a)
     state_b = state_of(ctx, j.index_b)
@@ -822,7 +822,7 @@ prepare_prismatic_joint(base: *JointSim, ctx: *StepContext) {
     j.frame_a = world_frame(bodies.sim_a, base.local_frame_a)
     j.frame_b = world_frame(bodies.sim_b, base.local_frame_b)
     j.delta_center = math.sub(bodies.sim_b.center, bodies.sim_a.center)
-    j.rotation_mass = math.invert_matrix(math.add_mm(base.inv_inertia_a, base.inv_inertia_b))
+    j.rotation_mass = math.invert_matrix(math.add_mm(math.widen_mat3(base.inv_inertia_a), math.widen_mat3(base.inv_inertia_b)))
     matrix_a = math.make_matrix_from_quat(j.frame_a.q)
     j.joint_axis = matrix_a.cx
     j.perp_axis_y = matrix_a.cy
@@ -862,9 +862,9 @@ warm_start_prismatic_joint(base: *JointSim, ctx: *StepContext) {
     l_a = math.add(math.blend3(axial, s_ax, j.perp_impulse.x, s_ay, j.perp_impulse.y, s_az), j.angular_impulse)
     l_b = math.add(math.blend3(axial, s_bx, j.perp_impulse.x, s_by, j.perp_impulse.y, s_bz), j.angular_impulse)
     v_a = math.mul_sub(math.widen3(state_a.v), base.inv_mass_a, p)
-    w_a = math.sub(math.widen3(state_a.w), math.mul_mv(base.inv_inertia_a, l_a))
+    w_a = math.sub(math.widen3(state_a.w), math.mul_mv(math.widen_mat3(base.inv_inertia_a), l_a))
     v_b = math.mul_add(math.widen3(state_b.v), base.inv_mass_b, p)
-    w_b = math.add(math.widen3(state_b.w), math.mul_mv(base.inv_inertia_b, l_b))
+    w_b = math.add(math.widen3(state_b.w), math.mul_mv(math.widen_mat3(base.inv_inertia_b), l_b))
     store_velocities(state_a, v_a, w_a, state_b, v_b, w_b)
 }
 
@@ -875,8 +875,8 @@ warm_start_prismatic_joint(base: *JointSim, ctx: *StepContext) {
 solve_prismatic_joint(base: *JointSim, ctx: *StepContext, use_bias: bool) {
     m_a = base.inv_mass_a
     m_b = base.inv_mass_b
-    i_a = base.inv_inertia_a
-    i_b = base.inv_inertia_b
+    i_a = math.widen_mat3(base.inv_inertia_a)
+    i_b = math.widen_mat3(base.inv_inertia_b)
     j = dynamics.prismatic_joint_of(base)
     state_a = state_of(ctx, j.index_a)
     state_b = state_of(ctx, j.index_b)
@@ -1156,7 +1156,7 @@ prepare_revolute_joint(base: *JointSim, ctx: *StepContext) {
     j.frame_a = world_frame(bodies.sim_a, base.local_frame_a)
     j.frame_b = world_frame(bodies.sim_b, base.local_frame_b)
     j.delta_center = math.sub(bodies.sim_b.center, bodies.sim_a.center)
-    inertia_sum = math.add_mm(base.inv_inertia_a, base.inv_inertia_b)
+    inertia_sum = math.add_mm(math.widen_mat3(base.inv_inertia_a), math.widen_mat3(base.inv_inertia_b))
     axis_z = math.rotate_vector(j.frame_a.q, math.vec3_axis_z())
     k = math.dot(axis_z, math.mul_mv(inertia_sum, axis_z))
     j.axial_mass = 0.0
@@ -1189,9 +1189,9 @@ warm_start_revolute_joint(base: *JointSim, ctx: *StepContext) {
     angular = math.blend2(j.perp_impulse.x, j.perp_axis_x, j.perp_impulse.y, j.perp_axis_y)
     angular = math.mul_add(angular, axial, j.rotation_axis_z)
     v_a = math.mul_sub(math.widen3(state_a.v), base.inv_mass_a, j.linear_impulse)
-    w_a = math.sub(math.widen3(state_a.w), math.mul_mv(base.inv_inertia_a, math.add(math.cross(r_a, j.linear_impulse), angular)))
+    w_a = math.sub(math.widen3(state_a.w), math.mul_mv(math.widen_mat3(base.inv_inertia_a), math.add(math.cross(r_a, j.linear_impulse), angular)))
     v_b = math.mul_add(math.widen3(state_b.v), base.inv_mass_b, j.linear_impulse)
-    w_b = math.add(math.widen3(state_b.w), math.mul_mv(base.inv_inertia_b, math.add(math.cross(r_b, j.linear_impulse), angular)))
+    w_b = math.add(math.widen3(state_b.w), math.mul_mv(math.widen_mat3(base.inv_inertia_b), math.add(math.cross(r_b, j.linear_impulse), angular)))
     store_velocities(state_a, v_a, w_a, state_b, v_b, w_b)
 }
 
@@ -1201,8 +1201,8 @@ warm_start_revolute_joint(base: *JointSim, ctx: *StepContext) {
 solve_revolute_joint(base: *JointSim, ctx: *StepContext, use_bias: bool) {
     m_a = base.inv_mass_a
     m_b = base.inv_mass_b
-    i_a = base.inv_inertia_a
-    i_b = base.inv_inertia_b
+    i_a = math.widen_mat3(base.inv_inertia_a)
+    i_b = math.widen_mat3(base.inv_inertia_b)
     j = dynamics.revolute_joint_of(base)
     state_a = state_of(ctx, j.index_a)
     state_b = state_of(ctx, j.index_b)
@@ -1421,7 +1421,7 @@ prepare_spherical_joint(base: *JointSim, ctx: *StepContext) {
     j.frame_a = world_frame(bodies.sim_a, base.local_frame_a)
     j.frame_b = world_frame(bodies.sim_b, base.local_frame_b)
     j.delta_center = math.sub(bodies.sim_b.center, bodies.sim_a.center)
-    inertia_sum = math.add_mm(base.inv_inertia_a, base.inv_inertia_b)
+    inertia_sum = math.add_mm(math.widen_mat3(base.inv_inertia_a), math.widen_mat3(base.inv_inertia_b))
     cone_axis = math.rotate_vector(j.frame_a.q, math.vec3_axis_z())
     twist_axis = math.rotate_vector(j.frame_b.q, math.vec3_axis_z())
     if j.enable_cone_limit {
@@ -1463,11 +1463,14 @@ warm_start_spherical_joint(base: *JointSim, ctx: *StepContext) {
     state_b = state_of(ctx, j.index_b)
     r_a = math.rotate_vector(math.widen_quat(state_a.dq), j.frame_a.p)
     r_b = math.rotate_vector(math.widen_quat(state_b.dq), j.frame_b.p)
-    angular = spherical_angular_impulse(j)
+    // The angular impulses are each zeroed when their part is off, so a
+    // plain point (no spring, motor or limit) has none to give back.
+    angular = math.vec3_zero()
+    if j.enable_spring || j.enable_motor || j.enable_cone_limit || j.enable_twist_limit { angular = spherical_angular_impulse(j) }
     v_a = math.mul_sub(math.widen3(state_a.v), base.inv_mass_a, j.linear_impulse)
-    w_a = math.sub(math.widen3(state_a.w), math.mul_mv(base.inv_inertia_a, math.add(math.cross(r_a, j.linear_impulse), angular)))
+    w_a = math.sub(math.widen3(state_a.w), math.mul_mv(math.widen_mat3(base.inv_inertia_a), math.add(math.cross(r_a, j.linear_impulse), angular)))
     v_b = math.mul_add(math.widen3(state_b.v), base.inv_mass_b, j.linear_impulse)
-    w_b = math.add(math.widen3(state_b.w), math.mul_mv(base.inv_inertia_b, math.add(math.cross(r_b, j.linear_impulse), angular)))
+    w_b = math.add(math.widen3(state_b.w), math.mul_mv(math.widen_mat3(base.inv_inertia_b), math.add(math.cross(r_b, j.linear_impulse), angular)))
     store_velocities(state_a, v_a, w_a, state_b, v_b, w_b)
 }
 
@@ -1477,8 +1480,8 @@ warm_start_spherical_joint(base: *JointSim, ctx: *StepContext) {
 solve_spherical_joint(base: *JointSim, ctx: *StepContext, use_bias: bool) {
     m_a = base.inv_mass_a
     m_b = base.inv_mass_b
-    i_a = base.inv_inertia_a
-    i_b = base.inv_inertia_b
+    i_a = math.widen_mat3(base.inv_inertia_a)
+    i_b = math.widen_mat3(base.inv_inertia_b)
     j = dynamics.spherical_joint_of(base)
     state_a = state_of(ctx, j.index_a)
     state_b = state_of(ctx, j.index_b)
@@ -1737,7 +1740,7 @@ prepare_weld_joint(base: *JointSim, ctx: *StepContext) {
     j.frame_a = world_frame(bodies.sim_a, base.local_frame_a)
     j.frame_b = world_frame(bodies.sim_b, base.local_frame_b)
     j.delta_center = math.sub(bodies.sim_b.center, bodies.sim_a.center)
-    j.angular_mass = math.invert_matrix(math.add_mm(base.inv_inertia_a, base.inv_inertia_b))
+    j.angular_mass = math.invert_matrix(math.add_mm(math.widen_mat3(base.inv_inertia_a), math.widen_mat3(base.inv_inertia_b)))
     if j.linear_hertz == 0.0 { j.linear_spring = base.constraint_softness } else { j.linear_spring = dynamics.make_soft(j.linear_hertz, j.linear_damping_ratio, ctx.h) }
     if j.angular_hertz == 0.0 { j.angular_spring = base.constraint_softness } else { j.angular_spring = dynamics.make_soft(j.angular_hertz, j.angular_damping_ratio, ctx.h) }
     if ctx.enable_warm_starting == false {
@@ -1753,9 +1756,9 @@ warm_start_weld_joint(base: *JointSim, ctx: *StepContext) {
     r_a = math.rotate_vector(math.widen_quat(state_a.dq), j.frame_a.p)
     r_b = math.rotate_vector(math.widen_quat(state_b.dq), j.frame_b.p)
     v_a = math.mul_sub(math.widen3(state_a.v), base.inv_mass_a, j.linear_impulse)
-    w_a = math.sub(math.widen3(state_a.w), math.mul_mv(base.inv_inertia_a, math.add(math.cross(r_a, j.linear_impulse), j.angular_impulse)))
+    w_a = math.sub(math.widen3(state_a.w), math.mul_mv(math.widen_mat3(base.inv_inertia_a), math.add(math.cross(r_a, j.linear_impulse), j.angular_impulse)))
     v_b = math.mul_add(math.widen3(state_b.v), base.inv_mass_b, j.linear_impulse)
-    w_b = math.add(math.widen3(state_b.w), math.mul_mv(base.inv_inertia_b, math.add(math.cross(r_b, j.linear_impulse), j.angular_impulse)))
+    w_b = math.add(math.widen3(state_b.w), math.mul_mv(math.widen_mat3(base.inv_inertia_b), math.add(math.cross(r_b, j.linear_impulse), j.angular_impulse)))
     store_velocities(state_a, v_a, w_a, state_b, v_b, w_b)
 }
 
@@ -1764,8 +1767,8 @@ warm_start_weld_joint(base: *JointSim, ctx: *StepContext) {
 solve_weld_joint(base: *JointSim, ctx: *StepContext, use_bias: bool) {
     m_a = base.inv_mass_a
     m_b = base.inv_mass_b
-    i_a = base.inv_inertia_a
-    i_b = base.inv_inertia_b
+    i_a = math.widen_mat3(base.inv_inertia_a)
+    i_b = math.widen_mat3(base.inv_inertia_b)
     j = dynamics.weld_joint_of(base)
     state_a = state_of(ctx, j.index_a)
     state_b = state_of(ctx, j.index_b)
@@ -1863,7 +1866,7 @@ prepare_wheel_joint(base: *JointSim, ctx: *StepContext) {
     j.frame_a = world_frame(bodies.sim_a, base.local_frame_a)
     j.frame_b = world_frame(bodies.sim_b, base.local_frame_b)
     j.delta_center = math.sub(bodies.sim_b.center, bodies.sim_a.center)
-    inertia_sum = math.add_mm(base.inv_inertia_a, base.inv_inertia_b)
+    inertia_sum = math.add_mm(math.widen_mat3(base.inv_inertia_a), math.widen_mat3(base.inv_inertia_b))
     r_a = j.frame_a.p
     r_b = j.frame_b.p
     matrix_a = math.make_matrix_from_quat(j.frame_a.q)
@@ -1871,7 +1874,7 @@ prepare_wheel_joint(base: *JointSim, ctx: *StepContext) {
     suspension_axis = matrix_a.cx
     r_an = math.cross(r_a, suspension_axis)
     r_bn = math.cross(r_b, suspension_axis)
-    k = base.inv_mass_a + base.inv_mass_b + math.dot(r_an, math.mul_mv(base.inv_inertia_a, r_an)) + math.dot(r_bn, math.mul_mv(base.inv_inertia_b, r_bn))
+    k = base.inv_mass_a + base.inv_mass_b + math.dot(r_an, math.mul_mv(math.widen_mat3(base.inv_inertia_a), r_an)) + math.dot(r_bn, math.mul_mv(math.widen_mat3(base.inv_inertia_b), r_bn))
     j.suspension_mass = 0.0
     if k > 0.0 { j.suspension_mass = 1.0 / k }
     j.suspension_softness = dynamics.make_soft(j.suspension_hertz, j.suspension_damping_ratio, ctx.h)
@@ -1946,11 +1949,11 @@ warm_start_wheel_joint(base: *JointSim, ctx: *StepContext) {
     angular = wheel_angular_impulse(j, quat_a, quat_b, matrix_a, matrix_b)
     if (state_a.flags & dynamics.DYNAMIC_FLAG) != 0 {
         state_a.v = math.narrow3(math.mul_sub(math.widen3(state_a.v), base.inv_mass_a, linear))
-        state_a.w = math.narrow3(math.sub(math.widen3(state_a.w), math.mul_mv(base.inv_inertia_a, math.add(angular_a, angular))))
+        state_a.w = math.narrow3(math.sub(math.widen3(state_a.w), math.mul_mv(math.widen_mat3(base.inv_inertia_a), math.add(angular_a, angular))))
     }
     if (state_b.flags & dynamics.DYNAMIC_FLAG) != 0 {
         state_b.v = math.narrow3(math.mul_add(math.widen3(state_b.v), base.inv_mass_b, linear))
-        state_b.w = math.narrow3(math.add(math.widen3(state_b.w), math.mul_mv(base.inv_inertia_b, math.add(angular_b, angular))))
+        state_b.w = math.narrow3(math.add(math.widen3(state_b.w), math.mul_mv(math.widen_mat3(base.inv_inertia_b), math.add(angular_b, angular))))
     }
 }
 
@@ -1962,8 +1965,8 @@ warm_start_wheel_joint(base: *JointSim, ctx: *StepContext) {
 solve_wheel_joint(base: *JointSim, ctx: *StepContext, use_bias: bool) {
     m_a = base.inv_mass_a
     m_b = base.inv_mass_b
-    i_a = base.inv_inertia_a
-    i_b = base.inv_inertia_b
+    i_a = math.widen_mat3(base.inv_inertia_a)
+    i_b = math.widen_mat3(base.inv_inertia_b)
     j = dynamics.wheel_joint_of(base)
     state_a = state_of(ctx, j.index_a)
     state_b = state_of(ctx, j.index_b)

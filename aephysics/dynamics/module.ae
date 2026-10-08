@@ -984,8 +984,8 @@ struct JointSim {
     fixed_rotation: bool
     inv_mass_a: float
     inv_mass_b: float
-    inv_inertia_a: Matrix3
-    inv_inertia_b: Matrix3
+    inv_inertia_a: Matrix3f        // the body sims' world inertias, single precision as they are kept
+    inv_inertia_b: Matrix3f
     constraint_softness: Softness
     force_threshold: float         // the solve's joint event test
     torque_threshold: float
