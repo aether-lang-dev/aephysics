@@ -48,6 +48,8 @@ const MAX_MANIFOLD_POINTS = 4
 const MAX_CLIP_POINTS = 64
 // Four linear slops: contacts start this far apart, so the solver sees them coming.
 const SPECULATIVE_DISTANCE = 0.02
+// The feature index of a near vertex added to a face contact (no edge has it: hulls have at most 128 vertices).
+const NEAR_VERTEX = 255
 // Edge pairs whose sine is below this are not an axis.
 const PARALLEL_EDGE_TOL = 0.005
 
@@ -1273,6 +1275,63 @@ build_polygon(out: ClipVertex[], transform: Transform, h: *HullData, inc_face: i
     return out_count
 }
 
+// The vertices of B off its incident face that already lie within the
+// speculative distance of A's reference face and over it (inside its side
+// planes), added to the clipped polygon. A hull rocking between two of its
+// faces about a vertex has the corner it is about to land on here, so the
+// contact meets that corner speculatively; with the incident face alone
+// the corner is found a step deep when the incident face flips, the soft
+// contact lifts it back out, and the hull rocks for good (#134). A box
+// resting flat has no such vertex (its others are a body's height up), so
+// the reference's stacks are untouched.
+add_near_vertices(out: ClipVertex[], count: int, hull_a: *HullData, ref_face: int, ref_plane: Plane,
+                  hull_b: *HullData, inc_face: int, transform_b_to_a: Transform) -> int {
+    faces_a = hull.hull_faces(hull_a)
+    edges_a = hull.hull_edges(hull_a)
+    points_a = hull.hull_points(hull_a)
+    faces_b = hull.hull_faces(hull_b)
+    edges_b = hull.hull_edges(hull_b)
+    points_b = hull.hull_points(hull_b)
+    m = math.make_matrix_from_quat(transform_b_to_a.q)
+    out_count = count
+    v = 0
+    while v < hull_b.vertex_count && out_count < MAX_CLIP_POINTS {
+        position = math.add(math.mul_mv(m, points_b[v]), transform_b_to_a.p)
+        separation = math.plane_separation(ref_plane, position)
+        if separation < SPECULATIVE_DISTANCE {
+            // Not one of the incident face's own (those were clipped already).
+            on_face = false
+            start_b = faces_b[inc_face]
+            edge_b = start_b
+            while true {
+                if edges_b[edge_b].origin == v { on_face = true }
+                edge_b = edges_b[edge_b].next
+                if edge_b == start_b || on_face { break }
+            }
+            // Over the reference face: behind every side plane.
+            inside = on_face == false
+            start_a = faces_a[ref_face]
+            edge_a = start_a
+            while inside {
+                next_a = edges_a[edge_a].next
+                vertex1 = points_a[edges_a[edge_a].origin]
+                vertex2 = points_a[edges_a[next_a].origin]
+                binormal = math.cross(math.normalize(math.sub(vertex2, vertex1)), ref_plane.normal)
+                if math.plane_separation(math.make_plane_from_normal_and_point(binormal, vertex1), position) > 0.0 { inside = false }
+                edge_a = next_a
+                if edge_a == start_a { break }
+            }
+            if inside {
+                out[out_count] = ClipVertex { position: position, separation: separation,
+                                              pair: make_feature_pair(FEATURE_SHAPE_B, NEAR_VERTEX, FEATURE_SHAPE_B, v) }
+                out_count = out_count + 1
+            }
+        }
+        v = v + 1
+    }
+    return out_count
+}
+
 // The face contact with A's face as the reference: B's incident face
 // clipped to A's side planes, the points halfway between the surfaces,
 // reduced to four.
@@ -1314,6 +1373,7 @@ build_face_a_contact(m: *LocalManifold, capacity: int, hull_a: *HullData, hull_b
         if edge_index == start { break }
     }
     point_count = math.min_int(point_count, MAX_CLIP_POINTS)
+    point_count = add_near_vertices(input, point_count, hull_a, ref_face, ref_plane, hull_b, inc_face, transform_b_to_a)
 
     points = clip_points() as LocalManifoldPoint[]
     min_separation = math.MAX_FLOAT

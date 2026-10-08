@@ -169,8 +169,8 @@ NaN numbers never made, steps of no, negative and infinite time,
 geometry that cannot collide, a heavy chain, an unlimited motor, a
 hinge whose limits meet, a hinge's motor pressing past its limit settling
 where the reference's does, an elliptical cone stopping a swing at each
-half-angle, and a kinematic body's contacts made stiff on request; 126
-checks).
+half-angle, a kinematic body's contacts made stiff on request, and a
+hull rocking about a vertex on the floor coming to rest; 128 checks).
 
 A joint's limits are soft constraints, as the reference's are: driven
 past one by a motor or held under a steady load, it settles past itself
@@ -184,6 +184,17 @@ car) sinks into them while the soft contact pushes them out;
 reference's choice) gives its contacts the static softness, twice as
 stiff, and a struck ball is out to within a centimetre four frames on
 instead of three centimetres.
+
+One place goes past the reference on purpose. A hull resting on an edge
+or vertex can rock between two of its faces, and the reference (and this
+engine before) rocked it for good, in a cycle of 400 steps: the corner
+about to land was on the face the contact had not picked, so it was found
+a step deep when the incident face flipped, and the soft contact lifted
+it back out. The face contact now also takes the hull's vertices that
+already lie within the speculative distance over the reference face, so
+the corner lands as a speculative point and the hull sleeps (#134). A
+box resting flat has no such vertex, so the reference's stacks give the
+same checksums.
 
 `test_soak.ae` throws seeded piles of every convex kind into a walled
 pen and holds them to what a sane world does: no energy made, no body

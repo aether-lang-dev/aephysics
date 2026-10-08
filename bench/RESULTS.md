@@ -1067,15 +1067,18 @@ every phase: the solve's share is the body states' gather and scatter in
 doubles (#95), the pairs, the narrow phase of the mixed pairings and the
 transforms are their own (#121).
 
-The sleeping times differ by more than when each pile happens to sleep.
-The reference's pile is asleep by step 500. In ours a random hull resting
-on an edge rocks between two faces and holds an island of 1,330 awake
-until step 1,150: when the floor's manifold flips to the other incident
-face, the corner that comes down was not among the old manifold's points
-and is found 5 mm deep, the soft contact pushes it out, lifting the body,
-and it falls back the other way (body 1098, 0.12 m/s, 0.4 rad/s). The old
-pin `f555ee4` had a hull rocking for good in the same pile; `e77352c`
-does not, so ours is to be explained against main (#122).
+Both piles are asleep by step 500 now. Before #134, a random hull resting
+on an edge could rock between two faces for good, in the reference as in
+ours (replayed from the same state, both cycle every 400 steps to five
+digits): when the floor's manifold flipped to the other incident face, the
+corner coming down was not among the old manifold's points and was found
+up to 2.5 cm deep, the soft contact pushed it out, lifting the body, and
+it fell back the other way, the energy the impact took given back as
+height. Which body in a pile ended up so was chaos, so the reference's
+pile slept at step 500 and ours at 1,150, then 800. The face contact now
+takes the hull's vertices already within the speculative distance over
+the reference face, the corner lands speculatively, and our pile sleeps at
+step 500 as the reference's does; the benchmark checksums are unchanged.
 
 `tests/test_soak.ae` holds the small version to account on four seeds
 (64 bodies, 900 steps), and the reference's port on the same dice agrees
