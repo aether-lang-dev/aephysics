@@ -1090,6 +1090,84 @@ test_rocking_hull() {
     hull.destroy_hull(rock)
 }
 
+// The contacts keep their bodies' sims as indices (the reference's
+// encodedBodySimA/B), which every move of a sim between and within the sets
+// must keep current: a sleeping island's, a woken one's, a sim swapped into
+// a destroyed body's place in the static and the awake set, a body changed
+// to kinematic, disabled and enabled, and a non-touching contact between an
+// awake body and a sleeping one (which the collide pass reaches through the
+// body). validate_solver_sets checks every contact's indices after each
+// step and change.
+valid_world(world_id: WorldId) -> bool {
+    w = dynamics.get_world(world_id.index1 - 1)
+    return dynamics.validate_solver_sets(w) && dynamics.validate_contacts(w)
+}
+
+checked_steps(world_id: WorldId, count: int) -> bool {
+    i = 0
+    while i < count {
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        if valid_world(world_id) == false { return false }
+        i = i + 1
+    }
+    return true
+}
+
+slab_at(world_id: WorldId, x: float, h: ptr) -> BodyId {
+    bdef = dynamics.default_body_def()
+    bdef.position = math.vec3(x, 0.0 - 0.5, 0.0)
+    body = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    dynamics.create_hull_shape(body, &sdef, h as *HullData)
+    return body
+}
+
+test_encoded_sims() {
+    fixtures_ready()
+    slab = hull.make_box_hull(2.5, 0.5, 2.5)
+    world_id = new_world()
+    s0 = slab_at(world_id, 0.0 - 6.0, slab as ptr)
+    s1 = slab_at(world_id, 0.0, slab as ptr)
+    s2 = slab_at(world_id, 6.0, slab as ptr)
+    b0 = box_at(world_id, math.vec3(0.0 - 6.0, 0.5, 0.0), g_box, 1.0)
+    b1 = box_at(world_id, math.vec3(0.0, 0.5, 0.0), g_box, 1.0)
+    // Beside b1, 5 cm off: the fat boxes overlap, the cubes don't touch.
+    b1x = box_at(world_id, math.vec3(1.05, 0.5, 0.0), g_box, 1.0)
+    b2 = box_at(world_id, math.vec3(6.0, 0.5, 0.0), g_box, 1.0)
+    ensure("encoded sims: valid while settling and falling asleep", checked_steps(world_id, 120))
+    ensure("encoded sims: all asleep", dynamics.body_is_awake(b0) == false && dynamics.body_is_awake(b1) == false &&
+           dynamics.body_is_awake(b1x) == false && dynamics.body_is_awake(b2) == false)
+    // b1 woken alone: its contact with the sleeping b1x leaves the disabled set.
+    dynamics.body_set_awake(b1, true)
+    ensure("encoded sims: one island woken, valid", valid_world(world_id) && dynamics.body_is_awake(b1x) == false)
+    ensure("encoded sims: an awake body beside a sleeping one", checked_steps(world_id, 5) && dynamics.body_is_awake(b1x) == false)
+    // The first static body destroyed: the last one's sim takes its place.
+    dynamics.destroy_body(s0)
+    ensure("encoded sims: a static sim moved, valid", valid_world(world_id))
+    ensure("encoded sims: valid after, b0 falling", checked_steps(world_id, 10))
+    // Everything awake, then a body not last in the awake set destroyed.
+    dynamics.body_set_awake(b1x, true)
+    dynamics.body_set_awake(b2, true)
+    dynamics.destroy_body(b0)
+    ensure("encoded sims: an awake sim moved, valid", valid_world(world_id))
+    ensure("encoded sims: valid after", checked_steps(world_id, 5))
+    dynamics.body_set_type(b2, dynamics.BODY_KINEMATIC)
+    ensure("encoded sims: kinematic, valid", valid_world(world_id) && checked_steps(world_id, 5))
+    dynamics.body_set_type(b2, dynamics.BODY_DYNAMIC)
+    dynamics.body_disable(b1)
+    ensure("encoded sims: disabled, valid", valid_world(world_id) && checked_steps(world_id, 5))
+    dynamics.body_enable(b1)
+    ensure("encoded sims: enabled, valid", valid_world(world_id) && checked_steps(world_id, 5))
+    ensure("encoded sims: asleep again, valid throughout", checked_steps(world_id, 120) && dynamics.body_is_awake(b1) == false)
+    ensure("encoded sims: resting where they were", finite_body(b1) && finite_body(b1x) && finite_body(b2) &&
+           math.abs_float(dynamics.body_get_position(b1).y - 0.5) < 0.02 && math.abs_float(dynamics.body_get_position(b2).y - 0.5) < 0.02)
+    dynamics.destroy_body(s2)
+    dynamics.destroy_body(s1)
+    ensure("encoded sims: the grounds gone, valid", valid_world(world_id) && checked_steps(world_id, 5))
+    dynamics.destroy_world(world_id)
+    hull.destroy_hull(slab)
+}
+
 test_motor_and_limits() {
     fixtures_ready()
     wdef = dynamics.default_world_def()
@@ -1170,6 +1248,7 @@ main() {
     test_elliptical_cone()
     test_kinematic_softness()
     test_rocking_hull()
+    test_encoded_sims()
     println("edge_cases: ${checks} checks")
     if failures == 0 {
         println("edge_cases: all checks passed")

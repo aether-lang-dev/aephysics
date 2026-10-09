@@ -800,6 +800,55 @@ reference's algorithm in double). After this morning's #124, #126, #127
 and this, the reference's three scenes stand at 1.25x, 1.2x and 1.1x its
 AVX2 build, from 1.8x, 1.8x and 1.2x.
 
+### The collide pass as the reference keeps it (2026-10-09, #121)
+
+Two pieces of `e77352c`'s collide pass were not ported until now, and
+both are about what a contact reaches without going through anything
+else:
+
+- A contact keeps its bodies' sims as indices (the reference's
+  `encodedBodySimA/B`): the awake set's index for an awake body,
+  -(index + 2) for a static one, `NULL_INDEX` for any other. They are
+  kept current wherever a sim moves: a contact made or put into the
+  graph, a body woken or put to sleep, a sim swapped into the place of a
+  destroyed or transferred body's. The collide pass and the contact
+  prepares read them where they used to go from the shape to the body,
+  its solver set and its sim, and rewrite the indices every step. A
+  sleeping body's sim, which a non-touching contact may still need, is
+  found through the body, as the reference's `b3ResolveContactBodySim`
+  does. `validate_solver_sets` checks every contact's indices against its
+  bodies (the reference's `b3ValidateSolverSets`), and
+  `test_encoded_sims` in `tests/test_edge_cases.ae` runs every path that
+  moves a sim with that check after each step: leaving out the refresh
+  on a destroy, or on a wake, fails it.
+- The shapes' fat boxes live in the world's `fat_aabbs`, by shape id (the
+  reference's `fatAABBs`), not in the shapes: the first test of every
+  contact, whether its proxies still overlap, reads two entries of a
+  dense array instead of two shapes, and a recycled contact never
+  touches its shapes at all.
+
+Nothing is computed differently: the golden trace and every checksum are
+the same. A quiet machine, pinned to one core, 5 runs each rotated, ms per
+step (range and median):
+
+| scene | main | this change | Box3D `e77352c`, AVX2 |
+|---|---|---|---|
+| large pyramid | 6.50-7.29 (6.81) | 6.27-8.85 (6.47) | 5.28-5.80 (5.39) |
+| collide | 1.00-1.08 | 0.81-0.85 | 0.81-0.94 |
+| many pyramids | 14.66-17.10 (14.86) | 13.43-15.02 (14.34) | 11.73-13.83 (12.40) |
+| collide | 2.49-2.97 | 1.81-1.97 | 1.97-2.36 |
+| joint grid | 10.62-10.91 | 10.76-11.00 | 10.25-10.39 |
+
+The collide pass is level with the reference's on the large pyramid and
+ahead of it on the many pyramids. The mixed pile (`bench/soak.ae`, awake,
+6 runs): 2.58-2.64 ms per step to 2.52-2.55 against the reference's
+1.99-2.02, its collide 0.59-0.60 to 0.52-0.53 against 0.42-0.43; more of
+that pile's contacts compute their manifolds afresh every step, and the
+narrow phase of its mixed pairings is in double. The scenes now stand at
+1.2x, 1.15x and 1.05x the reference, the mixed pile at 1.26x. What is left
+is in the lanes (warm start, solve, relax: the transpose of aether#2550),
+the prepare, and the pairs (the tree in double, kept for large worlds).
+
 ### The joint grid's warm start (2026-10-08, #121)
 
 The joint grid's solve and relax were already ahead of the reference's;
