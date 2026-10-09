@@ -11,7 +11,7 @@ exports (
     MAX_WORKERS, worker_index, set_worker_index, claim_slots, release_slots, enter_traversal, leave_traversal, yield_thread, pause, processor_count, scratch,
     atomic_load, atomic_store, atomic_add, atomic_or, atomic_cas,
     semaphore_new, semaphore_free, semaphore_wait, semaphore_signal,
-    name_copy, name_text, name_free, prefetch, load_word, load_u16
+    name_copy, name_text, name_free, prefetch, load_word, load_u8, load_u16
 )
 
 // The most workers a world can have: every module's scratch is a block
@@ -38,6 +38,7 @@ extern aephysics_semaphore_wait(s: ptr)
 extern aephysics_semaphore_signal(s: ptr, count: int)
 extern aephysics_prefetch(p: ptr) @c_import
 extern aephysics_load_word(p: ptr, index: long) -> long @c_import
+extern aephysics_load_u8(p: ptr, index: long) -> int @c_import
 extern aephysics_load_u16(p: ptr, index: long) -> int @c_import
 extern aephysics_name_copy(s: string) -> ptr
 extern aephysics_name_text(name: ptr) -> string
@@ -49,6 +50,9 @@ prefetch(p: ptr) { aephysics_prefetch(p) }
 // The word at `index` words into `p`, safe to read whatever the block was
 // written as (C's aliasing rule).
 load_word(p: ptr, index: long) -> long { return aephysics_load_word(p, index) }
+
+// The byte at `index` into `p`, unsigned.
+load_u8(p: ptr, index: long) -> int { return aephysics_load_u8(p, index) }
 
 // The unsigned 16-bit value at `index` halves into `p` (little-endian, as
 // every platform aephysics runs on).

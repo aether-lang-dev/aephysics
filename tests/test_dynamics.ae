@@ -1218,6 +1218,36 @@ test_shape_filter() {
 // changed in place drops its contact and pairs under its new size and
 // kind; its friction and restitution, events and mass read and set; the
 // closest point on a shape and on a body to a target.
+// test_shape.c's ShapeFlagsTest: the def carries all four event enables
+// to the shape, and flipping one leaves the others as they were.
+flags_are(id: ShapeId, sensor: bool, contact: bool, hit: bool, pre_solve: bool) -> bool {
+    return dynamics.shape_are_sensor_events_enabled(id) == sensor && dynamics.shape_are_contact_events_enabled(id) == contact &&
+           dynamics.shape_are_hit_events_enabled(id) == hit && dynamics.shape_are_pre_solve_events_enabled(id) == pre_solve
+}
+
+test_shape_flags() {
+    world_id = new_world()
+    bdef = dynamic_body_def()
+    body = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    sdef.density = 1.0
+    sdef.enable_sensor_events = true
+    sdef.enable_contact_events = true
+    sdef.enable_hit_events = true
+    sdef.enable_pre_solve_events = true
+    id = dynamics.create_sphere_shape(body, &sdef, manifold.sphere(math.vec3_zero(), 0.5))
+    ensure("shape flags: the def's four enables", flags_are(id, true, true, true, true))
+    dynamics.shape_enable_sensor_events(id, false)
+    ensure("shape flags: sensor events off, the rest on", flags_are(id, false, true, true, true))
+    dynamics.shape_enable_sensor_events(id, true)
+    dynamics.shape_enable_hit_events(id, false)
+    ensure("shape flags: sensor back, hit events off", flags_are(id, true, true, false, true))
+    dynamics.shape_enable_contact_events(id, false)
+    dynamics.shape_enable_pre_solve_events(id, false)
+    ensure("shape flags: only sensor events left", flags_are(id, true, false, false, false))
+    dynamics.destroy_world(world_id)
+}
+
 test_shape_api() {
     world_id = slab_world()
     w = dynamics.get_world(world_id.index1 - 1)
@@ -1699,6 +1729,7 @@ main() {
     test_body_setters()
     test_shape_filter()
     test_shape_api()
+    test_shape_flags()
     test_sensors()
     hull.destroy_hull(g_cube as *HullData)
     hull.destroy_hull(g_slab as *HullData)

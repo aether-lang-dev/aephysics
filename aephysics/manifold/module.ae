@@ -450,7 +450,7 @@ reduce_manifold_points(m: *LocalManifold, capacity: int, points: LocalManifoldPo
     // 1: the extreme touching point.
     best_index = NULL_INDEX
     best_score = 0.0 - math.MAX_FLOAT
-    search = arbitrary_perp(normal)
+    search = math.arbitrary_perp(normal)
     i = 0
     while i < count {
         if points[i].separation <= SPECULATIVE_DISTANCE {
@@ -539,22 +539,6 @@ reduce_manifold_points(m: *LocalManifold, capacity: int, points: LocalManifoldPo
         set_manifold_point(m, m.point_count, points[best_index])
         m.point_count = m.point_count + 1
     }
-}
-
-// A fixed perpendicular to a unit vector, the reference's, so the
-// reduction's tie-break is the same on every platform.
-arbitrary_perp(v: Vec3) -> Vec3 {
-    a = 0.67
-    b = 0.0 - 0.42
-    p = math.vec3_zero()
-    if v.x < 0.0 - 0.5 || 0.5 < v.x {
-        p = math.vec3(a * v.y + b * v.z, 0.0 - a * v.x, 0.0 - b * v.x)
-    } else if v.y < 0.0 - 0.5 || 0.5 < v.y {
-        p = math.vec3(a * v.y, 0.0 - a * v.x + b * v.z, 0.0 - b * v.y)
-    } else {
-        p = math.vec3(a * v.z, b * v.z, 0.0 - a * v.x - b * v.y)
-    }
-    return math.normalize(p)
 }
 
 // --- spheres and capsules ----------------------------------------------------------------

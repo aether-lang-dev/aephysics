@@ -11,10 +11,12 @@
 import std.string
 import aephysics.math
 import aephysics.basics
+import aephysics.dynamic_tree
 import aephysics.hull
 import aephysics.manifold
 import aephysics.mesh
 import aephysics.compound
+import aephysics.material
 import aephysics.shape
 import aephysics.distance
 import aephysics.broad_phase
@@ -279,6 +281,328 @@ test_rebuilt_static_pairs() {
     ensure("rebuilt static tree: the new pair found (${dynamics.world_contact_count(w)} contacts)", dynamics.world_contact_count(w) == 1)
     dynamics.destroy_world(world_id)
     hull.destroy_hull(cube)
+    hull.destroy_hull(slab)
+}
+
+// test_world.c's EmptyWorld: an empty world steps 60 times and is gone
+// once destroyed.
+test_empty_world() {
+    wdef = dynamics.default_world_def()
+    world_id = dynamics.create_world(&wdef)
+    ensure("empty world: valid", dynamics.world_is_valid(world_id))
+    i = 0
+    while i < 60 {
+        physics_world.step(world_id, 1.0 / 60.0, 1)
+        i = i + 1
+    }
+    dynamics.destroy_world(world_id)
+    ensure("empty world: gone", dynamics.world_is_valid(world_id) == false)
+}
+
+// DestroyAllBodiesWorld: ten bodies made one a step, then destroyed one a
+// step, stepping all along; none left by the counters.
+test_destroy_all_bodies_world() {
+    wdef = dynamics.default_world_def()
+    world_id = dynamics.create_world(&wdef)
+    ids_block = calloc(10, sizeof(BodyId))
+    ids = ids_block as BodyId[]
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    cube = hull.make_cube_hull(0.5)
+    count = 0
+    creating = true
+    i = 0
+    while i < 2 * 10 + 10 {
+        if creating {
+            if count < 10 {
+                ids[count] = dynamics.create_body(world_id, &bdef)
+                sdef = dynamics.default_shape_def()
+                dynamics.create_hull_shape(ids[count], &sdef, cube)
+                count = count + 1
+            } else {
+                creating = false
+            }
+        } else if count > 0 {
+            dynamics.destroy_body(ids[count - 1])
+            count = count - 1
+        }
+        physics_world.step(world_id, 1.0 / 60.0, 3)
+        i = i + 1
+    }
+    ensure("destroy all bodies: none left (${physics_world.get_counters(world_id).body_count})", physics_world.get_counters(world_id).body_count == 0)
+    dynamics.destroy_world(world_id)
+    ensure("destroy all bodies: the world gone", dynamics.world_is_valid(world_id) == false)
+    hull.destroy_hull(cube)
+    free(ids_block)
+}
+
+// TestWorldRecycle: half the worlds, each with a body and ten steps, made
+// and destroyed a hundred times over.
+test_world_recycle() {
+    count = dynamics.MAX_WORLDS / 2
+    ids_block = calloc(count, sizeof(WorldId))
+    ids = ids_block as WorldId[]
+    all_valid = true
+    all_gone = true
+    round = 0
+    while round < 100 {
+        wdef = dynamics.default_world_def()
+        j = 0
+        while j < count {
+            ids[j] = dynamics.create_world(&wdef)
+            if dynamics.world_is_valid(ids[j]) == false { all_valid = false }
+            bdef = dynamics.default_body_def()
+            dynamics.create_body(ids[j], &bdef)
+            j = j + 1
+        }
+        j = 0
+        while j < count {
+            k = 0
+            while k < 10 {
+                physics_world.step(ids[j], 1.0 / 60.0, 1)
+                k = k + 1
+            }
+            j = j + 1
+        }
+        j = count - 1
+        while j >= 0 {
+            dynamics.destroy_world(ids[j])
+            if dynamics.world_is_valid(ids[j]) { all_gone = false }
+            j = j - 1
+        }
+        round = round + 1
+    }
+    ensure("world recycle: every world valid when made", all_valid)
+    ensure("world recycle: every world gone when destroyed", all_gone)
+    free(ids_block)
+}
+
+var g_filter_context_null = true
+
+filter_all(a: ShapeId, b: ShapeId, context: ptr) -> bool {
+    if context != null { g_filter_context_null = false }
+    return true
+}
+
+pre_solve_none(a: ShapeId, b: ShapeId, point: Vec3, normal: Vec3, context: ptr) -> bool {
+    if context != null { g_filter_context_null = false }
+    return false
+}
+
+// TestWorldCoverage: every world setting set and read back, the callbacks
+// set, an explosion over an empty world, and a step of a whole second.
+test_world_coverage() {
+    wdef = dynamics.default_world_def()
+    world_id = dynamics.create_world(&wdef)
+    physics_world.enable_sleeping(world_id, true)
+    physics_world.enable_sleeping(world_id, false)
+    ensure("coverage: sleeping off", physics_world.is_sleeping_enabled(world_id) == false)
+    physics_world.enable_continuous(world_id, false)
+    physics_world.enable_continuous(world_id, true)
+    ensure("coverage: continuous on", physics_world.is_continuous_enabled(world_id))
+    physics_world.set_restitution_threshold(world_id, 0.0)
+    physics_world.set_restitution_threshold(world_id, 2.0)
+    ensure("coverage: restitution threshold", physics_world.get_restitution_threshold(world_id) == 2.0)
+    physics_world.set_hit_event_threshold(world_id, 0.0)
+    physics_world.set_hit_event_threshold(world_id, 100.0)
+    ensure("coverage: hit event threshold", physics_world.get_hit_event_threshold(world_id) == 100.0)
+    physics_world.set_custom_filter_callback(world_id, filter_all, null)
+    physics_world.set_pre_solve_callback(world_id, pre_solve_none, null)
+    g = math.vec3(1.0, 2.0, 0.0)
+    physics_world.set_gravity(world_id, g)
+    v = physics_world.get_gravity(world_id)
+    ensure("coverage: gravity", v.x == g.x && v.y == g.y)
+    edef = physics_world.default_explosion_def()
+    physics_world.explode(world_id, &edef)
+    physics_world.set_contact_tuning(world_id, 10.0, 2.0, 4.0)
+    physics_world.set_maximum_linear_speed(world_id, 10.0)
+    ensure("coverage: maximum linear speed", physics_world.get_maximum_linear_speed(world_id) == 10.0)
+    physics_world.enable_warm_starting(world_id, true)
+    ensure("coverage: warm starting on", physics_world.is_warm_starting_enabled(world_id))
+    ensure("coverage: nothing awake", physics_world.get_awake_body_count(world_id) == 0)
+    marker = calloc(1, 8)
+    physics_world.set_user_data(world_id, marker)
+    ensure("coverage: user data", physics_world.get_user_data(world_id) == marker)
+    physics_world.step(world_id, 1.0, 1)
+    ensure("coverage: the callbacks saw no context", g_filter_context_null)
+    dynamics.destroy_world(world_id)
+    free(marker)
+}
+
+// SetBulletDriftTest: the bullet flag set or cleared after creation holds
+// through set_motion_locks, which syncs the body's flags to its sim.
+test_set_bullet_drift() {
+    wdef = dynamics.default_world_def()
+    world_id = dynamics.create_world(&wdef)
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.is_bullet = false
+    a = dynamics.create_body(world_id, &bdef)
+    ensure("bullet drift: made plain", dynamics.body_is_bullet(a) == false)
+    dynamics.body_set_bullet(a, true)
+    ensure("bullet drift: set", dynamics.body_is_bullet(a))
+    locks = MotionLocks { linear_x: true, linear_y: false, linear_z: false, angular_x: false, angular_y: false, angular_z: false }
+    dynamics.body_set_motion_locks(a, locks)
+    ensure("bullet drift: still a bullet after the motion locks", dynamics.body_is_bullet(a))
+    bdef.is_bullet = true
+    b = dynamics.create_body(world_id, &bdef)
+    ensure("bullet drift: made a bullet", dynamics.body_is_bullet(b))
+    dynamics.body_set_bullet(b, false)
+    ensure("bullet drift: cleared", dynamics.body_is_bullet(b) == false)
+    dynamics.body_set_motion_locks(b, locks)
+    ensure("bullet drift: still plain after the motion locks", dynamics.body_is_bullet(b) == false)
+    dynamics.destroy_world(world_id)
+}
+
+// EnableSleepFlagSyncTest and EnableContactRecyclingTest: flags made off
+// in the def, turned on, read back, and a step taken.
+test_def_flags() {
+    wdef = dynamics.default_world_def()
+    world_id = dynamics.create_world(&wdef)
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.enable_sleep = false
+    sleeper = dynamics.create_body(world_id, &bdef)
+    ensure("sleep flag: off from the def", dynamics.body_is_sleep_enabled(sleeper) == false)
+    dynamics.body_enable_sleep(sleeper, true)
+    ensure("sleep flag: on", dynamics.body_is_sleep_enabled(sleeper))
+    bdef.enable_sleep = true
+    recycler = dynamics.create_body(world_id, &bdef)
+    ensure("recycling: on by default", dynamics.body_is_contact_recycling_enabled(recycler))
+    dynamics.body_enable_contact_recycling(recycler, false)
+    ensure("recycling: off", dynamics.body_is_contact_recycling_enabled(recycler) == false)
+    dynamics.body_enable_contact_recycling(recycler, true)
+    ensure("recycling: on again", dynamics.body_is_contact_recycling_enabled(recycler))
+    bdef.enable_contact_recycling = false
+    opted_out = dynamics.create_body(world_id, &bdef)
+    ensure("recycling: off from the def", dynamics.body_is_contact_recycling_enabled(opted_out) == false)
+    physics_world.step(world_id, 1.0 / 60.0, 4)
+    ensure("def flags: valid after a step", dynamics.validate_solver_sets(dynamics.get_world(world_id.index1 - 1)))
+    dynamics.destroy_world(world_id)
+}
+
+// TestCompoundShapeCount: the world's compound count back to zero both
+// when the shape is destroyed and when its body takes it away.
+test_compound_shape_count() {
+    wdef = dynamics.default_world_def()
+    world_id = dynamics.create_world(&wdef)
+    w = dynamics.get_world(world_id.index1 - 1)
+    ensure("compound count: none at first", w.compound_shape_count == 0)
+    box = hull.make_box_hull(1.0, 1.0, 1.0)
+    hulls_block = calloc(1, sizeof(CompoundHullDef))
+    hulls = hulls_block as CompoundHullDef[]
+    hulls[0] = compound.compound_hull_def(box, math.transform_identity(), material.default_surface_material())
+    cdef = compound.compound_def()
+    cdef.hulls = hulls_block
+    cdef.hull_count = 1
+    c = compound.create_compound(&cdef)
+    ensure("compound count: the compound made", c != null)
+    bdef = dynamics.default_body_def()
+    sdef = dynamics.default_shape_def()
+    body = dynamics.create_body(world_id, &bdef)
+    shape_id = dynamics.create_compound_shape(body, &sdef, c)
+    ensure("compound count: one", w.compound_shape_count == 1)
+    dynamics.destroy_shape(shape_id, true)
+    ensure("compound count: none after the shape is destroyed", w.compound_shape_count == 0)
+    dynamics.destroy_body(body)
+    body = dynamics.create_body(world_id, &bdef)
+    dynamics.create_compound_shape(body, &sdef, c)
+    ensure("compound count: one again", w.compound_shape_count == 1)
+    dynamics.destroy_body(body)
+    ensure("compound count: none after its body is destroyed", w.compound_shape_count == 0)
+    dynamics.destroy_world(world_id)
+    compound.destroy_compound(c)
+    hull.destroy_hull(box)
+    free(hulls_block)
+}
+
+moved_node_count(t: *DynamicTree) -> int {
+    nodes = t.nodes as DynamicTreeNode[]
+    count = 0
+    i = 0
+    while i < t.node_end {
+        flag = nodes[i].flag_index
+        if dynamic_tree.is_empty_node(flag) == false && dynamic_tree.is_node_moved(flag) { count = count + 1 }
+        i = i + 1
+    }
+    return count
+}
+
+// TestEnlargedProxyDestroyed: a proxy enlarged in one step whose body is
+// destroyed before the next leaves no node marked moved, and the next
+// step leaves the tree in depth-first order (the reference's issue 149).
+test_enlarged_proxy_destroyed() {
+    wdef = dynamics.default_world_def()
+    wdef.gravity = math.vec3_zero()
+    world_id = dynamics.create_world(&wdef)
+    w = dynamics.get_world(world_id.index1 - 1)
+    trees = w.broad_phase.trees as DynamicTree[]
+    tree = &trees[dynamics.BODY_DYNAMIC]
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    sdef = dynamics.default_shape_def()
+    ball = manifold.sphere(math.vec3_zero(), 0.25)
+    // Resting bodies keep the tree deep enough that the mover has an
+    // ancestor that outlives it.
+    i = 0
+    while i < 8 {
+        bdef.position = math.vec3(2.0 * (i as float), 0.0, 0.0)
+        resting = dynamics.create_body(world_id, &bdef)
+        dynamics.create_sphere_shape(resting, &sdef, ball)
+        i = i + 1
+    }
+    // This one outruns its margin every step.
+    bdef.position = math.vec3(7.0, 1.0, 0.0)
+    bdef.linear_velocity = math.vec3(6.0, 0.0, 0.0)
+    mover = dynamics.create_body(world_id, &bdef)
+    dynamics.create_sphere_shape(mover, &sdef, ball)
+    physics_world.step(world_id, 1.0 / 60.0, 4)
+    ensure("enlarged proxy: the step marked nodes moved (${moved_node_count(tree)})", moved_node_count(tree) > 0)
+    dynamics.destroy_body(mover)
+    ensure("enlarged proxy: the tree valid with nothing marked after the destroy", dynamic_tree.tree_validate(tree) && moved_node_count(tree) == 0)
+    physics_world.step(world_id, 1.0 / 60.0, 4)
+    ensure("enlarged proxy: nothing marked after the next step", moved_node_count(tree) == 0)
+    ensure("enlarged proxy: depth-first order after the next step", tree.dfs_ordered)
+    dynamics.destroy_world(world_id)
+}
+
+// test_broad_phase.c's StaticRebuildKeepsMarks: the broad phase keeps a
+// static proxy's pending pair mark in the static tree, so a full rebuild
+// between a static change and the next step must not wipe it. Both ways a
+// static proxy is marked: a static body teleported under a resting sphere,
+// and a shape made there with invoke_contact_creation.
+static_rebuild_keeps_marks(use_invoke: bool) {
+    wdef = dynamics.default_world_def()
+    wdef.gravity = math.vec3_zero()
+    world_id = dynamics.create_world(&wdef)
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.position = math.vec3(0.0, 1.0, 0.0)
+    sphere_id = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    dynamics.create_sphere_shape(sphere_id, &sdef, manifold.sphere(math.vec3_zero(), 0.5))
+    bdef.kind = dynamics.BODY_STATIC
+    bdef.position = math.vec3(100.0, 0.0, 0.0)
+    ground = dynamics.create_body(world_id, &bdef)
+    slab = hull.make_box_hull(2.0, 0.5, 2.0)
+    if use_invoke == false { dynamics.create_hull_shape(ground, &sdef, slab) }
+    // Settled, so the resting sphere carries no mark of its own.
+    i = 0
+    while i < 3 {
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        i = i + 1
+    }
+    dynamics.body_set_transform(ground, math.vec3_zero(), math.quat_identity())
+    if use_invoke {
+        idef = dynamics.default_shape_def()
+        idef.invoke_contact_creation = true
+        dynamics.create_hull_shape(ground, &idef, slab)
+    }
+    physics_world.rebuild_static_tree(world_id)
+    physics_world.step(world_id, 1.0 / 60.0, 4)
+    ensure("static rebuild keeps the marks (invoke ${use_invoke}): the sphere's contact (${dynamics.body_get_contact_capacity(sphere_id)})",
+           dynamics.body_get_contact_capacity(sphere_id) == 1)
+    dynamics.destroy_world(world_id)
     hull.destroy_hull(slab)
 }
 
@@ -1024,6 +1348,16 @@ main() {
     test_mesh_scale()
     test_fell_asleep()
     test_rebuilt_static_pairs()
+    static_rebuild_keeps_marks(false)
+    static_rebuild_keeps_marks(true)
+    test_empty_world()
+    test_destroy_all_bodies_world()
+    test_world_recycle()
+    test_world_coverage()
+    test_set_bullet_drift()
+    test_def_flags()
+    test_compound_shape_count()
+    test_enlarged_proxy_destroyed()
     test_restitution()
     test_joint_springs_and_locks()
     test_parallel_bookkeeping()

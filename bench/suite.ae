@@ -1,0 +1,863 @@
+// The rest of the reference's benchmark suite (benchmark/main.c, its
+// scenes in shared/benchmarks.c at e77352c, #141): the convex pile, the
+// junkyard, the large world, sleep, the spinner, the trees at three
+// scales and the washer, each built as the reference builds them (its
+// release sizes) and run as its runner runs them: the scene's own step
+// before every step, the first step untimed, the rest timed.
+// bench/suite_box3d.c runs the reference's own scene functions the same
+// way and prints the same line, so the two are read side by side.
+//
+// The SAT runs come last: shared/sat_benchmark.c's hull pairs (PEEL's
+// convex, the rock, a 32-sided cylinder) placed half the speculative
+// distance apart, timed through GJK cold and warm and the separating axis
+// test with and without its inscribed-sphere bound.
+//
+//   AEPHYSICS_BENCH_SCENE=convex_pile|junkyard|large_world|sleep|spinner|
+//   trees25|trees50|trees100|washer|sat runs one; unset, all of them.
+import std.string
+import std.os
+import aephysics.math
+import aephysics.basics
+import aephysics.hull
+import aephysics.mesh
+import aephysics.manifold
+import aephysics.distance
+import aephysics.dynamics
+import aephysics.joint_solver
+import aephysics.physics_world
+
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+
+clock() -> long { return os.now_monotonic_ns() }
+ms(ns: long) -> float { return (ns as float) / 1000000.0 }
+
+const TIME_STEP = 0.016666666666666666
+const SUB_STEPS = 4
+
+// The hulls and meshes a scene's shapes hold, freed after its world.
+var g_hulls: ptr = null
+var g_hull_count = 0
+var g_meshes: ptr = null
+var g_mesh_count = 0
+
+keep_hull(h: *HullData) -> *HullData {
+    hulls = g_hulls as ptr[]
+    hulls[g_hull_count] = h as ptr
+    g_hull_count = g_hull_count + 1
+    return h
+}
+
+keep_mesh(m: *MeshData) -> *MeshData {
+    meshes = g_meshes as ptr[]
+    meshes[g_mesh_count] = m as ptr
+    g_mesh_count = g_mesh_count + 1
+    return m
+}
+
+release_kept() {
+    hulls = g_hulls as ptr[]
+    i = 0
+    while i < g_hull_count {
+        hull.destroy_hull(hulls[i] as *HullData)
+        i = i + 1
+    }
+    g_hull_count = 0
+    meshes = g_meshes as ptr[]
+    i = 0
+    while i < g_mesh_count {
+        mesh.destroy_mesh(meshes[i] as *MeshData)
+        i = i + 1
+    }
+    g_mesh_count = 0
+}
+
+// The dynamic bodies' heights summed in id order, as the reference's
+// driver sums them.
+height_sum(world_id: WorldId) -> float {
+    w = dynamics.get_world(world_id.index1 - 1)
+    sum = 0.0
+    i = 0
+    while i < w.bodies.count {
+        body = dynamics.body_at(w, i)
+        if body.set_index != dynamics.NULL_INDEX && body.kind == dynamics.BODY_DYNAMIC {
+            sum = sum + dynamics.get_body_sim(w, body).transform.p.y
+        }
+        i = i + 1
+    }
+    return sum
+}
+
+// --- the scenes' own steps ------------------------------------------------------------------------------------
+
+const SCENE_NONE = 0
+const SCENE_JUNKYARD = 1
+const SCENE_LARGE_WORLD = 2
+const SCENE_SLEEP = 3
+
+var g_pusher: ptr = null        // BodyId[1]: the junkyard's kinematic cylinder
+var g_pusher_degrees = 0.0
+var g_pusher_radius = 35.0
+var g_spheres_dropped = 0
+var g_sleep_a: ptr = null       // BodyId[SLEEP_PYRAMID_COUNT]
+var g_sleep_b: ptr = null
+var g_spinner: ptr = null       // JointId[1]: the spinner's motor, while its scene runs
+
+scene_step(scene: int, world_id: WorldId, step: int) {
+    if scene == SCENE_JUNKYARD { step_junkyard() }
+    else if scene == SCENE_LARGE_WORLD { step_large_world(world_id, step) }
+    else if scene == SCENE_SLEEP { step_sleep(world_id) }
+}
+
+run(name: string, world_id: WorldId, steps: int, scene: int) {
+    scene_step(scene, world_id, 0)
+    physics_world.step(world_id, TIME_STEP, SUB_STEPS)
+    pairs_ms = 0.0
+    collide_ms = 0.0
+    t0 = clock()
+    s = 1
+    while s < steps {
+        scene_step(scene, world_id, s)
+        physics_world.step(world_id, TIME_STEP, SUB_STEPS)
+        seen = physics_world.get_profile(world_id)
+        pairs_ms = pairs_ms + seen.pairs
+        collide_ms = collide_ms + seen.collide
+        s = s + 1
+    }
+    t1 = clock()
+    timed = (steps - 1) as float
+    counters = physics_world.get_counters(world_id)
+    awake = physics_world.get_awake_body_count(world_id)
+    println("aephysics suite: ${name}: ${steps} steps of ${counters.body_count} bodies ${ms(t1 - t0)} ms, ${ms(t1 - t0) / timed} ms per step (height sum ${height_sum(world_id)}, ${counters.contact_count} contacts, ${counters.joint_count} joints, ${awake} awake)")
+    println("aephysics phases ms/step: pairs ${pairs_ms / timed} collide ${collide_ms / timed}")
+    spinner_joint = g_spinner as JointId[]
+    if spinner_joint[0].index1 != 0 {
+        println("aephysics spinner angle ${joint_solver.revolute_joint_get_angle(spinner_joint[0])}")
+        spinner_joint[0] = JointId { index1: 0, world0: 0, generation: 0 }
+    }
+    dynamics.destroy_world(world_id)
+    release_kept()
+}
+
+world_with(static_bodies: int, dynamic_bodies: int, static_shapes: int, dynamic_shapes: int, contacts: int) -> WorldId {
+    wdef = dynamics.default_world_def()
+    wdef.static_body_count = static_bodies
+    wdef.dynamic_body_count = dynamic_bodies
+    wdef.static_shape_count = static_shapes
+    wdef.dynamic_shape_count = dynamic_shapes
+    wdef.contact_count = contacts
+    return dynamics.create_world(&wdef)
+}
+
+// A static ground: a box of half extents (hx, hy, hz) at height y.
+ground_box(world_id: WorldId, y: float, hx: float, hy: float, hz: float) -> BodyId {
+    bdef = dynamics.default_body_def()
+    bdef.position = math.vec3(0.0, y, 0.0)
+    body = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    dynamics.create_hull_shape(body, &sdef, keep_hull(hull.make_box_hull(hx, hy, hz)))
+    return body
+}
+
+// --- convex pile: a huge pile of PEEL's large convexes ------------------------------------------------------
+
+convex_pile() {
+    world_id = world_with(0, 5120, 0, 5120, 64 * 1024)
+    ground_box(world_id, 0.0 - 1.0, 250.0, 1.0, 250.0)
+    count_x = 8
+    count_z = 8
+    layers = 80
+    amplitude = 2.0
+    scatter = 2.0 * amplitude
+    convex = keep_hull(hull.create_complex_hull(amplitude))
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    sdef = dynamics.default_shape_def()
+    layer = 0
+    while layer < layers {
+        z = 0
+        while z < count_z {
+            x = 0
+            while x < count_x {
+                px = ((x as float) - 0.5 * (count_x as float)) * scatter
+                pz = ((z as float) - 0.5 * (count_z as float)) * scatter
+                py = amplitude + 2.0 * amplitude * (layer as float)
+                bdef.position = math.vec3(px, py, pz)
+                body = dynamics.create_body(world_id, &bdef)
+                dynamics.create_hull_shape(body, &sdef, convex)
+                x = x + 1
+            }
+            z = z + 1
+        }
+        layer = layer + 1
+    }
+    run("convex_pile", world_id, 500, SCENE_NONE)
+}
+
+// --- junkyard: rocks in a walled yard, swept by a kinematic cylinder --------------------------------------
+
+junkyard() {
+    world_id = world_with(16, 20 * 20 * 24 + 1, 16, 20 * 20 * 24 + 1, 250 * 1024)
+    bdef = dynamics.default_body_def()
+    bdef.position = math.vec3(0.0, 0.0 - 1.0, 0.0)
+    ground = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    dynamics.create_hull_shape(ground, &sdef, keep_hull(hull.make_box_hull(120.0, 1.0, 120.0)))
+    dynamics.create_hull_shape(ground, &sdef, keep_hull(hull.make_offset_box_hull(1.0, 8.0, 50.0, math.vec3(0.0 - 50.0, 8.0, 0.0))))
+    dynamics.create_hull_shape(ground, &sdef, keep_hull(hull.make_offset_box_hull(1.0, 8.0, 50.0, math.vec3(50.0, 8.0, 0.0))))
+    dynamics.create_hull_shape(ground, &sdef, keep_hull(hull.make_offset_box_hull(50.0, 8.0, 1.0, math.vec3(0.0, 8.0, 0.0 - 50.0))))
+    dynamics.create_hull_shape(ground, &sdef, keep_hull(hull.make_offset_box_hull(50.0, 8.0, 1.0, math.vec3(0.0, 8.0, 50.0))))
+    rock = keep_hull(hull.create_rock(1.5))
+    count = 24
+    height = 24.0
+    rdef = dynamics.default_body_def()
+    rdef.kind = dynamics.BODY_DYNAMIC
+    Y = 0
+    while Y < count {
+        X = 0
+        while X <= 20 {
+            Z = 0
+            while Z <= 20 {
+                rdef.position = math.vec3(0.0 - 40.0 + 4.0 * (X as float), 4.0 * (Y as float) + height + 1.0, 0.0 - 40.0 + 4.0 * (Z as float))
+                body = dynamics.create_body(world_id, &rdef)
+                dynamics.create_hull_shape(body, &sdef, rock)
+                Z = Z + 1
+            }
+            X = X + 1
+        }
+        Y = Y + 1
+    }
+    g_pusher_radius = 35.0
+    g_pusher_degrees = 0.0
+    pdef = dynamics.default_body_def()
+    pdef.kind = dynamics.BODY_KINEMATIC
+    pdef.position = math.vec3(g_pusher_radius, 0.0, 0.0)
+    pusher = g_pusher as BodyId[]
+    pusher[0] = dynamics.create_body(world_id, &pdef)
+    dynamics.create_hull_shape(pusher[0], &sdef, keep_hull(hull.create_cylinder(24.0, 4.0, 0.0, 16)))
+    run("junkyard", world_id, 500, SCENE_JUNKYARD)
+}
+
+// The pusher driven round a circle at six degrees a second, by target.
+step_junkyard() {
+    omega = 0.0 - 6.0
+    g_pusher_degrees = g_pusher_degrees + omega * TIME_STEP
+    cs = math.compute_cos_sin(g_pusher_degrees * math.PI / 180.0)
+    r = g_pusher_radius
+    target = Transform { p: math.vec3(r * cs.cosine, 0.0, r * cs.sine), q: math.quat_identity() }
+    pusher = g_pusher as BodyId[]
+    dynamics.body_set_target_transform(pusher[0], target, TIME_STEP, false)
+}
+
+// --- large world: a million static boxes, spheres dropped onto them -------------------------------------
+
+const FLOOR_CELL = 10.0
+const FLOOR_GRID = 1000
+const FLOOR_SPHERES = 100
+const FLOOR_DROP_INTERVAL = 5
+
+large_world() {
+    floors = FLOOR_GRID * FLOOR_GRID
+    world_id = world_with(floors, FLOOR_SPHERES, floors, FLOOR_SPHERES, math.max_int(1024, 8 * FLOOR_SPHERES))
+    g_spheres_dropped = 0
+    half_span = 0.5 * FLOOR_CELL * (FLOOR_GRID as float)
+    box = keep_hull(hull.make_box_hull(0.5 * FLOOR_CELL, 0.25, 0.5 * FLOOR_CELL))
+    bdef = dynamics.default_body_def()
+    sdef = dynamics.default_shape_def()
+    // Every static shape goes into the move set as it is made.
+    sdef.invoke_contact_creation = true
+    i = 0
+    while i < FLOOR_GRID {
+        x = 0.0 - half_span + ((i as float) + 0.5) * FLOOR_CELL
+        j = 0
+        while j < FLOOR_GRID {
+            z = 0.0 - half_span + ((j as float) + 0.5) * FLOOR_CELL
+            bdef.position = math.vec3(x, 0.0, z)
+            body = dynamics.create_body(world_id, &bdef)
+            dynamics.create_hull_shape(body, &sdef, box)
+            j = j + 1
+        }
+        i = i + 1
+    }
+    run("large_world", world_id, 500, SCENE_LARGE_WORLD)
+}
+
+// A sphere every fifth step, in a coarse grid over the inner floor.
+step_large_world(world_id: WorldId, step: int) {
+    if g_spheres_dropped >= FLOOR_SPHERES { return }
+    if step == 0 { return }
+    if (step % FLOOR_DROP_INTERVAL) != 0 { return }
+    side = 1
+    while side * side < FLOOR_SPHERES { side = side + 1 }
+    gi = g_spheres_dropped % side
+    gj = g_spheres_dropped / side
+    half_span = 0.5 * FLOOR_CELL * (FLOOR_GRID as float)
+    inset = 0.1 * 2.0 * half_span
+    usable = 2.0 * half_span - 2.0 * inset
+    x = 0.0 - half_span + inset + ((gi as float) + 0.5) * (usable / (side as float))
+    z = 0.0 - half_span + inset + ((gj as float) + 0.5) * (usable / (side as float))
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.position = math.vec3(x, 1.5, z)
+    sdef = dynamics.default_shape_def()
+    body = dynamics.create_body(world_id, &bdef)
+    dynamics.create_sphere_shape(body, &sdef, manifold.sphere(math.vec3_zero(), 0.5))
+    g_spheres_dropped = g_spheres_dropped + 1
+}
+
+// --- sleep: ten pyramids, one woken again each step ----------------------------------------------------
+
+const SLEEP_PYRAMIDS = 10
+
+sleep_pyramid(world_id: WorldId, base_count: int, extent: float, center_x: float, index: int, box: *HullData) {
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.sleep_threshold = 1.0
+    sdef = dynamics.default_shape_def()
+    a = g_sleep_a as BodyId[]
+    b = g_sleep_b as BodyId[]
+    i = 0
+    while i < base_count {
+        y = (2.0 * (i as float) + 1.0) * extent
+        j = i
+        while j < base_count {
+            x = ((i as float) + 1.0) * extent + 2.0 * ((j - i) as float) * extent + center_x
+            bdef.position = math.vec3(x, y, 0.0)
+            body = dynamics.create_body(world_id, &bdef)
+            dynamics.create_hull_shape(body, &sdef, box)
+            if i == 0 && j == 0 { a[index] = body }
+            else if i == 1 && j == 1 { b[index] = body }
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+sleep_scene() {
+    world_id = world_with(4, 2200, 4, 2200, 12000)
+    base_count = 20
+    extent = 0.5
+    base_width = 2.0 * extent * (base_count as float)
+    pitch = base_width + 8.0 * extent
+    span = pitch * ((SLEEP_PYRAMIDS - 1) as float)
+    ground_box(world_id, 0.0 - 1.0, 0.5 * span + base_width, 1.0, 4.0)
+    box = keep_hull(hull.make_box_hull(extent, extent, extent))
+    i = 0
+    while i < SLEEP_PYRAMIDS {
+        center_x = 0.0 - 0.5 * span + (i as float) * pitch - 0.5 * base_width
+        sleep_pyramid(world_id, base_count, extent, center_x, i, box)
+        i = i + 1
+    }
+    run("sleep", world_id, 300, SCENE_SLEEP)
+}
+
+// The first pyramid found asleep is woken by a filter joint made and
+// destroyed between two of its touching bodies (the island splitter at work).
+step_sleep(world_id: WorldId) {
+    a = g_sleep_a as BodyId[]
+    b = g_sleep_b as BodyId[]
+    i = 0
+    while i < SLEEP_PYRAMIDS {
+        if dynamics.body_is_awake(a[i]) == false {
+            jdef = dynamics.default_filter_joint_def()
+            jdef.base.body_id_a = a[i]
+            jdef.base.body_id_b = b[i]
+            joint = dynamics.create_filter_joint(world_id, &jdef)
+            dynamics.destroy_joint(joint, true)
+            return
+        }
+        i = i + 1
+    }
+}
+
+// --- spinner: a motored paddle churning spheres in a closed cylinder ---------------------------------
+
+const SPINNER_SEGMENTS = 90
+
+// An inward cylinder about z, capped at both ends, every triangle wound
+// to face the axis.
+inward_cylinder_mesh(radius: float, half_depth: float, y_center: float, segments: int) -> *MeshData {
+    vertex_count = 2 * segments + 2
+    triangle_count = 4 * segments
+    vertex_block = basics.alloc(vertex_count * sizeof(Vec3))
+    index_block = basics.alloc(3 * triangle_count * 4)
+    vertices = vertex_block as Vec3[]
+    indices = index_block as int[]
+    i = 0
+    while i < segments {
+        cs = math.compute_cos_sin(2.0 * math.PI * (i as float) / (segments as float))
+        x = radius * cs.cosine
+        y = radius * cs.sine + y_center
+        vertices[2 * i] = math.vec3(x, y, 0.0 - half_depth)
+        vertices[2 * i + 1] = math.vec3(x, y, half_depth)
+        i = i + 1
+    }
+    near = 2 * segments
+    far = 2 * segments + 1
+    vertices[near] = math.vec3(0.0, y_center, 0.0 - half_depth)
+    vertices[far] = math.vec3(0.0, y_center, half_depth)
+    k = 0
+    i = 0
+    while i < segments {
+        j = (i + 1) % segments
+        // The wall, its normal toward the axis.
+        indices[k] = 2 * i
+        indices[k + 1] = 2 * i + 1
+        indices[k + 2] = 2 * j + 1
+        indices[k + 3] = 2 * i
+        indices[k + 4] = 2 * j + 1
+        indices[k + 5] = 2 * j
+        // The near cap toward +z, the far one toward -z.
+        indices[k + 6] = near
+        indices[k + 7] = 2 * i
+        indices[k + 8] = 2 * j
+        indices[k + 9] = far
+        indices[k + 10] = 2 * j + 1
+        indices[k + 11] = 2 * i + 1
+        k = k + 12
+        i = i + 1
+    }
+    mdef = MeshDef { vertices: vertex_block, stride: 0, indices: index_block, material_indices: null, weld_tolerance: 0.0,
+                     vertex_count: vertex_count, triangle_count: triangle_count, weld_vertices: false, use_median_split: false,
+                     identify_edges: true, clockwise_winding: false }
+    m = mesh.create_mesh(&mdef, null, 0)
+    basics.free_bytes(vertex_block, vertex_count * sizeof(Vec3))
+    basics.free_bytes(index_block, 3 * triangle_count * 4)
+    return m
+}
+
+spinner() {
+    world_id = world_with(4, 2000, 4, 2000, 20000)
+    radius = 12.0
+    half_depth = 1.0
+    y_center = radius
+    gdef = dynamics.default_body_def()
+    ground = dynamics.create_body(world_id, &gdef)
+    msdef = dynamics.default_shape_def()
+    msdef.base_material.friction = 0.1
+    dynamics.create_mesh_shape(ground, &msdef, keep_mesh(inward_cylinder_mesh(radius, half_depth, y_center, SPINNER_SEGMENTS)), math.vec3_one())
+    half_length = 0.5 * radius
+    pdef = dynamics.default_body_def()
+    pdef.kind = dynamics.BODY_DYNAMIC
+    pdef.position = math.vec3(0.0, y_center - half_length, 0.0)
+    pdef.enable_sleep = false
+    paddle = dynamics.create_body(world_id, &pdef)
+    psdef = dynamics.default_shape_def()
+    psdef.base_material.friction = 0.0
+    dynamics.create_hull_shape(paddle, &psdef, keep_hull(hull.make_box_hull(0.3, half_length + 0.1, half_depth + 0.1)))
+    jdef = dynamics.default_revolute_joint_def()
+    jdef.base.body_id_a = ground
+    jdef.base.body_id_b = paddle
+    jdef.base.local_frame_a.p = math.vec3(0.0, y_center - half_length, 0.0)
+    jdef.enable_motor = true
+    jdef.motor_speed = 8.0
+    jdef.max_motor_torque = math.MAX_FLOAT
+    spinner_joint = g_spinner as JointId[]
+    spinner_joint[0] = dynamics.create_revolute_joint(world_id, &jdef)
+    sphere_radius = 0.2
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    sdef = dynamics.default_shape_def()
+    sdef.base_material.friction = 0.1
+    sdef.base_material.restitution = 0.1
+    sdef.density = 0.25
+    body_count = 1500
+    // The grid starts low, where the cylinder is narrow: the chord there bounds it.
+    spacing = 0.55
+    y_start = 2.0
+    chord = sqrt(radius * radius - (y_center - y_start) * (y_center - y_start))
+    x_limit = chord - 2.0 * spacing
+    z_limit = half_depth - 2.0 * sphere_radius
+    x = 0.0 - x_limit
+    y = y_start
+    z = 0.0 - z_limit
+    i = 0
+    while i < body_count {
+        bdef.position = math.vec3(x, y, z)
+        body = dynamics.create_body(world_id, &bdef)
+        dynamics.create_sphere_shape(body, &sdef, manifold.sphere(math.vec3_zero(), sphere_radius))
+        z = z + spacing
+        if z > z_limit {
+            z = 0.0 - z_limit
+            x = x + spacing
+            if x > x_limit {
+                x = 0.0 - x_limit
+                y = y + spacing
+            }
+        }
+        i = i + 1
+    }
+    run("spinner", world_id, 800, SCENE_NONE)
+}
+
+// --- trees: fifty tall stacks of cylinders rolling over a wave mesh -----------------------------------
+
+trees(name: string, scale: int) {
+    wdef = dynamics.default_world_def()
+    world_id = dynamics.create_world(&wdef)
+    gdef = dynamics.default_body_def()
+    ground = dynamics.create_body(world_id, &gdef)
+    x_count = scale * 150
+    z_count = scale * 200
+    cell_width = 1.0 / (scale as float)
+    wave = keep_mesh(mesh.create_wave_mesh(x_count, z_count, cell_width, 0.4, 0.05, 0.1))
+    sdef = dynamics.default_shape_def()
+    dynamics.create_mesh_shape(ground, &sdef, wave, math.vec3_one())
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.sleep_threshold = 0.2
+    body_count = 50
+    sdef.base_material.friction = 0.9
+    sdef.base_material.rolling_resistance = 0.05
+    sdef.update_body_mass = false
+    sdef.density = 1.0
+    hull_count = 22
+    hulls_block = calloc(hull_count, 8)
+    hulls = hulls_block as ptr[]
+    y = 1.0
+    r = 0.75
+    l = 1.5
+    i = 0
+    while i < hull_count {
+        hulls[i] = keep_hull(hull.create_cylinder(l + 2.0 * r, r, y - r, 6)) as ptr
+        y = y + l + 2.0 * r
+        r = 0.95 * r
+        i = i + 1
+    }
+    angular_velocity = 0.0 - 0.5
+    z = 0.0 - 70.0
+    b = 0
+    while b < body_count {
+        bdef.position = math.vec3(0.0, 1.0, z)
+        body = dynamics.create_body(world_id, &bdef)
+        k = 0
+        while k < hull_count {
+            dynamics.create_hull_shape(body, &sdef, hulls[k] as *HullData)
+            k = k + 1
+        }
+        velocity_scale = 0.5 + (0.5 * (b as float)) / (body_count as float)
+        dynamics.body_apply_mass_from_shapes(body)
+        center = dynamics.body_get_world_center(body)
+        omega = math.vec3(0.0, 0.0, velocity_scale * angular_velocity)
+        v = math.cross(omega, math.sub(center, bdef.position))
+        dynamics.body_set_angular_velocity(body, omega)
+        dynamics.body_set_linear_velocity(body, v)
+        z = z + 3.0
+        angular_velocity = 0.0 - angular_velocity
+        b = b + 1
+    }
+    free(hulls_block)
+    run(name, world_id, 500, SCENE_NONE)
+}
+
+// --- washer: a kinematic drum tumbling eight thousand cubes -------------------------------------------
+
+drum_segment(body: BodyId, sdef: *ShapeDef, p: Vec3[]) {
+    block = basics.alloc(8 * sizeof(Vec3))
+    points = block as Vec3[]
+    i = 0
+    while i < 8 {
+        points[i] = p[i]
+        i = i + 1
+    }
+    dynamics.create_hull_shape(body, sdef, keep_hull(hull.create_hull(points, 8, 8)))
+    basics.free_bytes(block, 8 * sizeof(Vec3))
+}
+
+washer() {
+    world_id = world_with(16, 10000, 16, 10000, 60000)
+    ground_box(world_id, 0.0 - 1.0, 60.0, 1.0, 60.0)
+    motor_speed = 25.0
+    ddef = dynamics.default_body_def()
+    ddef.position = math.vec3(0.0, 21.0, 0.0)
+    ddef.kind = dynamics.BODY_KINEMATIC
+    ddef.angular_velocity = math.vec3(0.0, 0.0, (math.PI / 180.0) * motor_speed)
+    ddef.linear_velocity = math.vec3(0.001, 0.0 - 0.002, 0.0)
+    drum = dynamics.create_body(world_id, &ddef)
+    sdef = dynamics.default_shape_def()
+    r0 = 14.0
+    r1 = 16.0
+    r2 = 18.0
+    nd = math.vec3(0.0, 0.0, 0.0 - 10.0)
+    pd = math.vec3(0.0, 0.0, 10.0)
+    angle = math.PI / 18.0
+    q = math.make_quat_from_axis_angle(math.vec3_axis_z(), angle)
+    qo = math.make_quat_from_axis_angle(math.vec3_axis_z(), 0.1 * angle)
+    u1 = math.vec3(1.0, 0.0, 0.0)
+    corner_block = basics.alloc(8 * sizeof(Vec3))
+    p = corner_block as Vec3[]
+    i = 0
+    while i < 36 {
+        u2 = math.rotate_vector(q, u1)
+        if i == 35 { u2 = math.vec3(1.0, 0.0, 0.0) }
+        a1 = math.inv_rotate_vector(qo, u1)
+        a2 = math.rotate_vector(qo, u2)
+        p[0] = math.mul_add(nd, r1, a1)
+        p[1] = math.mul_add(nd, r2, a1)
+        p[2] = math.mul_add(nd, r1, a2)
+        p[3] = math.mul_add(nd, r2, a2)
+        p[4] = math.mul_add(pd, r1, a1)
+        p[5] = math.mul_add(pd, r2, a1)
+        p[6] = math.mul_add(pd, r1, a2)
+        p[7] = math.mul_add(pd, r2, a2)
+        drum_segment(drum, &sdef, p)
+        if i % 9 == 0 {
+            p[0] = math.mul_add(nd, r0, u1)
+            p[1] = math.mul_add(nd, r1, u1)
+            p[2] = math.mul_add(nd, r0, u2)
+            p[3] = math.mul_add(nd, r1, u2)
+            p[4] = math.mul_add(pd, r0, u1)
+            p[5] = math.mul_add(pd, r1, u1)
+            p[6] = math.mul_add(pd, r0, u2)
+            p[7] = math.mul_add(pd, r1, u2)
+            drum_segment(drum, &sdef, p)
+        }
+        u1 = u2
+        i = i + 1
+    }
+    basics.free_bytes(corner_block, 8 * sizeof(Vec3))
+    grid = 20
+    a = 0.2
+    cube = keep_hull(hull.make_box_hull(a, a, a))
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    csdef = dynamics.default_shape_def()
+    x = 0.0 - 2.0 * a * (grid as float)
+    gi = 0
+    while gi < grid {
+        y = 0.0 - 2.0 * a * (grid as float) + 21.0
+        gj = 0
+        while gj < grid {
+            z = 0.0 - 2.0 * a * (grid as float)
+            gk = 0
+            while gk < grid {
+                bdef.position = math.vec3(x, y, z)
+                body = dynamics.create_body(world_id, &bdef)
+                dynamics.create_hull_shape(body, &csdef, cube)
+                z = z + 4.0 * a
+                gk = gk + 1
+            }
+            y = y + 4.0 * a
+            gj = gj + 1
+        }
+        x = x + 4.0 * a
+        gi = gi + 1
+    }
+    run("washer", world_id, 1000, SCENE_NONE)
+}
+
+// --- the SAT runs (shared/sat_benchmark.c): GJK and the separating axis on placed hull pairs ---------------
+
+const SAT_PAIRS = 1000
+const SAT_REPEATS = 20
+const SAT_RUNS = 4
+const RAND_LIMIT = 32767
+const MASK32: long = 4294967295
+
+var g_random_seed: long = 1
+
+// The reference's XorShift32 (shared/utils.h), its range and Shoemake's rotation.
+random_int() -> int {
+    x = g_random_seed
+    x = (x ^ (x << 13)) & MASK32
+    x = x ^ (x >> 17)
+    x = (x ^ (x << 5)) & MASK32
+    g_random_seed = x
+    return (x % ((RAND_LIMIT + 1) as long)) as int
+}
+
+random_float_range(lo: float, hi: float) -> float {
+    r = ((random_int() & RAND_LIMIT) as float) / (RAND_LIMIT as float)
+    return (hi - lo) * r + lo
+}
+
+random_quat() -> Quat {
+    u1 = random_float_range(0.0, 1.0)
+    u2 = random_float_range(0.0, 2.0 * math.PI)
+    u3 = random_float_range(0.0, 2.0 * math.PI)
+    cs2 = math.compute_cos_sin(u2)
+    cs3 = math.compute_cos_sin(u3)
+    return math.quat_vs(math.vec3(sqrt(1.0 - u1) * cs2.sine, sqrt(1.0 - u1) * cs2.cosine, sqrt(u1) * cs3.sine), sqrt(u1) * cs3.cosine)
+}
+
+sat_hull(kind: int) -> *HullData {
+    if kind == 0 { return hull.create_complex_hull(0.5) }
+    if kind == 1 { return hull.create_rock(0.5) }
+    return hull.create_cylinder(1.0, 0.1, 0.0 - 0.5, 32)
+}
+
+sat_name(kind: int) -> string {
+    if kind == 0 { return "complex" }
+    if kind == 1 { return "rock" }
+    return "cylinder"
+}
+
+bounding_radius(h: *HullData) -> float { return math.length(math.aabb_center(h.aabb)) + math.length(math.aabb_extents(h.aabb)) }
+
+zero_cache() -> SimplexCache {
+    return SimplexCache { metric: 0.0, count: 0, index_a0: 0, index_a1: 0, index_a2: 0, index_a3: 0, index_b0: 0, index_b1: 0, index_b2: 0, index_b3: 0 }
+}
+
+// One timed pass over the placed pairs: the distance (cold or warm from
+// the placement's caches), then the separating axis with its early return.
+// The milliseconds of each, and the early returns, which the placement
+// keeps at zero.
+struct SatPass {
+    distance_ms: float
+    sat_ms: float
+    early_returns: int
+}
+
+sat_pass(a: *HullData, b: *HullData, transforms: Transform[], caches: SimplexCache[], warm: bool) -> SatPass {
+    input = DistanceInput { proxy_a: ShapeProxy { points: hull.hull_points(a) as ptr, count: a.vertex_count, radius: 0.0 },
+                            proxy_b: ShapeProxy { points: hull.hull_points(b) as ptr, count: b.vertex_count, radius: 0.0 },
+                            transform: math.transform_identity(), use_radii: false }
+    sum = 0.0
+    t0 = clock()
+    r = 0
+    while r < SAT_REPEATS {
+        i = 0
+        while i < SAT_PAIRS {
+            input.transform = transforms[i]
+            cache = zero_cache()
+            if warm { cache = caches[i] }
+            out = distance.shape_distance(&input, &cache, null, 0)
+            sum = sum + out.distance
+            i = i + 1
+        }
+        r = r + 1
+    }
+    t1 = clock()
+    early = 0
+    r = 0
+    while r < SAT_REPEATS {
+        i = 0
+        while i < SAT_PAIRS {
+            query = manifold.compute_separating_axis(a, b, transforms[i], true)
+            axis = manifold.get_best_axis(&query)
+            sum = sum + axis.separation
+            if query.separated_feature != manifold.AXIS_INVALID { early = early + 1 }
+            i = i + 1
+        }
+        r = r + 1
+    }
+    t2 = clock()
+    if sum == 12345.678 { println("") }
+    return SatPass { distance_ms: ms(t1 - t0), sat_ms: ms(t2 - t1), early_returns: early }
+}
+
+sat_pair(kind_a: int, kind_b: int) {
+    a = sat_hull(kind_a)
+    b = sat_hull(kind_b)
+    inner_a = a.inner_radius
+    inner_b = b.inner_radius
+    transforms_block = calloc(SAT_PAIRS, sizeof(Transform))
+    caches_block = calloc(SAT_PAIRS, sizeof(SimplexCache))
+    transforms = transforms_block as Transform[]
+    caches = caches_block as SimplexCache[]
+    input = DistanceInput { proxy_a: ShapeProxy { points: hull.hull_points(a) as ptr, count: a.vertex_count, radius: 0.0 },
+                            proxy_b: ShapeProxy { points: hull.hull_points(b) as ptr, count: b.vertex_count, radius: 0.0 },
+                            transform: math.transform_identity(), use_radii: false }
+    // Each pair placed half the speculative distance apart, as the
+    // reference places them: from far out along a random direction, moved
+    // in along the GJK normal until the distance is within 1% of it.
+    target = 0.5 * dynamics.SPECULATIVE_DISTANCE
+    tolerance = 0.01 * target
+    reach = bounding_radius(a) + bounding_radius(b) + 0.5
+    worst = 0.0
+    g_random_seed = 1234
+    i = 0
+    while i < SAT_PAIRS {
+        q = random_quat()
+        direction = math.rotate_vector(random_quat(), math.vec3_axis_x())
+        t = Transform { p: math.mul_sv(reach, direction), q: q }
+        cache = zero_cache()
+        error = 0.0
+        k = 0
+        while k < 20 {
+            input.transform = t
+            out = distance.shape_distance(&input, &cache, null, 0)
+            error = out.distance - target
+            if math.abs_float(error) < tolerance { break }
+            t.p = math.mul_sub(t.p, error, out.normal)
+            k = k + 1
+        }
+        transforms[i] = t
+        caches[i] = cache
+        worst = math.max_float(worst, math.abs_float(error))
+        i = i + 1
+    }
+    cold_ms = math.MAX_FLOAT
+    warm_ms = math.MAX_FLOAT
+    sat_ms = math.MAX_FLOAT
+    full_ms = math.MAX_FLOAT
+    early = 0
+    run = 0
+    while run < SAT_RUNS {
+        a.inner_radius = inner_a
+        b.inner_radius = inner_b
+        cold = sat_pass(a, b, transforms, caches, false)
+        warm = sat_pass(a, b, transforms, caches, true)
+        // "sat full": the inscribed sphere's bound turned off.
+        a.inner_radius = 0.0 - math.HUGE
+        b.inner_radius = 0.0 - math.HUGE
+        full = sat_pass(a, b, transforms, caches, false)
+        cold_ms = math.min_float(cold_ms, cold.distance_ms)
+        warm_ms = math.min_float(warm_ms, warm.distance_ms)
+        sat_ms = math.min_float(sat_ms, math.min_float(cold.sat_ms, warm.sat_ms))
+        full_ms = math.min_float(full_ms, full.sat_ms)
+        early = early + cold.early_returns + full.early_returns
+        run = run + 1
+    }
+    a.inner_radius = inner_a
+    b.inner_radius = inner_b
+    scale = 1000.0 / ((SAT_REPEATS * SAT_PAIRS) as float)
+    println("aephysics sat: ${sat_name(kind_a)}/${sat_name(kind_b)}: gjk cold ${scale * cold_ms} us, gjk warm ${scale * warm_ms}, sat ${scale * sat_ms}, sat full ${scale * full_ms} (early returns ${early}, worst placement error ${worst})")
+    free(transforms_block)
+    free(caches_block)
+    hull.destroy_hull(a)
+    hull.destroy_hull(b)
+}
+
+sat_runs() {
+    kind_a = 0
+    while kind_a < 3 {
+        kind_b = kind_a
+        while kind_b < 3 {
+            sat_pair(kind_a, kind_b)
+            kind_b = kind_b + 1
+        }
+        kind_a = kind_a + 1
+    }
+}
+
+wanted(scene: string) -> bool {
+    asked = os.getenv("AEPHYSICS_BENCH_SCENE")
+    if asked == null { return true }
+    return string.equals(asked, scene) == 1
+}
+
+main() {
+    g_hulls = calloc(256, 8)
+    g_meshes = calloc(8, 8)
+    g_sleep_a = calloc(SLEEP_PYRAMIDS, sizeof(BodyId))
+    g_sleep_b = calloc(SLEEP_PYRAMIDS, sizeof(BodyId))
+    g_pusher = calloc(1, sizeof(BodyId))
+    g_spinner = calloc(1, sizeof(JointId))
+    if wanted("convex_pile") { convex_pile() }
+    if wanted("junkyard") { junkyard() }
+    if wanted("large_world") { large_world() }
+    if wanted("sleep") { sleep_scene() }
+    if wanted("spinner") { spinner() }
+    if wanted("trees25") { trees("trees25", 4) }
+    if wanted("trees50") { trees("trees50", 2) }
+    if wanted("trees100") { trees("trees100", 1) }
+    if wanted("washer") { washer() }
+    if wanted("sat") { sat_runs() }
+    free(g_hulls)
+    free(g_meshes)
+    free(g_sleep_a)
+    free(g_sleep_b)
+    free(g_pusher)
+    free(g_spinner)
+}

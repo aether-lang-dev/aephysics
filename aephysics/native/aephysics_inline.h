@@ -54,6 +54,12 @@ static inline long long aephysics_load_word(const void *p, long long index)
     return word;
 }
 
+// The byte at `index` into `p`, unsigned (a hashed block's tail).
+static inline int aephysics_load_u8(const void *p, long long index)
+{
+    return ((const unsigned char *)p)[index];
+}
+
 // The unsigned 16-bit value at `index` halves into `p` (a height field's
 // quanta), one load where two byte reads and a shift were the field's
 // queries' extra cost.

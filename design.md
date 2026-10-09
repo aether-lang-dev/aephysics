@@ -363,8 +363,12 @@ started until its tests pass.
    not zero; poisoning the memory shows nothing reads it first).
 15. **recording and replay**, `world_snapshot`: last, since they are the
    tooling and not the engine.
-16. **benchmarks**: `reference/benchmark/main.c`'s nine scenes ported, run
-   against the C build on the same machine, recorded under `benchmark/`.
+16. **benchmarks** (done, #141): `reference/benchmark/main.c`'s thirteen
+   scenes and its SAT runs, against the reference's own scene functions
+   on the same machine: the large pyramid, the many pyramids and the
+   joint grid in `bench/physics_world.ae`, the rain in `bench/human.ae`,
+   the other nine scenes and the SAT runs in `bench/suite.ae` beside
+   `bench/suite_box3d.c`; recorded in `bench/RESULTS.md`.
 
 ## Measures
 

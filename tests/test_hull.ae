@@ -298,6 +298,20 @@ test_cylinder() {
         ensure("rock: 10 vertices", rock.vertex_count == 10)
         hull.destroy_hull(rock)
     }
+    // PEEL's convex, the reference's b3CreateComplexHull(2): the same 32
+    // points from the same generator, so the same hull, counts, mass and
+    // centre as the reference's own (printed by its library).
+    complex = hull.create_complex_hull(2.0)
+    ensure("complex: built", complex != null)
+    if complex != null {
+        ensure("complex: valid", hull.is_valid_hull(complex))
+        ensure("complex: the reference's counts (${complex.vertex_count} ${complex.edge_count} ${complex.face_count})",
+               complex.vertex_count == 32 && complex.edge_count == 178 && complex.face_count == 59)
+        md = hull.compute_hull_mass(complex, 1.0)
+        small("complex: the reference's mass (${md.mass})", md.mass - 23.4043102, 0.00001)
+        small("complex: the reference's centre", math.length(math.sub(md.center, math.vec3(0.0712011755, 0.0 - 0.0683457255, 0.0723172426))), 0.000001)
+        hull.destroy_hull(complex)
+    }
 }
 
 // XorShift32 + Shoemake's unit-vector recipe, the reference's.
