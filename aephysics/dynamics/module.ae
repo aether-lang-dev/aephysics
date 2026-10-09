@@ -68,7 +68,7 @@ exports (
     default_world_def, default_body_def, default_shape_def, null_body_id, null_shape_id,
     create_world, destroy_world, world_is_valid, get_world, world_body_count, world_shape_count, world_awake_body_count,
     world_set_gravity, world_get_gravity,
-    create_body, destroy_body, body_is_valid, get_body_full_id, get_body, get_body_sim, get_body_state, get_body_transform,
+    create_body, destroy_body, body_is_valid, get_body_full_id, get_body, get_body_sim, get_body_state, get_body_transform, hash_world_state,
     make_body_id, sync_body_flags, update_body_mass_data, is_body_awake, wake_body,
     body_get_position, body_get_rotation, body_get_transform, body_set_transform,
     body_get_local_point, body_get_world_point, body_get_local_vector, body_get_world_vector,
@@ -1750,6 +1750,43 @@ get_body_state(w: *World, body: *Body) -> *BodyState {
 }
 
 get_body_transform(w: *World, body_id: int) -> Transform { return get_body_sim(w, body_at(w, body_id)).transform }
+
+// The reference's b3HashWorldState: every live body's pose and, awake, its
+// velocities, folded as their bits by 64-bit FNV-1a in body order. Two runs
+// alike to the bit hash alike (worker parity, replay). The pose is held in
+// double here, so its bits are the double's, as the reference's large world
+// build mixes its positions. Aether's integers wrap (the language
+// reference), so the multiply is the FNV's own.
+hash_world_state(w: *World) -> long {
+    // 14695981039346656037 and 1099511628211, the FNV-1a basis and prime.
+    hash = 0 - 3750763034362895579
+    prime = 1099511628211 as long
+    i = 0
+    while i < w.bodies.count {
+        body = body_at(w, i)
+        if body.id == i {
+            xf = get_body_sim(w, body).transform
+            hash = (hash ^ native.f64_bits(xf.p.x)) * prime
+            hash = (hash ^ native.f64_bits(xf.p.y)) * prime
+            hash = (hash ^ native.f64_bits(xf.p.z)) * prime
+            hash = (hash ^ native.f64_bits(xf.q.x)) * prime
+            hash = (hash ^ native.f64_bits(xf.q.y)) * prime
+            hash = (hash ^ native.f64_bits(xf.q.z)) * prime
+            hash = (hash ^ native.f64_bits(xf.q.w)) * prime
+            state = get_body_state(w, body)
+            if state != null {
+                hash = (hash ^ native.f32_bits(state.v.x)) * prime
+                hash = (hash ^ native.f32_bits(state.v.y)) * prime
+                hash = (hash ^ native.f32_bits(state.v.z)) * prime
+                hash = (hash ^ native.f32_bits(state.w.x)) * prime
+                hash = (hash ^ native.f32_bits(state.w.y)) * prime
+                hash = (hash ^ native.f32_bits(state.w.z)) * prime
+            }
+        }
+        i = i + 1
+    }
+    return hash
+}
 make_body_id(w: *World, body_id: int) -> BodyId { return BodyId { index1: body_id + 1, world0: w.world_id, generation: body_at(w, body_id).generation } }
 
 // The body's flags onto its sim and state, never the transient ones,

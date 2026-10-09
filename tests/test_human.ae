@@ -20,6 +20,7 @@ extern calloc(count: int, size: int) -> ptr
 extern exit(code: int)
 extern free(p: ptr)
 extern atan2(y: float, x: float) -> float
+extern asin(x: float) -> float
 extern cos(x: float) -> float
 extern sin(x: float) -> float
 
@@ -813,6 +814,218 @@ test_grip() {
     dynamics.destroy_world(world_id)
 }
 
+// #152: the feet as bones of their own. With ankles the figure has 14
+// bones, each foot a body on a spherical joint below its calf carrying the
+// foot's capsule (the calf keeps only its shin); every joint starts closed
+// and inside its limits; the ankle's ranges, measured through the joint
+// with the calf held and a steady torque on the foot, are a person's (the
+// toes down 50 degrees and up 35, 15 to the side, the sole rolled 15); the
+// figure falls and comes to rest whole; and a shape whose calf has no foot
+// is refused. The default figure stays the reference's twelve (every
+// other test here).
+ankle_frame(h: *Human, foot_index: int) -> Quat {
+    bone = human.bone_at(h, foot_index)
+    calf = human.bone_at(h, bone.parent_index)
+    return math.mul_quat(dynamics.body_get_rotation(calf.body_id), bone.local_frame_a.q)
+}
+
+// The foot's line against the ankle's frame on the calf: its swing toward
+// the frame's x (toes down) and toward its y (the side), in degrees.
+ankle_swing(h: *Human, foot_index: int) -> Vec2 {
+    bone = human.bone_at(h, foot_index)
+    frame = ankle_frame(h, foot_index)
+    foot_z = math.rotate_vector(math.mul_quat(dynamics.body_get_rotation(bone.body_id), bone.local_frame_b.q), math.vec3_axis_z())
+    along = math.dot(foot_z, math.rotate_vector(frame, math.vec3_axis_z()))
+    toward_x = math.dot(foot_z, math.rotate_vector(frame, math.vec3_axis_x()))
+    toward_y = math.dot(foot_z, math.rotate_vector(frame, math.vec3_axis_y()))
+    return Vec2 { x: atan2(toward_x, along) * math.RAD_TO_DEG, y: atan2(toward_y, along) * math.RAD_TO_DEG }
+}
+
+// The left foot pushed by a steady torque (in the ankle's frame) against
+// its limit, from the rest, the calf held still; what it settles at.
+pushed_foot(torque: Vec3) -> Vec3 {
+    wdef = dynamics.default_world_def()
+    wdef.gravity = math.vec3_zero()
+    world_id = dynamics.create_world(&wdef)
+    h = Human { bones: null, filter_joints: null, filter_joint_count: 0, friction_torque: 0.0, is_spawned: false }
+    h.ankles = true
+    human.create_human(&h, world_id, math.vec3(0.0, 1.0, 0.0), 0.0, 0.0, 0.0, 1, null)
+    calf = human.bone_at(&h, human.BONE_CALF_L)
+    dynamics.body_set_type(calf.body_id, dynamics.BODY_STATIC)
+    foot = human.bone_at(&h, human.BONE_FOOT_L)
+    frame = ankle_frame(&h, human.BONE_FOOT_L)
+    world_torque = math.rotate_vector(frame, torque)
+    i = 0
+    while i < 240 {
+        dynamics.body_apply_torque(foot.body_id, world_torque, true)
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        i = i + 1
+    }
+    swing = ankle_swing(&h, human.BONE_FOOT_L)
+    roll = joint_solver.spherical_joint_get_twist_angle(foot.joint_id) * math.RAD_TO_DEG
+    human.destroy_human(&h)
+    dynamics.destroy_world(world_id)
+    return math.vec3(swing.x, swing.y, roll)
+}
+
+test_ankles() {
+    world_id = world_with_ground()
+    h = Human { bones: null, filter_joints: null, filter_joint_count: 0, friction_torque: 0.0, is_spawned: false }
+    h.ankles = true
+    human.create_human(&h, world_id, math.vec3(0.0, 1.0, 0.0), 5.0, 1.0, 0.7, 1, null)
+    ensure("ankles: spawned with 14 bones", h.is_spawned && h.bone_count == human.MAX_BONE_COUNT)
+    counters = physics_world.get_counters(world_id)
+    ensure("ankles: 15 bodies, 16 joints (${counters.body_count}, ${counters.joint_count})", counters.body_count == 15 && counters.joint_count == 16)
+    shapes_block = calloc(4, sizeof(ShapeId))
+    shapes = shapes_block as ShapeId[]
+    side = 0
+    while side < 2 {
+        calf_index = human.BONE_CALF_L
+        foot_index = human.BONE_FOOT_L
+        if side == 1 {
+            calf_index = human.BONE_CALF_R
+            foot_index = human.BONE_FOOT_R
+        }
+        calf = human.bone_at(&h, calf_index)
+        foot = human.bone_at(&h, foot_index)
+        ensure("ankles (side ${side}): the foot hangs from its calf on a spherical joint",
+               foot.parent_index == calf_index && dynamics.joint_is_valid(foot.joint_id) && dynamics.joint_get_type(foot.joint_id) == dynamics.JOINT_SPHERICAL)
+        ensure("ankles (side ${side}): the calf keeps only its shin", dynamics.body_get_shapes(calf.body_id, shapes, 4) == 1 && calf.foot_shape_id.index1 == 0)
+        ensure("ankles (side ${side}): the foot body carries the foot's capsule", dynamics.body_get_shapes(foot.body_id, shapes, 4) == 1 &&
+               dynamics.shape_get_type(shapes[0]) == shape.SHAPE_CAPSULE && foot.foot_shape_id.index1 == foot.shape_id.index1 &&
+               math.abs_float(dynamics.shape_get_capsule(shapes[0]).radius - 0.07) < 0.000001)
+        side = side + 1
+    }
+    free(shapes_block)
+    worst_gap = 0.0
+    worst_angle = 0.0
+    i = 1
+    while i < h.bone_count {
+        joint = human.bone_at(&h, i).joint_id
+        worst_gap = math.max_float(worst_gap, dynamics.joint_get_linear_separation(joint))
+        worst_angle = math.max_float(worst_angle, dynamics.joint_get_angular_separation(joint))
+        i = i + 1
+    }
+    ensure("ankles: every joint closed and inside its limits at the rest (${worst_gap} m, ${worst_angle} rad)", worst_gap < 0.001 && worst_angle < 0.001)
+    // It falls and comes to rest whole.
+    s = 0
+    while s < 300 {
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        s = s + 1
+    }
+    whole = true
+    i = 0
+    while i < h.bone_count {
+        p = dynamics.body_get_position(human.bone_at(&h, i).body_id)
+        if math.is_valid_vec3(p) == false || p.y < 0.0 - 0.2 { whole = false }
+        i = i + 1
+    }
+    ensure("ankles: fallen and at rest, every bone finite and above the ground", whole)
+    worst_gap = 0.0
+    i = 1
+    while i < h.bone_count {
+        worst_gap = math.max_float(worst_gap, dynamics.joint_get_linear_separation(human.bone_at(&h, i).joint_id))
+        i = i + 1
+    }
+    ensure("ankles: the joints held through the fall (${worst_gap} m)", worst_gap < 0.01)
+    human.destroy_human(&h)
+    ensure("ankles: destroyed", h.is_spawned == false && physics_world.get_counters(world_id).body_count == 1)
+    dynamics.destroy_world(world_id)
+    // The ranges, each pushed to its limit through the joint.
+    toes_down = pushed_foot(math.vec3(0.0, 0.5, 0.0))
+    toes_up = pushed_foot(math.vec3(0.0, 0.0 - 0.5, 0.0))
+    aside = pushed_foot(math.vec3(0.0 - 0.5, 0.0, 0.0))
+    rolled = pushed_foot(math.vec3(0.0, 0.0, 0.5))
+    println("human: ankle ranges: toes down ${toes_down.x}, up ${toes_up.x}, aside ${aside.y}, rolled ${rolled.z} degrees")
+    ensure("ankles: the toes down to ${human.ANKLE_PLANTAR_DEGREES} (${toes_down.x})", math.abs_float(toes_down.x - human.ANKLE_PLANTAR_DEGREES) < 2.0)
+    ensure("ankles: the toes up to ${human.ANKLE_DORSAL_DEGREES} (${toes_up.x})", math.abs_float(toes_up.x + human.ANKLE_DORSAL_DEGREES) < 2.0)
+    ensure("ankles: about ${human.ANKLE_SIDE_DEGREES} to the side (${aside.y})", math.abs_float(aside.y - human.ANKLE_SIDE_DEGREES) < 2.0)
+    ensure("ankles: the sole rolled ${human.ANKLE_ROLL_DEGREES} (${rolled.z})", math.abs_float(math.abs_float(rolled.z) - human.ANKLE_ROLL_DEGREES) < 2.0)
+    // Ankles need a foot on each calf: refused without.
+    footless = human.human_reference_shape()
+    human.spec_at(footless, human.BONE_CALF_L).has_foot = false
+    world_id = world_with_ground()
+    h = Human { bones: null, filter_joints: null, filter_joint_count: 0, friction_torque: 0.0, is_spawned: false }
+    h.ankles = true
+    human.create_human_shaped(&h, world_id, math.transform_identity(), footless, 5.0, 1.0, 0.7, 1, null)
+    ensure("ankles: a calf without a foot is refused", h.is_spawned == false && physics_world.get_counters(world_id).body_count == 1)
+    dynamics.destroy_world(world_id)
+    free(footless)
+}
+
+// The issue's own measure (#152): a crouch tips the shin forward over the
+// foot, 25 degrees at a 50 degree knee bend. With the figure held still
+// and each calf turned forward about its ankle by `degrees`, the free feet
+// settle on the ground: within the ankle's range the soles lie as they did
+// standing (the reference's foot, fixed to the calf, would tilt by the
+// whole angle); past it the sole lifts by what the range cannot take.
+foot_tilt(h: *Human, foot_index: int) -> float {
+    foot = human.bone_at(h, foot_index)
+    c = dynamics.shape_get_capsule(foot.shape_id)
+    xf = Transform { p: dynamics.body_get_position(foot.body_id), q: dynamics.body_get_rotation(foot.body_id) }
+    axis = math.normalize(math.sub(math.transform_point(xf, c.center2), math.transform_point(xf, c.center1)))
+    return asin(math.abs_float(axis.y)) * math.RAD_TO_DEG
+}
+
+crouched_soles(degrees: float) -> Vec2 {
+    world_id = world_with_ground()
+    h = Human { bones: null, filter_joints: null, filter_joint_count: 0, friction_torque: 0.0, is_spawned: false }
+    h.ankles = true
+    human.create_human(&h, world_id, math.vec3(0.0, 0.01, 0.0), 0.0, 0.0, 0.0, 1, null)
+    rest_l = foot_tilt(&h, human.BONE_FOOT_L)
+    rest_r = foot_tilt(&h, human.BONE_FOOT_R)
+    i = 0
+    while i < human.BONE_COUNT {
+        dynamics.body_set_type(human.bone_at(&h, i).body_id, dynamics.BODY_STATIC)
+        i = i + 1
+    }
+    side = 0
+    while side < 2 {
+        calf_index = human.BONE_CALF_L
+        foot_index = human.BONE_FOOT_L
+        if side == 1 {
+            calf_index = human.BONE_CALF_R
+            foot_index = human.BONE_FOOT_R
+        }
+        calf = human.bone_at(&h, calf_index)
+        foot = human.bone_at(&h, foot_index)
+        frame = ankle_frame(&h, foot_index)
+        q = dynamics.body_get_rotation(calf.body_id)
+        p = dynamics.body_get_position(calf.body_id)
+        ankle = math.add(p, math.rotate_vector(q, foot.local_frame_a.p))
+        lateral = math.rotate_vector(frame, math.vec3_axis_y())
+        toe_way = math.rotate_vector(frame, math.vec3_axis_z())
+        forward = math.normalize(math.vec3(toe_way.x, 0.0, toe_way.z))
+        // The turn that takes the knee forward, over the toes.
+        turn = math.make_quat_from_axis_angle(lateral, degrees * math.DEG_TO_RAD)
+        if math.dot(math.sub(math.rotate_vector(turn, math.sub(p, ankle)), math.sub(p, ankle)), forward) < 0.0 {
+            turn = math.make_quat_from_axis_angle(lateral, 0.0 - degrees * math.DEG_TO_RAD)
+        }
+        dynamics.body_set_transform(calf.body_id, math.add(ankle, math.rotate_vector(turn, math.sub(p, ankle))), math.mul_quat(turn, q))
+        side = side + 1
+    }
+    s = 0
+    while s < 180 {
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        s = s + 1
+    }
+    tilt = Vec2 { x: foot_tilt(&h, human.BONE_FOOT_L) - rest_l, y: foot_tilt(&h, human.BONE_FOOT_R) - rest_r }
+    human.destroy_human(&h)
+    dynamics.destroy_world(world_id)
+    return tilt
+}
+
+test_ankle_crouch() {
+    shallow = crouched_soles(25.0)
+    ensure("crouch: shins 25 degrees over the feet, the soles lie as standing (${shallow.x}, ${shallow.y} degrees)",
+           math.abs_float(shallow.x) < 3.0 && math.abs_float(shallow.y) < 3.0)
+    deep = crouched_soles(45.0)
+    over = 45.0 - human.ANKLE_DORSAL_DEGREES
+    println("human: crouched soles against standing: shins at 25 degrees ${shallow.x} and ${shallow.y}, at 45 degrees ${deep.x} and ${deep.y}")
+    ensure("crouch: shins 45 degrees over, the soles lift by what the 35 cannot take (${deep.x}, ${deep.y} against ${over})",
+           math.abs_float(deep.x - over) < 4.0 && math.abs_float(deep.y - over) < 4.0)
+}
+
 main() {
     g_slab = hull.make_box_hull(20.0, 1.0, 20.0) as ptr
     test_build_and_fall()
@@ -826,6 +1039,8 @@ main() {
     test_hinges()
     test_hips()
     test_grip()
+    test_ankles()
+    test_ankle_crouch()
     hull.destroy_hull(g_slab as *HullData)
     println("human: ${checks} checks")
     if failures == 0 {

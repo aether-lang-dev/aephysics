@@ -34,6 +34,7 @@ import aephysics.joint_solver
 exports (
     BONE_PELVIS, BONE_SPINE_01, BONE_SPINE_03, BONE_NECK, BONE_THIGH_L, BONE_CALF_L, BONE_THIGH_R, BONE_CALF_R,
     BONE_UPPER_ARM_L, BONE_LOWER_ARM_L, BONE_UPPER_ARM_R, BONE_LOWER_ARM_R, BONE_COUNT, FILTER_JOINT_COUNT,
+    BONE_FOOT_L, BONE_FOOT_R, MAX_BONE_COUNT, ANKLE_PLANTAR_DEGREES, ANKLE_DORSAL_DEGREES, ANKLE_SIDE_DEGREES, ANKLE_ROLL_DEGREES,
     HumanBone, Human, BoneSpec, bone_at, filter_joint_at, spec_at,
     human_reference_shape, human_anatomical_limits, human_tight_limits, human_chain_child, human_shape_head, human_shape_tail, human_shape_toe, human_fit_shape, create_human_shaped,
     create_human, destroy_human, human_set_velocity, human_apply_angular_impulse, human_set_joint_friction_torque,
@@ -42,6 +43,8 @@ exports (
 )
 
 extern calloc(count: int, size: int) -> ptr
+extern sin(x: float) -> float
+extern cos(x: float) -> float
 extern free(p: ptr)
 
 const BONE_PELVIS = 0
@@ -58,6 +61,20 @@ const BONE_UPPER_ARM_R = 10
 const BONE_LOWER_ARM_R = 11
 const BONE_COUNT = 12
 const FILTER_JOINT_COUNT = 3
+// With ankles (#152, past the reference, whose figure has no foot bodies)
+// the feet are bones of their own after the twelve, each on a joint below
+// its calf; without, the reference's twelve, the foot a shape on the calf.
+const BONE_FOOT_L = 12
+const BONE_FOOT_R = 13
+const MAX_BONE_COUNT = 14
+// The ankle's range, a loaded one's: the toes down 50 degrees and up 35 (an
+// elliptical cone about a centre tipped toward the toes), 15 to either
+// side, and the sole rolled 15 either way about the foot's line.
+const ANKLE_PLANTAR_DEGREES = 50.0
+const ANKLE_DORSAL_DEGREES = 35.0
+const ANKLE_SIDE_DEGREES = 15.0
+const ANKLE_ROLL_DEGREES = 15.0
+const ANKLE_FRICTION = 0.6
 
 // One bone: its body, the joint to its parent, the anchor a pose drive
 // hangs it from, the joint's frames on parent and bone, the bone's
@@ -85,13 +102,18 @@ struct HumanBone {
     cone_major_axis: Vec3          // in local_frame_a
 }
 
-// The ragdoll: a heap block of bones and filter joints (create allocates, destroy frees).
+// The ragdoll: a heap block of bones and filter joints (create allocates,
+// destroy frees). `ankles`, set before it is made, gives the feet bones of
+// their own (bone_count MAX_BONE_COUNT); left false it is the reference's
+// figure of BONE_COUNT bones.
 struct Human {
-    bones: ptr                     // HumanBone[BONE_COUNT]
+    bones: ptr                     // HumanBone[bone_count]
     filter_joints: ptr             // JointId[FILTER_JOINT_COUNT]
     filter_joint_count: int
     friction_torque: float
     is_spawned: bool
+    ankles: bool
+    bone_count: int
 }
 
 bone_at(h: *Human, index: int) -> *HumanBone { return (h.bones + index * sizeof(HumanBone)) as *HumanBone }
@@ -606,7 +628,7 @@ point_foot(spec: *BoneSpec, axis: Vec3, toe: Vec3, head: Vec3) {
 
 // A bone's body and shapes: the body at its frame placed by `placement`,
 // the capsule (and a calf's foot) with its material; the joint data on the bone.
-place_bone(h: *Human, world_id: WorldId, index: int, placement: Transform, spec: *BoneSpec, user_data: ptr, group_index: int) {
+place_bone(h: *Human, world_id: WorldId, index: int, placement: Transform, spec: *BoneSpec, user_data: ptr, group_index: int, foot_on_calf: bool) {
     bone = bone_at(h, index)
     bone.parent_index = spec.parent
     bone.reference_frame = spec.reference
@@ -623,7 +645,7 @@ place_bone(h: *Human, world_id: WorldId, index: int, placement: Transform, spec:
     sdef.base_material.rolling_resistance = 0.1
     bone.shape_id = dynamics.create_capsule_shape(bone.body_id, &sdef, spec.capsule)
     bone.foot_shape_id = dynamics.null_shape_id()
-    if spec.has_foot {
+    if spec.has_foot && foot_on_calf {
         fdef = dynamics.default_shape_def()
         fdef.base_material.friction = spec.foot_friction
         fdef.base_material.rolling_resistance = 0.1
@@ -638,6 +660,50 @@ place_bone(h: *Human, world_id: WorldId, index: int, placement: Transform, spec:
     bone.swing_minor_limit = spec.swing_minor_degrees * math.DEG_TO_RAD
     bone.cone_major_axis = spec.cone_major_axis
     bone.joint_friction = spec.joint_friction
+}
+
+// A calf's foot as a bone of its own: a body in the calf's frame carrying
+// the foot's capsule, on a spherical joint at the ankle (the far end of the
+// calf's capsule). The joint's frame looks down the foot (z from the ankle
+// to the toe) with x the way the toes go down (the shin's line across the
+// foot), so its elliptical cone reaches ANKLE_PLANTAR_DEGREES toward x and
+// ANKLE_DORSAL_DEGREES back (a centre tipped toward x by half their
+// difference), ANKLE_SIDE_DEGREES across, and its twist is the sole's roll.
+// The foot rests in the calf's frame, so both frames are one at rest.
+place_foot(h: *Human, world_id: WorldId, index: int, calf_index: int, placement: Transform, spec: *BoneSpec, user_data: ptr, group_index: int) {
+    bone = bone_at(h, index)
+    bone.parent_index = calf_index
+    bone.reference_frame = spec.reference
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.user_data = user_data
+    bdef.rotation = math.mul_quat(placement.q, spec.reference.q)
+    bdef.position = math.transform_point(placement, spec.reference.p)
+    bone.body_id = dynamics.create_body(world_id, &bdef)
+    fdef = dynamics.default_shape_def()
+    fdef.density = fdef.density * spec.density
+    fdef.filter.group_index = spec.group * group_index
+    fdef.base_material.friction = spec.foot_friction
+    fdef.base_material.rolling_resistance = 0.1
+    bone.shape_id = dynamics.create_capsule_shape(bone.body_id, &fdef, spec.foot)
+    bone.foot_shape_id = bone.shape_id
+    ankle = spec.capsule.center1
+    if math.length(spec.capsule.center2) > math.length(ankle) { ankle = spec.capsule.center2 }
+    z = math.normalize(math.sub(foot_toe(spec), ankle))
+    shin = math.normalize(ankle)
+    x = math.normalize(math.sub(shin, math.mul_sv(math.dot(shin, z), z)))
+    y = math.cross(z, x)
+    frame = Transform { p: ankle, q: math.make_quat_from_matrix(Matrix3 { cx: x, cy: y, cz: z }) }
+    bone.joint_kind = dynamics.JOINT_SPHERICAL
+    bone.local_frame_a = frame
+    bone.local_frame_b = frame
+    tilt = 0.5 * (ANKLE_PLANTAR_DEGREES - ANKLE_DORSAL_DEGREES) * math.DEG_TO_RAD
+    bone.cone_axis = math.vec3(sin(tilt), 0.0, cos(tilt))
+    bone.swing_limit = 0.5 * (ANKLE_PLANTAR_DEGREES + ANKLE_DORSAL_DEGREES) * math.DEG_TO_RAD
+    bone.swing_minor_limit = ANKLE_SIDE_DEGREES * math.DEG_TO_RAD
+    bone.cone_major_axis = math.vec3_zero()
+    bone.twist_limit = Vec2 { x: 0.0 - ANKLE_ROLL_DEGREES * math.DEG_TO_RAD, y: ANKLE_ROLL_DEGREES * math.DEG_TO_RAD }
+    bone.joint_friction = ANKLE_FRICTION
 }
 
 // The reference's figure standing at `position`.
@@ -655,11 +721,15 @@ create_human_shaped(h: *Human, world_id: WorldId, placement: Transform, shape: p
     if h.is_spawned { return }
     if dynamics.world_is_valid(world_id) == false || shape == null || math.is_valid_world_transform(placement) == false { return }
     if valid_nonnegative(friction_torque) == false || valid_nonnegative(hertz) == false || valid_nonnegative(damping_ratio) == false { return }
-    h.bones = calloc(BONE_COUNT, sizeof(HumanBone))
+    // Ankles need a foot on each calf to stand on.
+    if h.ankles && (spec_at(shape, BONE_CALF_L).has_foot == false || spec_at(shape, BONE_CALF_R).has_foot == false) { return }
+    h.bone_count = BONE_COUNT
+    if h.ankles { h.bone_count = MAX_BONE_COUNT }
+    h.bones = calloc(h.bone_count, sizeof(HumanBone))
     h.filter_joints = calloc(FILTER_JOINT_COUNT, sizeof(JointId))
     h.filter_joint_count = 0
     i = 0
-    while i < BONE_COUNT {
+    while i < h.bone_count {
         bone = bone_at(h, i)
         bone.body_id = dynamics.null_body_id()
         bone.anchor_id = dynamics.null_body_id()
@@ -683,14 +753,18 @@ create_human_shaped(h: *Human, world_id: WorldId, placement: Transform, shape: p
     h.friction_torque = friction_torque
     i = 0
     while i < BONE_COUNT {
-        place_bone(h, world_id, i, placement, spec_at(shape, i), user_data, group_index)
+        place_bone(h, world_id, i, placement, spec_at(shape, i), user_data, group_index, h.ankles == false)
         i = i + 1
+    }
+    if h.ankles {
+        place_foot(h, world_id, BONE_FOOT_L, BONE_CALF_L, placement, spec_at(shape, BONE_CALF_L), user_data, group_index)
+        place_foot(h, world_id, BONE_FOOT_R, BONE_CALF_R, placement, spec_at(shape, BONE_CALF_R), user_data, group_index)
     }
     // A bone the world refused (a full world, a shape spec out of range)
     // would leave a figure missing a limb that every later call reaches
     // for: what was made is taken down and the figure stays unspawned.
     i = 0
-    while i < BONE_COUNT {
+    while i < h.bone_count {
         if dynamics.body_is_valid(bone_at(h, i).body_id) == false {
             take_down(h)
             return
@@ -701,7 +775,7 @@ create_human_shaped(h: *Human, world_id: WorldId, placement: Transform, shape: p
     // The joints: a spring toward the reference pose when asked, the
     // motor's torque limit as friction, the limits as the rig allows.
     i = 1
-    while i < BONE_COUNT {
+    while i < h.bone_count {
         bone = bone_at(h, i)
         parent = bone_at(h, bone.parent_index)
         bone.local_frame_a.q = math.normalize_quat(bone.local_frame_a.q)
@@ -777,14 +851,14 @@ take_down(h: *Human) {
         i = i + 1
     }
     i = 0
-    while i < BONE_COUNT {
+    while i < h.bone_count {
         bone = bone_at(h, i)
         if dynamics.joint_is_valid(bone.joint_id) { dynamics.destroy_joint(bone.joint_id, false) }
         if dynamics.joint_is_valid(bone.anchor_joint_id) { dynamics.destroy_joint(bone.anchor_joint_id, false) }
         i = i + 1
     }
     i = 0
-    while i < BONE_COUNT {
+    while i < h.bone_count {
         bone = bone_at(h, i)
         if dynamics.body_is_valid(bone.body_id) { dynamics.destroy_body(bone.body_id) }
         if dynamics.body_is_valid(bone.anchor_id) { dynamics.destroy_body(bone.anchor_id) }
@@ -801,7 +875,7 @@ take_down(h: *Human) {
 human_set_velocity(h: *Human, velocity: Vec3) {
     if h.is_spawned == false { return }
     i = 0
-    while i < BONE_COUNT {
+    while i < h.bone_count {
         bone = bone_at(h, i)
         if dynamics.body_is_valid(bone.body_id) { dynamics.body_set_linear_velocity(bone.body_id, velocity) }
         i = i + 1
@@ -818,7 +892,7 @@ human_set_joint_friction_torque(h: *Human, torque: float) {
     if h.is_spawned == false || valid_nonnegative(torque) == false { return }
     h.friction_torque = torque
     i = 1
-    while i < BONE_COUNT {
+    while i < h.bone_count {
         bone = bone_at(h, i)
         if bone.joint_kind == dynamics.JOINT_REVOLUTE {
             joint_solver.revolute_joint_set_max_motor_torque(bone.joint_id, bone.joint_friction * torque)
@@ -832,7 +906,7 @@ human_set_joint_friction_torque(h: *Human, torque: float) {
 human_set_joint_spring_hertz(h: *Human, hertz: float) {
     if h.is_spawned == false { return }
     i = 1
-    while i < BONE_COUNT {
+    while i < h.bone_count {
         bone = bone_at(h, i)
         if bone.joint_kind == dynamics.JOINT_REVOLUTE {
             joint_solver.revolute_joint_set_spring_hertz(bone.joint_id, hertz)
@@ -846,7 +920,7 @@ human_set_joint_spring_hertz(h: *Human, hertz: float) {
 human_set_joint_damping_ratio(h: *Human, damping_ratio: float) {
     if h.is_spawned == false { return }
     i = 1
-    while i < BONE_COUNT {
+    while i < h.bone_count {
         bone = bone_at(h, i)
         if bone.joint_kind == dynamics.JOINT_REVOLUTE {
             joint_solver.revolute_joint_set_spring_damping_ratio(bone.joint_id, damping_ratio)
@@ -903,7 +977,7 @@ human_create_motor_anchors(h: *Human, world_id: WorldId) {
     mdef.max_spring_force = math.MAX_FLOAT
     mdef.max_spring_torque = math.MAX_FLOAT
     i = 0
-    while i < BONE_COUNT {
+    while i < h.bone_count {
         bone = bone_at(h, i)
         xf = dynamics.body_get_transform(bone.body_id)
         adef.position = xf.p
@@ -929,7 +1003,7 @@ human_create_parallel_anchors(h: *Human, world_id: WorldId) {
     pdef.damping_ratio = 1.0
     pdef.max_torque = 800.0
     i = 0
-    while i < BONE_COUNT {
+    while i < h.bone_count {
         bone = bone_at(h, i)
         xf = dynamics.body_get_transform(bone.body_id)
         adef.position = xf.p
@@ -958,7 +1032,7 @@ human_has_anchors(h: *Human) -> bool {
 // as the animation does, colliding as the ragdoll it is. Nothing happens
 // for a bone without an anchor.
 human_set_anchor_target(h: *Human, index: int, target: Transform, time_step: float) {
-    if h.is_spawned == false || index < 0 || index >= BONE_COUNT { return }
+    if h.is_spawned == false || index < 0 || index >= h.bone_count { return }
     bone = bone_at(h, index)
     if dynamics.body_is_valid(bone.anchor_id) == false { return }
     dynamics.body_set_target_transform(bone.anchor_id, target, time_step, true)
@@ -969,7 +1043,7 @@ human_set_anchor_target(h: *Human, index: int, target: Transform, time_step: flo
 human_destroy_anchors(h: *Human) {
     if h.is_spawned == false { return }
     i = 0
-    while i < BONE_COUNT {
+    while i < h.bone_count {
         bone = bone_at(h, i)
         if dynamics.joint_is_valid(bone.anchor_joint_id) { dynamics.destroy_joint(bone.anchor_joint_id, true) }
         if dynamics.body_is_valid(bone.anchor_id) { dynamics.destroy_body(bone.anchor_id) }
@@ -982,7 +1056,7 @@ human_destroy_anchors(h: *Human) {
 human_set_bullet(h: *Human, flag: bool) {
     if h.is_spawned == false { return }
     i = 0
-    while i < BONE_COUNT {
+    while i < h.bone_count {
         dynamics.body_set_bullet(bone_at(h, i).body_id, flag)
         i = i + 1
     }
