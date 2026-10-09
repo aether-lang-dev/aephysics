@@ -32,8 +32,8 @@ exports (
     key_hash, shape_pair_key, SHAPE_POWER, CHILD_POWER, MAX_SHAPES, MAX_CHILD_SHAPES,
     set_create, set_destroy, set_clear, set_add, set_remove, set_contains, set_contains_hashed,
     set_count, set_bytes,
-    LongMap, map_create, map_destroy, map_clear, map_set, map_get, map_has, map_count, map_bytes,
-    hash_bytes,
+    LongMap, map_create, map_destroy, map_clear, map_set, map_get, map_has, map_remove, map_count, map_bytes,
+    hash_bytes, section_fits,
     ints_create, ints_destroy, ints_reserve, ints_push, ints_pop, ints_get, ints_set, ints_clear,
     ints_remove_swap, ints_count, ints_capacity, ints_bytes,
     buffer_create, buffer_destroy, buffer_reserve, buffer_push, buffer_pop, buffer_clear,
@@ -271,7 +271,8 @@ bitset_bytes(s: *BitSet) -> int { return s.block_capacity * 8 }
 // An open-addressing map from a 64-bit key to an int, on the hash set's
 // pattern (a zero hash marks an empty slot): what the reference's
 // verstable maps are used for -- the mesh's vertex welding and edge
-// pairing, the world's hull database.
+// pairing, the world's hull database (map_remove keeps it from growing as
+// hulls come and go).
 struct MapItem {
     key: long
     hash: int
@@ -365,8 +366,43 @@ map_has(m: *LongMap, key: long) -> bool {
     return items[index].hash != 0
 }
 
+// Take the key out; true when it was there. The run after it moves back
+// over the hole (linear probing's deletion): an item moves when the hole
+// lies between its home slot and where it sits, so every key stays
+// reachable from its home and no tombstones build up.
+map_remove(m: *LongMap, key: long) -> bool {
+    mask = m.capacity - 1
+    hole = map_find_slot(m, key, key_hash(key))
+    items = m.items as MapItem[]
+    if items[hole].hash == 0 { return false }
+    next = (hole + 1) & mask
+    while items[next].hash != 0 {
+        home = items[next].hash & mask
+        if ((next - home) & mask) >= ((next - hole) & mask) {
+            items[hole] = items[next]
+            hole = next
+        }
+        next = (next + 1) & mask
+    }
+    items[hole] = MapItem { key: 0 as long, hash: 0, value: 0 }
+    m.count = m.count - 1
+    return true
+}
+
 map_count(m: *LongMap) -> int { return m.count }
 map_bytes(m: *LongMap) -> int { return m.capacity * sizeof(MapItem) }
+
+// --- a section of a block ------------------------------------------------------
+
+// `count` items of `size` bytes from `offset` lie inside a block of
+// `byte_count` bytes: what bytes read from outside (a file, a recording)
+// are checked with before anything reads through their offsets. No
+// product is formed, so no count overflows the check.
+section_fits(offset: int, count: int, size: int, byte_count: int) -> bool {
+    if offset < 0 || count < 0 || size < 0 || offset > byte_count { return false }
+    if size == 0 || count == 0 { return true }
+    return count <= (byte_count - offset) / size
+}
 
 // --- a hash over a block --------------------------------------------------------
 

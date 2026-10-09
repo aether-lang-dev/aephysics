@@ -28,7 +28,7 @@ exports (
     HullData, HalfEdge, MassData, ShapeExtent, Point2D,
     MAX_HULL_VERTICES, MAX_HULL_FACES, MAX_HULL_EDGES, HULL_VERSION, NULL_INDEX,
     hull_vertices, hull_points, hull_edges, hull_planes, hull_faces,
-    create_hull, destroy_hull, clone_hull, clone_and_transform_hull, is_valid_hull,
+    create_hull, destroy_hull, clone_hull, clone_and_transform_hull, is_valid_hull, hull_bytes_valid,
     hash_hull_data, compare_hull_data,
     create_cylinder, create_cone, create_rock, create_complex_hull,
     make_box_hull, make_cube_hull, make_offset_box_hull, make_transformed_box_hull,
@@ -1381,6 +1381,47 @@ compare_hull_data(a: *HullData, b: *HullData) -> bool {
     if a == b { return true }
     if a.byte_count != b.byte_count { return false }
     return memcmp(a as ptr, b as ptr, a.byte_count) == 0
+}
+
+// A hull in bytes from outside (a compound's, a file's, a recording's),
+// at most `available` of them: its arrays inside its block, its block
+// inside the bytes, every index in range, then the structure is_valid_hull
+// checks. Nothing here reads outside the bytes, so corrupt input is
+// refused rather than followed.
+hull_bytes_valid(h: *HullData, available: int) -> bool {
+    if h == null || available < sizeof(HullData) { return false }
+    if h.version != HULL_VERSION { return false }
+    n = h.byte_count
+    if n < sizeof(HullData) || n > available { return false }
+    if h.vertex_count < 4 || h.vertex_count > MAX_HULL_VERTICES { return false }
+    if h.face_count < 4 || h.face_count > MAX_HULL_FACES { return false }
+    if h.edge_count < 12 || h.edge_count > MAX_HULL_EDGES || (h.edge_count & 1) != 0 { return false }
+    if basics.section_fits(h.vertex_offset, h.vertex_count, 4, n) == false { return false }
+    if basics.section_fits(h.point_offset, h.vertex_count, sizeof(Vec3), n) == false { return false }
+    if basics.section_fits(h.edge_offset, h.edge_count, sizeof(HalfEdge), n) == false { return false }
+    if basics.section_fits(h.plane_offset, h.face_count, sizeof(Plane), n) == false { return false }
+    if basics.section_fits(h.face_offset, h.face_count, 4, n) == false { return false }
+    vertices = hull_vertices(h)
+    edges = hull_edges(h)
+    faces = hull_faces(h)
+    i = 0
+    while i < h.vertex_count {
+        if vertices[i] < 0 || vertices[i] >= h.edge_count { return false }
+        i = i + 1
+    }
+    i = 0
+    while i < h.edge_count {
+        e = edges[i]
+        if e.next < 0 || e.next >= h.edge_count || e.twin < 0 || e.twin >= h.edge_count { return false }
+        if e.origin < 0 || e.origin >= h.vertex_count || e.face < 0 || e.face >= h.face_count { return false }
+        i = i + 1
+    }
+    i = 0
+    while i < h.face_count {
+        if faces[i] < 0 || faces[i] >= h.edge_count { return false }
+        i = i + 1
+    }
+    return is_valid_hull(h)
 }
 
 // The block for a hull of these counts, with the offsets set.

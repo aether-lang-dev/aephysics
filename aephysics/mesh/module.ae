@@ -32,7 +32,7 @@ exports (
     MeshDef, MeshData, MeshNode, MeshTriangle, Mesh, Triangle, PlaneResult,
     MESH_VERSION, NULL_INDEX, MESH_STACK_SIZE, LEAF_NODE,
     mesh_def, mesh, mesh_nodes, mesh_vertices, mesh_triangles, mesh_material_indices, mesh_flags,
-    create_mesh, destroy_mesh, is_valid_mesh, get_height,
+    create_mesh, destroy_mesh, is_valid_mesh, mesh_bytes_valid, get_height,
     create_grid_mesh, create_wave_mesh, create_torus_mesh, create_box_mesh, create_hollow_box_mesh,
     create_platform_mesh,
     overlap_mesh, compute_mesh_aabb, ray_cast_mesh, shape_cast_mesh, get_mesh_triangle,
@@ -262,6 +262,46 @@ is_valid_mesh(m: *MeshData) -> bool {
     if m == null { return false }
     if m.version != MESH_VERSION { return false }
     if m.byte_count < sizeof(MeshData) { return false }
+    return is_consistent(m)
+}
+
+// A mesh in bytes from outside (a compound's, a recording's), at most
+// `available` of them: its arrays inside its block, its block inside the
+// bytes, every node's children after it and inside the nodes, every
+// leaf's triangles and every triangle's vertices in range, then the
+// bounds is_consistent checks. Nothing here reads outside the bytes.
+mesh_bytes_valid(m: *MeshData, available: int) -> bool {
+    if m == null || available < sizeof(MeshData) { return false }
+    if m.version != MESH_VERSION { return false }
+    n = m.byte_count
+    if n < sizeof(MeshData) || n > available { return false }
+    if m.node_count < 1 || m.vertex_count < 0 || m.triangle_count < 0 { return false }
+    if basics.section_fits(m.node_offset, m.node_count, sizeof(MeshNode), n) == false { return false }
+    if basics.section_fits(m.vertex_offset, m.vertex_count, sizeof(Vec3), n) == false { return false }
+    if basics.section_fits(m.triangle_offset, m.triangle_count, sizeof(MeshTriangle), n) == false { return false }
+    if basics.section_fits(m.material_offset, m.triangle_count, 4, n) == false { return false }
+    if basics.section_fits(m.flags_offset, m.triangle_count, 4, n) == false { return false }
+    nodes = mesh_nodes(m)
+    i = 0
+    while i < m.node_count {
+        node = nodes[i]
+        if is_leaf(node) {
+            if node.count_or_offset < 0 || node.triangle_offset < 0 { return false }
+            if node.count_or_offset > m.triangle_count - node.triangle_offset { return false }
+        } else {
+            if node.axis < 0 || node.axis > 2 { return false }
+            if i + 1 >= m.node_count || node.count_or_offset < 2 || node.count_or_offset >= m.node_count - i { return false }
+        }
+        i = i + 1
+    }
+    triangles = mesh_triangles(m)
+    i = 0
+    while i < m.triangle_count {
+        t = triangles[i]
+        if t.index1 < 0 || t.index1 >= m.vertex_count || t.index2 < 0 || t.index2 >= m.vertex_count { return false }
+        if t.index3 < 0 || t.index3 >= m.vertex_count { return false }
+        i = i + 1
+    }
     return is_consistent(m)
 }
 

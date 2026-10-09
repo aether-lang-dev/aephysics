@@ -37,7 +37,8 @@ exports (
     tree_get_user_data, tree_get_aabb,
     tree_create_proxy_internal, tree_move_proxy_internal, tree_mark_proxy_moved_serial,
     tree_mark_proxy_moved, tree_clear_moved, tree_gather_moved_proxies, tree_refit,
-    tree_has_moved, tree_needs_rebuild, test_category, test_bounds_ray_overlap
+    tree_has_moved, tree_needs_rebuild, test_category, test_bounds_ray_overlap,
+    TreeSaveHeader, tree_save_version, tree_save_bytes, tree_load_bytes
 )
 
 extern memcpy(dst: ptr, src: ptr, size: int) -> ptr
@@ -813,6 +814,127 @@ tree_validate_no_moved(t: *DynamicTree) -> bool {
         i = i + 1
     }
     return true
+}
+
+// --- a tree as bytes (b3DynamicTree_Save and _Load, #148) ----------------------
+
+// What leads a saved tree: the layout's tag and this build's node and
+// proxy sizes (a tree saved by another layout is refused, not misread),
+// then the tree's own counts and lists. The nodes up to node_end, their
+// parents and every proxy follow, as the reference writes them.
+struct TreeSaveHeader {
+    version: long
+    node_size: int
+    proxy_size: int
+    node_end: int
+    node_capacity: int
+    pair_free_list: int
+    proxy_count: int
+    proxy_capacity: int
+    proxy_free_list: int
+    dfs_ordered: int
+    padding: int
+}
+
+// The reference's B3_DYNAMIC_TREE_VERSION with this port's boxes (in
+// double) folded in, so neither engine takes the other's bytes.
+tree_save_version() -> long { return (0x1D6F4C2A73B80E91 as long) ^ (0x00000000D0B1E64 as long) }
+
+// The tree as one block of bytes and its length, the block the caller's
+// to free (basics.free_bytes). A tree without parents (a compound's baked
+// tree) or not made is not saved: null and 0, as the reference writes no
+// file for it. The node capacity saved is node_end, the nodes in use.
+tree_save_bytes(t: *DynamicTree) -> (ptr, int) {
+    if t.nodes == null || t.parents == null || t.proxies == null { return null, 0 }
+    header_bytes = sizeof(TreeSaveHeader)
+    node_bytes = t.node_end * sizeof(DynamicTreeNode)
+    parent_bytes = t.node_end * 4
+    proxy_bytes = t.proxy_capacity * sizeof(TreeProxy)
+    byte_count = header_bytes + node_bytes + parent_bytes + proxy_bytes
+    block = basics.alloc(byte_count)
+    h = block as *TreeSaveHeader
+    h.version = tree_save_version()
+    h.node_size = sizeof(DynamicTreeNode)
+    h.proxy_size = sizeof(TreeProxy)
+    h.node_end = t.node_end
+    h.node_capacity = t.node_end
+    h.pair_free_list = t.pair_free_list
+    h.proxy_count = t.proxy_count
+    h.proxy_capacity = t.proxy_capacity
+    h.proxy_free_list = t.proxy_free_list
+    h.dfs_ordered = 0
+    if t.dfs_ordered { h.dfs_ordered = 1 }
+    memcpy(block + header_bytes, t.nodes, node_bytes)
+    memcpy(block + header_bytes + node_bytes, t.parents, parent_bytes)
+    memcpy(block + header_bytes + node_bytes + parent_bytes, t.proxies, proxy_bytes)
+    return block, byte_count
+}
+
+// A tree of no nodes, what a refused load returns (nodes null).
+empty_tree() -> DynamicTree {
+    return DynamicTree { nodes: null, parents: null, proxies: null, node_end: 0, node_capacity: 0, pair_free_list: NULL_INDEX,
+                         proxy_count: 0, proxy_capacity: 0, proxy_free_list: NULL_INDEX,
+                         swap_nodes: null, leaf_indices: null, leaf_nodes: null, leaf_centers: null,
+                         rebuild_capacity: 0, dfs_ordered: true, stack: null, stack_dist: null, copy_stack: null }
+}
+
+// The tree in `byte_count` bytes saved by tree_save_bytes, its boxes
+// scaled by `scale`; a tree of null nodes when the bytes are not one.
+// Refused, as the reference refuses them: another layout's tag, too few
+// nodes or proxies, an odd or out-of-range node end; and past it: a
+// length other than the counts give, a scale that is not positive and
+// finite, and a structure tree_validate rejects (indices out of range,
+// broken free lists, boxes that do not contain their children), so
+// nothing a corrupt block holds is ever followed. The empty nodes keep
+// their inverted infinities under the scale.
+tree_load_bytes(block: ptr, byte_count: int, scale: float) -> DynamicTree {
+    if block == null || byte_count < sizeof(TreeSaveHeader) { return empty_tree() }
+    if math.is_valid_float(scale) == false || scale <= 0.0 { return empty_tree() }
+    h = block as *TreeSaveHeader
+    if h.version != tree_save_version() || h.node_size != sizeof(DynamicTreeNode) || h.proxy_size != sizeof(TreeProxy) { return empty_tree() }
+    if h.node_capacity < 2 || h.proxy_capacity < 1 || (h.node_end & 1) != 0 || h.node_end < 2 || h.node_end > h.node_capacity { return empty_tree() }
+    if h.proxy_count < 0 || h.proxy_count > h.proxy_capacity || (h.dfs_ordered != 0 && h.dfs_ordered != 1) { return empty_tree() }
+    header_bytes = sizeof(TreeSaveHeader)
+    // The counts against the length before any product of them is formed.
+    if basics.section_fits(header_bytes, h.node_capacity, sizeof(DynamicTreeNode) + 4, byte_count) == false { return empty_tree() }
+    node_bytes = h.node_capacity * sizeof(DynamicTreeNode)
+    parent_bytes = h.node_capacity * 4
+    if basics.section_fits(header_bytes + node_bytes + parent_bytes, h.proxy_capacity, sizeof(TreeProxy), byte_count) == false { return empty_tree() }
+    proxy_bytes = h.proxy_capacity * sizeof(TreeProxy)
+    if header_bytes + node_bytes + parent_bytes + proxy_bytes != byte_count { return empty_tree() }
+
+    t = empty_tree()
+    t.node_end = h.node_end
+    t.node_capacity = h.node_capacity
+    t.pair_free_list = h.pair_free_list
+    t.proxy_count = h.proxy_count
+    t.proxy_capacity = h.proxy_capacity
+    t.proxy_free_list = h.proxy_free_list
+    t.dfs_ordered = h.dfs_ordered == 1
+    t.nodes = basics.alloc(node_bytes)
+    t.parents = basics.alloc(parent_bytes)
+    t.proxies = basics.alloc(proxy_bytes)
+    memcpy(t.nodes, block + header_bytes, node_bytes)
+    memcpy(t.parents, block + header_bytes + node_bytes, parent_bytes)
+    memcpy(t.proxies, block + header_bytes + node_bytes + parent_bytes, proxy_bytes)
+    t.stack = basics.alloc(tree_stacks_bytes())
+    t.stack_dist = basics.alloc(native.MAX_WORKERS * (TREE_STACK_SIZE * 8))
+    t.copy_stack = basics.alloc(TREE_STACK_SIZE * COPY_ITEM_INTS * 4)
+    if tree_validate(&t) == false {
+        tree_destroy(&t)
+        return empty_tree()
+    }
+    // A positive scale keeps every containment: rounding is monotonic.
+    nodes = t.nodes as DynamicTreeNode[]
+    i = 0
+    while i < t.node_end {
+        if is_empty_node(nodes[i].flag_index) == false {
+            nodes[i].aabb.lower = math.mul_sv(scale, nodes[i].aabb.lower)
+            nodes[i].aabb.upper = math.mul_sv(scale, nodes[i].aabb.upper)
+        }
+        i = i + 1
+    }
+    return t
 }
 
 // --- queries -------------------------------------------------------------------

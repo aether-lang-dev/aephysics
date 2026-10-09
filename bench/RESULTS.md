@@ -513,8 +513,9 @@ phase before it, as the reference's zero-time step runs them).
 The same mass sum (53,272.5), the same 5,000 contacts and 5,000
 islands, 4,999 joints and one island, 2,500 begin events.
 Creation is at parity: the reference's hull database hashes every hull
-shape's bytes and refcounts them, which this layer does not do (a hull
-shape keeps the pointer it was given). The transforms are 0.7x: the
+shape's bytes and refcounts them, which this layer did not do then (a hull
+shape kept the pointer it was given; the database came with #147, below).
+The transforms are 0.7x: the
 reference's b3Body_SetTransform also walks the body's joints, which
 arrive with the joint layer. The collide passes are 1.7-1.8x: each
 contact is reached through its id into a 300-byte struct here where the
@@ -527,6 +528,13 @@ b3CreateJoint records the call for its replay and validates the joint
 definition's cookie; the destruction is 2x on a tenth of a millisecond.
 The sensor passes are 1.2-1.4x: each pass queries the three trees per
 sensor and runs GJK on every candidate, the distance layer's gap.
+
+With the hull database (#147, 2026-10-09, Aether 0.795.0, three runs
+each, the same session): every hull shape now clones its hull into the
+world on its first use and finds it by hash and bytes after, as the
+reference does. Creation went from 96.2-97.4 ms to 97.0-99.2, against
+the reference's 120.5-123.9: still 0.8x of its time, now for the same
+work. The other phases did not move.
 
 Re-measured on 2026-10-05 (main b47a270, Aether 0.779.0), three runs
 each, the same session:

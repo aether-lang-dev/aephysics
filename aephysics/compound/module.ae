@@ -37,7 +37,7 @@ exports (
     CompoundData, CompoundCapsule, CompoundHull, CompoundMesh, CompoundSphere, ChildShape,
     COMPOUND_VERSION, MAX_COMPOUND_MESH_MATERIALS, MAX_CHILD_SHAPES, NULL_INDEX,
     compound_def, compound_capsule_def, compound_hull_def, compound_mesh_def, compound_sphere_def,
-    create_compound, destroy_compound,
+    create_compound, destroy_compound, convert_compound_to_bytes, convert_bytes_to_compound,
     get_compound_materials, get_compound_material, get_compound_capsule, get_compound_hull,
     get_compound_mesh, get_compound_sphere, get_compound_child, compound_child_count, child_material,
     compute_compound_aabb, overlap_compound, ray_cast_compound, shape_cast_compound,
@@ -587,15 +587,23 @@ create_compound(def: *CompoundDef) -> *CompoundData {
     c.sphere_count = sphere_count
 
     // The baked tree: its nodes, proxies and stack in the block; nothing
-    // for insertions or rebuilds.
+    // for insertions or rebuilds. Stored a field at a time into the zeroed
+    // block, so the bytes between fields stay zero and a compound's bytes
+    // are the same for the same compound (a struct value copied in would
+    // bring whatever its padding held). The pointers left null stay zero.
     memcpy(block + node_offset, tree.nodes, tree.node_end * sizeof(DynamicTreeNode))
     memcpy(block + proxy_offset, tree.proxies, tree.proxy_count * sizeof(TreeProxy))
-    c.tree = DynamicTree { nodes: block + node_offset, parents: null, proxies: block + proxy_offset,
-                           node_end: tree.node_end, node_capacity: tree.node_end, pair_free_list: NULL_INDEX,
-                           proxy_count: tree.proxy_count, proxy_capacity: tree.proxy_count, proxy_free_list: NULL_INDEX,
-                           swap_nodes: null, leaf_indices: null, leaf_nodes: null, leaf_centers: null,
-                           rebuild_capacity: 0, dfs_ordered: tree.dfs_ordered,
-                           stack: g_tree_stack, stack_dist: g_tree_dists, copy_stack: null }
+    c.tree.nodes = block + node_offset
+    c.tree.proxies = block + proxy_offset
+    c.tree.node_end = tree.node_end
+    c.tree.node_capacity = tree.node_end
+    c.tree.pair_free_list = NULL_INDEX
+    c.tree.proxy_count = tree.proxy_count
+    c.tree.proxy_capacity = tree.proxy_count
+    c.tree.proxy_free_list = NULL_INDEX
+    c.tree.dfs_ordered = tree.dfs_ordered
+    c.tree.stack = g_tree_stack
+    c.tree.stack_dist = g_tree_dists
     dynamic_tree.tree_destroy(&tree)
 
     memcpy(block + material_offset, table.materials, table.count * sizeof(SurfaceMaterial))
@@ -643,6 +651,126 @@ create_compound(def: *CompoundDef) -> *CompoundData {
 }
 
 destroy_compound(c: *CompoundData) { basics.free_bytes(c as ptr, c.byte_count) }
+
+// --- a compound as bytes (b3ConvertCompoundToBytes and back, #148) -------------------------------
+
+// The compound's bytes: the block itself, byte_count long, with its
+// tree's pointers cleared so the bytes hold no address and are the same
+// for the same compound. The compound cannot be queried again until
+// convert_bytes_to_compound points them back, as in the reference.
+convert_compound_to_bytes(c: *CompoundData) -> ptr {
+    if c == null { return null }
+    c.tree.nodes = null
+    c.tree.proxies = null
+    c.tree.stack = null
+    c.tree.stack_dist = null
+    return c as ptr
+}
+
+// The compound in `byte_count` bytes, or null when they are not one.
+// The reference refuses another version, a length other than the one the
+// bytes declare and a missing node or proxy section; past it, every
+// section, each shared hull and mesh, every child's material and the
+// baked tree are checked against the bytes, so nothing a corrupt block
+// holds is followed. The bytes are changed in place (the tree's pointers
+// set) and stay the caller's: free them as they were allocated, not with
+// destroy_compound unless they came from create_compound.
+convert_bytes_to_compound(bytes: ptr, byte_count: int) -> *CompoundData {
+    if bytes == null || byte_count < sizeof(CompoundData) { return null }
+    c = bytes as *CompoundData
+    if c.version != COMPOUND_VERSION || c.byte_count != byte_count { return null }
+    if c.node_offset <= 0 || c.proxy_offset <= 0 { return null }
+    if compound_sections_fit(c) == false { return null }
+    c.tree.parents = null
+    c.tree.swap_nodes = null
+    c.tree.leaf_indices = null
+    c.tree.leaf_nodes = null
+    c.tree.leaf_centers = null
+    c.tree.copy_stack = null
+    c.tree.nodes = bytes + c.node_offset
+    c.tree.proxies = bytes + c.proxy_offset
+    // The baked tree's own invariants, and every leaf's child in range.
+    if dynamic_tree.tree_validate(&c.tree) == false { return compound_refused(c) }
+    child_count = c.capsule_count + c.hull_count + c.mesh_count + c.sphere_count
+    proxies = c.tree.proxies as TreeProxy[]
+    i = 0
+    while i < c.tree.proxy_count {
+        if proxies[i].user_data < (0 as long) || proxies[i].user_data >= (child_count as long) { return compound_refused(c) }
+        i = i + 1
+    }
+    tree_stacks_ready()
+    c.tree.stack = g_tree_stack
+    c.tree.stack_dist = g_tree_dists
+    return c
+}
+
+// The bytes left pointer-free again when the tree is refused.
+compound_refused(c: *CompoundData) -> *CompoundData {
+    c.tree.nodes = null
+    c.tree.proxies = null
+    return null
+}
+
+// Every section of the block inside it: the tree's nodes and proxies (a
+// dense baked tree), the material table and map, each kind's instances,
+// every hull's and mesh's own bytes, each child's material and each mesh
+// run inside the map.
+compound_sections_fit(c: *CompoundData) -> bool {
+    n = c.byte_count
+    header = sizeof(CompoundData)
+    if c.tree.node_end < 2 || c.tree.node_capacity != c.tree.node_end || c.tree.proxy_count < 0 { return false }
+    if c.tree.proxy_capacity != c.tree.proxy_count || c.tree.pair_free_list != NULL_INDEX || c.tree.proxy_free_list != NULL_INDEX { return false }
+    if c.capsule_count < 0 || c.hull_count < 0 || c.mesh_count < 0 || c.sphere_count < 0 { return false }
+    if c.capsule_count + c.hull_count + c.mesh_count + c.sphere_count > MAX_CHILD_SHAPES { return false }
+    if c.material_count < 1 || c.material_map_count < 0 { return false }
+    if c.node_offset < header || basics.section_fits(c.node_offset, c.tree.node_end, sizeof(DynamicTreeNode), n) == false { return false }
+    if c.proxy_offset < header || basics.section_fits(c.proxy_offset, c.tree.proxy_count, sizeof(TreeProxy), n) == false { return false }
+    if c.material_offset < header || basics.section_fits(c.material_offset, c.material_count, sizeof(SurfaceMaterial), n) == false { return false }
+    if c.material_map_offset < header || basics.section_fits(c.material_map_offset, c.material_map_count, 4, n) == false { return false }
+    if c.capsule_offset < header || basics.section_fits(c.capsule_offset, c.capsule_count, sizeof(CompoundCapsule), n) == false { return false }
+    if c.hull_offset < header || basics.section_fits(c.hull_offset, c.hull_count, sizeof(HullInstance), n) == false { return false }
+    if c.mesh_offset < header || basics.section_fits(c.mesh_offset, c.mesh_count, sizeof(MeshInstance), n) == false { return false }
+    if c.sphere_offset < header || basics.section_fits(c.sphere_offset, c.sphere_count, sizeof(CompoundSphere), n) == false { return false }
+    block = c as ptr
+    map = (block + c.material_map_offset) as int[]
+    i = 0
+    while i < c.material_map_count {
+        if map[i] < 0 || map[i] >= c.material_count { return false }
+        i = i + 1
+    }
+    capsules = (block + c.capsule_offset) as CompoundCapsule[]
+    i = 0
+    while i < c.capsule_count {
+        if capsules[i].material_index < 0 || capsules[i].material_index >= c.material_count { return false }
+        i = i + 1
+    }
+    hulls = (block + c.hull_offset) as HullInstance[]
+    i = 0
+    while i < c.hull_count {
+        offset = hulls[i].hull_offset
+        if hulls[i].material_index < 0 || hulls[i].material_index >= c.material_count { return false }
+        if offset < header || offset > n - sizeof(HullData) { return false }
+        if hull.hull_bytes_valid((block + offset) as *HullData, n - offset) == false { return false }
+        i = i + 1
+    }
+    meshes = (block + c.mesh_offset) as MeshInstance[]
+    i = 0
+    while i < c.mesh_count {
+        offset = meshes[i].mesh_offset
+        if meshes[i].material_count < 1 || meshes[i].material_start < 0 { return false }
+        if meshes[i].material_count > c.material_map_count - meshes[i].material_start { return false }
+        if offset < header || offset > n - sizeof(MeshData) { return false }
+        if mesh.mesh_bytes_valid((block + offset) as *MeshData, n - offset) == false { return false }
+        i = i + 1
+    }
+    spheres = (block + c.sphere_offset) as CompoundSphere[]
+    i = 0
+    while i < c.sphere_count {
+        if spheres[i].material_index < 0 || spheres[i].material_index >= c.material_count { return false }
+        i = i + 1
+    }
+    return true
+}
 
 // --- queries ---------------------------------------------------------------------------------------
 

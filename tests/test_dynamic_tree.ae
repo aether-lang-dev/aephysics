@@ -2,18 +2,25 @@
 // test_dynamic_tree.c: a leaf at the root, the query against a linear
 // scan, the category filter, moving and enlarging through refit and
 // rebuild, destroying in a scrambled order, the ray and box casts against
-// the slab test, and the closest query against the scan. The debug save
-// and load are not ported, so that subtest is not either. Every
-// allocation is freed by the end.
+// the slab test, the closest query against the scan, and the save and
+// load (TreeSaveLoadRoundtrip, #148) with every refusal a corrupt file
+// meets. Every allocation is freed by the end.
 
 import std.string
+import std.fs
 import aephysics.math
 import aephysics.basics
 import aephysics.dynamic_tree
+import aephysics.hull
+import aephysics.material
+import aephysics.compound
+import aephysics.files
 
 extern calloc(count: int, size: int) -> ptr
 extern exit(code: int)
 extern free(p: ptr)
+extern memcmp(a: ptr, b: ptr, size: int) -> int
+extern memcpy(dst: ptr, src: ptr, size: int) -> ptr
 
 var failures = 0
 var checks = 0
@@ -619,8 +626,200 @@ test_ray_cast_aabb() {
         math.slab_overlap(empty.lower, empty.upper, from_left, math.ray_inverse(math.vec3(0.0 - 1.0, 0.0 - 1.0, 0.0 - 1.0)), 1.0) == false)
 }
 
-main() {
+// The reference's TreeSaveLoadRoundtrip: a tree of 300 with every 37th
+// proxy destroyed (the pair free list populated, the node tail stale),
+// rebuilt, saved to a file and loaded: the same nodes and parents byte for
+// byte, the node capacity the nodes in use, the same count, valid. A
+// compound's baked tree, which has no parents, writes no file. Past the
+// reference: the loaded tree answers 200 queries as the scan does, a
+// scale of two doubles every box and keeps the empty nodes empty, and
+// every corruption of the bytes is refused with a tree of null nodes.
+test_save_load() {
+    seed = 4242
+    tree = dynamic_tree.tree_create(16)
+    boxes_block = calloc(PROXY_COUNT, sizeof(AABB))
+    boxes = boxes_block as AABB[]
+    proxies_block = calloc(PROXY_COUNT, 4)
+    proxies = proxies_block as int[]
+    i = 0
+    while i < PROXY_COUNT {
+        boxes[i] = random_box(6.0, 1.0)
+        proxies[i] = dynamic_tree.tree_create_proxy(&tree, boxes[i], dynamic_tree.default_category_bits(), i as long)
+        i = i + 1
+    }
+    i = 0
+    while i < PROXY_COUNT {
+        dynamic_tree.tree_destroy_proxy(&tree, proxies[i])
+        i = i + 37
+    }
+    dynamic_tree.tree_rebuild(&tree, true)
+    ensure("save: the tree is valid before", dynamic_tree.tree_validate(&tree))
+
+    path = "test_dynamic_tree_roundtrip.dat"
+    ensure("save: the file is written", files.tree_save(&tree, path))
+    loaded = files.tree_load(path, 1.0)
+    fs.delete(path)
+    ensure("save: loaded", loaded.nodes != null)
+    if loaded.nodes == null {
+        dynamic_tree.tree_destroy(&tree)
+        free(boxes_block)
+        free(proxies_block)
+        return
+    }
+    ensure("save: the node end", loaded.node_end == tree.node_end)
+    ensure("save: the node capacity is the nodes in use", loaded.node_capacity == tree.node_end)
+    ensure("save: the proxy count", dynamic_tree.tree_get_proxy_count(&loaded) == dynamic_tree.tree_get_proxy_count(&tree))
+    ensure("save: the nodes byte for byte", memcmp(loaded.nodes, tree.nodes, tree.node_end * sizeof(DynamicTreeNode)) == 0)
+    ensure("save: the parents byte for byte", memcmp(loaded.parents, tree.parents, tree.node_end * 4) == 0)
+    ensure("save: valid", dynamic_tree.tree_validate(&loaded))
+
+    // The loaded tree queries as the scan does over the boxes still in it.
+    i = 0
+    while i < PROXY_COUNT {
+        if i % 37 == 0 { boxes[i] = math.aabb(math.vec3(1000.0, 1000.0, 1000.0), math.vec3(1000.5, 1000.5, 1000.5)) }
+        i = i + 1
+    }
+    round = 0
+    while round < 200 {
+        query = random_box(7.0, 3.0)
+        tree_hits = hitset_create()
+        dynamic_tree.tree_query(&loaded, query, dynamic_tree.default_mask_bits(), false, collect, (&tree_hits) as ptr)
+        scan_hits = hitset_create()
+        scan(boxes, query, &scan_hits)
+        same_set("save: the loaded tree's query", &tree_hits, &scan_hits)
+        hitset_destroy(&tree_hits)
+        hitset_destroy(&scan_hits)
+        round = round + 1
+    }
+    dynamic_tree.tree_destroy(&loaded)
+
+    // The bytes themselves: a scale of two, then each corruption.
+    block, byte_count = dynamic_tree.tree_save_bytes(&tree)
+    doubled = dynamic_tree.tree_load_bytes(block, byte_count, 2.0)
+    scaled = doubled.nodes != null
+    if scaled {
+        original = tree.nodes as DynamicTreeNode[]
+        twice = doubled.nodes as DynamicTreeNode[]
+        i = 0
+        while i < tree.node_end {
+            if dynamic_tree.is_empty_node(original[i].flag_index) {
+                if dynamic_tree.is_empty_node(twice[i].flag_index) == false || twice[i].aabb.lower.x != original[i].aabb.lower.x { scaled = false }
+            } else if twice[i].aabb.lower.x != 2.0 * original[i].aabb.lower.x || twice[i].aabb.upper.z != 2.0 * original[i].aabb.upper.z {
+                scaled = false
+            }
+            i = i + 1
+        }
+        ensure("save: the doubled tree is valid", dynamic_tree.tree_validate(&doubled))
+        dynamic_tree.tree_destroy(&doubled)
+    }
+    ensure("save: a scale of two doubles every box and leaves the empty nodes empty", scaled)
+    ensure("save: a scale of zero is refused", refused(block, byte_count, 0.0))
+    ensure("save: a negative scale is refused", refused(block, byte_count, 0.0 - 1.0))
+    ensure("save: a scale that is not a number is refused", refused(block, byte_count, g_zero / g_zero))
+    ensure("save: an infinite scale is refused", refused(block, byte_count, math.infinity()))
+    ensure("save: a byte short is refused", refused(block, byte_count - 1, 1.0))
+    ensure("save: a byte over is refused", refused_longer(block, byte_count))
+    ensure("save: no bytes are refused", refused(null, 0, 1.0) && refused(block, 8, 1.0))
+    ensure("save: another layout's tag is refused", corrupted(block, byte_count, 0))
+    ensure("save: another node size is refused", corrupted(block, byte_count, 1))
+    ensure("save: an odd node end is refused", corrupted(block, byte_count, 2))
+    ensure("save: a node end past the capacity is refused", corrupted(block, byte_count, 3))
+    ensure("save: more proxies than the capacity is refused", corrupted(block, byte_count, 4))
+    ensure("save: a child pair out of range is refused", corrupted(block, byte_count, 5))
+    ensure("save: a leaf's proxy out of range is refused", corrupted(block, byte_count, 6))
+    ensure("save: a broken proxy free list is refused", corrupted(block, byte_count, 7))
+    ensure("save: a box that no longer holds its child is refused", corrupted(block, byte_count, 8))
+    ensure("save: a node capacity too large for the bytes is refused", corrupted(block, byte_count, 9))
+    ensure("save: the untouched bytes still load after all that", refused(block, byte_count, 1.0) == false)
+    basics.free_bytes(block, byte_count)
+    dynamic_tree.tree_destroy(&tree)
+
+    // A compound's baked tree has no parents: nothing is written, and a
+    // missing file loads as a tree of null nodes.
+    box = hull.make_box_hull(0.5, 0.5, 0.5)
+    hulls_block = calloc(2, sizeof(CompoundHullDef))
+    defs = hulls_block as CompoundHullDef[]
+    defs[0] = compound.compound_hull_def(box, Transform { p: math.vec3(0.0 - 1.0, 0.0, 0.0), q: math.quat_identity() }, material.default_surface_material())
+    defs[1] = compound.compound_hull_def(box, Transform { p: math.vec3(1.0, 0.0, 0.0), q: math.quat_identity() }, material.default_surface_material())
+    cdef = compound.compound_def()
+    cdef.hulls = hulls_block
+    cdef.hull_count = 2
+    c = compound.create_compound(&cdef)
+    ensure("save: the compound is made", c != null)
+    if c != null {
+        ensure("save: the compound's tree has no parents", c.tree.parents == null)
+        ensure("save: the compound's tree is dense", c.tree.proxy_capacity == c.tree.proxy_count)
+        compound_path = "test_dynamic_tree_compound.dat"
+        fs.delete(compound_path)
+        ensure("save: a compound's tree writes no file", files.tree_save(&c.tree, compound_path) == false)
+        missing = files.tree_load(compound_path, 1.0)
+        ensure("save: a missing file loads no tree", missing.nodes == null)
+        compound.destroy_compound(c)
+    }
+    free(hulls_block)
+    hull.destroy_hull(box)
+    free(boxes_block)
+    free(proxies_block)
+}
+
+var g_zero = 0.0
+
+// The bytes refused: a tree of null nodes, and nothing left allocated.
+refused(block: ptr, byte_count: int, scale: float) -> bool {
     before = basics.alloc_count()
+    t = dynamic_tree.tree_load_bytes(block, byte_count, scale)
+    if t.nodes == null { return basics.alloc_count() == before }
+    dynamic_tree.tree_destroy(&t)
+    return false
+}
+
+// The bytes with one byte more after them, refused.
+refused_longer(block: ptr, byte_count: int) -> bool {
+    longer = basics.alloc(byte_count + 1)
+    memcpy(longer, block, byte_count)
+    result = refused(longer, byte_count + 1, 1.0)
+    basics.free_bytes(longer, byte_count + 1)
+    return result
+}
+
+// A copy of the bytes with one thing broken, refused.
+corrupted(block: ptr, byte_count: int, what: int) -> bool {
+    copy = basics.alloc(byte_count)
+    memcpy(copy, block, byte_count)
+    h = copy as *TreeSaveHeader
+    nodes = (copy + sizeof(TreeSaveHeader)) as DynamicTreeNode[]
+    root = nodes[dynamic_tree.ROOT_NODE]
+    if what == 0 { h.version = h.version ^ (1 as long) }
+    else if what == 1 { h.node_size = h.node_size + 8 }
+    else if what == 2 { h.node_end = h.node_end - 1 }
+    else if what == 3 { h.node_end = h.node_capacity + 2 }
+    else if what == 4 { h.proxy_count = h.proxy_capacity + 1 }
+    else if what == 5 { nodes[dynamic_tree.ROOT_NODE].flag_index = (root.flag_index & (0 - 1 - dynamic_tree.NODE_INDEX_MASK)) | (h.node_end + 2) }
+    else if what == 6 {
+        // The first leaf found points past the proxies.
+        i = 0
+        while i < h.node_end {
+            if dynamic_tree.is_leaf(nodes[i].flag_index) && dynamic_tree.is_empty_node(nodes[i].flag_index) == false {
+                nodes[i].flag_index = dynamic_tree.LEAF_NODE | h.proxy_capacity
+                break
+            }
+            i = i + 1
+        }
+    }
+    else if what == 7 { h.proxy_free_list = h.proxy_capacity + 3 }
+    else if what == 8 { nodes[dynamic_tree.ROOT_NODE].aabb.upper.x = nodes[dynamic_tree.ROOT_NODE].aabb.lower.x }
+    else if what == 9 { h.node_capacity = 1000000000 }
+    result = refused(copy, byte_count, 1.0)
+    basics.free_bytes(copy, byte_count)
+    return result
+}
+
+main() {
+    // The compound module's query stacks live as long as the program; the
+    // save test makes a compound, so they are taken before the count.
+    compound.reserve_scratch()
+    before = basics.alloc_count()
+    bytes_before = basics.bytes_in_use()
     test_leaf_root()
     test_query_brute_force()
     test_category_filter()
@@ -629,7 +828,8 @@ main() {
     test_cast_brute_force()
     test_query_closest()
     test_ray_cast_aabb()
-    ensure("every counted allocation was freed", basics.alloc_count() == before && basics.bytes_in_use() == 0)
+    test_save_load()
+    ensure("every counted allocation was freed (${basics.alloc_count() - before} left, ${basics.bytes_in_use() - bytes_before} bytes)", basics.alloc_count() == before && basics.bytes_in_use() == bytes_before)
 
     println("dynamic_tree: ${checks} checks")
     if failures == 0 {

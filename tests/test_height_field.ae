@@ -5,9 +5,11 @@
 // the shape cast and the ray cast against a brute force over every
 // triangle of a wave, and the back side culled for both windings; and
 // beyond it the edge flags of a wave and of holes, the box query, the
-// mover's planes, and a scaled field. The file roundtrip is not ported.
+// mover's planes, a scaled field, and the file roundtrip (FileRoundtrip,
+// #148) with a file in the reference's own text and every refusal.
 
 import std.string
+import std.fs
 import aephysics.math
 import aephysics.basics
 import aephysics.distance
@@ -15,10 +17,12 @@ import aephysics.manifold
 import aephysics.triangle_manifold
 import aephysics.mesh
 import aephysics.height_field
+import aephysics.files
 
 extern calloc(count: int, size: int) -> ptr
 extern exit(code: int)
 extern free(p: ptr)
+extern memcmp(a: ptr, b: ptr, size: int) -> int
 extern sqrt(x: float) -> float
 
 var failures = 0
@@ -613,6 +617,129 @@ test_query_and_mover() {
     free(planes_block)
 }
 
+// The reference's FileRoundtrip: a 3 by 3 field with a hole, scaled and
+// wound clockwise, dumped and loaded: the counts, the winding, the scale
+// and the range, each cell's material, and each height within two quanta.
+// Past it: the text keeps every digit, so the loaded field is the one
+// made from the definition byte for byte; the reference's own text
+// ("%.9f", CRLF as Windows writes it) loads; and every bad file is
+// refused with nothing left allocated.
+test_file_roundtrip() {
+    heights_block = calloc(9, 8)
+    heights = heights_block as float[]
+    heights[1] = 0.5
+    heights[2] = 0.0 - 0.3
+    heights[3] = 0.1
+    heights[7] = 0.2
+    materials_block = calloc(4, 4)
+    materials = materials_block as int[]
+    materials[0] = 0
+    materials[1] = height_field.HEIGHT_FIELD_HOLE
+    materials[2] = 1
+    materials[3] = 2
+    def = height_field.height_field_def()
+    def.heights = heights_block
+    def.material_indices = materials_block
+    def.scale = math.vec3(1.5, 2.0, 0.75)
+    def.count_x = 3
+    def.count_z = 3
+    def.global_minimum_height = 0.0 - 1.0
+    def.global_maximum_height = 1.0
+    def.clockwise_winding = true
+
+    path = "test_height_field_roundtrip.dat"
+    ensure("file: dumped", files.dump_height_data(&def, path))
+    loaded = files.load_height_field(path)
+    fs.delete(path)
+    ensure("file: loaded", loaded != null)
+    if loaded != null {
+        ensure("file: the rows", loaded.row_count == def.count_z)
+        ensure("file: the columns", loaded.column_count == def.count_x)
+        ensure("file: the winding", loaded.clockwise == def.clockwise_winding)
+        small("file: scale x", loaded.scale.x - def.scale.x, 0.0000002)
+        small("file: scale y", loaded.scale.y - def.scale.y, 0.0000002)
+        small("file: scale z", loaded.scale.z - def.scale.z, 0.0000002)
+        small("file: the lowest height", loaded.min_height - def.global_minimum_height, 0.0000002)
+        small("file: the highest height", loaded.max_height - def.global_maximum_height, 0.0000002)
+        cells = height_field.height_field_material_indices(loaded)
+        i = 0
+        while i < 4 {
+            ensure("file: cell ${i}'s material", (cells[i] as int) == materials[i])
+            i = i + 1
+        }
+        quantum = (def.global_maximum_height - def.global_minimum_height) / 65535.0
+        quanta = height_field.height_field_quanta(loaded)
+        i = 0
+        while i < 9 {
+            q = (quanta[2 * i] as int) | ((quanta[2 * i + 1] as int) << 8)
+            recovered = loaded.min_height + loaded.height_scale * (q as float)
+            ensure("file: height ${i} within two quanta (${recovered} against ${heights[i]})", math.abs_float(recovered - heights[i]) < 2.0 * quantum)
+            i = i + 1
+        }
+        direct = height_field.create_height_field(&def)
+        ensure("file: the loaded field is the definition's, byte for byte",
+               direct != null && direct.byte_count == loaded.byte_count && memcmp(direct as ptr, loaded as ptr, loaded.byte_count) == 0)
+        if direct != null { height_field.destroy_height_field(direct) }
+        height_field.destroy_height_field(loaded)
+    }
+
+    // The reference's own text for the same field: "%.9f" of each single,
+    // the lines ended as Windows text mode ends them.
+    reference_text = "3 3\r\n1.500000000 2.000000000 0.750000000\r\n-1.000000000 1.000000000\r\n1\r\n0.000000000\r\n0.500000000\r\n-0.300000012\r\n0.100000001\r\n0.000000000\r\n0.000000000\r\n0.000000000\r\n0.200000003\r\n0.000000000\r\n0\r\n255\r\n1\r\n2\r\n"
+    theirs = text_field(reference_text)
+    ensure("file: the reference's text loads", theirs != null)
+    if theirs != null {
+        ensure("file: its counts and winding", theirs.row_count == 3 && theirs.column_count == 3 && theirs.clockwise)
+        cells = height_field.height_field_material_indices(theirs)
+        ensure("file: its materials", (cells[0] as int) == 0 && (cells[1] as int) == 255 && (cells[2] as int) == 1 && (cells[3] as int) == 2)
+        quanta = height_field.height_field_quanta(theirs)
+        quantum = 2.0 / 65535.0
+        close = true
+        i = 0
+        while i < 9 {
+            q = (quanta[2 * i] as int) | ((quanta[2 * i + 1] as int) << 8)
+            if math.abs_float(theirs.min_height + theirs.height_scale * (q as float) - heights[i]) >= 2.0 * quantum { close = false }
+            i = i + 1
+        }
+        ensure("file: its heights within two quanta", close)
+        height_field.destroy_height_field(theirs)
+    }
+
+    // Bad files, each refused with nothing left allocated.
+    before = basics.alloc_count()
+    ensure("file: a missing file", files.load_height_field("test_height_field_missing.dat") == null)
+    ensure("file: an empty file", text_field("") == null)
+    ensure("file: a height short", text_field("2 2\n1 1 1\n-1 1\n0\n0\n0\n0\n") == null)
+    ensure("file: a material short", text_field("2 2\n1 1 1\n-1 1\n0\n0\n0\n0\n0\n") == null)
+    ensure("file: a material past a byte", text_field("2 2\n1 1 1\n-1 1\n0\n0\n0\n0\n0\n256\n") == null)
+    ensure("file: a negative material", text_field("2 2\n1 1 1\n-1 1\n0\n0\n0\n0\n0\n-1\n") == null)
+    ensure("file: a single grid line", text_field("1 2\n1 1 1\n-1 1\n0\n0\n0\n") == null)
+    ensure("file: counts larger than the file could hold", text_field("100000 100000\n1 1 1\n-1 1\n0\n0\n0\n0\n0\n0\n") == null)
+    ensure("file: counts whose product overflows", text_field("2147483647 2147483647\n1 1 1\n-1 1\n0\n") == null)
+    ensure("file: a word for a number", text_field("2 2\n1 1 1\n-1 1\n0\nzero\n0\n0\n0\n0\n") == null)
+    ensure("file: a winding of two", text_field("2 2\n1 1 1\n-1 1\n2\n0\n0\n0\n0\n0\n") == null)
+    ensure("file: a range upside down", text_field("2 2\n1 1 1\n1 -1\n0\n0\n0\n0\n0\n0\n") == null)
+    ensure("file: a scale of zero", text_field("2 2\n0 1 1\n-1 1\n0\n0\n0\n0\n0\n0\n") == null)
+    ensure("file: a height that is not a number", text_field("2 2\n1 1 1\n-1 1\n0\nnan\n0\n0\n0\n0\n") == null)
+    ensure("file: nothing left allocated by the refusals (${basics.alloc_count() - before})", basics.alloc_count() == before)
+    good = text_field("2 2\n1 1 1\n-1 1\n0\n0\n0.5\n0\n0\n7\n")
+    ensure("file: the smallest good file loads", good != null && good.row_count == 2 && good.column_count == 2)
+    if good != null { height_field.destroy_height_field(good) }
+    empty = height_field.height_field_def()
+    ensure("file: a definition without heights is not dumped", files.dump_height_data(&empty, path) == false)
+    free(heights_block)
+    free(materials_block)
+}
+
+// The field in a file holding `text`.
+text_field(text: string) -> *HeightFieldData {
+    path = "test_height_field_text.dat"
+    fs.write(path, text)
+    h = files.load_height_field(path)
+    fs.delete(path)
+    return h
+}
+
 main() {
     before = basics.alloc_count()
     test_create()
@@ -622,6 +749,7 @@ main() {
     test_brute_force()
     test_backside()
     test_query_and_mover()
+    test_file_roundtrip()
     // The module's scratch stays allocated: three blocks.
     ensure("every other counted allocation was freed (${basics.alloc_count() - before})", basics.alloc_count() == before + 3)
 

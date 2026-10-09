@@ -1,0 +1,217 @@
+// What the reference keeps on disk (#148): a dynamic tree saved and
+// loaded (b3DynamicTree_Save and b3DynamicTree_Load), and a height
+// field's definition as text (b3DumpHeightData and b3LoadHeightField), in
+// the reference's own text layout, so its files load here and these load
+// there. Apart from the modules whose data it writes, so a program that
+// keeps nothing on disk does not build std.fs.
+
+import std.string
+import std.fs
+import std.strbuilder
+import aephysics.math
+import aephysics.basics
+import aephysics.dynamic_tree
+import aephysics.height_field
+
+exports (
+    tree_save, tree_load, dump_height_data, load_height_field
+)
+
+extern memcpy(dst: ptr, src: ptr, size: int) -> ptr
+
+// The tree to `path` (tree_save_bytes's layout); false when nothing was
+// written: a tree without parents (a compound's baked tree) is not saved,
+// as the reference writes no file for it, or the file could not be made.
+tree_save(t: *DynamicTree, path: string) -> bool {
+    block, byte_count = dynamic_tree.tree_save_bytes(t)
+    if block == null { return false }
+    err = fs.write_binary(path, (block as byte[])[0..byte_count])
+    basics.free_bytes(block, byte_count)
+    return string.length(err) == 0
+}
+
+// The tree saved at `path`, its boxes scaled by `scale`; a tree of null
+// nodes when there is no such file or it does not hold one.
+tree_load(path: string, scale: float) -> DynamicTree {
+    block, byte_count = read_aligned(path)
+    t = dynamic_tree.tree_load_bytes(block, byte_count, scale)
+    if block != null { basics.free_bytes(block, byte_count) }
+    return t
+}
+
+// A file's bytes in a block of our own (aligned for the structs read
+// from it), and their count; null and 0 when it cannot be read.
+read_aligned(path: string) -> (ptr, int) {
+    data, length, err = fs.read_binary(path)
+    if string.length(err) > 0 { return null, 0 }
+    if length <= 0 {
+        string.free(data)
+        return null, 0
+    }
+    block = basics.alloc(length)
+    memcpy(block, string.aether_string_raw_ptr(data), length)
+    string.free(data)
+    return block, length
+}
+
+// --- a height field's definition as text ---------------------------------------------------------
+
+// The definition to `path` as the reference writes it: the counts, the
+// scale, the quantisation range and the winding on their lines, then a
+// height a line and a cell's material a line. A height is written with
+// every digit it needs to read back the same, where the reference's
+// "%.9f" rounds; its reader takes both. False when the definition has no
+// field to make or the file could not be written. A definition without
+// material indices writes material 0 for every cell.
+dump_height_data(def: *HeightFieldDef, path: string) -> bool {
+    if def == null || def.heights == null || def.count_x < 2 || def.count_z < 2 { return false }
+    height_count = def.count_x * def.count_z
+    cell_count = (def.count_x - 1) * (def.count_z - 1)
+    sb = strbuilder.new(64 + 24 * height_count + 4 * cell_count)
+    strbuilder.append(sb, "${def.count_x} ${def.count_z}\n")
+    append_float(sb, def.scale.x, " ")
+    append_float(sb, def.scale.y, " ")
+    append_float(sb, def.scale.z, "\n")
+    append_float(sb, def.global_minimum_height, " ")
+    append_float(sb, def.global_maximum_height, "\n")
+    clockwise = 0
+    if def.clockwise_winding { clockwise = 1 }
+    strbuilder.append(sb, "${clockwise}\n")
+    heights = def.heights as float[]
+    i = 0
+    while i < height_count {
+        append_float(sb, heights[i], "\n")
+        i = i + 1
+    }
+    materials = def.material_indices as int[]
+    i = 0
+    while i < cell_count {
+        material = 0
+        if def.material_indices != null { material = materials[i] }
+        strbuilder.append(sb, "${material}\n")
+        i = i + 1
+    }
+    text = strbuilder.finish(sb)
+    err = fs.write(path, text)
+    string.free(text)
+    return string.length(err) == 0
+}
+
+append_float(sb: ptr, value: float, separator: string) {
+    text = string.from_double(value)
+    strbuilder.append(sb, text)
+    string.free(text)
+    strbuilder.append(sb, separator)
+}
+
+// The text's next token from `start`: its first byte and the byte after
+// it, or -1 for both when only whitespace is left.
+struct Token {
+    start: int
+    end: int
+}
+
+next_token(text: string, length: int, start: int) -> Token {
+    i = start
+    while i < length && is_space(string.char_at_n(text, length, i)) { i = i + 1 }
+    if i >= length { return Token { start: 0 - 1, end: 0 - 1 } }
+    j = i
+    while j < length && is_space(string.char_at_n(text, length, j)) == false { j = j + 1 }
+    return Token { start: i, end: j }
+}
+
+is_space(c: int) -> bool { return c == 32 || c == 10 || c == 13 || c == 9 || c == 11 || c == 12 }
+
+// The reader's place in the text and whether every token so far parsed.
+struct Reader {
+    text: string
+    length: int
+    at: int
+    ok: bool
+}
+
+read_int(r: *Reader) -> int {
+    if r.ok == false { return 0 }
+    t = next_token(r.text, r.length, r.at)
+    if t.start < 0 {
+        r.ok = false
+        return 0
+    }
+    r.at = t.end
+    word = string.substring(r.text, t.start, t.end)
+    value, err = string.to_int(word)
+    string.free(word)
+    if string.length(err) > 0 { r.ok = false }
+    return value
+}
+
+read_float(r: *Reader) -> float {
+    if r.ok == false { return 0.0 }
+    t = next_token(r.text, r.length, r.at)
+    if t.start < 0 {
+        r.ok = false
+        return 0.0
+    }
+    r.at = t.end
+    word = string.substring(r.text, t.start, t.end)
+    value, err = string.to_double(word)
+    string.free(word)
+    if string.length(err) > 0 { r.ok = false }
+    return value
+}
+
+// The field defined in the text at `path`, made by create_height_field;
+// null when there is no such file, a number is missing or not one, the
+// counts are too small or more than the file could hold, a material is
+// outside a byte (HEIGHT_FIELD_HOLE the largest), or create_height_field
+// refuses the definition.
+load_height_field(path: string) -> *HeightFieldData {
+    text, length, err = fs.read_binary(path)
+    if string.length(err) > 0 { return null }
+    // The reader takes the text over and frees it when it goes (aether#2602:
+    // a free through the local now would free it twice).
+    r = Reader { text: text, length: length, at: 0, ok: true }
+    def = height_field.height_field_def()
+    def.count_x = read_int(&r)
+    def.count_z = read_int(&r)
+    def.scale.x = read_float(&r)
+    def.scale.y = read_float(&r)
+    def.scale.z = read_float(&r)
+    def.global_minimum_height = read_float(&r)
+    def.global_maximum_height = read_float(&r)
+    clockwise = read_int(&r)
+    // Each number takes two bytes at the least, a digit and its newline, so
+    // larger counts cannot be in the file (and their product never overflows).
+    if r.ok == false || def.count_x < 2 || def.count_z < 2 || def.count_x > length / 2 || def.count_z > (length / 2) / def.count_x || (clockwise != 0 && clockwise != 1) {
+        return null
+    }
+    def.clockwise_winding = clockwise == 1
+    height_count = def.count_x * def.count_z
+    cell_count = (def.count_x - 1) * (def.count_z - 1)
+    heights_block = basics.alloc(height_count * 8)
+    materials_block = basics.alloc(cell_count * 4)
+    heights = heights_block as float[]
+    materials = materials_block as int[]
+    i = 0
+    while i < height_count && r.ok {
+        heights[i] = read_float(&r)
+        i = i + 1
+    }
+    i = 0
+    while i < cell_count && r.ok {
+        materials[i] = read_int(&r)
+        if materials[i] < 0 || materials[i] > 255 { r.ok = false }
+        i = i + 1
+    }
+    if r.ok == false {
+        basics.free_bytes(heights_block, height_count * 8)
+        basics.free_bytes(materials_block, cell_count * 4)
+        return null
+    }
+    def.heights = heights_block
+    def.material_indices = materials_block
+    result = height_field.create_height_field(&def)
+    basics.free_bytes(heights_block, height_count * 8)
+    basics.free_bytes(materials_block, cell_count * 4)
+    return result
+}
