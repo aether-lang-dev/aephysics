@@ -48,7 +48,7 @@ extern memcpy(dst: ptr, src: ptr, size: int) -> ptr
 extern memcmp(a: ptr, b: ptr, size: int) -> int
 
 const NULL_INDEX = 0 - 1
-const COMPOUND_VERSION = 0x5C0E7B9B  // a mesh child's materials became a table (Box3D #172)
+const COMPOUND_VERSION = 0x5C0E7B9C  // the baked tree's nodes in single precision (#151); before, a mesh child's materials became a table (Box3D #172)
 // Kept for the API; a mesh child is no longer limited to it.
 const MAX_COMPOUND_MESH_MATERIALS = 4
 // The child index shares a 64-bit key with two shape ids in the reference's tables.

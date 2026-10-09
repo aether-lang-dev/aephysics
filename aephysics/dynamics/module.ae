@@ -1240,7 +1240,7 @@ struct World {
     islands: Buffer                // Island
     shape_id_pool: IdPool
     shapes: Buffer                 // WorldShape
-    fat_aabbs: Buffer              // AABB by shape id: the fat boxes, dense for the collide pass (the reference's fatAABBs)
+    fat_aabbs: Buffer              // AABBf by shape id: the fat boxes, dense for the collide pass (the reference's fatAABBs), in single precision rounded outward (#151)
     hull_entries: Buffer           // HullEntry: the hull database (the reference's hullDatabase)
     hull_heads: LongMap            // a hull's hash to the first entry of that hash
     hull_free: int                 // the first free entry, chained through next
@@ -1323,12 +1323,14 @@ world_at(index: int) -> *World { return (g_worlds + index * sizeof(World)) as *W
 
 body_at(w: *World, id: int) -> *Body { return (w.bodies.data + id * sizeof(Body)) as *Body }
 world_shape_at(w: *World, id: int) -> *WorldShape { return (w.shapes.data + id * sizeof(WorldShape)) as *WorldShape }
-shape_fat_aabb(w: *World, id: int) -> AABB {
-    boxes = w.fat_aabbs.data as AABB[]
+// A shape's fat box: the one its proxy holds, in single precision rounded
+// outward, so the collide pass's overlap test is the broad phase's own.
+shape_fat_aabb(w: *World, id: int) -> AABBf {
+    boxes = w.fat_aabbs.data as AABBf[]
     return boxes[id]
 }
-set_shape_fat_aabb(w: *World, id: int, box: AABB) {
-    boxes = w.fat_aabbs.data as AABB[]
+set_shape_fat_aabb(w: *World, id: int, box: AABBf) {
+    boxes = w.fat_aabbs.data as AABBf[]
     boxes[id] = box
 }
 island_at(w: *World, id: int) -> *Island { return (w.islands.data + id * sizeof(Island)) as *Island }
@@ -1450,7 +1452,7 @@ create_world(def: *WorldDef) -> WorldId {
     basics.buffer_reserve(&solver_set_at(w, awake_set).body_states, math.max_int(16, def.dynamic_body_count))
     w.shape_id_pool = basics.idpool_create()
     w.shapes = basics.buffer_create(sizeof(WorldShape), math.max_int(16, def.static_shape_count + def.dynamic_shape_count))
-    w.fat_aabbs = basics.buffer_create(sizeof(AABB), math.max_int(16, def.static_shape_count + def.dynamic_shape_count))
+    w.fat_aabbs = basics.buffer_create(sizeof(AABBf), math.max_int(16, def.static_shape_count + def.dynamic_shape_count))
     w.hull_entries = basics.buffer_create(sizeof(HullEntry), 0)
     w.hull_heads = basics.map_create(16)
     w.hull_free = NULL_INDEX
@@ -1984,7 +1986,7 @@ destroy_body(id: BodyId) {
         native.name_free(s.name)
         s.name = null
         basics.idpool_free(&w.shape_id_pool, shape_id)
-        set_shape_fat_aabb(w, shape_id, AABB { lower: math.vec3_zero(), upper: math.vec3_zero() })
+        set_shape_fat_aabb(w, shape_id, AABBf { lower: math.vec3f_zero(), upper: math.vec3f_zero() })
         s.id = NULL_INDEX
         shape_id = s.next_shape_id
     }
@@ -2042,7 +2044,7 @@ update_shape_aabbs(w: *World, s: *WorldShape, t: Transform, proxy_kind: int) {
     s.aabb = box
     margin = s.aabb_margin
     if proxy_kind == BODY_STATIC { margin = SPECULATIVE_DISTANCE }
-    set_shape_fat_aabb(w, s.id, AABB { lower: math.sub(box.lower, math.vec3(margin, margin, margin)), upper: math.add(box.upper, math.vec3(margin, margin, margin)) })
+    set_shape_fat_aabb(w, s.id, math.aabb_round_out(AABB { lower: math.sub(box.lower, math.vec3(margin, margin, margin)), upper: math.add(box.upper, math.vec3(margin, margin, margin)) }))
 }
 
 create_shape_proxy(w: *World, s: *WorldShape, kind: int, t: Transform, force_pair_creation: bool) {
@@ -2106,7 +2108,7 @@ create_shape(body_id: BodyId, def: *ShapeDef, geometry: Shape) -> ShapeId {
     s.local_centroid = shape.get_shape_centroid(&s.geometry)
     s.aabb_margin = compute_shape_margin(&s.geometry)
     s.aabb = AABB { lower: math.vec3_zero(), upper: math.vec3_zero() }
-    set_shape_fat_aabb(w, shape_id, s.aabb)
+    set_shape_fat_aabb(w, shape_id, math.aabb_round_out(s.aabb))
     s.generation = s.generation + 1
     s.sensor_index = NULL_INDEX
     s.name = native.name_copy(def.name)
@@ -2373,7 +2375,7 @@ destroy_shape(id: ShapeId, update_body_mass: bool) {
     native.name_free(s.name)
     s.name = null
     basics.idpool_free(&w.shape_id_pool, s.id)
-    set_shape_fat_aabb(w, s.id, AABB { lower: math.vec3_zero(), upper: math.vec3_zero() })
+    set_shape_fat_aabb(w, s.id, AABBf { lower: math.vec3f_zero(), upper: math.vec3f_zero() })
     s.id = NULL_INDEX
     if update_body_mass { update_body_mass_data(w, body) }
     w.locked = false
@@ -2870,7 +2872,7 @@ body_set_transform(id: BodyId, position: Vec3, rotation: Quat) {
         // frame is not taken out of the tree and put back each time.
         old_fat = shape_fat_aabb(w, s.id)
         update_shape_aabbs(w, s, sim.transform, body.kind)
-        if math.aabb_contains(old_fat, s.aabb) {
+        if math.aabbf_holds(old_fat, s.aabb) {
             set_shape_fat_aabb(w, s.id, old_fat)
         } else if s.proxy_key != NULL_INDEX {
             broad_phase.broad_phase_move_proxy(&w.broad_phase, s.proxy_key, shape_fat_aabb(w, s.id))
@@ -4857,7 +4859,7 @@ collide_contact(w: *World, contact_id: int) {
     c = contact_at(w, contact_id)
     shape_a = world_shape_at(w, c.shape_id_a)
     shape_b = world_shape_at(w, c.shape_id_b)
-    if math.aabb_overlaps(shape_fat_aabb(w, c.shape_id_a), shape_fat_aabb(w, c.shape_id_b)) == false {
+    if math.aabbf_overlaps(shape_fat_aabb(w, c.shape_id_a), shape_fat_aabb(w, c.shape_id_b)) == false {
         c.flags = (c.flags | SIM_DISJOINT) & (0 - 1 - SIM_TOUCHING)
         basics.bitset_set(&task_context(w).contact_state, contact_id)
         return

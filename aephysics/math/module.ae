@@ -25,6 +25,8 @@ import std.string
 exports (
     Vec2, Vec3, CosSin, Quat, Transform, Matrix2, Matrix3, AABB, Plane, SegmentDistanceResult,
     Vec3f, Quatf, Matrix3f, EPSILON_F32, TINY_F32,
+    AABBf, round_down_f32, round_up_f32, infinity_f32, aabb_round_out, aabb_widen, aabbf_empty,
+    aabbf_union, aabbf_overlaps, aabbf_contains, aabbf_holds, is_valid_aabbf,
     vec3f, quatf, matrix3f, vec3f_zero, vec3f_one, vec3f_axis_x, vec3f_axis_y, vec3f_axis_z,
     quatf_identity, mat3f_zero, mat3f_identity,
     narrow3, widen3, narrow_quat, widen_quat, narrow_mat3, widen_mat3,
@@ -71,6 +73,9 @@ extern sqrt(x: float) -> float
 // libm's single-precision square root: the one the f32 family uses, so a
 // length is computed at the width it is stored at.
 extern sqrtf(x: f32) -> f32
+// The next float toward a direction: exact IEEE, so the outward rounding
+// of a box is the same on every platform.
+extern nextafterf(x: f32, y: f32) -> f32
 extern remainder(x: float, y: float) -> float
 
 const PI = 3.14159265359
@@ -1246,6 +1251,77 @@ clamp_f32(a: f32, lower: f32, upper: f32) -> f32 {
     return a
 }
 sqrt_f32(a: f32) -> f32 { return sqrtf(a) }
+
+// --- boxes in single precision (#151) -------------------------------------------
+
+// A box in single precision: the dynamic tree's and the broad phase's, as
+// the reference keeps them. Built in double and narrowed outward, so it
+// always holds the double box: far from the origin a float is coarse (a
+// metre at 1e7) and the box only grows, never clips its shape.
+struct AABBf {
+    lower: Vec3f
+    upper: Vec3f
+}
+
+infinity_f32() -> f32 { return infinity() as f32 }
+
+// A coordinate narrowed toward negative infinity (b3RoundDownFloat): the
+// nearest float at or below it.
+round_down_f32(x: float) -> f32 {
+    f = x as f32
+    if (f as float) > x { return nextafterf(f, 0.0 - infinity_f32()) }
+    return f
+}
+
+// A coordinate narrowed toward positive infinity (b3RoundUpFloat).
+round_up_f32(x: float) -> f32 {
+    f = x as f32
+    if (f as float) < x { return nextafterf(f, infinity_f32()) }
+    return f
+}
+
+// The box narrowed outward (the rounding of b3OffsetAABB): it holds `a`.
+aabb_round_out(a: AABB) -> AABBf {
+    return AABBf { lower: Vec3f { x: round_down_f32(a.lower.x), y: round_down_f32(a.lower.y), z: round_down_f32(a.lower.z) },
+                   upper: Vec3f { x: round_up_f32(a.upper.x), y: round_up_f32(a.upper.y), z: round_up_f32(a.upper.z) } }
+}
+
+// The box in double: every float is a double, so this is exact.
+aabb_widen(a: AABBf) -> AABB { return AABB { lower: widen3(a.lower), upper: widen3(a.upper) } }
+
+// Inverted infinities: no box overlaps it (an empty tree node's bounds).
+aabbf_empty() -> AABBf {
+    inf = infinity_f32()
+    return AABBf { lower: Vec3f { x: inf, y: inf, z: inf }, upper: Vec3f { x: 0.0 - inf, y: 0.0 - inf, z: 0.0 - inf } }
+}
+
+// A union is a min and a max, exact at any precision.
+aabbf_union(a: AABBf, b: AABBf) -> AABBf { return AABBf { lower: min_vec3f(a.lower, b.lower), upper: max_vec3f(a.upper, b.upper) } }
+
+aabbf_overlaps(a: AABBf, b: AABBf) -> bool {
+    if a.upper.x < b.lower.x || a.lower.x > b.upper.x { return false }
+    if a.upper.y < b.lower.y || a.lower.y > b.upper.y { return false }
+    if a.upper.z < b.lower.z || a.lower.z > b.upper.z { return false }
+    return true
+}
+
+// Does a fully contain b?
+aabbf_contains(a: AABBf, b: AABBf) -> bool {
+    if a.lower.x > b.lower.x || b.upper.x > a.upper.x { return false }
+    if a.lower.y > b.lower.y || b.upper.y > a.upper.y { return false }
+    if a.lower.z > b.lower.z || b.upper.z > a.upper.z { return false }
+    return true
+}
+
+// Does the float box hold the double one? Compared widened, so exactly.
+aabbf_holds(a: AABBf, b: AABB) -> bool {
+    if (a.lower.x as float) > b.lower.x || b.upper.x > (a.upper.x as float) { return false }
+    if (a.lower.y as float) > b.lower.y || b.upper.y > (a.upper.y as float) { return false }
+    if (a.lower.z as float) > b.lower.z || b.upper.z > (a.upper.z as float) { return false }
+    return true
+}
+
+is_valid_aabbf(a: AABBf) -> bool { return is_valid_aabb(aabb_widen(a)) }
 
 // m * a, a as a column.
 mul_mvf(m: Matrix3f, a: Vec3f) -> Vec3f {

@@ -92,7 +92,7 @@ brute_force_count(scene: *Scene, bp: *BroadPhase) -> int {
             kind_j = broad_phase.proxy_type(keys[j])
             // Two static or two kinematic proxies never pair; nor static with kinematic.
             movable = kind_i == broad_phase.BODY_DYNAMIC || kind_j == broad_phase.BODY_DYNAMIC
-            if movable && math.aabb_overlaps(boxes[i], boxes[j]) && bodies[i] != bodies[j] {
+            if movable && math.aabbf_overlaps(math.aabb_round_out(boxes[i]), math.aabb_round_out(boxes[j])) && bodies[i] != bodies[j] {
                 odd = scene.filter_odd && ((i & 1) == 1 || (j & 1) == 1)
                 if odd == false && broad_phase.has_pair(bp, basics.shape_pair_key(i, j, 0)) == false { count = count + 1 }
             }
@@ -114,7 +114,7 @@ keys_are_overlaps(scene: *Scene, bp: *BroadPhase) -> bool {
         a = broad_phase.pair_key_shape_a(key)
         b = broad_phase.pair_key_shape_b(key)
         if a >= b { return false }
-        if math.aabb_overlaps(boxes[a], boxes[b]) == false { return false }
+        if math.aabbf_overlaps(math.aabb_round_out(boxes[a]), math.aabb_round_out(boxes[b])) == false { return false }
         if bodies[a] == bodies[b] { return false }
         if i > 0 && key <= broad_phase.pair_key(bp, i - 1) { return false }
         i = i + 1
@@ -186,15 +186,15 @@ test_grid() {
     while i < 36 {
         boxes[i] = box_at(math.vec3(1.5 * ((i % 6) as float), 1.0, 1.5 * ((i / 6) as float)), 0.5)
         bodies[i] = i
-        keys[i] = broad_phase.broad_phase_create_proxy(bp, broad_phase.BODY_DYNAMIC, boxes[i], all_bits(), i, false)
+        keys[i] = broad_phase.broad_phase_create_proxy(bp, broad_phase.BODY_DYNAMIC, math.aabb_round_out(boxes[i]), all_bits(), i, false)
         i = i + 1
     }
     boxes[36] = AABB { lower: math.vec3(0.0 - 2.0, 0.0 - 1.0, 0.0 - 2.0), upper: math.vec3(10.0, 0.6, 10.0) }
     bodies[36] = 36
-    keys[36] = broad_phase.broad_phase_create_proxy(bp, broad_phase.BODY_STATIC, boxes[36], all_bits(), 36, false)
+    keys[36] = broad_phase.broad_phase_create_proxy(bp, broad_phase.BODY_STATIC, math.aabb_round_out(boxes[36]), all_bits(), 36, false)
     boxes[37] = AABB { lower: math.vec3(0.0 - 2.0, 0.8, 0.0 - 0.6), upper: math.vec3(10.0, 1.2, 0.0 - 0.4) }
     bodies[37] = 37
-    keys[37] = broad_phase.broad_phase_create_proxy(bp, broad_phase.BODY_KINEMATIC, boxes[37], all_bits(), 37, false)
+    keys[37] = broad_phase.broad_phase_create_proxy(bp, broad_phase.BODY_KINEMATIC, math.aabb_round_out(boxes[37]), all_bits(), 37, false)
     ensure("proxy kinds", broad_phase.proxy_type(keys[0]) == broad_phase.BODY_DYNAMIC && broad_phase.proxy_type(keys[36]) == broad_phase.BODY_STATIC && broad_phase.proxy_type(keys[37]) == broad_phase.BODY_KINEMATIC)
     ensure("shape index round trip", broad_phase.broad_phase_get_shape_index(bp, keys[36]) == 36 && broad_phase.broad_phase_get_shape_index(bp, keys[17]) == 17)
     ensure("test overlap", broad_phase.broad_phase_test_overlap(bp, keys[0], keys[36]) && broad_phase.broad_phase_test_overlap(bp, keys[0], keys[1]) == false)
@@ -217,19 +217,19 @@ test_grid() {
     ensure("quiet update", n == 0)
     // A proxy moved onto its neighbour reports only the new pair, not the ones it has.
     boxes[8] = box_at(math.vec3(1.5 * 2.0 - 0.7, 1.0, 1.5), 0.5)
-    broad_phase.broad_phase_move_proxy(bp, keys[8], boxes[8])
+    broad_phase.broad_phase_move_proxy(bp, keys[8], math.aabb_round_out(boxes[8]))
     expected = brute_force_count(scene, bp)
     n = broad_phase.update_broad_phase_pairs(bp, visitors(scene), false)
     ensure("move finds the new pair (${n} of ${expected})", n == expected && n == 1)
     ensure("the new pair", broad_phase.pair_key_shape_a(broad_phase.pair_key(bp, 0)) == 7 && broad_phase.pair_key_shape_b(broad_phase.pair_key(bp, 0)) == 8)
     adopt_keys(bp)
     // Marking a proxy moved without moving it finds nothing new.
-    broad_phase.broad_phase_mark_proxy_moved(bp, keys[8], boxes[8])
+    broad_phase.broad_phase_mark_proxy_moved(bp, keys[8], math.aabb_round_out(boxes[8]))
     n = broad_phase.update_broad_phase_pairs(bp, visitors(scene), false)
     ensure("a mark alone finds nothing", n == 0)
     // A contact ends: its pair leaves the set, and the next move finds it again.
     broad_phase.remove_pair(bp, basics.shape_pair_key(7, 8, 0))
-    broad_phase.broad_phase_move_proxy(bp, keys[7], boxes[7])
+    broad_phase.broad_phase_move_proxy(bp, keys[7], math.aabb_round_out(boxes[7]))
     n = broad_phase.update_broad_phase_pairs(bp, visitors(scene), false)
     ensure("a removed pair is found again", n == 1 && broad_phase.pair_key_shape_a(broad_phase.pair_key(bp, 0)) == 7)
     adopt_keys(bp)
@@ -237,7 +237,7 @@ test_grid() {
     i = 12
     while i < 18 {
         boxes[i] = box_at(math.vec3(0.7 * ((i - 12) as float), 1.0, 0.0 - 0.3), 0.5)
-        broad_phase.broad_phase_move_proxy(bp, keys[i], boxes[i])
+        broad_phase.broad_phase_move_proxy(bp, keys[i], math.aabb_round_out(boxes[i]))
         i = i + 1
     }
     expected = brute_force_count(scene, bp)
@@ -248,11 +248,11 @@ test_grid() {
     // The filter: with the odd shapes refused, a move of an even one onto an odd finds nothing.
     scene.filter_odd = true
     boxes[20] = box_at(math.vec3(1.5 * 3.0 - 0.7, 1.0, 1.5 * 3.0), 0.5)
-    broad_phase.broad_phase_move_proxy(bp, keys[20], boxes[20])
+    broad_phase.broad_phase_move_proxy(bp, keys[20], math.aabb_round_out(boxes[20]))
     n = broad_phase.update_broad_phase_pairs(bp, visitors(scene), false)
     ensure("the filter refuses", n == 0)
     scene.filter_odd = false
-    broad_phase.broad_phase_move_proxy(bp, keys[20], boxes[20])
+    broad_phase.broad_phase_move_proxy(bp, keys[20], math.aabb_round_out(boxes[20]))
     n = broad_phase.update_broad_phase_pairs(bp, visitors(scene), false)
     ensure("the same move without the filter", n == 1 && broad_phase.pair_key_shape_a(broad_phase.pair_key(bp, 0)) == 20 && broad_phase.pair_key_shape_b(broad_phase.pair_key(bp, 0)) == 21)
     adopt_keys(bp)
@@ -260,7 +260,7 @@ test_grid() {
     bodies[21] = 22
     bodies[22] = 22
     boxes[21] = box_at(math.vec3(1.5 * 4.0 - 0.7, 1.0, 1.5 * 3.0), 0.5)
-    broad_phase.broad_phase_move_proxy(bp, keys[21], boxes[21])
+    broad_phase.broad_phase_move_proxy(bp, keys[21], math.aabb_round_out(boxes[21]))
     n = broad_phase.update_broad_phase_pairs(bp, visitors(scene), false)
     ensure("one body's shapes do not pair", n == 0)
     // A static proxy forced into pairs finds the dynamic boxes over it.
@@ -268,17 +268,17 @@ test_grid() {
     broad_phase.remove_pair(bp, basics.shape_pair_key(0, 36, 0))
     broad_phase.remove_pair(bp, basics.shape_pair_key(1, 36, 0))
     broad_phase.broad_phase_destroy_proxy(bp, keys[36])
-    keys[36] = broad_phase.broad_phase_create_proxy(bp, broad_phase.BODY_STATIC, boxes[36], all_bits(), 36, true)
+    keys[36] = broad_phase.broad_phase_create_proxy(bp, broad_phase.BODY_STATIC, math.aabb_round_out(boxes[36]), all_bits(), 36, true)
     n = broad_phase.update_broad_phase_pairs(bp, visitors(scene), false)
     ensure("a forced static proxy pairs (${n})", n == 2)
     adopt_keys(bp)
     // A static proxy created without the force finds nothing until a dynamic one moves onto it.
     broad_phase.remove_pair(bp, basics.shape_pair_key(0, 36, 0))
     broad_phase.broad_phase_destroy_proxy(bp, keys[36])
-    keys[36] = broad_phase.broad_phase_create_proxy(bp, broad_phase.BODY_STATIC, boxes[36], all_bits(), 36, false)
+    keys[36] = broad_phase.broad_phase_create_proxy(bp, broad_phase.BODY_STATIC, math.aabb_round_out(boxes[36]), all_bits(), 36, false)
     n = broad_phase.update_broad_phase_pairs(bp, visitors(scene), false)
     ensure("a quiet static proxy", n == 0)
-    broad_phase.broad_phase_move_proxy(bp, keys[0], boxes[0])
+    broad_phase.broad_phase_move_proxy(bp, keys[0], math.aabb_round_out(boxes[0]))
     n = broad_phase.update_broad_phase_pairs(bp, visitors(scene), false)
     ensure("then the mover finds it", n == 1 && broad_phase.pair_key_shape_b(broad_phase.pair_key(bp, 0)) == 36)
     adopt_keys(bp)
@@ -287,7 +287,7 @@ test_grid() {
     keys[7] = 0 - 1
     boxes[7] = AABB { lower: math.vec3(100.0, 100.0, 100.0), upper: math.vec3(100.0, 100.0, 100.0) }
     boxes[6] = box_at(math.vec3(1.5, 1.0, 1.5), 0.5)
-    broad_phase.broad_phase_move_proxy(bp, keys[6], boxes[6])
+    broad_phase.broad_phase_move_proxy(bp, keys[6], math.aabb_round_out(boxes[6]))
     n = broad_phase.update_broad_phase_pairs(bp, visitors(scene), false)
     ensure("a destroyed proxy is not found", keys_are_overlaps(scene, bp))
     ensure("trees valid at the end", broad_phase.validate_broad_phase(bp))
@@ -335,8 +335,8 @@ test_compound_pairs() {
     // The box straddles the children at local x 0 and 3 (world y 10 and 13), not the one at 6.
     boxes[0] = AABB { lower: math.vec3(0.0 - 0.6, 9.5, 0.0 - 0.6), upper: math.vec3(0.6, 13.2, 0.6) }
     boxes[1] = compound.compute_compound_aabb(c, scene.compound_transform)
-    keys[0] = broad_phase.broad_phase_create_proxy(bp, broad_phase.BODY_DYNAMIC, boxes[0], all_bits(), 0, false)
-    keys[1] = broad_phase.broad_phase_create_proxy(bp, broad_phase.BODY_STATIC, boxes[1], all_bits(), 1, false)
+    keys[0] = broad_phase.broad_phase_create_proxy(bp, broad_phase.BODY_DYNAMIC, math.aabb_round_out(boxes[0]), all_bits(), 0, false)
+    keys[1] = broad_phase.broad_phase_create_proxy(bp, broad_phase.BODY_STATIC, math.aabb_round_out(boxes[1]), all_bits(), 1, false)
     n = broad_phase.update_broad_phase_pairs(bp, visitors(scene), true)
     ensure("compound pairs (${n})", n == 2)
     if n == 2 {
@@ -348,13 +348,13 @@ test_compound_pairs() {
     adopt_keys(bp)
     // Without the compound flag the pair is plain; with it and the pair set holding one child, only the other comes.
     broad_phase.remove_pair(bp, basics.shape_pair_key(0, 1, 1))
-    broad_phase.broad_phase_move_proxy(bp, keys[0], boxes[0])
+    broad_phase.broad_phase_move_proxy(bp, keys[0], math.aabb_round_out(boxes[0]))
     n = broad_phase.update_broad_phase_pairs(bp, visitors(scene), true)
     ensure("compound child already paired is skipped", n == 1 && broad_phase.pair_key_child(broad_phase.pair_key(bp, 0)) == 1)
     // The gauntlet refusing the pair drops every child.
     bodies[1] = 0
     broad_phase.remove_pair(bp, basics.shape_pair_key(0, 1, 0))
-    broad_phase.broad_phase_move_proxy(bp, keys[0], boxes[0])
+    broad_phase.broad_phase_move_proxy(bp, keys[0], math.aabb_round_out(boxes[0]))
     n = broad_phase.update_broad_phase_pairs(bp, visitors(scene), true)
     ensure("compound pair refused drops every child", n == 0)
     broad_phase.destroy_broad_phase(bp)
