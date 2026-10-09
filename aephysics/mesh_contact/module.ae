@@ -61,7 +61,6 @@ const MAX_VERTEX_COUNT = 64
 // The gap left after a time of impact (the "rest offset").
 const MESH_REST_OFFSET = 0.005
 const MAX_AABB_MARGIN = 0.05
-const SPECULATIVE_DISTANCE = 0.02
 // A triangle's manifold and one accepted for the reduction: the
 // triangle_manifold module's features and the manifold module's axes,
 // restated (a module constant does not reach every expression).
@@ -176,9 +175,10 @@ scratch_ready() {
 // by the margin and the speculative distance); a refresh keeps each
 // surviving triangle's warm start.
 refresh_cache(cache: *MeshContactCache, mesh_shape: *Shape, xf_a: Transform, bounds: AABB) {
+    reach = manifold.speculative_distance()
     if math.aabb_contains(cache.query_bounds, bounds) { return }
     scratch_ready()
-    radius = MAX_AABB_MARGIN + SPECULATIVE_DISTANCE
+    radius = MAX_AABB_MARGIN + reach
     extension = math.vec3(radius, radius, radius)
     cache.query_bounds = AABB { lower: math.sub(bounds.lower, extension), upper: math.add(bounds.upper, extension) }
     local_bounds = math.aabb_transform(math.invert_transform(xf_a), cache.query_bounds)

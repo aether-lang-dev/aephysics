@@ -42,7 +42,7 @@ extern memcpy(dst: ptr, src: ptr, size: int) -> ptr
 extern memset(block: ptr, value: int, size: int) -> ptr
 
 const SNAPSHOT_MAGIC = 0x4E535041    // "APSN", little-endian
-const SNAPSHOT_VERSION = 3
+const SNAPSHOT_VERSION = 4
 const NULL_INDEX = 0 - 1
 
 // --- the bytes written -------------------------------------------------------------------------------
@@ -359,6 +359,7 @@ save_world(world_id: WorldId) -> (ptr, int) {
     w_int(&wr, w.restitution_iterations)
     w_bool(&wr, w.enable_restitution_propagation)
     w_bool(&wr, w.enable_kinematic_static_softness)
+    w_bool(&wr, w.enable_kinematic_speculation)
     w_float(&wr, w.max_linear_speed)
     w_float(&wr, w.contact_speed)
     w_float(&wr, w.contact_hertz)
@@ -678,6 +679,7 @@ fill_world(w: *World, rd: *SnapReader) -> bool {
     w.restitution_iterations = r_int(rd)
     w.enable_restitution_propagation = r_bool(rd)
     w.enable_kinematic_static_softness = r_bool(rd)
+    w.enable_kinematic_speculation = r_bool(rd)
     w.max_linear_speed = r_float(rd)
     w.contact_speed = r_float(rd)
     w.contact_hertz = r_float(rd)

@@ -528,12 +528,25 @@ finalize_range(start: int, end: int, worker: int, context: ptr) {
         if (sim.flags & dynamics.IS_FAST) == 0 {
             t = sim.transform
             shape_id = body.head_shape_id
+            // A kinematic body's fat bounds cover its next step's sweep when
+            // its contacts reach out over it (enable_kinematic_speculation),
+            // so a pair it will meet exists in time; its shapes' own bounds
+            // stay where they are.
+            sweeps = w.enable_kinematic_speculation && body.kind == dynamics.BODY_KINEMATIC && time_step > 0.0
+            travel = math.mul_sv(time_step, v)
+            turn = time_step * math.length(wv) * math.length(math.widen3(sim.max_extent))
             while shape_id != NULL_INDEX {
                 s = dynamics.world_shape_at(w, shape_id)
                 s.aabb = shape.compute_fat_shape_aabb(&s.geometry, t, dynamics.SPECULATIVE_DISTANCE)
-                if math.aabbf_holds(dynamics.shape_fat_aabb(w, shape_id), s.aabb) == false {
+                covered = s.aabb
+                if sweeps {
+                    ahead = math.offset_aabb(s.aabb, travel)
+                    swept = math.aabb_union(s.aabb, ahead)
+                    covered = AABB { lower: math.sub(swept.lower, math.vec3(turn, turn, turn)), upper: math.add(swept.upper, math.vec3(turn, turn, turn)) }
+                }
+                if math.aabbf_holds(dynamics.shape_fat_aabb(w, shape_id), covered) == false {
                     margin = math.vec3(s.aabb_margin, s.aabb_margin, s.aabb_margin)
-                    fat = math.aabb_round_out(AABB { lower: math.sub(s.aabb.lower, margin), upper: math.add(s.aabb.upper, margin) })
+                    fat = math.aabb_round_out(AABB { lower: math.sub(covered.lower, margin), upper: math.add(covered.upper, margin) })
                     dynamics.set_shape_fat_aabb(w, shape_id, fat)
                     broad_phase.broad_phase_mark_proxy_moved(&w.broad_phase, s.proxy_key, fat)
                 }

@@ -32,7 +32,7 @@ exports (
     reserve_scratch,
     Sphere, Capsule, FeaturePair, LocalManifoldPoint, LocalManifold, SATCache, SeparatingAxis, AxisQuery,
     ClipVertex,
-    MAX_MANIFOLD_POINTS, MAX_CLIP_POINTS, SPECULATIVE_DISTANCE, PARALLEL_EDGE_TOL, NULL_INDEX,
+    MAX_MANIFOLD_POINTS, MAX_CLIP_POINTS, SPECULATIVE_DISTANCE, speculative_distance, set_speculative_distance, PARALLEL_EDGE_TOL, NULL_INDEX,
     AXIS_INVALID, AXIS_BACKSIDE, AXIS_FACE_A, AXIS_FACE_B, AXIS_EDGE_PAIR, AXIS_CLOSEST_POINTS,
     AXIS_MANUAL_FACE_A, AXIS_MANUAL_FACE_B, AXIS_MANUAL_EDGE_PAIR,
     FEATURE_SHAPE_A, FEATURE_SHAPE_B,
@@ -236,7 +236,34 @@ var g_lane_scratch: ptr = null
 lane_scratch() -> ptr { return native.scratch(g_lane_scratch, 64) }
 b_frame_scratch() -> ptr { return edge_axes() + AXIS_FIELDS * AXIS_SLOTS * 4 }
 
+// Each worker's speculative distance: how far apart two shapes keep
+// points, SPECULATIVE_DISTANCE but while the collide pass reaches out for
+// a contact with a kinematic body (WorldDef.enable_kinematic_speculation,
+// #167). Every function here reads it once on entry.
+var g_speculative: ptr = null      // float[MAX_WORKERS]
+
+speculative_distance() -> float {
+    if g_speculative == null { return SPECULATIVE_DISTANCE }
+    return (native.scratch(g_speculative, 8) as float[])[0]
+}
+
+// The calling worker's speculative distance, until it is set back.
+set_speculative_distance(distance: float) {
+    scratch_ready()
+    (native.scratch(g_speculative, 8) as float[])[0] = distance
+}
+
 scratch_ready() {
+    if g_speculative == null {
+        block = basics.alloc(native.MAX_WORKERS * 8)
+        each = block as float[]
+        k = 0
+        while k < native.MAX_WORKERS {
+            each[k] = SPECULATIVE_DISTANCE
+            k = k + 1
+        }
+        g_speculative = block
+    }
     if g_clip1 == null {
         g_clip1 = basics.alloc(native.MAX_WORKERS * (CLIP_CAPACITY * sizeof(ClipVertex)))
         g_clip2 = basics.alloc(native.MAX_WORKERS * (CLIP_CAPACITY * sizeof(ClipVertex)))
@@ -454,6 +481,7 @@ clip_segment_to_hull_face(segment: ClipVertex[], h: *HullData, ref_face: int) ->
 // the point adding the most area outside it. The 0.95 bias keeps the
 // choice stable across steps. Consumes the point array.
 reduce_manifold_points(m: *LocalManifold, capacity: int, points: LocalManifoldPoint[], count: int) {
+    reach = speculative_distance()
     if capacity < 4 { return }
     if count <= 4 {
         i = 0
@@ -474,7 +502,7 @@ reduce_manifold_points(m: *LocalManifold, capacity: int, points: LocalManifoldPo
     search = math.arbitrary_perp(normal)
     i = 0
     while i < count {
-        if points[i].separation <= SPECULATIVE_DISTANCE {
+        if points[i].separation <= reach {
             score = 0.0 - points[i].separation + math.dot(search, points[i].point)
             if bias * score > best_score {
                 best_index = i
@@ -614,6 +642,7 @@ collide_capsule_and_sphere(m: *LocalManifold, capacity: int, capsule_a: Capsule,
 // the deep one.
 collide_hull_and_sphere(m: *LocalManifold, capacity: int, hull_a: *HullData, sphere_b: Sphere, transform_b_to_a: Transform,
                         cache: *SimplexCache) {
+    reach = speculative_distance()
     m.point_count = 0
     if capacity == 0 { return }
     center = math.transform_point(transform_b_to_a, sphere_b.center)
@@ -624,7 +653,7 @@ collide_hull_and_sphere(m: *LocalManifold, capacity: int, hull_a: *HullData, sph
     radius = radius_a + radius_b
     output = distance.shape_distance(&input, cache, null, 0)
 
-    if output.distance > radius + SPECULATIVE_DISTANCE {
+    if output.distance > radius + reach {
         clear_simplex_cache(cache)
         return
     }
@@ -658,6 +687,7 @@ collide_hull_and_sphere(m: *LocalManifold, capacity: int, hull_a: *HullData, sph
 // Two points when the capsules are nearly parallel and B's clipped ends
 // both touch A; otherwise the closest points of the segments.
 collide_capsules(m: *LocalManifold, capacity: int, capsule_a: Capsule, capsule_b: Capsule, transform_b_to_a: Transform) {
+    reach = speculative_distance()
     m.point_count = 0
     if capacity < 2 { return }
     center_a1 = capsule_a.center1
@@ -665,7 +695,7 @@ collide_capsules(m: *LocalManifold, capacity: int, capsule_a: Capsule, capsule_b
     center_b1 = math.transform_point(transform_b_to_a, capsule_b.center1)
     center_b2 = math.transform_point(transform_b_to_a, capsule_b.center2)
     radius = capsule_a.radius + capsule_b.radius
-    max_distance = radius + SPECULATIVE_DISTANCE
+    max_distance = radius + reach
     result = math.segment_distance(center_a1, center_a2, center_b1, center_b2)
     offset = math.sub(result.point2, result.point1)
     distance_squared = math.length_squared(offset)
@@ -793,6 +823,7 @@ query_edge_direction_hull_and_capsule(h: *HullData, c: Capsule, capsule_transfor
 
 build_hull_face_and_capsule_contact(m: *LocalManifold, hull_a: *HullData, capsule_b: Capsule, transform_b_to_a: Transform,
                                     query: SeparatingAxis) -> bool {
+    reach = speculative_distance()
     planes = hull.hull_planes(hull_a)
     ref_face = query.index_a
     ref_plane = planes[ref_face]
@@ -805,7 +836,7 @@ build_hull_face_and_capsule_contact(m: *LocalManifold, hull_a: *HullData, capsul
     if clip_segment_to_hull_face(segment, hull_a, ref_face) < 2 { return false }
     distance1 = math.plane_separation(ref_plane, segment[0].position)
     distance2 = math.plane_separation(ref_plane, segment[1].position)
-    if distance1 <= SPECULATIVE_DISTANCE || distance2 <= SPECULATIVE_DISTANCE {
+    if distance1 <= reach || distance2 <= reach {
         normal = ref_plane.normal
         point1 = math.mul_sub(segment[0].position, 0.5 * (distance1 + capsule_b.radius), normal)
         point2 = math.mul_sub(segment[1].position, 0.5 * (distance2 + capsule_b.radius), normal)
@@ -844,12 +875,13 @@ build_hull_and_capsule_edge_contact(m: *LocalManifold, capacity: int, hull_a: *H
 // it lies along it; the face and edge axes for the deep case.
 collide_hull_and_capsule(m: *LocalManifold, capacity: int, hull_a: *HullData, capsule_b: Capsule, transform_b_to_a: Transform,
                          cache: *SimplexCache) {
+    reach = speculative_distance()
     m.point_count = 0
     if capacity < 2 { return }
     input = DistanceInput { proxy_a: hull.hull_proxy(hull_a), proxy_b: distance.shape_proxy((&capsule_b) as ptr, 2, 0.0),
                             transform: transform_b_to_a, use_radii: false }
     output = distance.shape_distance(&input, cache, null, 0)
-    if output.distance > capsule_b.radius + SPECULATIVE_DISTANCE {
+    if output.distance > capsule_b.radius + reach {
         clear_simplex_cache(cache)
         return
     }
@@ -871,7 +903,7 @@ collide_hull_and_capsule(m: *LocalManifold, capacity: int, hull_a: *HullData, ca
             if clip_segment_to_hull_face(vertices_b, hull_a, ref_face) == 2 {
                 distance1 = math.plane_separation(ref_plane, vertices_b[0].position)
                 distance2 = math.plane_separation(ref_plane, vertices_b[1].position)
-                if distance1 <= capsule_b.radius + SPECULATIVE_DISTANCE || distance2 <= capsule_b.radius + SPECULATIVE_DISTANCE {
+                if distance1 <= capsule_b.radius + reach || distance2 <= capsule_b.radius + reach {
                     normal = ref_plane.normal
                     point1 = math.mul_sub(vertices_b[0].position, 0.5 * (capsule_b.radius + distance1), normal)
                     point2 = math.mul_sub(vertices_b[1].position, 0.5 * (capsule_b.radius + distance2), normal)
@@ -913,6 +945,7 @@ collide_hull_and_capsule(m: *LocalManifold, capacity: int, hull_a: *HullData, ca
 // frame A. With early_return the scan stops at the first axis past the
 // speculative distance. The reference's scalar path, exactly.
 compute_separating_axis(hull_a: *HullData, hull_b: *HullData, xf_b: Transform, early_return: bool) -> AxisQuery {
+    reach = speculative_distance()
     r = math.make_matrix_from_quat(xf_b.q)
     inv_r = math.transpose(r)
     res = AxisQuery {
@@ -960,7 +993,7 @@ compute_separating_axis(hull_a: *HullData, hull_b: *HullData, xf_b: Transform, e
         direction = math.neg(math.mul_mv(inv_r, plane.normal))
         seed_vertex = support_index_wide(hull_b, direction)
         seed_separation = math.dot(plane.normal, xf_b.p) - plane.offset - math.dot(direction, points_b[seed_vertex])
-        floor_a = math.min_float(seed_separation, SPECULATIVE_DISTANCE)
+        floor_a = math.min_float(seed_separation, reach)
     }
     i = 0
     while i < hull_a.face_count {
@@ -979,7 +1012,7 @@ compute_separating_axis(hull_a: *HullData, hull_b: *HullData, xf_b: Transform, e
                 res.face_a.separation = separation
                 res.face_a.index_a = i
                 res.face_a.index_b = vertex_index
-                if separation > SPECULATIVE_DISTANCE && early_return {
+                if separation > reach && early_return {
                     res.separated_feature = AXIS_FACE_A
                     return res
                 }
@@ -1011,7 +1044,7 @@ compute_separating_axis(hull_a: *HullData, hull_b: *HullData, xf_b: Transform, e
         seed_vertex = support_index_wide(hull_a, direction)
         seed_separation = math.dot(direction, xf_b.p) - plane.offset - math.dot(direction, points_a[seed_vertex])
         // A's faces have set a floor of their own.
-        floor_b = math.min_float(math.max_float(seed_separation, res.face_a.separation), SPECULATIVE_DISTANCE)
+        floor_b = math.min_float(math.max_float(seed_separation, res.face_a.separation), reach)
     }
     i = 0
     while i < hull_b.face_count {
@@ -1030,7 +1063,7 @@ compute_separating_axis(hull_a: *HullData, hull_b: *HullData, xf_b: Transform, e
                 res.face_b.separation = separation
                 res.face_b.index_a = vertex_index
                 res.face_b.index_b = i
-                if separation > SPECULATIVE_DISTANCE && early_return {
+                if separation > reach && early_return {
                     res.separated_feature = AXIS_FACE_B
                     return res
                 }
@@ -1253,7 +1286,7 @@ compute_separating_axis(hull_a: *HullData, hull_b: *HullData, xf_b: Transform, e
                                 res.edge.separation = separation
                                 res.edge.index_a = slots[AXIS_EDGE + at] as int
                                 res.edge.index_b = j
-                                if separation > SPECULATIVE_DISTANCE && early_return {
+                                if separation > reach && early_return {
                                     res.separated_feature = AXIS_EDGE_PAIR
                                     return res
                                 }
@@ -1421,6 +1454,7 @@ build_polygon(out: ClipVertex[], transform: Transform, h: *HullData, inc_face: i
 // the reference's stacks are untouched.
 add_near_vertices(out: ClipVertex[], count: int, hull_a: *HullData, ref_face: int, ref_plane: Plane,
                   hull_b: *HullData, inc_face: int, transform_b_to_a: Transform) -> int {
+    reach = speculative_distance()
     faces_a = hull.hull_faces(hull_a)
     edges_a = hull.hull_edges(hull_a)
     points_a = hull.hull_points(hull_a)
@@ -1433,7 +1467,7 @@ add_near_vertices(out: ClipVertex[], count: int, hull_a: *HullData, ref_face: in
     while v < hull_b.vertex_count && out_count < MAX_CLIP_POINTS {
         position = math.add(math.mul_mv(m, points_b[v]), transform_b_to_a.p)
         separation = math.plane_separation(ref_plane, position)
-        if separation < SPECULATIVE_DISTANCE {
+        if separation < reach {
             // Not one of the incident face's own (those were clipped already).
             on_face = false
             start_b = faces_b[inc_face]
@@ -1472,6 +1506,7 @@ add_near_vertices(out: ClipVertex[], count: int, hull_a: *HullData, ref_face: in
 // reduced to four.
 build_face_a_contact(m: *LocalManifold, capacity: int, hull_a: *HullData, hull_b: *HullData, transform_b_to_a: Transform,
                      query: SeparatingAxis, cache: *SATCache) -> bool {
+    reach = speculative_distance()
     faces_a = hull.hull_faces(hull_a)
     edges_a = hull.hull_edges(hull_a)
     planes_a = hull.hull_planes(hull_a)
@@ -1523,7 +1558,7 @@ build_face_a_contact(m: *LocalManifold, capacity: int, hull_a: *HullData, hull_b
         min_separation = math.min_float(min_separation, cp.separation)
         i = i + 1
     }
-    if min_separation >= SPECULATIVE_DISTANCE {
+    if min_separation >= reach {
         clear_sat_cache(cache)
         return false
     }
@@ -1599,6 +1634,7 @@ build_edge_contact(m: *LocalManifold, hull_a: *HullData, hull_b: *HullData, tran
 // edge contact is weak for stacking), the edge contact when the face
 // finds nothing or the edge axis is clearly better.
 collide_hulls(m: *LocalManifold, capacity: int, hull_a: *HullData, hull_b: *HullData, transform_b_to_a: Transform, cache: *SATCache) {
+    reach = speculative_distance()
     m.point_count = 0
     if capacity < 4 { return }
     edges_a = hull.hull_edges(hull_a)
@@ -1615,7 +1651,7 @@ collide_hulls(m: *LocalManifold, capacity: int, hull_a: *HullData, hull_b: *Hull
         vertex_index = hull.find_hull_support_vertex(hull_b, search_in_b)
         support = math.transform_point(transform_b_to_a, points_b[vertex_index])
         separation = math.plane_separation(plane, support)
-        if separation >= SPECULATIVE_DISTANCE {
+        if separation >= reach {
             cache.hit = 1
             return
         }
@@ -1632,7 +1668,7 @@ collide_hulls(m: *LocalManifold, capacity: int, hull_a: *HullData, hull_b: *Hull
         vertex_index = hull.find_hull_support_vertex(hull_a, search_in_a)
         support = math.inv_transform_point(transform_b_to_a, points_a[vertex_index])
         separation = math.plane_separation(plane, support)
-        if separation >= SPECULATIVE_DISTANCE {
+        if separation >= reach {
             cache.hit = 1
             return
         }
@@ -1666,7 +1702,7 @@ collide_hulls(m: *LocalManifold, capacity: int, hull_a: *HullData, hull_b: *Hull
                 t = cba / (cba - dba)
                 axis = math.normalize(math.lerp(u_b, v_b, t))
                 separation = math.dot(axis, math.sub(q_a, q_b))
-                if separation > SPECULATIVE_DISTANCE {
+                if separation > reach {
                     cache.hit = 1
                     return
                 }

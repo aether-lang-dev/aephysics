@@ -1146,6 +1146,7 @@ all_ops() {
     physics_world.set_restitution_iterations(world_id, 3)
     physics_world.enable_restitution_propagation(world_id, true)
     physics_world.enable_kinematic_static_softness(world_id, true)
+    physics_world.enable_kinematic_speculation(world_id, true)
     physics_world.set_hit_event_threshold(world_id, 0.5)
     physics_world.set_contact_tuning(world_id, 25.0, 8.0, 2.5)
     physics_world.set_contact_recycle_distance(world_id, 0.02)
@@ -1253,7 +1254,7 @@ all_ops() {
     dynamics.destroy_world(world_id)
 
     // Every opcode a recording has.
-    all_op_count = 160
+    all_op_count = 161
     all_ops_list = [
         dynamics.OP_CREATE_BODY, dynamics.OP_DESTROY_BODY, dynamics.OP_BODY_SET_TRANSFORM,
         dynamics.OP_BODY_SET_LINEAR_VELOCITY, dynamics.OP_BODY_SET_ANGULAR_VELOCITY,
@@ -1323,7 +1324,7 @@ all_ops() {
         dynamics.OP_WHEEL_JOINT_SET_MAX_SPIN_TORQUE, dynamics.OP_WHEEL_JOINT_ENABLE_STEERING,
         dynamics.OP_WHEEL_JOINT_SET_STEERING_HERTZ, dynamics.OP_WHEEL_JOINT_SET_STEERING_DAMPING_RATIO,
         dynamics.OP_WHEEL_JOINT_SET_MAX_STEERING_TORQUE, dynamics.OP_WHEEL_JOINT_ENABLE_STEERING_LIMIT,
-        dynamics.OP_WHEEL_JOINT_SET_STEERING_LIMITS, dynamics.OP_WHEEL_JOINT_SET_TARGET_STEERING_ANGLE
+        dynamics.OP_WHEEL_JOINT_SET_STEERING_LIMITS, dynamics.OP_WHEEL_JOINT_SET_TARGET_STEERING_ANGLE, dynamics.OP_ENABLE_KINEMATIC_SPECULATION
     ]
     seen = calloc(4096, 4)
     mark_ops(r, seen)

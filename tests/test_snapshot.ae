@@ -84,6 +84,8 @@ fixtures_free() {
 world_def() -> WorldDef {
     wdef = dynamics.default_world_def()
     wdef.gravity = math.vec3(0.0, 0.0 - 10.0, 0.0)
+    // The kinematic paddle reaches out (#167): a loaded world steps alike only if the setting came with it.
+    wdef.enable_kinematic_speculation = true
     return wdef
 }
 
@@ -336,7 +338,10 @@ round_trip(before: int) {
     steps(original, before)
     block, byte_count = snapshot.save_world(original)
     ensure("round trip at ${before}: saved (${byte_count} bytes)", block != null && byte_count > 0)
-    loaded = snapshot.load_world(&wdef, block, byte_count)
+    // Loaded with a def that has the setting off: the snapshot's settings rule.
+    plain = dynamics.default_world_def()
+    loaded = snapshot.load_world(&plain, block, byte_count)
+    ensure("round trip at ${before}: the kinematic speculation came with it", dynamics.world_is_valid(loaded) && physics_world.is_kinematic_speculation_enabled(loaded))
     ensure("round trip at ${before}: loaded", dynamics.world_is_valid(loaded))
     if dynamics.world_is_valid(loaded) == false {
         snapshot.free_snapshot(block, byte_count)
