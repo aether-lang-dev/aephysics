@@ -33,7 +33,7 @@ exports (
     HEIGHT_FIELD_VERSION, HEIGHT_FIELD_HOLE, NULL_INDEX,
     height_field_def, height_field_quanta, height_field_quantum, height_field_material_indices, height_field_flags,
     height_field_triangle_count, height_field_height,
-    create_height_field, destroy_height_field, create_grid, create_wave,
+    create_height_field, destroy_height_field, height_field_bytes_valid, create_grid, create_wave,
     get_height_field_triangle, get_height_field_material, compute_height_field_aabb,
     ray_cast_height_field, shape_cast_height_field, overlap_height_field, query_height_field,
     collide_mover_and_height_field
@@ -301,6 +301,25 @@ create_height_field(def: *HeightFieldDef) -> *HeightFieldData {
 }
 
 destroy_height_field(h: *HeightFieldData) { basics.free_bytes(h as ptr, h.byte_count) }
+
+// A height field in bytes from outside (a snapshot's, a recording's), at
+// most `available` of them: the layout's version, its block inside the
+// bytes, the grid two lines or more each way, a scale positive and finite,
+// a quantisation range in order, and its three arrays inside its block.
+height_field_bytes_valid(h: *HeightFieldData, available: int) -> bool {
+    if h == null || available < sizeof(HeightFieldData) { return false }
+    if h.version != HEIGHT_FIELD_VERSION { return false }
+    n = h.byte_count
+    if n < sizeof(HeightFieldData) || n > available { return false }
+    if h.column_count < 2 || h.row_count < 2 || h.column_count > n / 2 || h.row_count > (n / 2) / h.column_count { return false }
+    if math.is_valid_vec3(h.scale) == false || h.scale.x <= 0.0 || h.scale.y <= 0.0 || h.scale.z <= 0.0 { return false }
+    if math.is_valid_float(h.min_height) == false || math.is_valid_float(h.max_height) == false || h.min_height > h.max_height { return false }
+    if math.is_valid_float(h.height_scale) == false || h.height_scale <= 0.0 { return false }
+    cells = (h.column_count - 1) * (h.row_count - 1)
+    if basics.section_fits(h.heights_offset, h.column_count * h.row_count, 2, n) == false { return false }
+    if basics.section_fits(h.material_offset, cells, 1, n) == false { return false }
+    return basics.section_fits(h.flags_offset, 2 * cells, 1, n)
+}
 
 // A flat field, with a hole every sixteenth cell when asked.
 create_grid(row_count: int, column_count: int, scale: Vec3, make_holes: bool) -> *HeightFieldData {

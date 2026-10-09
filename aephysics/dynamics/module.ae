@@ -88,7 +88,7 @@ exports (
     body_set_sleep_threshold, body_get_sleep_threshold, body_get_shape_count, body_get_shapes, body_compute_aabb,
     body_set_motion_locks, body_get_motion_locks, body_get_flags,
     create_sphere_shape, create_capsule_shape, create_hull_shape, create_transformed_hull_shape, create_mesh_shape, create_height_field_shape,
-    HullEntry, world_hull_count,
+    HullEntry, world_hull_count, add_hull_to_database, allocate_manifolds, OwnedGeometry, adopt_geometry, world_at, destroy_solver_set,
     create_compound_shape, destroy_shape, shape_is_valid, get_shape_full_id, get_shape, shape_get_body,
     shape_get_aabb, shape_get_type, shape_get_density, shape_set_density, shape_get_filter, shape_set_filter,
     shape_get_surface_material, shape_set_surface_material, shape_get_material_count, shape_is_sensor,
@@ -1245,6 +1245,7 @@ struct World {
     hull_heads: LongMap            // a hull's hash to the first entry of that hash
     hull_free: int                 // the first free entry, chained through next
     hull_count: int                // the distinct hulls held
+    owned_geometry: Buffer         // OwnedGeometry: meshes, height fields and compounds the world was loaded with (aephysics.snapshot), freed with it
     sensors: Buffer                // Sensor
     sensor_begin_events: Buffer    // SensorBeginTouchEvent
     sensor_end_events0: Buffer     // SensorEndTouchEvent, double buffered with the contacts' index
@@ -1457,6 +1458,7 @@ create_world(def: *WorldDef) -> WorldId {
     w.hull_heads = basics.map_create(16)
     w.hull_free = NULL_INDEX
     w.hull_count = 0
+    w.owned_geometry = basics.buffer_create(sizeof(OwnedGeometry), 0)
     w.sensors = basics.buffer_create(sizeof(Sensor), 0)
     w.sensor_begin_events = basics.buffer_create(sizeof(SensorBeginTouchEvent), 4)
     w.sensor_end_events0 = basics.buffer_create(sizeof(SensorEndTouchEvent), 4)
@@ -1597,6 +1599,13 @@ destroy_world(id: WorldId) {
     basics.buffer_destroy(&w.hull_entries)
     basics.map_destroy(&w.hull_heads)
     w.hull_count = 0
+    i = 0
+    while i < w.owned_geometry.count {
+        owned = (w.owned_geometry.data + i * sizeof(OwnedGeometry)) as *OwnedGeometry
+        basics.free_bytes(owned.block, owned.byte_count)
+        i = i + 1
+    }
+    basics.buffer_destroy(&w.owned_geometry)
     basics.idpool_destroy(&w.shape_id_pool)
     basics.buffer_destroy(&w.contacts)
     basics.idpool_destroy(&w.contact_id_pool)
@@ -2279,6 +2288,20 @@ remove_hull_from_database(w: *World, h: *HullData) {
         previous = index
         index = entry.next
     }
+}
+
+// A block of geometry (a mesh's, a height field's, a compound's) the world
+// owns: the copies a loaded snapshot's shapes point at, freed with the world.
+struct OwnedGeometry {
+    block: ptr
+    byte_count: int
+}
+
+adopt_geometry(w: *World, block: ptr, byte_count: int) {
+    index = basics.buffer_push(&w.owned_geometry)
+    owned = (w.owned_geometry.data + index * sizeof(OwnedGeometry)) as *OwnedGeometry
+    owned.block = block
+    owned.byte_count = byte_count
 }
 
 // The distinct hulls a world holds for its shapes.
