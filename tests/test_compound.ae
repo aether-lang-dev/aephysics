@@ -28,6 +28,8 @@ import aephysics.shape
 
 extern calloc(count: int, size: int) -> ptr
 extern exit(code: int)
+extern memcmp(a: ptr, b: ptr, size: int) -> int
+extern memcpy(dst: ptr, src: ptr, size: int) -> ptr
 extern free(p: ptr)
 extern sin(x: float) -> float
 extern cos(x: float) -> float
@@ -980,6 +982,188 @@ test_two_materials_many_children() {
     hull.destroy_hull(box)
 }
 
+// The reference's BuildSerializableCompound: one child of each kind, a
+// capsule, a box hull at x = 5, a box mesh at z = 5 and a sphere at x = -5.
+serializable(md: *MeshData, box: *HullData, materials: ptr) -> *CompoundData {
+    mat = material.default_surface_material()
+    capsules_block = calloc(1, sizeof(CompoundCapsuleDef))
+    hulls_block = calloc(1, sizeof(CompoundHullDef))
+    meshes_block = calloc(1, sizeof(CompoundMeshDef))
+    spheres_block = calloc(1, sizeof(CompoundSphereDef))
+    capsules = capsules_block as CompoundCapsuleDef[]
+    hulls = hulls_block as CompoundHullDef[]
+    meshes = meshes_block as CompoundMeshDef[]
+    spheres = spheres_block as CompoundSphereDef[]
+    capsules[0] = compound.compound_capsule_def(Capsule { center1: math.vec3(0.0 - 2.0, 0.0, 0.0), center2: math.vec3(0.0 - 1.0, 0.0, 0.0), radius: 0.2 }, mat)
+    hulls[0] = compound.compound_hull_def(box, Transform { p: math.vec3(5.0, 0.0, 0.0), q: math.quat_identity() }, mat)
+    meshes[0] = compound.compound_mesh_def(md, Transform { p: math.vec3(0.0, 0.0, 5.0), q: math.quat_identity() }, math.vec3_one(), materials, 1)
+    spheres[0] = compound.compound_sphere_def(Sphere { center: math.vec3(0.0 - 5.0, 0.0, 0.0), radius: 0.5 }, mat)
+    def = compound.compound_def()
+    def.capsules = capsules_block
+    def.capsule_count = 1
+    def.hulls = hulls_block
+    def.hull_count = 1
+    def.meshes = meshes_block
+    def.mesh_count = 1
+    def.spheres = spheres_block
+    def.sphere_count = 1
+    c = compound.create_compound(&def)
+    free(capsules_block)
+    free(hulls_block)
+    free(meshes_block)
+    free(spheres_block)
+    return c
+}
+
+// A compound's bytes in a block of the caller's (calloc), as the reference
+// copies them out before destroying the compound.
+bytes_of(c: *CompoundData) -> ptr {
+    n = c.byte_count
+    buffer = calloc(1, n)
+    memcpy(buffer, compound.convert_compound_to_bytes(c), n)
+    return buffer
+}
+
+// The reference's CompoundSerializeRoundtrip, CompoundSerializeBadVersion
+// and CompoundSerializeWrongByteCount (#148): bytes copied out of a
+// compound one of each kind turn back into one whose bounds and ray cast
+// match the original's; another version or a wrong length is refused.
+// Past them: two compounds built alike give the same bytes, rays at every
+// child agree with a fresh build, the bytes go round twice, and every
+// corruption (a section, a shared hull or mesh, a material, a mesh run, a
+// leaf's child, a node) is refused rather than followed.
+test_serialize() {
+    md = mesh.create_box_mesh(math.vec3_zero(), math.vec3(0.5, 0.5, 0.5), false)
+    box = hull.make_box_hull(0.5, 0.5, 0.5)
+    materials_block = calloc(1, sizeof(SurfaceMaterial))
+    materials = materials_block as SurfaceMaterial[]
+    materials[0] = material.default_surface_material()
+
+    a = serializable(md, box, materials_block)
+    aabb_a = compound.compute_compound_aabb(a, math.transform_identity())
+    ray_a = compound.ray_cast_compound(a, math.vec3_zero(), math.vec3(20.0, 0.0, 0.0), 1.0)
+    ensure("serialize: the original's ray hits", ray_a.hit)
+    byte_count = a.byte_count
+    buffer = bytes_of(a)
+    compound.destroy_compound(a)
+
+    b = compound.convert_bytes_to_compound(buffer, byte_count)
+    ensure("serialize: the bytes are a compound", b != null)
+    if b != null {
+        ensure("serialize: its length", b.byte_count == byte_count)
+        ensure("serialize: one child of each kind", b.capsule_count == 1 && b.hull_count == 1 && b.mesh_count == 1 && b.sphere_count == 1)
+        ensure("serialize: its tree has nodes again", b.tree.nodes != null)
+        aabb_b = compound.compute_compound_aabb(b, math.transform_identity())
+        small("serialize: the bounds' low x", aabb_a.lower.x - aabb_b.lower.x, 0.00001)
+        small("serialize: the bounds' high z", aabb_a.upper.z - aabb_b.upper.z, 0.00001)
+        ray_b = compound.ray_cast_compound(b, math.vec3_zero(), math.vec3(20.0, 0.0, 0.0), 1.0)
+        ensure("serialize: the ray hits as before", ray_b.hit == ray_a.hit && ray_b.child_index == ray_a.child_index)
+        small("serialize: at the same fraction", ray_b.fraction - ray_a.fraction, 0.00001)
+
+        // Rays at every child, against a compound built afresh.
+        fresh = serializable(md, box, materials_block)
+        directions_block = calloc(6, sizeof(Vec3))
+        directions = directions_block as Vec3[]
+        directions[0] = math.vec3(20.0, 0.0, 0.0)
+        directions[1] = math.vec3(0.0 - 20.0, 0.0, 0.0)
+        directions[2] = math.vec3(0.0, 0.0, 20.0)
+        directions[3] = math.vec3(20.0, 0.1, 0.05)
+        directions[4] = math.vec3(0.0 - 20.0, 0.05, 0.0)
+        directions[5] = math.vec3(0.05, 0.1, 20.0)
+        hits = 0
+        i = 0
+        while i < 6 {
+            x = compound.ray_cast_compound(fresh, math.vec3_zero(), directions[i], 1.0)
+            y = compound.ray_cast_compound(b, math.vec3_zero(), directions[i], 1.0)
+            ensure("serialize: ray ${i} alike on the bytes and afresh", x.hit == y.hit && x.child_index == y.child_index &&
+                   x.fraction == y.fraction && x.material_index == y.material_index && x.triangle_index == y.triangle_index)
+            if y.hit { hits = hits + 1 }
+            i = i + 1
+        }
+        ensure("serialize: the rays hit the capsule, the hull and the mesh (${hits})", hits == 6)
+        free(directions_block)
+
+        // Built alike, the same bytes.
+        again = bytes_of(fresh)
+        ensure("serialize: two compounds built alike give the same bytes", memcmp(again, compound.convert_compound_to_bytes(b), byte_count) == 0)
+        compound.destroy_compound(fresh)
+
+        // Round again: the deserialized compound's bytes back to a compound.
+        c2 = compound.convert_bytes_to_compound(again, byte_count)
+        ensure("serialize: the bytes go round twice", c2 != null && compound.ray_cast_compound(c2, math.vec3_zero(), math.vec3(20.0, 0.0, 0.0), 1.0).hit)
+        free(again)
+    }
+
+    // The reference's refusals, then ours, each on a fresh copy of good bytes.
+    // The deserialized compound is the buffer itself: back to bytes first.
+    if b != null { compound.convert_compound_to_bytes(b) }
+    good = calloc(1, byte_count)
+    memcpy(good, buffer, byte_count)
+    ensure("serialize: another version is refused", corrupt_refused(good, byte_count, 0))
+    ensure("serialize: a byte too many is refused", compound.convert_bytes_to_compound(good, byte_count + 1) == null)
+    ensure("serialize: no bytes are refused", compound.convert_bytes_to_compound(null, 0) == null && compound.convert_bytes_to_compound(good, 16) == null)
+    ensure("serialize: a node section at zero is refused", corrupt_refused(good, byte_count, 1))
+    ensure("serialize: a section past the end is refused", corrupt_refused(good, byte_count, 2))
+    ensure("serialize: a shared hull past the end is refused", corrupt_refused(good, byte_count, 3))
+    ensure("serialize: a shared hull's broken edge is refused", corrupt_refused(good, byte_count, 4))
+    ensure("serialize: a shared mesh's triangle past its vertices is refused", corrupt_refused(good, byte_count, 5))
+    ensure("serialize: a child's material past the table is refused", corrupt_refused(good, byte_count, 6))
+    ensure("serialize: a mesh's run past the map is refused", corrupt_refused(good, byte_count, 7))
+    ensure("serialize: a leaf's child past the children is refused", corrupt_refused(good, byte_count, 8))
+    ensure("serialize: a node's child past the nodes is refused", corrupt_refused(good, byte_count, 9))
+    ensure("serialize: the good bytes still convert after all that", compound.convert_bytes_to_compound(good, byte_count) != null)
+    free(good)
+    free(buffer)
+    free(materials_block)
+    hull.destroy_hull(box)
+    mesh.destroy_mesh(md)
+}
+
+// A copy of the good bytes with one thing broken, refused.
+corrupt_refused(good: ptr, byte_count: int, what: int) -> bool {
+    copy = calloc(1, byte_count)
+    memcpy(copy, good, byte_count)
+    c = copy as *CompoundData
+    if what == 0 { c.version = c.version ^ 1 }
+    else if what == 1 { c.node_offset = 0 }
+    else if what == 2 { c.sphere_offset = byte_count }
+    else if what == 3 {
+        instances = (copy + c.hull_offset) as HullInstance[]
+        instances[0].hull_offset = byte_count - 8
+    }
+    else if what == 4 {
+        instances = (copy + c.hull_offset) as HullInstance[]
+        h = (copy + instances[0].hull_offset) as *HullData
+        edges = hull.hull_edges(h)
+        edges[3].twin = h.edge_count + 5
+    }
+    else if what == 5 {
+        instances = (copy + c.mesh_offset) as MeshInstance[]
+        m = (copy + instances[0].mesh_offset) as *MeshData
+        triangles = mesh.mesh_triangles(m)
+        triangles[0].index2 = m.vertex_count
+    }
+    else if what == 6 {
+        capsules = (copy + c.capsule_offset) as CompoundCapsule[]
+        capsules[0].material_index = c.material_count
+    }
+    else if what == 7 {
+        instances = (copy + c.mesh_offset) as MeshInstance[]
+        instances[0].material_count = c.material_map_count + 1
+    }
+    else if what == 8 {
+        proxies = (copy + c.proxy_offset) as TreeProxy[]
+        proxies[0].user_data = 4 as long
+    }
+    else if what == 9 {
+        nodes = (copy + c.node_offset) as DynamicTreeNode[]
+        nodes[dynamic_tree.ROOT_NODE].flag_index = c.tree.node_end + 2
+    }
+    result = compound.convert_bytes_to_compound(copy, byte_count) == null
+    free(copy)
+    return result
+}
+
 main() {
     before = basics.alloc_count()
     test_create()
@@ -995,6 +1179,7 @@ main() {
     test_through_shape()
     test_field()
     test_brute_force_rays()
+    test_serialize()
     // The scratch stays allocated: compound's five blocks (its baked trees' per-worker stacks among them), mesh's three, sphere's two, shape's one.
     ensure("every other counted allocation was freed (${basics.alloc_count() - before})", basics.alloc_count() == before + 11)
 

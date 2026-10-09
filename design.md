@@ -176,8 +176,9 @@ started until its tests pass.
      step-free parts of test_world.c, plus every set and shape kind,
      transforms, velocities, locks, destruction in every order with the
      sets validated throughout. The reference's hull database (hulls
-     deduplicated by content and refcounted across shapes) and its name
-     cache are not ported; a hull shape keeps the pointer it was given.
+     deduplicated by content and refcounted across shapes) came later
+     (#147): a hull shape holds the world's copy, so its caller may free
+     the hull once the shape is made. The name cache is not ported.
      Second slice: the contact (creation from the broad phase's pair
      keys through the pair visitors, the edges on both bodies, the
      manifold update -- convex pairs through the manifold module,
@@ -328,7 +329,7 @@ started until its tests pass.
      its arguments in the emitted C (aether#2126). Still to port: the
      falling ragdolls (they need the human of shared/human.c, the
      ground of the Euphoria work), test_world.c's compound hit events,
-     overflow colour pile and hull database.
+     overflow colour pile and hull database (all since ported: #154, #147).
    - `aephysics.human` (done, PR #29): the reference's ragdoll
      (shared/human.c) as a module, with the body forces, torques and
      impulses, the bullet setter and body_get_contact_data it needed on dynamics. 44 checks

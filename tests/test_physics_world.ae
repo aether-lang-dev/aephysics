@@ -6,8 +6,9 @@
 // explosion pushing a sphere the same near and far from the origin;
 // test_body_query.c's casts, overlaps and mover queries against one
 // body at a transform of the caller's, far from the origin too; the
-// world queries over every shape; and a wave pile stepping alike
-// twice, with its sleep step as the checksum.
+// world queries over every shape; a wave pile stepping alike twice,
+// with its sleep step as the checksum; and the hull database
+// (TestHullDatabase, #147).
 import std.string
 import aephysics.math
 import aephysics.basics
@@ -2187,6 +2188,117 @@ test_determinism() {
     hull.destroy_hull(cube)
 }
 
+// The reference's TestHullDatabase: two shapes made from one hull hold one
+// world-owned copy, not the caller's hull; a hull built again finds the
+// same copy; setting a shape's hull to its own copy keeps it; destroying
+// one shape keeps the other's; the world drains to no hulls. Past it: the
+// caller frees its hull as soon as the shape is made and the shape still
+// collides; transformed hulls bake once per transform and scale and are
+// refused without volume; a hull given up by set_hull, by a change to a
+// sphere or by its body's destruction goes when its last holder does; a
+// world destroyed holding hulls frees them; nothing counted is left over.
+test_hull_database() {
+    before = basics.alloc_count()
+    wdef = dynamics.default_world_def()
+    world_id = dynamics.create_world(&wdef)
+    box = hull.make_box_hull(0.5, 0.5, 0.5)
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    body_a = dynamics.create_body(world_id, &bdef)
+    body_b = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    shape_a = dynamics.create_hull_shape(body_a, &sdef, box)
+    shape_b = dynamics.create_hull_shape(body_b, &sdef, box)
+    got_a = dynamics.shape_get_hull(shape_a)
+    got_b = dynamics.shape_get_hull(shape_b)
+    ensure("hull database: both shapes hold the one copy", got_a == got_b)
+    ensure("hull database: the copy is the world's, not the caller's", got_a != box)
+    ensure("hull database: one hull held", dynamics.world_hull_count(world_id) == 1)
+
+    box2 = hull.make_box_hull(0.5, 0.5, 0.5)
+    body_c = dynamics.create_body(world_id, &bdef)
+    shape_c = dynamics.create_hull_shape(body_c, &sdef, box2)
+    ensure("hull database: a box built again finds the same copy", dynamics.shape_get_hull(shape_c) == got_a)
+    dynamics.destroy_shape(shape_c, true)
+    hull.destroy_hull(box2)
+
+    box3 = hull.make_box_hull(0.3, 0.3, 0.3)
+    body_d = dynamics.create_body(world_id, &bdef)
+    shape_d = dynamics.create_hull_shape(body_d, &sdef, box3)
+    got_d = dynamics.shape_get_hull(shape_d)
+    ensure("hull database: another hull is another copy", got_d != got_a && dynamics.world_hull_count(world_id) == 2)
+    dynamics.shape_set_hull(shape_d, got_d)
+    ensure("hull database: a shape's hull set to its own copy keeps it", dynamics.shape_get_hull(shape_d) == got_d && dynamics.world_hull_count(world_id) == 2)
+    dynamics.destroy_shape(shape_d, true)
+    ensure("hull database: its last holder gone, the copy goes", dynamics.world_hull_count(world_id) == 1)
+
+    dynamics.destroy_shape(shape_a, true)
+    ensure("hull database: one shape gone, the other's copy stays", dynamics.shape_get_hull(shape_b) == got_b && dynamics.world_hull_count(world_id) == 1)
+    dynamics.destroy_shape(shape_b, true)
+    ensure("hull database: drained", dynamics.world_hull_count(world_id) == 0)
+
+    // The caller's hull freed at once: the shape still lands on the ground.
+    gdef = dynamics.default_body_def()
+    gdef.position = math.vec3(0.0, 0.0 - 1.0, 0.0)
+    ground = dynamics.create_body(world_id, &gdef)
+    slab = hull.make_box_hull(20.0, 1.0, 20.0)
+    dynamics.create_hull_shape(ground, &sdef, slab)
+    hull.destroy_hull(slab)
+    bdef.position = math.vec3(0.0, 2.0, 0.0)
+    faller = dynamics.create_body(world_id, &bdef)
+    temporary = hull.make_box_hull(0.5, 0.5, 0.5)
+    falling = dynamics.create_hull_shape(faller, &sdef, temporary)
+    hull.destroy_hull(temporary)
+    i = 0
+    while i < 120 {
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        i = i + 1
+    }
+    y = dynamics.body_get_position(faller).y
+    ensure("hull database: a hull freed by its caller still collides (at ${y})", math.abs_float(y - 0.5) < 0.02)
+
+    // Transformed hulls: baked once per transform and scale.
+    xf = Transform { p: math.vec3(0.0, 0.25, 0.0), q: math.make_quat_from_axis_angle(math.vec3_axis_y(), 0.3) }
+    held = dynamics.world_hull_count(world_id)
+    body_e = dynamics.create_body(world_id, &bdef)
+    t1 = dynamics.create_transformed_hull_shape(body_e, &sdef, box, xf, math.vec3(2.0, 1.0, 1.0))
+    t2 = dynamics.create_transformed_hull_shape(body_e, &sdef, box, xf, math.vec3(2.0, 1.0, 1.0))
+    ensure("hull database: one transform and scale baked once", dynamics.shape_get_hull(t1) == dynamics.shape_get_hull(t2) && dynamics.world_hull_count(world_id) == held + 1)
+    stretched = dynamics.shape_get_hull(t1)
+    ensure("hull database: the baked hull is stretched (${stretched.volume})", math.abs_float(stretched.volume - 2.0) < 0.000001)
+    mirrored = dynamics.create_transformed_hull_shape(body_e, &sdef, box, xf, math.vec3(0.0 - 1.0, 1.0, 1.0))
+    ensure("hull database: a mirror is its own hull, of the same volume", dynamics.shape_is_valid(mirrored) &&
+           dynamics.world_hull_count(world_id) == held + 2 && math.abs_float(dynamics.shape_get_hull(mirrored).volume - 1.0) < 0.000001)
+    // A zero scale is made safe, as the reference's b3SafeScale makes it:
+    // the least scale, a thin hull of its own.
+    flat = dynamics.create_transformed_hull_shape(body_e, &sdef, box, xf, math.vec3(1.0, 0.0, 1.0))
+    ensure("hull database: a zero scale becomes the least scale, a thin hull", dynamics.shape_is_valid(flat) &&
+           dynamics.world_hull_count(world_id) == held + 3 && math.abs_float(dynamics.shape_get_hull(flat).volume - math.MIN_SCALE) < 0.000001)
+    ensure("hull database: no hull, no shape", dynamics.shape_is_valid(dynamics.create_transformed_hull_shape(body_e, &sdef, null, xf, math.vec3_one())) == false)
+    nowhere = dynamics.create_hull_shape(dynamics.BodyId { index1: 0, world0: world_id.index1 - 1, generation: 0 }, &sdef, box)
+    ensure("hull database: no body, no shape and no hull held", dynamics.shape_is_valid(nowhere) == false && dynamics.world_hull_count(world_id) == held + 3)
+
+    // A hull given up by set_hull and by a change to a sphere.
+    other = hull.make_box_hull(0.2, 0.4, 0.6)
+    dynamics.shape_set_hull(t1, other)
+    ensure("hull database: set to another hull, the baked one still held by its twin", dynamics.world_hull_count(world_id) == held + 4 &&
+           dynamics.shape_get_hull(t2) == stretched)
+    dynamics.shape_set_sphere(t2, Sphere { center: math.vec3_zero(), radius: 0.5 })
+    ensure("hull database: its twin a sphere now, the baked hull goes", dynamics.world_hull_count(world_id) == held + 3)
+    hull.destroy_hull(other)
+
+    // Destroying the body gives up all of its hulls.
+    dynamics.destroy_body(body_e)
+    ensure("hull database: the body's hulls go with it", dynamics.world_hull_count(world_id) == held)
+
+    // The world destroyed holding hulls frees them.
+    ensure("hull database: the ground's and the faller's hulls held to the end", dynamics.world_hull_count(world_id) == 2 && dynamics.shape_is_valid(falling))
+    dynamics.destroy_world(world_id)
+    hull.destroy_hull(box)
+    hull.destroy_hull(box3)
+    ensure("hull database: nothing counted left over (${basics.alloc_count() - before})", basics.alloc_count() == before)
+}
+
 main() {
     dynamics.reserve_scratch()
     before = basics.alloc_count()
@@ -2225,6 +2337,7 @@ main() {
     test_mover_time_of_impact()
     test_world_queries()
     test_determinism()
+    test_hull_database()
     // The scratch stays allocated: the worlds, the masses, the sweep and query buffers, the solvers' dummies (the modules' scratch is reserved before the count). The mover's planes are each query's own now, freed with it.
     ensure("every other counted allocation was freed (${basics.alloc_count() - before})", basics.alloc_count() == before + 8)
     println("physics_world: ${checks} checks")

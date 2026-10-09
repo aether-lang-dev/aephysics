@@ -30,9 +30,11 @@
 // comes with joint_solver), sensors (their overlaps begin and end), and
 // the validation. Nothing here steps time.
 //
-// Differences: no hull database (a hull shape keeps the pointer it was
-// given; the owner keeps the hull alive), no name cache, no recording
-// hooks; a world's callbacks are plain function values.
+// The hull database is the reference's: a hull shape holds the world's
+// copy of its hull, shared by every shape of an equal hull and freed with
+// its last, so a caller may free its hull once the shape is made.
+// Differences: no name cache, no recording hooks; a world's callbacks are
+// plain function values.
 import std.string
 import aephysics.math
 import aephysics.native
@@ -85,7 +87,8 @@ exports (
     body_is_awake, body_set_awake, body_is_enabled, body_is_sleep_enabled, body_enable_sleep,
     body_set_sleep_threshold, body_get_sleep_threshold, body_get_shape_count, body_get_shapes, body_compute_aabb,
     body_set_motion_locks, body_get_motion_locks, body_get_flags,
-    create_sphere_shape, create_capsule_shape, create_hull_shape, create_mesh_shape, create_height_field_shape,
+    create_sphere_shape, create_capsule_shape, create_hull_shape, create_transformed_hull_shape, create_mesh_shape, create_height_field_shape,
+    HullEntry, world_hull_count,
     create_compound_shape, destroy_shape, shape_is_valid, get_shape_full_id, get_shape, shape_get_body,
     shape_get_aabb, shape_get_type, shape_get_density, shape_set_density, shape_get_filter, shape_set_filter,
     shape_get_surface_material, shape_set_surface_material, shape_get_material_count, shape_is_sensor,
@@ -1238,6 +1241,10 @@ struct World {
     shape_id_pool: IdPool
     shapes: Buffer                 // WorldShape
     fat_aabbs: Buffer              // AABB by shape id: the fat boxes, dense for the collide pass (the reference's fatAABBs)
+    hull_entries: Buffer           // HullEntry: the hull database (the reference's hullDatabase)
+    hull_heads: LongMap            // a hull's hash to the first entry of that hash
+    hull_free: int                 // the first free entry, chained through next
+    hull_count: int                // the distinct hulls held
     sensors: Buffer                // Sensor
     sensor_begin_events: Buffer    // SensorBeginTouchEvent
     sensor_end_events0: Buffer     // SensorEndTouchEvent, double buffered with the contacts' index
@@ -1444,6 +1451,10 @@ create_world(def: *WorldDef) -> WorldId {
     w.shape_id_pool = basics.idpool_create()
     w.shapes = basics.buffer_create(sizeof(WorldShape), math.max_int(16, def.static_shape_count + def.dynamic_shape_count))
     w.fat_aabbs = basics.buffer_create(sizeof(AABB), math.max_int(16, def.static_shape_count + def.dynamic_shape_count))
+    w.hull_entries = basics.buffer_create(sizeof(HullEntry), 0)
+    w.hull_heads = basics.map_create(16)
+    w.hull_free = NULL_INDEX
+    w.hull_count = 0
     w.sensors = basics.buffer_create(sizeof(Sensor), 0)
     w.sensor_begin_events = basics.buffer_create(sizeof(SensorBeginTouchEvent), 4)
     w.sensor_end_events0 = basics.buffer_create(sizeof(SensorEndTouchEvent), 4)
@@ -1574,6 +1585,16 @@ destroy_world(id: WorldId) {
     basics.idpool_destroy(&w.body_id_pool)
     basics.buffer_destroy(&w.shapes)
     basics.buffer_destroy(&w.fat_aabbs)
+    // The hulls the shapes still held, owned by the world.
+    i = 0
+    while i < w.hull_entries.count {
+        entry = hull_entry_at(w, i)
+        if entry.hull != null { hull.destroy_hull(entry.hull as *HullData) }
+        i = i + 1
+    }
+    basics.buffer_destroy(&w.hull_entries)
+    basics.map_destroy(&w.hull_heads)
+    w.hull_count = 0
     basics.idpool_destroy(&w.shape_id_pool)
     basics.buffer_destroy(&w.contacts)
     basics.idpool_destroy(&w.contact_id_pool)
@@ -1949,6 +1970,7 @@ destroy_body(id: BodyId) {
     while shape_id != NULL_INDEX {
         s = world_shape_at(w, shape_id)
         if s.geometry.kind == KIND_COMPOUND { w.compound_shape_count = w.compound_shape_count - 1 }
+        if s.geometry.kind == KIND_HULL { remove_hull_from_database(w, s.geometry.hull) }
         if s.sensor_index != NULL_INDEX { destroy_sensor(w, s) }
         if s.proxy_key != NULL_INDEX {
             broad_phase.broad_phase_destroy_proxy(&w.broad_phase, s.proxy_key)
@@ -2155,11 +2177,145 @@ create_capsule_shape(body_id: BodyId, def: *ShapeDef, c: Capsule) -> ShapeId {
     return create_shape(body_id, def, shape.capsule_shape(c, def.density))
 }
 
+// --- the hull database (the reference's hullDatabase, #147) -------------------------
+
+// One entry of the world's hull database: an owned copy of a hull its
+// shapes use and how many shapes hold it. Equal hulls (every byte; the
+// hash only finds the candidates) share one entry, so shapes made from
+// the same hull, or from one built again, hold one copy, and a caller's
+// hull may be freed as soon as its shape is made.
+struct HullEntry {
+    hull: ptr        // *HullData, the world's; null when the entry is free
+    hash: long
+    ref_count: int
+    next: int        // the next entry of the same hash, or the next free entry
+}
+
+hull_entry_at(w: *World, index: int) -> *HullEntry { return (w.hull_entries.data + index * sizeof(HullEntry)) as *HullEntry }
+
+// The entry holding a hull equal to `h`, or NULL_INDEX.
+find_hull_entry(w: *World, h: *HullData) -> int {
+    index = basics.map_get(&w.hull_heads, h.hash, NULL_INDEX)
+    while index != NULL_INDEX {
+        entry = hull_entry_at(w, index)
+        if hull.compare_hull_data(entry.hull as *HullData, h) { return index }
+        index = entry.next
+    }
+    return NULL_INDEX
+}
+
+// A new entry for `owned` at the head of its hash's chain, held once.
+insert_hull_entry(w: *World, owned: *HullData) -> *HullData {
+    index = w.hull_free
+    if index != NULL_INDEX {
+        w.hull_free = hull_entry_at(w, index).next
+    } else {
+        index = basics.buffer_push(&w.hull_entries)
+    }
+    entry = hull_entry_at(w, index)
+    entry.hull = owned as ptr
+    entry.hash = owned.hash
+    entry.ref_count = 1
+    entry.next = basics.map_get(&w.hull_heads, owned.hash, NULL_INDEX)
+    basics.map_set(&w.hull_heads, owned.hash, index)
+    w.hull_count = w.hull_count + 1
+    return owned
+}
+
+// The world's copy of `h`, held once more: the existing one when an equal
+// hull is held, else a clone (b3AddHullToDatabase). Null when `h` is not
+// a valid hull.
+add_hull_to_database(w: *World, h: *HullData) -> *HullData {
+    found = find_hull_entry(w, h)
+    if found != NULL_INDEX {
+        entry = hull_entry_at(w, found)
+        entry.ref_count = entry.ref_count + 1
+        return entry.hull as *HullData
+    }
+    clone = hull.clone_hull(h)
+    if clone == null { return null }
+    return insert_hull_entry(w, clone)
+}
+
+// As add_hull_to_database for a hull the world takes over: freed at once
+// when an equal one is already held (b3AddOwnedHullToDatabase).
+add_owned_hull_to_database(w: *World, owned: *HullData) -> *HullData {
+    found = find_hull_entry(w, owned)
+    if found != NULL_INDEX {
+        entry = hull_entry_at(w, found)
+        entry.ref_count = entry.ref_count + 1
+        hull.destroy_hull(owned)
+        return entry.hull as *HullData
+    }
+    return insert_hull_entry(w, owned)
+}
+
+// One hold of the world's copy given up; the copy is freed with its last
+// (b3RemoveHullFromDatabase). `h` is the world's copy itself.
+remove_hull_from_database(w: *World, h: *HullData) {
+    previous = NULL_INDEX
+    index = basics.map_get(&w.hull_heads, h.hash, NULL_INDEX)
+    while index != NULL_INDEX {
+        entry = hull_entry_at(w, index)
+        if entry.hull == (h as ptr) {
+            entry.ref_count = entry.ref_count - 1
+            if entry.ref_count > 0 { return }
+            if previous == NULL_INDEX {
+                if entry.next == NULL_INDEX { basics.map_remove(&w.hull_heads, entry.hash) }
+                else { basics.map_set(&w.hull_heads, entry.hash, entry.next) }
+            } else {
+                hull_entry_at(w, previous).next = entry.next
+            }
+            hull.destroy_hull(h)
+            entry.hull = null
+            entry.hash = 0 as long
+            entry.next = w.hull_free
+            w.hull_free = index
+            w.hull_count = w.hull_count - 1
+            return
+        }
+        previous = index
+        index = entry.next
+    }
+}
+
+// The distinct hulls a world holds for its shapes.
+world_hull_count(world_id: WorldId) -> int {
+    if world_is_valid(world_id) == false { return 0 }
+    return get_world_from_id(world_id).hull_count
+}
+
 // The baked shapes are refused when they are missing or of another
-// layout's version, as the reference refuses them.
+// layout's version, as the reference refuses them. A hull shape holds the
+// world's copy of its hull (the hull database), never the caller's: the
+// caller may free its hull once the shape is made.
 create_hull_shape(body_id: BodyId, def: *ShapeDef, h: *HullData) -> ShapeId {
     if h == null || h.version != hull.HULL_VERSION { return null_shape_id() }
-    return create_shape(body_id, def, shape.hull_shape(h, def.density))
+    if body_is_valid(body_id) == false { return null_shape_id() }
+    w = world_at(body_id.world0)
+    if w.locked { return null_shape_id() }
+    shared = add_hull_to_database(w, h)
+    if shared == null { return null_shape_id() }
+    id = create_shape(body_id, def, shape.hull_shape(shared, def.density))
+    if id.index1 == 0 { remove_hull_from_database(w, shared) }
+    return id
+}
+
+// A hull scaled (non-uniformly, or mirrored) then moved by `transform`,
+// baked into the world's own copy and shared like any other
+// (b3CreateTransformedHullShape). Refused when the result has no volume.
+create_transformed_hull_shape(body_id: BodyId, def: *ShapeDef, h: *HullData, transform: Transform, scale: Vec3) -> ShapeId {
+    if h == null || h.version != hull.HULL_VERSION { return null_shape_id() }
+    if math.is_valid_transform(transform) == false || math.is_valid_vec3(scale) == false { return null_shape_id() }
+    if body_is_valid(body_id) == false { return null_shape_id() }
+    w = world_at(body_id.world0)
+    if w.locked { return null_shape_id() }
+    baked = hull.clone_and_transform_hull(h, transform, scale)
+    if baked == null { return null_shape_id() }
+    shared = add_owned_hull_to_database(w, baked)
+    id = create_shape(body_id, def, shape.hull_shape(shared, def.density))
+    if id.index1 == 0 { remove_hull_from_database(w, shared) }
+    return id
 }
 create_mesh_shape(body_id: BodyId, def: *ShapeDef, m: *MeshData, scale: Vec3) -> ShapeId {
     if m == null || m.version != mesh.MESH_VERSION || math.is_valid_vec3(scale) == false { return null_shape_id() }
@@ -2203,6 +2359,7 @@ destroy_shape(id: ShapeId, update_body_mass: bool) {
     if body.head_shape_id == s.id { body.head_shape_id = s.next_shape_id }
     body.shape_count = body.shape_count - 1
     if s.geometry.kind == KIND_COMPOUND { w.compound_shape_count = w.compound_shape_count - 1 }
+    if s.geometry.kind == KIND_HULL { remove_hull_from_database(w, s.geometry.hull) }
     if s.sensor_index != NULL_INDEX { destroy_sensor(w, s) }
     if s.proxy_key != NULL_INDEX {
         broad_phase.broad_phase_destroy_proxy(&w.broad_phase, s.proxy_key)
@@ -2320,9 +2477,22 @@ shape_set_capsule(id: ShapeId, c: Capsule) {
     if valid_capsule(c) == false { return }
     change_shape_geometry(id, shape.capsule_shape(c, 0.0))
 }
+// The new hull is taken into the database before the old is given up, so
+// `h` may be the shape's own copy; the same copy changes nothing (no
+// contacts lost, no proxy made again), as in b3Shape_SetHull.
 shape_set_hull(id: ShapeId, h: *HullData) {
     if h == null || h.version != hull.HULL_VERSION { return }
-    change_shape_geometry(id, shape.hull_shape(h, 0.0))
+    w = world_at(id.world0)
+    if w.locked { return }
+    s = get_shape_full_id(w, id)
+    if s.geometry.kind == KIND_COMPOUND || s.geometry.kind == KIND_HEIGHT_FIELD { return }
+    shared = add_hull_to_database(w, h)
+    if shared == null { return }
+    if s.geometry.kind == KIND_HULL && s.geometry.hull == shared {
+        remove_hull_from_database(w, shared)
+        return
+    }
+    change_shape_geometry(id, shape.hull_shape(shared, 0.0))
 }
 shape_set_mesh(id: ShapeId, m: *MeshData, scale: Vec3) {
     if m == null || m.version != mesh.MESH_VERSION || math.is_valid_vec3(scale) == false { return }
@@ -2334,6 +2504,8 @@ change_shape_geometry(id: ShapeId, geometry: Shape) {
     if w.locked { return }
     s = get_shape_full_id(w, id)
     if s.geometry.kind == KIND_COMPOUND || s.geometry.kind == KIND_HEIGHT_FIELD { return }
+    // A hull the shape held goes back to the database.
+    if s.geometry.kind == KIND_HULL { remove_hull_from_database(w, s.geometry.hull) }
     density = s.geometry.density
     s.geometry = geometry
     s.geometry.density = density
