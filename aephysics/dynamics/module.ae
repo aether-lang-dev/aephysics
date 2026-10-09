@@ -5310,37 +5310,37 @@ update_contact(w: *World, c: *Contact, shape_a: *WorldShape, local_center_a: Vec
     kind_a = shape_a.geometry.kind
     if kind_a == KIND_COMPOUND {
         child = compound.get_compound_child(shape_a.geometry.compound, c.child_index)
-        child_geometry = child_geometry() as *Shape
+        child_shape = child_geometry() as *Shape
         materials_a = shape_a.materials as SurfaceMaterial[]
         child_material = materials_a[math.clamp_int(child.material_index0, 0, shape_a.material_count - 1)]
         if child.kind == KIND_CAPSULE {
             cg = shape.capsule_shape(child.capsule, 0.0)
-            copy_geometry(child_geometry, cg)
+            copy_geometry(child_shape, cg)
             if shape_b.geometry.kind == KIND_HULL {
-                touching = update_convex_contact(w, c, &shape_b.geometry, shape_b.material, shape_b.flags, xf_b, child_geometry, child_material, shape_a.flags, xf_a, true)
+                touching = update_convex_contact(w, c, &shape_b.geometry, shape_b.material, shape_b.flags, xf_b, child_shape, child_material, shape_a.flags, xf_a, true)
             } else {
-                touching = update_convex_contact(w, c, child_geometry, child_material, shape_a.flags, xf_a, &shape_b.geometry, shape_b.material, shape_b.flags, xf_b, false)
+                touching = update_convex_contact(w, c, child_shape, child_material, shape_a.flags, xf_a, &shape_b.geometry, shape_b.material, shape_b.flags, xf_b, false)
             }
         } else if child.kind == KIND_HULL {
             cg = shape.hull_shape(child.hull, 0.0)
-            copy_geometry(child_geometry, cg)
+            copy_geometry(child_shape, cg)
             xf_child = math.mul_transforms(xf_a, child.transform)
-            touching = update_convex_contact(w, c, child_geometry, child_material, shape_a.flags, xf_child, &shape_b.geometry, shape_b.material, shape_b.flags, xf_b, false)
+            touching = update_convex_contact(w, c, child_shape, child_material, shape_a.flags, xf_child, &shape_b.geometry, shape_b.material, shape_b.flags, xf_b, false)
         } else if child.kind == KIND_MESH {
             cg = shape.mesh_shape(child.mesh, shape_a.material_count)
-            copy_geometry(child_geometry, cg)
+            copy_geometry(child_shape, cg)
             xf_child = math.mul_transforms(xf_a, child.transform)
             // The child's own run of indices into the compound's materials.
-            touching = update_mesh_contact(w, c, child_geometry, shape_a, child.material_indices, child.material_count, xf_child, shape_b, xf_b, is_fast)
+            touching = update_mesh_contact(w, c, child_shape, shape_a, child.material_indices, child.material_count, xf_child, shape_b, xf_b, is_fast)
             convex = false
             set_hit_event_flag(c, touching, shape_a.flags, shape_b.flags)
         } else {
             cg = shape.sphere_shape(child.sphere, 0.0)
-            copy_geometry(child_geometry, cg)
+            copy_geometry(child_shape, cg)
             if shape_b.geometry.kind == KIND_CAPSULE || shape_b.geometry.kind == KIND_HULL {
-                touching = update_convex_contact(w, c, &shape_b.geometry, shape_b.material, shape_b.flags, xf_b, child_geometry, child_material, shape_a.flags, xf_a, true)
+                touching = update_convex_contact(w, c, &shape_b.geometry, shape_b.material, shape_b.flags, xf_b, child_shape, child_material, shape_a.flags, xf_a, true)
             } else {
-                touching = update_convex_contact(w, c, child_geometry, child_material, shape_a.flags, xf_a, &shape_b.geometry, shape_b.material, shape_b.flags, xf_b, false)
+                touching = update_convex_contact(w, c, child_shape, child_material, shape_a.flags, xf_a, &shape_b.geometry, shape_b.material, shape_b.flags, xf_b, false)
             }
         }
         // The anchors are relative to the child's origin: offset to the compound's.
