@@ -469,6 +469,16 @@ test_sets_and_shapes() {
     pv = dynamics.body_get_world_point_velocity(awake_id, math.add(dynamics.body_get_world_center(awake_id), math.vec3(1.0, 0.0, 0.0)))
     small("point velocity x", pv.x - 1.0, 0.00001)
     small("point velocity y", pv.y - 1.0, 0.00001)
+    // The same by the point's body coordinates (b3Body_GetLocalPointVelocity),
+    // the body turned a quarter about z: the local x axis points along world y.
+    dynamics.body_set_transform(awake_id, math.vec3(10.0, 0.0, 0.0), math.make_quat_from_axis_angle(math.vec3(0.0, 0.0, 1.0), 0.5 * math.PI))
+    local_point = math.add(dynamics.body_get_local_center(awake_id), math.vec3(1.0, 0.0, 0.0))
+    lv = dynamics.body_get_local_point_velocity(awake_id, local_point)
+    wv2 = dynamics.body_get_world_point_velocity(awake_id, dynamics.body_get_world_point(awake_id, local_point))
+    small("local point velocity x", lv.x, 0.00001)
+    small("local point velocity y", lv.y, 0.00001)
+    small("local and world point velocities agree", math.length(math.sub(lv, wv2)), 0.00001)
+    dynamics.body_set_transform(awake_id, math.vec3(10.0, 0.0, 0.0), math.quat_identity())
     // Damping, gravity scale, user data, sleep.
     dynamics.body_set_linear_damping(awake_id, 0.3)
     dynamics.body_set_angular_damping(awake_id, 0.4)
@@ -1248,6 +1258,37 @@ test_shape_flags() {
     dynamics.destroy_world(world_id)
 }
 
+// A force at a point (b3Body_ApplyForce): the force, and the torque of
+// its arm about the centre of mass, as a force at the centre and that
+// torque give.
+test_point_force() {
+    world_id = new_world()
+    w = dynamics.get_world(world_id.index1 - 1)
+    sdef = dynamics.default_shape_def()
+    sdef.density = 1.0
+    bdef = dynamic_body_def()
+    bdef.position = math.vec3(2.0, 3.0, 4.0)
+    pushed = dynamics.create_body(world_id, &bdef)
+    dynamics.create_sphere_shape(pushed, &sdef, manifold.sphere(math.vec3_zero(), 0.5))
+    bdef.position = math.vec3(12.0, 3.0, 4.0)
+    twin = dynamics.create_body(world_id, &bdef)
+    dynamics.create_sphere_shape(twin, &sdef, manifold.sphere(math.vec3_zero(), 0.5))
+    force = math.vec3(0.0, 10.0, 0.0)
+    arm = math.vec3(1.0, 0.0, 0.0)
+    dynamics.body_apply_force(pushed, force, math.add(dynamics.body_get_world_center(pushed), arm), true)
+    dynamics.body_apply_force_to_center(twin, force, true)
+    dynamics.body_apply_torque(twin, math.cross(arm, force), true)
+    a = dynamics.get_body_sim(w, dynamics.get_body_full_id(w, pushed))
+    b = dynamics.get_body_sim(w, dynamics.get_body_full_id(w, twin))
+    ensure("point force: the force", a.force.x == b.force.x && a.force.y == b.force.y && a.force.z == b.force.z && a.force.y == (10.0 as f32))
+    ensure("point force: the torque of its arm", a.torque.x == b.torque.x && a.torque.y == b.torque.y && a.torque.z == b.torque.z && a.torque.z == (10.0 as f32))
+    // Not finite: refused, the accumulators untouched.
+    zero = math.length(math.vec3_zero())
+    dynamics.body_apply_force(pushed, math.vec3(0.0, 0.0 - 1.0 / zero, 0.0), math.vec3_zero(), true)
+    ensure("point force: a force not finite is refused", a.force.y == (10.0 as f32) && a.torque.z == (10.0 as f32))
+    dynamics.destroy_world(world_id)
+}
+
 // test_shape.c's ShapeNameTest: no name from a default def, the def's name
 // carried, the setter overwriting, a long name kept whole (the reference's
 // name cache keeps it so), null clearing it; a body's name from its def.
@@ -1757,6 +1798,7 @@ main() {
     test_shape_api()
     test_shape_flags()
     test_shape_names()
+    test_point_force()
     test_sensors()
     hull.destroy_hull(g_cube as *HullData)
     hull.destroy_hull(g_slab as *HullData)

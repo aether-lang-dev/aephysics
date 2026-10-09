@@ -35,7 +35,7 @@ import aephysics.mesh_contact
 import aephysics.dynamics
 
 exports (
-    SNAPSHOT_MAGIC, SNAPSHOT_VERSION, snapshot_layout, save_world, load_world, free_snapshot
+    SNAPSHOT_MAGIC, SNAPSHOT_VERSION, snapshot_layout, save_world, load_world, restore_world, free_snapshot
 )
 
 extern memcpy(dst: ptr, src: ptr, size: int) -> ptr
@@ -592,6 +592,26 @@ load_world(def: *WorldDef, data: ptr, size: int) -> WorldId {
         return null_id
     }
     return world_id
+}
+
+// The world `world_id` made what the snapshot holds, in place: its id,
+// workers, callbacks, filters and user data stay (the reference's
+// deserialize into a shell, what a replay rewinds with). False when the
+// world is not one, is mid-step or records, or when the bytes are not a
+// snapshot of this layout or fail any check; the world is then left empty,
+// as a new world from `def` is, never half loaded. `def` gives the
+// capacities the emptied world starts from.
+restore_world(world_id: WorldId, def: *WorldDef, data: ptr, size: int) -> bool {
+    if data == null || size < 16 { return false }
+    rd = SnapReader { data: data, size: size, at: 0, ok: true }
+    if r_int(&rd) != SNAPSHOT_MAGIC || r_int(&rd) != SNAPSHOT_VERSION || r_long(&rd) != snapshot_layout() { return false }
+    if dynamics.reset_world(world_id, def) == false { return false }
+    w = dynamics.get_world(world_id.index1 - 1)
+    if fill_world(w, &rd) == false || rd.at != rd.size || world_valid(w) == false {
+        dynamics.reset_world(world_id, def)
+        return false
+    }
+    return true
 }
 
 // The world's own invariants over everything loaded.

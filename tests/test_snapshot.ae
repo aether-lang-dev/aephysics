@@ -25,6 +25,7 @@ import aephysics.joint_solver
 import aephysics.physics_world
 import aephysics.human
 import aephysics.snapshot
+import aephysics.recording
 
 extern calloc(count: int, size: int) -> ptr
 extern exit(code: int)
@@ -441,6 +442,64 @@ across_workers() {
     dynamics.destroy_world(original)
 }
 
+// A world restored in place keeps its id and its host's wiring, and
+// steps on as the world it was saved from; bytes that are not a snapshot,
+// a world mid-recording and a world that is not one are refused, the
+// refused world left empty and whole.
+restore_in_place() {
+    wdef = world_def()
+    original = dynamics.create_world(&wdef)
+    build_scene(original)
+    steps(original, 25)
+    block, byte_count = snapshot.save_world(original)
+    target_def = world_def()
+    target_def.worker_count = 2
+    target_def.user_data = block
+    target = dynamics.create_world(&target_def)
+    sdef = dynamics.default_shape_def()
+    stale = dynamic_body(target, math.vec3(0.0, 5.0, 0.0))
+    dynamics.create_sphere_shape(stale, &sdef, manifold.sphere(math.vec3_zero(), 0.5))
+    steps(target, 3)
+    ensure("restore: in place", snapshot.restore_world(target, &target_def, block, byte_count))
+    w = dynamics.get_world(target.index1 - 1)
+    ensure("restore: the id, workers and user data stay", dynamics.world_is_valid(target) && w.worker_count == 2 && w.user_data == block)
+    ensure("restore: hashes as the original", state_hash(target) == state_hash(original))
+    alike = true
+    i = 0
+    while i < 60 {
+        physics_world.step(original, 1.0 / 60.0, 4)
+        physics_world.step(target, 1.0 / 60.0, 4)
+        if state_hash(original) != state_hash(target) || events_of(original) != events_of(target) { alike = false }
+        i = i + 1
+    }
+    ensure("restore: steps on alike for 60 steps", alike)
+    ensure("restore: again over a stepped world", snapshot.restore_world(target, &target_def, block, byte_count))
+    resaved, resaved_count = snapshot.save_world(target)
+    ensure("restore: saved again, the same bytes", resaved_count == byte_count && memcmp(resaved, block, byte_count) == 0)
+    snapshot.free_snapshot(resaved, resaved_count)
+
+    snapshot.restore_world(target, &target_def, block, byte_count)
+    loaded_count = basics.alloc_count()
+    refused = snapshot.restore_world(target, &target_def, block, byte_count / 2) == false
+    ensure("restore: a truncation refused", refused)
+    ensure("restore: the refused world is empty and whole", dynamics.world_is_valid(target) && dynamics.world_body_count(w) == 0 && w.worker_count == 2)
+    steps(target, 2)
+    snapshot.restore_world(target, &target_def, block, byte_count)
+    ensure("restore: the refusal leaves nothing behind (${basics.alloc_count() - loaded_count})", basics.alloc_count() == loaded_count)
+    ensure("restore: no world", snapshot.restore_world(WorldId { index1: 0, generation: 0 }, &target_def, block, byte_count) == false)
+    ensure("restore: no bytes", snapshot.restore_world(target, &target_def, null, 0) == false)
+    r = recording.create_recording()
+    recording.start_recording(target, r)
+    ensure("restore: a world that records is refused", snapshot.restore_world(target, &target_def, block, byte_count) == false)
+    recording.stop_recording(target)
+    recording.destroy_recording(r)
+    ensure("restore: after the recording stops", snapshot.restore_world(target, &target_def, block, byte_count) && state_hash(target) != (0 as long))
+    dynamics.destroy_world(target)
+    snapshot.free_snapshot(block, byte_count)
+    human.destroy_human(g_ragdoll as *Human)
+    dynamics.destroy_world(original)
+}
+
 // Every damage to the bytes loads no world and leaves nothing behind.
 corruptions() {
     wdef = world_def()
@@ -513,6 +572,7 @@ main() {
     round_trip(45)
     round_trip(200)
     across_workers()
+    restore_in_place()
     corruptions()
     ensure("every counted allocation was freed (${basics.alloc_count() - before})", basics.alloc_count() == before)
     fixtures_free()

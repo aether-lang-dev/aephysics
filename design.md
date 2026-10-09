@@ -365,7 +365,17 @@ started until its tests pass.
 15. **recording and replay**, `world_snapshot`: last, since they are the
    tooling and not the engine. The snapshot is in (`aephysics.snapshot`,
    #149's first part): a loaded world steps on bit for bit as the one it
-   was taken from. Recording, replay and the name cache build on it.
+   was taken from. Recording and replay are in (`aephysics.recording`,
+   #149's second part): the hooks at the top of every call that changes a
+   world, generated from the calls' signatures, write the record before
+   the call runs, so nothing the call does is recorded twice; the player
+   restores its world in place (`dynamics.reset_world`, the reference's
+   deserialize into a shell), so ids handed to a viewer stay valid through
+   a seek. Recording the world queries, and the name cache, are next. Two
+   functions no test called hid type errors (`body_apply_force`,
+   `body_get_local_point_velocity`) until the replay dispatcher called
+   every recorded one: `ae build` checks only what a program reaches
+   (aether#2613), so the gate now runs `ae check` on every module.
 16. **benchmarks** (done, #141): `reference/benchmark/main.c`'s thirteen
    scenes and its SAT runs, against the reference's own scene functions
    on the same machine: the large pyramid, the many pyramids and the

@@ -89,6 +89,9 @@ exports (
     body_set_motion_locks, body_get_motion_locks, body_get_flags,
     create_sphere_shape, create_capsule_shape, create_hull_shape, create_transformed_hull_shape, create_mesh_shape, create_height_field_shape,
     HullEntry, world_hull_count, add_hull_to_database, allocate_manifolds, OwnedGeometry, adopt_geometry, world_at, destroy_solver_set,
+    Recording, RecordedGeometry, RECORDING_MAGIC, RECORDING_MAJOR_VERSION, RECORDING_MINOR_VERSION, RECORDING_HEADER_BYTES, recording_on, rec_begin, rec_end, rec_int, rec_long,
+    rec_float, rec_bool, rec_vec3, rec_quat, rec_transform, rec_id, rec_string, rec_raw, rec_geometry, finish_recording, recorded_geometry_at,
+    OP_STATE_HASH, OP_BOUNDS, OP_END, OP_CREATE_BODY, OP_DESTROY_BODY, OP_BODY_SET_TRANSFORM, OP_BODY_SET_LINEAR_VELOCITY, OP_BODY_SET_ANGULAR_VELOCITY, OP_BODY_SET_TARGET_TRANSFORM, OP_BODY_APPLY_FORCE, OP_BODY_APPLY_FORCE_TO_CENTER, OP_BODY_APPLY_TORQUE, OP_BODY_APPLY_LINEAR_IMPULSE, OP_BODY_APPLY_LINEAR_IMPULSE_TO_CENTER, OP_BODY_APPLY_ANGULAR_IMPULSE, OP_BODY_SET_BULLET, OP_BODY_SET_MASS_DATA, OP_BODY_APPLY_MASS_FROM_SHAPES, OP_BODY_SET_LINEAR_DAMPING, OP_BODY_SET_ANGULAR_DAMPING, OP_BODY_SET_GRAVITY_SCALE, OP_BODY_SET_AWAKE, OP_BODY_ENABLE_SLEEP, OP_BODY_SET_SLEEP_THRESHOLD, OP_BODY_SET_MOTION_LOCKS, OP_CREATE_SPHERE_SHAPE, OP_CREATE_CAPSULE_SHAPE, OP_CREATE_HULL_SHAPE, OP_CREATE_TRANSFORMED_HULL_SHAPE, OP_CREATE_MESH_SHAPE, OP_CREATE_HEIGHT_FIELD_SHAPE, OP_CREATE_COMPOUND_SHAPE, OP_DESTROY_SHAPE, OP_SHAPE_SET_DENSITY, OP_SHAPE_SET_FILTER, OP_SHAPE_SET_SURFACE_MATERIAL, OP_SHAPE_SET_SPHERE, OP_SHAPE_SET_CAPSULE, OP_SHAPE_SET_HULL, OP_SHAPE_SET_MESH, OP_SHAPE_SET_FRICTION, OP_SHAPE_SET_RESTITUTION, OP_SHAPE_SET_MESH_MATERIAL, OP_SHAPE_ENABLE_PRE_SOLVE_EVENTS, OP_BODY_ENABLE_HIT_EVENTS, OP_BODY_ALLOW_FAST_ROTATION, OP_BODY_ENABLE_CONTACT_RECYCLING, OP_BODY_SET_SAFETY_FACTOR, OP_SHAPE_APPLY_WIND, OP_BODY_SET_NAME, OP_SHAPE_SET_NAME, OP_CREATE_DISTANCE_JOINT, OP_CREATE_MOTOR_JOINT, OP_CREATE_FILTER_JOINT, OP_CREATE_PARALLEL_JOINT, OP_CREATE_PRISMATIC_JOINT, OP_CREATE_REVOLUTE_JOINT, OP_CREATE_SPHERICAL_JOINT, OP_CREATE_WELD_JOINT, OP_CREATE_WHEEL_JOINT, OP_DESTROY_JOINT, OP_JOINT_SET_LOCAL_FRAME_A, OP_JOINT_SET_LOCAL_FRAME_B, OP_JOINT_SET_COLLIDE_CONNECTED, OP_JOINT_WAKE_BODIES, OP_JOINT_SET_CONSTRAINT_TUNING, OP_JOINT_SET_FORCE_THRESHOLD, OP_JOINT_SET_TORQUE_THRESHOLD, OP_BODY_SET_TYPE, OP_BODY_DISABLE, OP_BODY_ENABLE, OP_SHAPE_ENABLE_SENSOR_EVENTS, OP_SHAPE_ENABLE_CONTACT_EVENTS, OP_SHAPE_ENABLE_HIT_EVENTS, OP_STEP, OP_ENABLE_SLEEPING, OP_ENABLE_WARM_STARTING, OP_ENABLE_CONTINUOUS, OP_ENABLE_SPECULATIVE, OP_SET_RESTITUTION_THRESHOLD, OP_SET_RESTITUTION_ITERATIONS, OP_ENABLE_RESTITUTION_PROPAGATION, OP_ENABLE_KINEMATIC_STATIC_SOFTNESS, OP_SET_HIT_EVENT_THRESHOLD, OP_SET_CONTACT_TUNING, OP_SET_CONTACT_RECYCLE_DISTANCE, OP_SET_MAXIMUM_LINEAR_SPEED, OP_SET_GRAVITY, OP_REBUILD_STATIC_TREE, OP_EXPLODE, OP_DISTANCE_JOINT_SET_LENGTH, OP_DISTANCE_JOINT_ENABLE_LIMIT, OP_DISTANCE_JOINT_SET_LENGTH_RANGE, OP_DISTANCE_JOINT_ENABLE_SPRING, OP_DISTANCE_JOINT_SET_SPRING_FORCE_RANGE, OP_DISTANCE_JOINT_SET_SPRING_HERTZ, OP_DISTANCE_JOINT_SET_SPRING_DAMPING_RATIO, OP_DISTANCE_JOINT_ENABLE_MOTOR, OP_DISTANCE_JOINT_SET_MOTOR_SPEED, OP_DISTANCE_JOINT_SET_MAX_MOTOR_FORCE, OP_MOTOR_JOINT_SET_LINEAR_VELOCITY, OP_MOTOR_JOINT_SET_ANGULAR_VELOCITY, OP_MOTOR_JOINT_SET_MAX_VELOCITY_TORQUE, OP_MOTOR_JOINT_SET_MAX_VELOCITY_FORCE, OP_MOTOR_JOINT_SET_LINEAR_HERTZ, OP_MOTOR_JOINT_SET_LINEAR_DAMPING_RATIO, OP_MOTOR_JOINT_SET_ANGULAR_HERTZ, OP_MOTOR_JOINT_SET_ANGULAR_DAMPING_RATIO, OP_MOTOR_JOINT_SET_MAX_SPRING_FORCE, OP_MOTOR_JOINT_SET_MAX_SPRING_TORQUE, OP_PARALLEL_JOINT_SET_SPRING_HERTZ, OP_PARALLEL_JOINT_SET_SPRING_DAMPING_RATIO, OP_PARALLEL_JOINT_SET_MAX_TORQUE, OP_PRISMATIC_JOINT_ENABLE_SPRING, OP_PRISMATIC_JOINT_SET_SPRING_HERTZ, OP_PRISMATIC_JOINT_SET_SPRING_DAMPING_RATIO, OP_PRISMATIC_JOINT_SET_TARGET_TRANSLATION, OP_PRISMATIC_JOINT_ENABLE_LIMIT, OP_PRISMATIC_JOINT_SET_LIMITS, OP_PRISMATIC_JOINT_ENABLE_MOTOR, OP_PRISMATIC_JOINT_SET_MOTOR_SPEED, OP_PRISMATIC_JOINT_SET_MAX_MOTOR_FORCE, OP_REVOLUTE_JOINT_ENABLE_LIMIT, OP_REVOLUTE_JOINT_SET_LIMITS, OP_REVOLUTE_JOINT_ENABLE_SPRING, OP_REVOLUTE_JOINT_SET_TARGET_ANGLE, OP_REVOLUTE_JOINT_SET_SPRING_HERTZ, OP_REVOLUTE_JOINT_SET_SPRING_DAMPING_RATIO, OP_REVOLUTE_JOINT_ENABLE_MOTOR, OP_REVOLUTE_JOINT_SET_MOTOR_SPEED, OP_REVOLUTE_JOINT_SET_MAX_MOTOR_TORQUE, OP_SPHERICAL_JOINT_ENABLE_CONE_LIMIT, OP_SPHERICAL_JOINT_SET_CONE_LIMIT, OP_SPHERICAL_JOINT_SET_CONE_AXIS, OP_SPHERICAL_JOINT_SET_CONE_ELLIPSE, OP_SPHERICAL_JOINT_ENABLE_TWIST_LIMIT, OP_SPHERICAL_JOINT_SET_TWIST_LIMITS, OP_SPHERICAL_JOINT_ENABLE_SPRING, OP_SPHERICAL_JOINT_SET_TARGET_ROTATION, OP_SPHERICAL_JOINT_SET_SPRING_HERTZ, OP_SPHERICAL_JOINT_SET_SPRING_DAMPING_RATIO, OP_SPHERICAL_JOINT_ENABLE_MOTOR, OP_SPHERICAL_JOINT_SET_MOTOR_VELOCITY, OP_SPHERICAL_JOINT_SET_MAX_MOTOR_TORQUE, OP_WELD_JOINT_SET_LINEAR_HERTZ, OP_WELD_JOINT_SET_LINEAR_DAMPING_RATIO, OP_WELD_JOINT_SET_ANGULAR_HERTZ, OP_WELD_JOINT_SET_ANGULAR_DAMPING_RATIO, OP_WHEEL_JOINT_ENABLE_SUSPENSION, OP_WHEEL_JOINT_SET_SUSPENSION_HERTZ, OP_WHEEL_JOINT_SET_SUSPENSION_DAMPING_RATIO, OP_WHEEL_JOINT_ENABLE_SUSPENSION_LIMIT, OP_WHEEL_JOINT_SET_SUSPENSION_LIMITS, OP_WHEEL_JOINT_ENABLE_SPIN_MOTOR, OP_WHEEL_JOINT_SET_SPIN_MOTOR_SPEED, OP_WHEEL_JOINT_SET_MAX_SPIN_TORQUE, OP_WHEEL_JOINT_ENABLE_STEERING, OP_WHEEL_JOINT_SET_STEERING_HERTZ, OP_WHEEL_JOINT_SET_STEERING_DAMPING_RATIO, OP_WHEEL_JOINT_SET_MAX_STEERING_TORQUE, OP_WHEEL_JOINT_ENABLE_STEERING_LIMIT, OP_WHEEL_JOINT_SET_STEERING_LIMITS, OP_WHEEL_JOINT_SET_TARGET_STEERING_ANGLE,
     create_compound_shape, destroy_shape, shape_is_valid, get_shape_full_id, get_shape, shape_get_body,
     shape_get_aabb, shape_get_type, shape_get_density, shape_set_density, shape_get_filter, shape_set_filter,
     shape_get_surface_material, shape_set_surface_material, shape_get_material_count, shape_is_sensor,
@@ -149,11 +152,13 @@ exports (
     world_body_move_event_count, world_body_move_event, world_contact_hit_event_count, world_contact_hit_event,
     world_joint_event_count, world_joint_event, world_set_pre_solve, world_clear_pre_solve,
     shape_user_material_id, make_relative_sweep, body_move_event_at,
-    TaskContext, task_context, task_context_at, task_sensor_hit_at, enter_world, leave_world
+    TaskContext, task_context, task_context_at, task_sensor_hit_at, enter_world, leave_world,
+    reset_world
 )
 
 extern memset(block: ptr, value: int, size: int) -> ptr
 extern memcpy(dst: ptr, src: ptr, size: int) -> ptr
+extern memcmp(a: ptr, b: ptr, size: int) -> int
 extern sqrt(x: float) -> float
 
 const NULL_INDEX = 0 - 1
@@ -1292,6 +1297,7 @@ struct World {
     enable_speculative: bool
     in_use: bool
     user_data: ptr
+    recording: ptr                 // *Recording while the world records (aephysics.recording), else null
 }
 
 var g_worlds: ptr = null           // World[MAX_WORLDS]
@@ -1430,10 +1436,29 @@ create_world(def: *WorldDef) -> WorldId {
     w.generation = generation
     w.in_use = true
     w.stack = basics.stack_create(2048)
-    w.manifold_allocators = basics.buffer_create(sizeof(BlockAllocator), 0)
-    w.manifold_lock = 0
     reserve_scratch()
     create_workers(w, def.scheduler, def.worker_count)
+    w.friction_callback = def.friction_callback
+    w.restitution_callback = def.restitution_callback
+    w.user_data = def.user_data
+    init_world_contents(w, def)
+    return WorldId { index1: index + 1, generation: generation }
+}
+
+// Everything a world holds (its bodies, shapes, joints, contacts, sets,
+// islands, geometry and events), made fresh as `def` sizes and sets it;
+// what the host wires in (workers, callbacks, filters, user data) is not
+// touched.
+init_world_contents(w: *World, def: *WorldDef) {
+    memset((&w.profile) as ptr, 0, sizeof(Profile))
+    w.manifold_allocators = basics.buffer_create(sizeof(BlockAllocator), 0)
+    w.manifold_lock = 0
+    w.sat_call_count = 0
+    w.sat_cache_hit_count = 0
+    w.recycled_contact_count = 0
+    w.compound_shape_count = 0
+    w.inv_h = 0.0
+    w.inv_dt = 0.0
     w.contact_state = basics.bitset_create(64)
     w.contact_begin_events = basics.buffer_create(sizeof(ContactBeginTouchEvent), 4)
     w.contact_end_events0 = basics.buffer_create(sizeof(ContactEndTouchEvent), 4)
@@ -1464,8 +1489,6 @@ create_world(def: *WorldDef) -> WorldId {
     w.sensor_end_events0 = basics.buffer_create(sizeof(SensorEndTouchEvent), 4)
     w.sensor_end_events1 = basics.buffer_create(sizeof(SensorEndTouchEvent), 4)
     w.sensor_event_bits = basics.bitset_create(64)
-    w.has_custom_filter = false
-    w.has_pre_solve = false
     w.body_move_events = basics.buffer_create(sizeof(BodyMoveEvent), math.max_int(16, def.dynamic_body_count))
     w.contact_hit_events = basics.buffer_create(sizeof(ContactHitEvent), 4)
     w.joint_events = basics.buffer_create(sizeof(JointEvent), 4)
@@ -1493,21 +1516,43 @@ create_world(def: *WorldDef) -> WorldId {
     w.contact_hertz = def.contact_hertz
     w.contact_damping_ratio = def.contact_damping_ratio
     w.contact_recycle_distance = CONTACT_RECYCLE_DISTANCE
-    w.friction_callback = def.friction_callback
-    w.restitution_callback = def.restitution_callback
     w.enable_sleep = def.enable_sleep
     w.locked = false
     w.enable_warm_starting = true
     w.enable_continuous = def.enable_continuous
     w.enable_speculative = true
-    w.user_data = def.user_data
-    return WorldId { index1: index + 1, generation: generation }
 }
 
 // Everything the world holds is freed; ids into it die with its generation.
 destroy_world(id: WorldId) {
     if world_is_valid(id) == false { return }
     w = get_world_from_id(id)
+    finish_recording(w)
+    free_world_contents(w)
+    destroy_workers(w)
+    basics.stack_destroy(&w.stack)
+    generation = w.generation
+    memset(w as ptr, 0, sizeof(World))
+    w.generation = generation + 1
+    w.in_use = false
+}
+
+// The world emptied in place, as a new world from `def` is (the
+// reference's deserialize into a shell): its id, workers, callbacks,
+// filters and user data stay, so ids handed out before stay this world's.
+// False for a world that is not one, is mid-step or records (the
+// recording could not replay what it did not see).
+reset_world(id: WorldId, def: *WorldDef) -> bool {
+    if world_is_valid(id) == false || valid_world_def(def) == false { return false }
+    w = get_world_from_id(id)
+    if w.locked || w.recording != null { return false }
+    free_world_contents(w)
+    init_world_contents(w, def)
+    return true
+}
+
+// What init_world_contents made, freed.
+free_world_contents(w: *World) {
     // The shapes' materials and names, the bodies' names, the sensors'
     // lists and the contacts' caches.
     i = 0
@@ -1615,16 +1660,10 @@ destroy_world(id: WorldId) {
     basics.idpool_destroy(&w.island_id_pool)
     broad_phase.destroy_broad_phase(&w.broad_phase)
     destroy_graph(&w.constraint_graph)
-    destroy_workers(w)
     basics.bitset_destroy(&w.contact_state)
     basics.buffer_destroy(&w.contact_begin_events)
     basics.buffer_destroy(&w.contact_end_events0)
     basics.buffer_destroy(&w.contact_end_events1)
-    basics.stack_destroy(&w.stack)
-    generation = w.generation
-    memset(w as ptr, 0, sizeof(World))
-    w.generation = generation + 1
-    w.in_use = false
 }
 
 world_body_count(w: *World) -> int { return basics.idpool_count(&w.body_id_pool) }
@@ -1859,6 +1898,17 @@ valid_body_def(def: *BodyDef) -> bool {
 }
 
 create_body(world_id: WorldId, def: *BodyDef) -> BodyId {
+    if recording_on(world_id.index1 - 1) == false { return create_body_internal(world_id, def) }
+    recorder = rec_begin(world_id.index1 - 1, OP_CREATE_BODY)
+    rec_body_def(recorder, def)
+    made = create_body_internal(world_id, def)
+    rec_id(recorder, made.index1, made.generation)
+    rec_end(recorder)
+    return made
+}
+
+// create_body's work, unrecorded.
+create_body_internal(world_id: WorldId, def: *BodyDef) -> BodyId {
     if world_is_valid(world_id) == false { return null_body_id() }
     if valid_body_def(def) == false { return null_body_id() }
     w = get_world_from_id(world_id)
@@ -1964,6 +2014,7 @@ wake_body(w: *World, body: *Body) -> bool {
 // The body's joints and contacts, its shapes (their sensors and
 // proxies), its island, its sim and state, then its id (the generation stays).
 destroy_body(id: BodyId) {
+    if recording_on(id.world0) { recorder = rec_begin(id.world0, OP_DESTROY_BODY); rec_id(recorder, id.index1, id.generation); rec_end(recorder) }
     if body_is_valid(id) == false { return }
     w = world_at(id.world0)
     if w.locked { return }
@@ -2172,6 +2223,19 @@ valid_sphere(s: Sphere) -> bool { return math.is_valid_vec3(s.center) && valid_n
 valid_capsule(c: Capsule) -> bool { return math.is_valid_vec3(c.center1) && math.is_valid_vec3(c.center2) && valid_nonnegative(c.radius) }
 
 create_sphere_shape(body_id: BodyId, def: *ShapeDef, s: Sphere) -> ShapeId {
+    if recording_on(body_id.world0) == false { return create_sphere_shape_internal(body_id, def, s) }
+    recorder = rec_begin(body_id.world0, OP_CREATE_SPHERE_SHAPE)
+    rec_id(recorder, body_id.index1, body_id.generation)
+    rec_shape_def(recorder, def)
+    rec_sphere_value(recorder, s)
+    made = create_sphere_shape_internal(body_id, def, s)
+    rec_id(recorder, made.index1, made.generation)
+    rec_end(recorder)
+    return made
+}
+
+// create_sphere_shape's work, unrecorded.
+create_sphere_shape_internal(body_id: BodyId, def: *ShapeDef, s: Sphere) -> ShapeId {
     if valid_sphere(s) == false { return null_shape_id() }
     return create_shape(body_id, def, shape.sphere_shape(s, def.density))
 }
@@ -2180,6 +2244,19 @@ create_sphere_shape(body_id: BodyId, def: *ShapeDef, s: Sphere) -> ShapeId {
 // their midpoint, as the reference's b3CreateCapsuleShape does: its segment
 // has no direction to collide along.
 create_capsule_shape(body_id: BodyId, def: *ShapeDef, c: Capsule) -> ShapeId {
+    if recording_on(body_id.world0) == false { return create_capsule_shape_internal(body_id, def, c) }
+    recorder = rec_begin(body_id.world0, OP_CREATE_CAPSULE_SHAPE)
+    rec_id(recorder, body_id.index1, body_id.generation)
+    rec_shape_def(recorder, def)
+    rec_capsule_value(recorder, c)
+    made = create_capsule_shape_internal(body_id, def, c)
+    rec_id(recorder, made.index1, made.generation)
+    rec_end(recorder)
+    return made
+}
+
+// create_capsule_shape's work, unrecorded.
+create_capsule_shape_internal(body_id: BodyId, def: *ShapeDef, c: Capsule) -> ShapeId {
     if valid_capsule(c) == false { return null_shape_id() }
     if math.distance_squared(c.center1, c.center2) <= math.LINEAR_SLOP * math.LINEAR_SLOP {
         middle = math.lerp(c.center1, c.center2, 0.5)
@@ -2187,6 +2264,632 @@ create_capsule_shape(body_id: BodyId, def: *ShapeDef, c: Capsule) -> ShapeId {
     }
     return create_shape(body_id, def, shape.capsule_shape(c, def.density))
 }
+
+// --- recording (#149) ---------------------------------------------------------------------------
+
+// The bytes a world writes while it records (aephysics.recording starts and
+// stops it): every call that changes the world, as its opcode, the length
+// of its arguments and the arguments field by field (never a struct's
+// bytes, which carry pointers and the language's own bookkeeping), a state
+// hash after every step, and at the end the geometry the calls named by
+// id. The recording starts with a snapshot of the world, so a player
+// begins where the recording did.
+struct Recording {
+    data: ptr
+    size: int
+    capacity: int
+    record_start: int
+    geometry: Buffer           // RecordedGeometry: the blocks the calls name, each once
+    geometry_heads: LongMap    // a content hash to the first entry of that hash
+    bounds: AABB               // every step's world bounds, joined
+    have_bounds: bool
+    owner: int                 // the recording world's index1 while it records, else 0
+}
+
+// One geometry block the calls named: the recording's own pointer-free
+// copy, found again by its content (the hash, then every byte).
+struct RecordedGeometry {
+    hash: long
+    kind: int
+    byte_count: int
+    block: ptr
+    next: int
+}
+
+// The recording's file header, before the snapshot: a new major version
+// is one older players cannot read; a new minor version only adds records,
+// which older players skip.
+const RECORDING_MAGIC = 0x43525041    // "APRC", little-endian
+const RECORDING_MAJOR_VERSION = 1
+const RECORDING_MINOR_VERSION = 0
+const RECORDING_HEADER_BYTES = 32
+
+const OP_STATE_HASH = 2
+const OP_BOUNDS = 3
+const OP_END = 4
+const OP_CREATE_BODY = 16
+const OP_DESTROY_BODY = 17
+const OP_BODY_SET_TRANSFORM = 18
+const OP_BODY_SET_LINEAR_VELOCITY = 19
+const OP_BODY_SET_ANGULAR_VELOCITY = 20
+const OP_BODY_SET_TARGET_TRANSFORM = 21
+const OP_BODY_APPLY_FORCE = 22
+const OP_BODY_APPLY_FORCE_TO_CENTER = 23
+const OP_BODY_APPLY_TORQUE = 24
+const OP_BODY_APPLY_LINEAR_IMPULSE = 25
+const OP_BODY_APPLY_LINEAR_IMPULSE_TO_CENTER = 26
+const OP_BODY_APPLY_ANGULAR_IMPULSE = 27
+const OP_BODY_SET_BULLET = 28
+const OP_BODY_SET_MASS_DATA = 29
+const OP_BODY_APPLY_MASS_FROM_SHAPES = 30
+const OP_BODY_SET_LINEAR_DAMPING = 31
+const OP_BODY_SET_ANGULAR_DAMPING = 32
+const OP_BODY_SET_GRAVITY_SCALE = 33
+const OP_BODY_SET_AWAKE = 34
+const OP_BODY_ENABLE_SLEEP = 35
+const OP_BODY_SET_SLEEP_THRESHOLD = 36
+const OP_BODY_SET_MOTION_LOCKS = 37
+const OP_CREATE_SPHERE_SHAPE = 38
+const OP_CREATE_CAPSULE_SHAPE = 39
+const OP_CREATE_HULL_SHAPE = 40
+const OP_CREATE_TRANSFORMED_HULL_SHAPE = 41
+const OP_CREATE_MESH_SHAPE = 42
+const OP_CREATE_HEIGHT_FIELD_SHAPE = 43
+const OP_CREATE_COMPOUND_SHAPE = 44
+const OP_DESTROY_SHAPE = 45
+const OP_SHAPE_SET_DENSITY = 46
+const OP_SHAPE_SET_FILTER = 47
+const OP_SHAPE_SET_SURFACE_MATERIAL = 48
+const OP_SHAPE_SET_SPHERE = 49
+const OP_SHAPE_SET_CAPSULE = 50
+const OP_SHAPE_SET_HULL = 51
+const OP_SHAPE_SET_MESH = 52
+const OP_SHAPE_SET_FRICTION = 53
+const OP_SHAPE_SET_RESTITUTION = 54
+const OP_SHAPE_SET_MESH_MATERIAL = 55
+const OP_SHAPE_ENABLE_PRE_SOLVE_EVENTS = 56
+const OP_BODY_ENABLE_HIT_EVENTS = 57
+const OP_BODY_ALLOW_FAST_ROTATION = 58
+const OP_BODY_ENABLE_CONTACT_RECYCLING = 59
+const OP_BODY_SET_SAFETY_FACTOR = 60
+const OP_SHAPE_APPLY_WIND = 61
+const OP_BODY_SET_NAME = 62
+const OP_SHAPE_SET_NAME = 63
+const OP_CREATE_DISTANCE_JOINT = 64
+const OP_CREATE_MOTOR_JOINT = 65
+const OP_CREATE_FILTER_JOINT = 66
+const OP_CREATE_PARALLEL_JOINT = 67
+const OP_CREATE_PRISMATIC_JOINT = 68
+const OP_CREATE_REVOLUTE_JOINT = 69
+const OP_CREATE_SPHERICAL_JOINT = 70
+const OP_CREATE_WELD_JOINT = 71
+const OP_CREATE_WHEEL_JOINT = 72
+const OP_DESTROY_JOINT = 73
+const OP_JOINT_SET_LOCAL_FRAME_A = 74
+const OP_JOINT_SET_LOCAL_FRAME_B = 75
+const OP_JOINT_SET_COLLIDE_CONNECTED = 76
+const OP_JOINT_WAKE_BODIES = 77
+const OP_JOINT_SET_CONSTRAINT_TUNING = 78
+const OP_JOINT_SET_FORCE_THRESHOLD = 79
+const OP_JOINT_SET_TORQUE_THRESHOLD = 80
+const OP_BODY_SET_TYPE = 81
+const OP_BODY_DISABLE = 82
+const OP_BODY_ENABLE = 83
+const OP_SHAPE_ENABLE_SENSOR_EVENTS = 84
+const OP_SHAPE_ENABLE_CONTACT_EVENTS = 85
+const OP_SHAPE_ENABLE_HIT_EVENTS = 86
+const OP_STEP = 87
+const OP_ENABLE_SLEEPING = 88
+const OP_ENABLE_WARM_STARTING = 89
+const OP_ENABLE_CONTINUOUS = 90
+const OP_ENABLE_SPECULATIVE = 91
+const OP_SET_RESTITUTION_THRESHOLD = 92
+const OP_SET_RESTITUTION_ITERATIONS = 93
+const OP_ENABLE_RESTITUTION_PROPAGATION = 94
+const OP_ENABLE_KINEMATIC_STATIC_SOFTNESS = 95
+const OP_SET_HIT_EVENT_THRESHOLD = 96
+const OP_SET_CONTACT_TUNING = 97
+const OP_SET_CONTACT_RECYCLE_DISTANCE = 98
+const OP_SET_MAXIMUM_LINEAR_SPEED = 99
+const OP_SET_GRAVITY = 100
+const OP_REBUILD_STATIC_TREE = 101
+const OP_EXPLODE = 102
+const OP_DISTANCE_JOINT_SET_LENGTH = 103
+const OP_DISTANCE_JOINT_ENABLE_LIMIT = 104
+const OP_DISTANCE_JOINT_SET_LENGTH_RANGE = 105
+const OP_DISTANCE_JOINT_ENABLE_SPRING = 106
+const OP_DISTANCE_JOINT_SET_SPRING_FORCE_RANGE = 107
+const OP_DISTANCE_JOINT_SET_SPRING_HERTZ = 108
+const OP_DISTANCE_JOINT_SET_SPRING_DAMPING_RATIO = 109
+const OP_DISTANCE_JOINT_ENABLE_MOTOR = 110
+const OP_DISTANCE_JOINT_SET_MOTOR_SPEED = 111
+const OP_DISTANCE_JOINT_SET_MAX_MOTOR_FORCE = 112
+const OP_MOTOR_JOINT_SET_LINEAR_VELOCITY = 113
+const OP_MOTOR_JOINT_SET_ANGULAR_VELOCITY = 114
+const OP_MOTOR_JOINT_SET_MAX_VELOCITY_TORQUE = 115
+const OP_MOTOR_JOINT_SET_MAX_VELOCITY_FORCE = 116
+const OP_MOTOR_JOINT_SET_LINEAR_HERTZ = 117
+const OP_MOTOR_JOINT_SET_LINEAR_DAMPING_RATIO = 118
+const OP_MOTOR_JOINT_SET_ANGULAR_HERTZ = 119
+const OP_MOTOR_JOINT_SET_ANGULAR_DAMPING_RATIO = 120
+const OP_MOTOR_JOINT_SET_MAX_SPRING_FORCE = 121
+const OP_MOTOR_JOINT_SET_MAX_SPRING_TORQUE = 122
+const OP_PARALLEL_JOINT_SET_SPRING_HERTZ = 123
+const OP_PARALLEL_JOINT_SET_SPRING_DAMPING_RATIO = 124
+const OP_PARALLEL_JOINT_SET_MAX_TORQUE = 125
+const OP_PRISMATIC_JOINT_ENABLE_SPRING = 126
+const OP_PRISMATIC_JOINT_SET_SPRING_HERTZ = 127
+const OP_PRISMATIC_JOINT_SET_SPRING_DAMPING_RATIO = 128
+const OP_PRISMATIC_JOINT_SET_TARGET_TRANSLATION = 129
+const OP_PRISMATIC_JOINT_ENABLE_LIMIT = 130
+const OP_PRISMATIC_JOINT_SET_LIMITS = 131
+const OP_PRISMATIC_JOINT_ENABLE_MOTOR = 132
+const OP_PRISMATIC_JOINT_SET_MOTOR_SPEED = 133
+const OP_PRISMATIC_JOINT_SET_MAX_MOTOR_FORCE = 134
+const OP_REVOLUTE_JOINT_ENABLE_LIMIT = 135
+const OP_REVOLUTE_JOINT_SET_LIMITS = 136
+const OP_REVOLUTE_JOINT_ENABLE_SPRING = 137
+const OP_REVOLUTE_JOINT_SET_TARGET_ANGLE = 138
+const OP_REVOLUTE_JOINT_SET_SPRING_HERTZ = 139
+const OP_REVOLUTE_JOINT_SET_SPRING_DAMPING_RATIO = 140
+const OP_REVOLUTE_JOINT_ENABLE_MOTOR = 141
+const OP_REVOLUTE_JOINT_SET_MOTOR_SPEED = 142
+const OP_REVOLUTE_JOINT_SET_MAX_MOTOR_TORQUE = 143
+const OP_SPHERICAL_JOINT_ENABLE_CONE_LIMIT = 144
+const OP_SPHERICAL_JOINT_SET_CONE_LIMIT = 145
+const OP_SPHERICAL_JOINT_SET_CONE_AXIS = 146
+const OP_SPHERICAL_JOINT_SET_CONE_ELLIPSE = 147
+const OP_SPHERICAL_JOINT_ENABLE_TWIST_LIMIT = 148
+const OP_SPHERICAL_JOINT_SET_TWIST_LIMITS = 149
+const OP_SPHERICAL_JOINT_ENABLE_SPRING = 150
+const OP_SPHERICAL_JOINT_SET_TARGET_ROTATION = 151
+const OP_SPHERICAL_JOINT_SET_SPRING_HERTZ = 152
+const OP_SPHERICAL_JOINT_SET_SPRING_DAMPING_RATIO = 153
+const OP_SPHERICAL_JOINT_ENABLE_MOTOR = 154
+const OP_SPHERICAL_JOINT_SET_MOTOR_VELOCITY = 155
+const OP_SPHERICAL_JOINT_SET_MAX_MOTOR_TORQUE = 156
+const OP_WELD_JOINT_SET_LINEAR_HERTZ = 157
+const OP_WELD_JOINT_SET_LINEAR_DAMPING_RATIO = 158
+const OP_WELD_JOINT_SET_ANGULAR_HERTZ = 159
+const OP_WELD_JOINT_SET_ANGULAR_DAMPING_RATIO = 160
+const OP_WHEEL_JOINT_ENABLE_SUSPENSION = 161
+const OP_WHEEL_JOINT_SET_SUSPENSION_HERTZ = 162
+const OP_WHEEL_JOINT_SET_SUSPENSION_DAMPING_RATIO = 163
+const OP_WHEEL_JOINT_ENABLE_SUSPENSION_LIMIT = 164
+const OP_WHEEL_JOINT_SET_SUSPENSION_LIMITS = 165
+const OP_WHEEL_JOINT_ENABLE_SPIN_MOTOR = 166
+const OP_WHEEL_JOINT_SET_SPIN_MOTOR_SPEED = 167
+const OP_WHEEL_JOINT_SET_MAX_SPIN_TORQUE = 168
+const OP_WHEEL_JOINT_ENABLE_STEERING = 169
+const OP_WHEEL_JOINT_SET_STEERING_HERTZ = 170
+const OP_WHEEL_JOINT_SET_STEERING_DAMPING_RATIO = 171
+const OP_WHEEL_JOINT_SET_MAX_STEERING_TORQUE = 172
+const OP_WHEEL_JOINT_ENABLE_STEERING_LIMIT = 173
+const OP_WHEEL_JOINT_SET_STEERING_LIMITS = 174
+const OP_WHEEL_JOINT_SET_TARGET_STEERING_ANGLE = 175
+
+// Whether the world of this index is recording: the hooks' test, false
+// for an index that is not a world's.
+recording_on(world0: int) -> bool {
+    if g_worlds == null || world0 < 0 || world0 >= MAX_WORLDS { return false }
+    w = world_at(world0)
+    return w.in_use && w.recording != null
+}
+
+rec_grow(r: *Recording, n: int) {
+    if r.size + n <= r.capacity { return }
+    capacity = math.max_int(math.max_int(2 * r.capacity, r.size + n), 4096)
+    block = basics.alloc(capacity)
+    if r.data != null {
+        memcpy(block, r.data, r.size)
+        basics.free_bytes(r.data, r.capacity)
+    }
+    r.data = block
+    r.capacity = capacity
+}
+
+rec_raw(r: *Recording, src: ptr, n: int) {
+    if n <= 0 { return }
+    rec_grow(r, n)
+    memcpy(r.data + r.size, src, n)
+    r.size = r.size + n
+}
+
+// A record begun: its opcode and a length filled in by rec_end.
+rec_begin(world0: int, op: int) -> *Recording {
+    r = world_at(world0).recording as *Recording
+    rec_int(r, op)
+    r.record_start = r.size
+    rec_int(r, 0)
+    return r
+}
+
+rec_end(r: *Recording) {
+    length = r.size - r.record_start - 4
+    memcpy(r.data + r.record_start, (&length) as ptr, 4)
+}
+
+rec_int(r: *Recording, v: int) {
+    holder = v
+    rec_raw(r, (&holder) as ptr, 4)
+}
+
+rec_long(r: *Recording, v: long) {
+    holder = v
+    rec_raw(r, (&holder) as ptr, 8)
+}
+
+rec_float(r: *Recording, v: float) {
+    holder = v
+    rec_raw(r, (&holder) as ptr, 8)
+}
+
+rec_bool(r: *Recording, v: bool) {
+    if v { rec_int(r, 1) } else { rec_int(r, 0) }
+}
+
+rec_vec3(r: *Recording, v: Vec3) {
+    rec_float(r, v.x)
+    rec_float(r, v.y)
+    rec_float(r, v.z)
+}
+
+rec_quat(r: *Recording, q: Quat) {
+    rec_float(r, q.x)
+    rec_float(r, q.y)
+    rec_float(r, q.z)
+    rec_float(r, q.w)
+}
+
+rec_transform(r: *Recording, t: Transform) {
+    rec_vec3(r, t.p)
+    rec_quat(r, t.q)
+}
+
+// A body, shape or joint id without its world: the player's world stands in.
+rec_id(r: *Recording, index1: int, generation: int) {
+    rec_int(r, index1)
+    rec_int(r, generation)
+}
+
+// A string's length and bytes, or -1 for none.
+rec_string(r: *Recording, s: string) {
+    if s == null {
+        rec_int(r, NULL_INDEX)
+        return
+    }
+    n = string.length(s)
+    rec_int(r, n)
+    rec_raw(r, string.aether_string_raw_ptr(s), n)
+}
+
+// A shape def's materials: their count, then each one, or -1 for none.
+rec_materials(r: *Recording, materials: ptr, count: int) {
+    if materials == null || count <= 0 {
+        rec_int(r, NULL_INDEX)
+        return
+    }
+    rec_int(r, count)
+    each = materials as SurfaceMaterial[]
+    i = 0
+    while i < count {
+        rec_surface_material(r, &each[i])
+        i = i + 1
+    }
+}
+
+// A geometry block by its id in the recording, interned by content: the
+// first call to name a block copies it (a compound's tree pointers
+// cleared), later ones find it. -1 for none.
+rec_geometry(r: *Recording, kind: int, block: ptr) {
+    if block == null {
+        rec_int(r, NULL_INDEX)
+        return
+    }
+    byte_count = 0
+    if kind == shape.SHAPE_HULL { byte_count = (block as *HullData).byte_count }
+    else if kind == shape.SHAPE_MESH { byte_count = (block as *MeshData).byte_count }
+    else if kind == shape.SHAPE_HEIGHT_FIELD { byte_count = (block as *HeightFieldData).byte_count }
+    else if kind == shape.SHAPE_COMPOUND { byte_count = (block as *CompoundData).byte_count }
+    copy = basics.alloc(byte_count)
+    memcpy(copy, block, byte_count)
+    if kind == shape.SHAPE_COMPOUND {
+        c = copy as *CompoundData
+        c.tree.nodes = null
+        c.tree.proxies = null
+        c.tree.stack = null
+        c.tree.stack_dist = null
+    }
+    hash = basics.hash_bytes(copy, byte_count)
+    index = basics.map_get(&r.geometry_heads, hash, NULL_INDEX)
+    while index != NULL_INDEX {
+        entry = recorded_geometry_at(r, index)
+        if entry.kind == kind && entry.byte_count == byte_count && memcmp(entry.block, copy, byte_count) == 0 {
+            basics.free_bytes(copy, byte_count)
+            rec_int(r, index)
+            return
+        }
+        index = entry.next
+    }
+    index = basics.buffer_push(&r.geometry)
+    entry = recorded_geometry_at(r, index)
+    entry.hash = hash
+    entry.kind = kind
+    entry.byte_count = byte_count
+    entry.block = copy
+    entry.next = basics.map_get(&r.geometry_heads, hash, NULL_INDEX)
+    basics.map_set(&r.geometry_heads, hash, index)
+    rec_int(r, index)
+}
+
+recorded_geometry_at(r: *Recording, index: int) -> *RecordedGeometry { return (r.geometry.data + index * sizeof(RecordedGeometry)) as *RecordedGeometry }
+
+// The recording finished (aephysics.recording's stop, and a recording
+// world's destroy): the joined bounds and the end marker, then the
+// geometry the calls named, and the header told where that is.
+finish_recording(w: *World) {
+    if w.recording == null { return }
+    r = w.recording as *Recording
+    w.recording = null
+    r.owner = 0
+    rec_int(r, OP_BOUNDS)
+    r.record_start = r.size
+    rec_int(r, 0)
+    rec_bool(r, r.have_bounds)
+    rec_vec3(r, r.bounds.lower)
+    rec_vec3(r, r.bounds.upper)
+    rec_end(r)
+    rec_int(r, OP_END)
+    rec_int(r, 0)
+    registry_offset = r.size
+    rec_int(r, r.geometry.count)
+    i = 0
+    while i < r.geometry.count {
+        entry = recorded_geometry_at(r, i)
+        rec_int(r, entry.kind)
+        rec_int(r, entry.byte_count)
+        rec_raw(r, entry.block, entry.byte_count)
+        i = i + 1
+    }
+    registry_bytes = r.size - registry_offset
+    memcpy(r.data + 12, (&registry_offset) as ptr, 4)
+    memcpy(r.data + 16, (&registry_bytes) as ptr, 4)
+}
+
+rec_body_def(r: *Recording, v: *BodyDef) {
+    rec_int(r, v.kind)
+    rec_vec3(r, v.position)
+    rec_quat(r, v.rotation)
+    rec_vec3(r, v.linear_velocity)
+    rec_vec3(r, v.angular_velocity)
+    rec_float(r, v.linear_damping)
+    rec_float(r, v.angular_damping)
+    rec_float(r, v.gravity_scale)
+    rec_float(r, v.sleep_threshold)
+    rec_float(r, v.safety_factor)
+    rec_string(r, v.name)
+    rec_motion_locks(r, &v.motion_locks)
+    rec_bool(r, v.enable_sleep)
+    rec_bool(r, v.is_awake)
+    rec_bool(r, v.is_bullet)
+    rec_bool(r, v.is_enabled)
+    rec_bool(r, v.allow_fast_rotation)
+    rec_bool(r, v.enable_contact_recycling)
+}
+rec_body_def_value(r: *Recording, v: BodyDef) { rec_body_def(r, &v) }
+
+rec_shape_def(r: *Recording, v: *ShapeDef) {
+    rec_string(r, v.name)
+    rec_materials(r, v.materials, v.material_count)
+    rec_surface_material(r, &v.base_material)
+    rec_float(r, v.density)
+    rec_float(r, v.explosion_scale)
+    rec_filter(r, &v.filter)
+    rec_bool(r, v.enable_custom_filtering)
+    rec_bool(r, v.is_sensor)
+    rec_bool(r, v.enable_sensor_events)
+    rec_bool(r, v.enable_contact_events)
+    rec_bool(r, v.enable_hit_events)
+    rec_bool(r, v.enable_pre_solve_events)
+    rec_bool(r, v.invoke_contact_creation)
+    rec_bool(r, v.update_body_mass)
+    rec_bool(r, v.enable_speculative_contact)
+}
+rec_shape_def_value(r: *Recording, v: ShapeDef) { rec_shape_def(r, &v) }
+
+rec_joint_def(r: *Recording, v: *JointDef) {
+    rec_id(r, v.body_id_a.index1, v.body_id_a.generation)
+    rec_id(r, v.body_id_b.index1, v.body_id_b.generation)
+    rec_transform(r, v.local_frame_a)
+    rec_transform(r, v.local_frame_b)
+    rec_float(r, v.force_threshold)
+    rec_float(r, v.torque_threshold)
+    rec_float(r, v.constraint_hertz)
+    rec_float(r, v.constraint_damping_ratio)
+    rec_float(r, v.draw_scale)
+    rec_bool(r, v.collide_connected)
+}
+rec_joint_def_value(r: *Recording, v: JointDef) { rec_joint_def(r, &v) }
+
+rec_distance_joint_def(r: *Recording, v: *DistanceJointDef) {
+    rec_joint_def(r, &v.base)
+    rec_float(r, v.length)
+    rec_bool(r, v.enable_spring)
+    rec_float(r, v.lower_spring_force)
+    rec_float(r, v.upper_spring_force)
+    rec_float(r, v.hertz)
+    rec_float(r, v.damping_ratio)
+    rec_bool(r, v.enable_limit)
+    rec_float(r, v.min_length)
+    rec_float(r, v.max_length)
+    rec_bool(r, v.enable_motor)
+    rec_float(r, v.max_motor_force)
+    rec_float(r, v.motor_speed)
+}
+rec_distance_joint_def_value(r: *Recording, v: DistanceJointDef) { rec_distance_joint_def(r, &v) }
+
+rec_motor_joint_def(r: *Recording, v: *MotorJointDef) {
+    rec_joint_def(r, &v.base)
+    rec_vec3(r, v.linear_velocity)
+    rec_float(r, v.max_velocity_force)
+    rec_vec3(r, v.angular_velocity)
+    rec_float(r, v.max_velocity_torque)
+    rec_float(r, v.linear_hertz)
+    rec_float(r, v.linear_damping_ratio)
+    rec_float(r, v.max_spring_force)
+    rec_float(r, v.angular_hertz)
+    rec_float(r, v.angular_damping_ratio)
+    rec_float(r, v.max_spring_torque)
+}
+rec_motor_joint_def_value(r: *Recording, v: MotorJointDef) { rec_motor_joint_def(r, &v) }
+
+rec_filter_joint_def(r: *Recording, v: *FilterJointDef) {
+    rec_joint_def(r, &v.base)
+}
+rec_filter_joint_def_value(r: *Recording, v: FilterJointDef) { rec_filter_joint_def(r, &v) }
+
+rec_parallel_joint_def(r: *Recording, v: *ParallelJointDef) {
+    rec_joint_def(r, &v.base)
+    rec_float(r, v.hertz)
+    rec_float(r, v.damping_ratio)
+    rec_float(r, v.max_torque)
+}
+rec_parallel_joint_def_value(r: *Recording, v: ParallelJointDef) { rec_parallel_joint_def(r, &v) }
+
+rec_prismatic_joint_def(r: *Recording, v: *PrismaticJointDef) {
+    rec_joint_def(r, &v.base)
+    rec_bool(r, v.enable_spring)
+    rec_float(r, v.hertz)
+    rec_float(r, v.damping_ratio)
+    rec_float(r, v.target_translation)
+    rec_bool(r, v.enable_limit)
+    rec_float(r, v.lower_translation)
+    rec_float(r, v.upper_translation)
+    rec_bool(r, v.enable_motor)
+    rec_float(r, v.max_motor_force)
+    rec_float(r, v.motor_speed)
+}
+rec_prismatic_joint_def_value(r: *Recording, v: PrismaticJointDef) { rec_prismatic_joint_def(r, &v) }
+
+rec_revolute_joint_def(r: *Recording, v: *RevoluteJointDef) {
+    rec_joint_def(r, &v.base)
+    rec_float(r, v.target_angle)
+    rec_bool(r, v.enable_spring)
+    rec_float(r, v.hertz)
+    rec_float(r, v.damping_ratio)
+    rec_bool(r, v.enable_limit)
+    rec_float(r, v.lower_angle)
+    rec_float(r, v.upper_angle)
+    rec_bool(r, v.enable_motor)
+    rec_float(r, v.max_motor_torque)
+    rec_float(r, v.motor_speed)
+}
+rec_revolute_joint_def_value(r: *Recording, v: RevoluteJointDef) { rec_revolute_joint_def(r, &v) }
+
+rec_spherical_joint_def(r: *Recording, v: *SphericalJointDef) {
+    rec_joint_def(r, &v.base)
+    rec_bool(r, v.enable_spring)
+    rec_float(r, v.hertz)
+    rec_float(r, v.damping_ratio)
+    rec_quat(r, v.target_rotation)
+    rec_bool(r, v.enable_cone_limit)
+    rec_float(r, v.cone_angle)
+    rec_vec3(r, v.cone_axis)
+    rec_float(r, v.cone_minor_angle)
+    rec_vec3(r, v.cone_major_axis)
+    rec_bool(r, v.enable_twist_limit)
+    rec_float(r, v.lower_twist_angle)
+    rec_float(r, v.upper_twist_angle)
+    rec_bool(r, v.enable_motor)
+    rec_float(r, v.max_motor_torque)
+    rec_vec3(r, v.motor_velocity)
+}
+rec_spherical_joint_def_value(r: *Recording, v: SphericalJointDef) { rec_spherical_joint_def(r, &v) }
+
+rec_weld_joint_def(r: *Recording, v: *WeldJointDef) {
+    rec_joint_def(r, &v.base)
+    rec_float(r, v.linear_hertz)
+    rec_float(r, v.angular_hertz)
+    rec_float(r, v.linear_damping_ratio)
+    rec_float(r, v.angular_damping_ratio)
+}
+rec_weld_joint_def_value(r: *Recording, v: WeldJointDef) { rec_weld_joint_def(r, &v) }
+
+rec_wheel_joint_def(r: *Recording, v: *WheelJointDef) {
+    rec_joint_def(r, &v.base)
+    rec_bool(r, v.enable_suspension_spring)
+    rec_float(r, v.suspension_hertz)
+    rec_float(r, v.suspension_damping_ratio)
+    rec_bool(r, v.enable_suspension_limit)
+    rec_float(r, v.lower_suspension_limit)
+    rec_float(r, v.upper_suspension_limit)
+    rec_bool(r, v.enable_spin_motor)
+    rec_float(r, v.max_spin_torque)
+    rec_float(r, v.spin_speed)
+    rec_bool(r, v.enable_steering)
+    rec_float(r, v.steering_hertz)
+    rec_float(r, v.steering_damping_ratio)
+    rec_float(r, v.target_steering_angle)
+    rec_float(r, v.max_steering_torque)
+    rec_bool(r, v.enable_steering_limit)
+    rec_float(r, v.lower_steering_limit)
+    rec_float(r, v.upper_steering_limit)
+}
+rec_wheel_joint_def_value(r: *Recording, v: WheelJointDef) { rec_wheel_joint_def(r, &v) }
+
+rec_mass_data(r: *Recording, v: *MassData) {
+    rec_float(r, v.mass)
+    rec_vec3(r, v.center)
+    rec_matrix3(r, &v.inertia)
+}
+rec_mass_data_value(r: *Recording, v: MassData) { rec_mass_data(r, &v) }
+
+rec_motion_locks(r: *Recording, v: *MotionLocks) {
+    rec_bool(r, v.linear_x)
+    rec_bool(r, v.linear_y)
+    rec_bool(r, v.linear_z)
+    rec_bool(r, v.angular_x)
+    rec_bool(r, v.angular_y)
+    rec_bool(r, v.angular_z)
+}
+rec_motion_locks_value(r: *Recording, v: MotionLocks) { rec_motion_locks(r, &v) }
+
+rec_filter(r: *Recording, v: *Filter) {
+    rec_long(r, v.category_bits)
+    rec_long(r, v.mask_bits)
+    rec_int(r, v.group_index)
+}
+rec_filter_value(r: *Recording, v: Filter) { rec_filter(r, &v) }
+
+rec_surface_material(r: *Recording, v: *SurfaceMaterial) {
+    rec_float(r, v.friction)
+    rec_float(r, v.restitution)
+    rec_float(r, v.rolling_resistance)
+    rec_vec3(r, v.tangent_velocity)
+    rec_long(r, v.user_material_id)
+    rec_int(r, v.custom_color)
+}
+rec_surface_material_value(r: *Recording, v: SurfaceMaterial) { rec_surface_material(r, &v) }
+
+rec_sphere(r: *Recording, v: *Sphere) {
+    rec_vec3(r, v.center)
+    rec_float(r, v.radius)
+}
+rec_sphere_value(r: *Recording, v: Sphere) { rec_sphere(r, &v) }
+
+rec_capsule(r: *Recording, v: *Capsule) {
+    rec_vec3(r, v.center1)
+    rec_vec3(r, v.center2)
+    rec_float(r, v.radius)
+}
+rec_capsule_value(r: *Recording, v: Capsule) { rec_capsule(r, &v) }
+
+rec_matrix3(r: *Recording, v: *Matrix3) {
+    rec_vec3(r, v.cx)
+    rec_vec3(r, v.cy)
+    rec_vec3(r, v.cz)
+}
+rec_matrix3_value(r: *Recording, v: Matrix3) { rec_matrix3(r, &v) }
 
 // --- the hull database (the reference's hullDatabase, #147) -------------------------
 
@@ -2315,6 +3018,19 @@ world_hull_count(world_id: WorldId) -> int {
 // world's copy of its hull (the hull database), never the caller's: the
 // caller may free its hull once the shape is made.
 create_hull_shape(body_id: BodyId, def: *ShapeDef, h: *HullData) -> ShapeId {
+    if recording_on(body_id.world0) == false { return create_hull_shape_internal(body_id, def, h) }
+    recorder = rec_begin(body_id.world0, OP_CREATE_HULL_SHAPE)
+    rec_id(recorder, body_id.index1, body_id.generation)
+    rec_shape_def(recorder, def)
+    rec_geometry(recorder, shape.SHAPE_HULL, h as ptr)
+    made = create_hull_shape_internal(body_id, def, h)
+    rec_id(recorder, made.index1, made.generation)
+    rec_end(recorder)
+    return made
+}
+
+// create_hull_shape's work, unrecorded.
+create_hull_shape_internal(body_id: BodyId, def: *ShapeDef, h: *HullData) -> ShapeId {
     if h == null || h.version != hull.HULL_VERSION { return null_shape_id() }
     if body_is_valid(body_id) == false { return null_shape_id() }
     w = world_at(body_id.world0)
@@ -2330,6 +3046,21 @@ create_hull_shape(body_id: BodyId, def: *ShapeDef, h: *HullData) -> ShapeId {
 // baked into the world's own copy and shared like any other
 // (b3CreateTransformedHullShape). Refused when the result has no volume.
 create_transformed_hull_shape(body_id: BodyId, def: *ShapeDef, h: *HullData, transform: Transform, scale: Vec3) -> ShapeId {
+    if recording_on(body_id.world0) == false { return create_transformed_hull_shape_internal(body_id, def, h, transform, scale) }
+    recorder = rec_begin(body_id.world0, OP_CREATE_TRANSFORMED_HULL_SHAPE)
+    rec_id(recorder, body_id.index1, body_id.generation)
+    rec_shape_def(recorder, def)
+    rec_geometry(recorder, shape.SHAPE_HULL, h as ptr)
+    rec_transform(recorder, transform)
+    rec_vec3(recorder, scale)
+    made = create_transformed_hull_shape_internal(body_id, def, h, transform, scale)
+    rec_id(recorder, made.index1, made.generation)
+    rec_end(recorder)
+    return made
+}
+
+// create_transformed_hull_shape's work, unrecorded.
+create_transformed_hull_shape_internal(body_id: BodyId, def: *ShapeDef, h: *HullData, transform: Transform, scale: Vec3) -> ShapeId {
     if h == null || h.version != hull.HULL_VERSION { return null_shape_id() }
     if math.is_valid_transform(transform) == false || math.is_valid_vec3(scale) == false { return null_shape_id() }
     if body_is_valid(body_id) == false { return null_shape_id() }
@@ -2343,14 +3074,54 @@ create_transformed_hull_shape(body_id: BodyId, def: *ShapeDef, h: *HullData, tra
     return id
 }
 create_mesh_shape(body_id: BodyId, def: *ShapeDef, m: *MeshData, scale: Vec3) -> ShapeId {
+    if recording_on(body_id.world0) == false { return create_mesh_shape_internal(body_id, def, m, scale) }
+    recorder = rec_begin(body_id.world0, OP_CREATE_MESH_SHAPE)
+    rec_id(recorder, body_id.index1, body_id.generation)
+    rec_shape_def(recorder, def)
+    rec_geometry(recorder, shape.SHAPE_MESH, m as ptr)
+    rec_vec3(recorder, scale)
+    made = create_mesh_shape_internal(body_id, def, m, scale)
+    rec_id(recorder, made.index1, made.generation)
+    rec_end(recorder)
+    return made
+}
+
+// create_mesh_shape's work, unrecorded.
+create_mesh_shape_internal(body_id: BodyId, def: *ShapeDef, m: *MeshData, scale: Vec3) -> ShapeId {
     if m == null || m.version != mesh.MESH_VERSION || math.is_valid_vec3(scale) == false { return null_shape_id() }
     return create_shape(body_id, def, shape.mesh_shape(mesh.mesh(m, math.safe_scale(scale)), math.max_int(def.material_count, 1)))
 }
 create_height_field_shape(body_id: BodyId, def: *ShapeDef, h: *HeightFieldData) -> ShapeId {
+    if recording_on(body_id.world0) == false { return create_height_field_shape_internal(body_id, def, h) }
+    recorder = rec_begin(body_id.world0, OP_CREATE_HEIGHT_FIELD_SHAPE)
+    rec_id(recorder, body_id.index1, body_id.generation)
+    rec_shape_def(recorder, def)
+    rec_geometry(recorder, shape.SHAPE_HEIGHT_FIELD, h as ptr)
+    made = create_height_field_shape_internal(body_id, def, h)
+    rec_id(recorder, made.index1, made.generation)
+    rec_end(recorder)
+    return made
+}
+
+// create_height_field_shape's work, unrecorded.
+create_height_field_shape_internal(body_id: BodyId, def: *ShapeDef, h: *HeightFieldData) -> ShapeId {
     if h == null || h.version != height_field.HEIGHT_FIELD_VERSION { return null_shape_id() }
     return create_shape(body_id, def, shape.height_field_shape(h, math.max_int(def.material_count, 1)))
 }
 create_compound_shape(body_id: BodyId, def: *ShapeDef, c: *CompoundData) -> ShapeId {
+    if recording_on(body_id.world0) == false { return create_compound_shape_internal(body_id, def, c) }
+    recorder = rec_begin(body_id.world0, OP_CREATE_COMPOUND_SHAPE)
+    rec_id(recorder, body_id.index1, body_id.generation)
+    rec_shape_def(recorder, def)
+    rec_geometry(recorder, shape.SHAPE_COMPOUND, c as ptr)
+    made = create_compound_shape_internal(body_id, def, c)
+    rec_id(recorder, made.index1, made.generation)
+    rec_end(recorder)
+    return made
+}
+
+// create_compound_shape's work, unrecorded.
+create_compound_shape_internal(body_id: BodyId, def: *ShapeDef, c: *CompoundData) -> ShapeId {
     if c == null || c.version != compound.COMPOUND_VERSION { return null_shape_id() }
     return create_shape(body_id, def, shape.compound_shape(c))
 }
@@ -2372,6 +3143,7 @@ get_shape(w: *World, shape_id: int) -> *WorldShape { return world_shape_at(w, sh
 // The shape leaves its body's list and the broad phase; the body's mass
 // is updated when asked.
 destroy_shape(id: ShapeId, update_body_mass: bool) {
+    if recording_on(id.world0) { recorder = rec_begin(id.world0, OP_DESTROY_SHAPE); rec_id(recorder, id.index1, id.generation); rec_bool(recorder, update_body_mass); rec_end(recorder) }
     if shape_is_valid(id) == false { return }
     w = world_at(id.world0)
     if w.locked { return }
@@ -2412,6 +3184,7 @@ shape_get_aabb(id: ShapeId) -> AABB { return get_shape_full_id(world_at(id.world
 shape_get_type(id: ShapeId) -> int { return get_shape_full_id(world_at(id.world0), id).geometry.kind }
 shape_get_density(id: ShapeId) -> float { return get_shape_full_id(world_at(id.world0), id).geometry.density }
 shape_set_density(id: ShapeId, density: float, update_body_mass: bool) {
+    if recording_on(id.world0) { recorder = rec_begin(id.world0, OP_SHAPE_SET_DENSITY); rec_id(recorder, id.index1, id.generation); rec_float(recorder, density); rec_bool(recorder, update_body_mass); rec_end(recorder) }
     if valid_nonnegative(density) == false { return }
     w = world_at(id.world0)
     // Not mid-step, and an unchanged density spares the mass update (b3Shape_SetDensity).
@@ -2431,6 +3204,7 @@ shape_get_filter(id: ShapeId) -> Filter { return get_shape_full_id(world_at(id.w
 // paired shapes the filter now allows, and queried the old category.)
 // Sensor overlaps follow on the next step.
 shape_set_filter(id: ShapeId, filter: Filter) {
+    if recording_on(id.world0) { recorder = rec_begin(id.world0, OP_SHAPE_SET_FILTER); rec_id(recorder, id.index1, id.generation); rec_filter_value(recorder, filter); rec_end(recorder) }
     w = world_at(id.world0)
     if w.locked { return }
     s = get_shape_full_id(w, id)
@@ -2465,6 +3239,13 @@ reset_shape_proxy(w: *World, s: *WorldShape, wake_bodies: bool, remake: bool) {
 }
 shape_get_surface_material(id: ShapeId) -> SurfaceMaterial { return get_shape_full_id(world_at(id.world0), id).material }
 shape_set_surface_material(id: ShapeId, m: SurfaceMaterial) {
+    if recording_on(id.world0) { recorder = rec_begin(id.world0, OP_SHAPE_SET_SURFACE_MATERIAL); rec_id(recorder, id.index1, id.generation); rec_surface_material_value(recorder, m); rec_end(recorder) }
+    set_surface_material(id, m)
+}
+
+// The material set without recording it: the setters built on it record
+// themselves.
+set_surface_material(id: ShapeId, m: SurfaceMaterial) {
     if valid_material(m) == false { return }
     s = get_shape_full_id(world_at(id.world0), id)
     s.material = m
@@ -2495,10 +3276,12 @@ shape_get_height_field(id: ShapeId) -> *HeightFieldData { return get_shape_full_
 // as in the reference. A compound or height field (static-only shapes) is
 // not changed, nor changed into.
 shape_set_sphere(id: ShapeId, s: Sphere) {
+    if recording_on(id.world0) { recorder = rec_begin(id.world0, OP_SHAPE_SET_SPHERE); rec_id(recorder, id.index1, id.generation); rec_sphere_value(recorder, s); rec_end(recorder) }
     if valid_sphere(s) == false { return }
     change_shape_geometry(id, shape.sphere_shape(s, 0.0))
 }
 shape_set_capsule(id: ShapeId, c: Capsule) {
+    if recording_on(id.world0) { recorder = rec_begin(id.world0, OP_SHAPE_SET_CAPSULE); rec_id(recorder, id.index1, id.generation); rec_capsule_value(recorder, c); rec_end(recorder) }
     if valid_capsule(c) == false { return }
     change_shape_geometry(id, shape.capsule_shape(c, 0.0))
 }
@@ -2506,6 +3289,7 @@ shape_set_capsule(id: ShapeId, c: Capsule) {
 // `h` may be the shape's own copy; the same copy changes nothing (no
 // contacts lost, no proxy made again), as in b3Shape_SetHull.
 shape_set_hull(id: ShapeId, h: *HullData) {
+    if recording_on(id.world0) { recorder = rec_begin(id.world0, OP_SHAPE_SET_HULL); rec_id(recorder, id.index1, id.generation); rec_geometry(recorder, shape.SHAPE_HULL, h as ptr); rec_end(recorder) }
     if h == null || h.version != hull.HULL_VERSION { return }
     w = world_at(id.world0)
     if w.locked { return }
@@ -2520,6 +3304,7 @@ shape_set_hull(id: ShapeId, h: *HullData) {
     change_shape_geometry(id, shape.hull_shape(shared, 0.0))
 }
 shape_set_mesh(id: ShapeId, m: *MeshData, scale: Vec3) {
+    if recording_on(id.world0) { recorder = rec_begin(id.world0, OP_SHAPE_SET_MESH); rec_id(recorder, id.index1, id.generation); rec_geometry(recorder, shape.SHAPE_MESH, m as ptr); rec_vec3(recorder, scale); rec_end(recorder) }
     if m == null || m.version != mesh.MESH_VERSION || math.is_valid_vec3(scale) == false { return }
     change_shape_geometry(id, shape.mesh_shape(mesh.mesh(m, math.safe_scale(scale)), 1))
 }
@@ -2544,15 +3329,17 @@ change_shape_geometry(id: ShapeId, geometry: Shape) {
 // its siblings); a contact takes them on its next update.
 shape_get_friction(id: ShapeId) -> float { return get_shape_full_id(world_at(id.world0), id).material.friction }
 shape_set_friction(id: ShapeId, friction: float) {
+    if recording_on(id.world0) { recorder = rec_begin(id.world0, OP_SHAPE_SET_FRICTION); rec_id(recorder, id.index1, id.generation); rec_float(recorder, friction); rec_end(recorder) }
     m = shape_get_surface_material(id)
     m.friction = friction
-    shape_set_surface_material(id, m)
+    set_surface_material(id, m)
 }
 shape_get_restitution(id: ShapeId) -> float { return get_shape_full_id(world_at(id.world0), id).material.restitution }
 shape_set_restitution(id: ShapeId, restitution: float) {
+    if recording_on(id.world0) { recorder = rec_begin(id.world0, OP_SHAPE_SET_RESTITUTION); rec_id(recorder, id.index1, id.generation); rec_float(recorder, restitution); rec_end(recorder) }
     m = shape_get_surface_material(id)
     m.restitution = restitution
-    shape_set_surface_material(id, m)
+    set_surface_material(id, m)
 }
 
 // A mesh's materials by index (b3Shape_SetMeshMaterial): the first is the
@@ -2564,11 +3351,12 @@ shape_get_mesh_surface_material(id: ShapeId, index: int) -> SurfaceMaterial {
     return materials[index]
 }
 shape_set_mesh_material(id: ShapeId, m: SurfaceMaterial, index: int) {
+    if recording_on(id.world0) { recorder = rec_begin(id.world0, OP_SHAPE_SET_MESH_MATERIAL); rec_id(recorder, id.index1, id.generation); rec_surface_material_value(recorder, m); rec_int(recorder, index); rec_end(recorder) }
     if valid_material(m) == false { return }
     s = get_shape_full_id(world_at(id.world0), id)
     if index < 0 || index >= s.material_count { return }
     if index == 0 {
-        shape_set_surface_material(id, m)
+        set_surface_material(id, m)
         return
     }
     materials = s.materials as SurfaceMaterial[]
@@ -2577,6 +3365,7 @@ shape_set_mesh_material(id: ShapeId, m: SurfaceMaterial, index: int) {
 
 // Pre-solve events on a shape after its creation; a contact takes the flag when it is made.
 shape_enable_pre_solve_events(id: ShapeId, flag: bool) {
+    if recording_on(id.world0) { recorder = rec_begin(id.world0, OP_SHAPE_ENABLE_PRE_SOLVE_EVENTS); rec_id(recorder, id.index1, id.generation); rec_bool(recorder, flag); rec_end(recorder) }
     s = get_shape_full_id(world_at(id.world0), id)
     if flag { s.flags = s.flags | SHAPE_ENABLE_PRE_SOLVE_EVENTS } else { s.flags = s.flags & (0 - 1 - SHAPE_ENABLE_PRE_SOLVE_EVENTS) }
 }
@@ -2595,6 +3384,7 @@ shape_are_pre_solve_events_enabled(id: ShapeId) -> bool { return (get_shape_full
 const AIR_DENSITY = 1.225
 
 shape_apply_wind(id: ShapeId, wind: Vec3, drag: float, lift: float, max_speed: float, wake: bool) {
+    if recording_on(id.world0) { recorder = rec_begin(id.world0, OP_SHAPE_APPLY_WIND); rec_id(recorder, id.index1, id.generation); rec_vec3(recorder, wind); rec_float(recorder, drag); rec_float(recorder, lift); rec_float(recorder, max_speed); rec_bool(recorder, wake); rec_end(recorder) }
     w = world_at(id.world0)
     if w.locked { return }
     s = get_shape_full_id(w, id)
@@ -2679,12 +3469,14 @@ shape_apply_wind(id: ShapeId, wind: Vec3, drag: float, lift: float, max_speed: f
 // A label for debugging (b3Body_SetName and its siblings): copied, so the
 // caller's string may go; the old one freed; an empty name for none.
 body_set_name(id: BodyId, name: string) {
+    if recording_on(id.world0) { recorder = rec_begin(id.world0, OP_BODY_SET_NAME); rec_id(recorder, id.index1, id.generation); rec_string(recorder, name); rec_end(recorder) }
     body = get_body_full_id(world_at(id.world0), id)
     native.name_free(body.name)
     body.name = native.name_copy(name)
 }
 body_get_name(id: BodyId) -> string { return native.name_text(get_body_full_id(world_at(id.world0), id).name) }
 shape_set_name(id: ShapeId, name: string) {
+    if recording_on(id.world0) { recorder = rec_begin(id.world0, OP_SHAPE_SET_NAME); rec_id(recorder, id.index1, id.generation); rec_string(recorder, name); rec_end(recorder) }
     s = get_shape_full_id(world_at(id.world0), id)
     native.name_free(s.name)
     s.name = native.name_copy(name)
@@ -2875,6 +3667,7 @@ body_get_world_vector(id: BodyId, local_vector: Vec3) -> Vec3 { return math.rota
 // its shapes' bounds and proxies are updated at once (a static body's
 // too, so contacts begin without a step).
 body_set_transform(id: BodyId, position: Vec3, rotation: Quat) {
+    if recording_on(id.world0) { recorder = rec_begin(id.world0, OP_BODY_SET_TRANSFORM); rec_id(recorder, id.index1, id.generation); rec_vec3(recorder, position); rec_quat(recorder, rotation); rec_end(recorder) }
     if math.is_valid_position(position) == false || math.is_valid_quat(rotation) == false { return }
     w = body_world(id)
     if w.locked { return }
@@ -2921,6 +3714,7 @@ body_get_angular_velocity(id: BodyId) -> Vec3 {
 
 // A velocity wakes a sleeping body; a static body has none.
 body_set_linear_velocity(id: BodyId, v: Vec3) {
+    if recording_on(id.world0) { recorder = rec_begin(id.world0, OP_BODY_SET_LINEAR_VELOCITY); rec_id(recorder, id.index1, id.generation); rec_vec3(recorder, v); rec_end(recorder) }
     if math.is_valid_vec3(v) == false { return }
     w = body_world(id)
     body = get_body_full_id(w, id)
@@ -2944,6 +3738,7 @@ awake_for_apply(w: *World, body: *Body, wake: bool) -> bool {
 // sleeping body stays asleep when the movement would be below its
 // sleep threshold, unless woken.
 body_set_target_transform(id: BodyId, target: Transform, time_step: float, wake: bool) {
+    if recording_on(id.world0) { recorder = rec_begin(id.world0, OP_BODY_SET_TARGET_TRANSFORM); rec_id(recorder, id.index1, id.generation); rec_transform(recorder, target); rec_float(recorder, time_step); rec_bool(recorder, wake); rec_end(recorder) }
     if math.is_valid_world_transform(target) == false || math.is_valid_float(time_step) == false { return }
     w = body_world(id)
     body = get_body_full_id(w, id)
@@ -2973,16 +3768,18 @@ body_set_target_transform(id: BodyId, target: Transform, time_step: float, wake:
 }
 
 body_apply_force(id: BodyId, force: Vec3, point: Vec3, wake: bool) {
+    if recording_on(id.world0) { recorder = rec_begin(id.world0, OP_BODY_APPLY_FORCE); rec_id(recorder, id.index1, id.generation); rec_vec3(recorder, force); rec_vec3(recorder, point); rec_bool(recorder, wake); rec_end(recorder) }
     if math.is_valid_vec3(force) == false || math.is_valid_position(point) == false { return }
     w = body_world(id)
     body = get_body_full_id(w, id)
     if awake_for_apply(w, body, wake) == false { return }
     sim = get_body_sim(w, body)
-    sim.force = math.add(sim.force, force)
-    sim.torque = math.add(sim.torque, math.cross(math.sub(point, sim.center), force))
+    sim.force = math.narrow3(math.add(math.widen3(sim.force), force))
+    sim.torque = math.narrow3(math.add(math.widen3(sim.torque), math.cross(math.sub(point, sim.center), force)))
 }
 
 body_apply_force_to_center(id: BodyId, force: Vec3, wake: bool) {
+    if recording_on(id.world0) { recorder = rec_begin(id.world0, OP_BODY_APPLY_FORCE_TO_CENTER); rec_id(recorder, id.index1, id.generation); rec_vec3(recorder, force); rec_bool(recorder, wake); rec_end(recorder) }
     if math.is_valid_vec3(force) == false { return }
     w = body_world(id)
     body = get_body_full_id(w, id)
@@ -2992,6 +3789,7 @@ body_apply_force_to_center(id: BodyId, force: Vec3, wake: bool) {
 }
 
 body_apply_torque(id: BodyId, torque: Vec3, wake: bool) {
+    if recording_on(id.world0) { recorder = rec_begin(id.world0, OP_BODY_APPLY_TORQUE); rec_id(recorder, id.index1, id.generation); rec_vec3(recorder, torque); rec_bool(recorder, wake); rec_end(recorder) }
     if math.is_valid_vec3(torque) == false { return }
     w = body_world(id)
     body = get_body_full_id(w, id)
@@ -3008,6 +3806,7 @@ capped_linear_velocity(w: *World, v: Vec3) -> Vec3 {
 }
 
 body_apply_linear_impulse(id: BodyId, impulse: Vec3, point: Vec3, wake: bool) {
+    if recording_on(id.world0) { recorder = rec_begin(id.world0, OP_BODY_APPLY_LINEAR_IMPULSE); rec_id(recorder, id.index1, id.generation); rec_vec3(recorder, impulse); rec_vec3(recorder, point); rec_bool(recorder, wake); rec_end(recorder) }
     if math.is_valid_vec3(impulse) == false || math.is_valid_position(point) == false { return }
     w = body_world(id)
     body = get_body_full_id(w, id)
@@ -3020,6 +3819,7 @@ body_apply_linear_impulse(id: BodyId, impulse: Vec3, point: Vec3, wake: bool) {
 }
 
 body_apply_linear_impulse_to_center(id: BodyId, impulse: Vec3, wake: bool) {
+    if recording_on(id.world0) { recorder = rec_begin(id.world0, OP_BODY_APPLY_LINEAR_IMPULSE_TO_CENTER); rec_id(recorder, id.index1, id.generation); rec_vec3(recorder, impulse); rec_bool(recorder, wake); rec_end(recorder) }
     if math.is_valid_vec3(impulse) == false { return }
     w = body_world(id)
     body = get_body_full_id(w, id)
@@ -3031,6 +3831,7 @@ body_apply_linear_impulse_to_center(id: BodyId, impulse: Vec3, wake: bool) {
 
 // The angular impulse through the local inertia, so it is exact under rotation.
 body_apply_angular_impulse(id: BodyId, impulse: Vec3, wake: bool) {
+    if recording_on(id.world0) { recorder = rec_begin(id.world0, OP_BODY_APPLY_ANGULAR_IMPULSE); rec_id(recorder, id.index1, id.generation); rec_vec3(recorder, impulse); rec_bool(recorder, wake); rec_end(recorder) }
     if math.is_valid_vec3(impulse) == false { return }
     w = body_world(id)
     body = get_body_full_id(w, id)
@@ -3043,6 +3844,7 @@ body_apply_angular_impulse(id: BodyId, impulse: Vec3, wake: bool) {
 }
 
 body_set_bullet(id: BodyId, flag: bool) {
+    if recording_on(id.world0) { recorder = rec_begin(id.world0, OP_BODY_SET_BULLET); rec_id(recorder, id.index1, id.generation); rec_bool(recorder, flag); rec_end(recorder) }
     w = body_world(id)
     if w == null { return }
     body = get_body_full_id(w, id)
@@ -3069,7 +3871,10 @@ set_body_flag(id: BodyId, bit: int, flag: bool) {
 
 // Fast rotation (b3Body_AllowFastRotation): a body allowed it is not capped
 // at the angular speed that keeps a step's turn small.
-body_allow_fast_rotation(id: BodyId, flag: bool) { set_body_flag(id, ALLOW_FAST_ROTATION, flag) }
+body_allow_fast_rotation(id: BodyId, flag: bool) {
+    if recording_on(id.world0) { recorder = rec_begin(id.world0, OP_BODY_ALLOW_FAST_ROTATION); rec_id(recorder, id.index1, id.generation); rec_bool(recorder, flag); rec_end(recorder) }
+    set_body_flag(id, ALLOW_FAST_ROTATION, flag)
+}
 body_is_fast_rotation_allowed(id: BodyId) -> bool { return (get_body_full_id(body_world(id), id).flags & ALLOW_FAST_ROTATION) != 0 }
 
 // Contact recycling (b3Body_EnableContactRecycling): a resting contact's
@@ -3077,6 +3882,7 @@ body_is_fast_rotation_allowed(id: BodyId) -> bool { return (get_body_full_id(bod
 // when it is made, so the body's contacts are brought in line here (the
 // reference's setter leaves them: one switched off went on recycling).
 body_enable_contact_recycling(id: BodyId, flag: bool) {
+    if recording_on(id.world0) { recorder = rec_begin(id.world0, OP_BODY_ENABLE_CONTACT_RECYCLING); rec_id(recorder, id.index1, id.generation); rec_bool(recorder, flag); rec_end(recorder) }
     set_body_flag(id, ENABLE_CONTACT_RECYCLING, flag)
     w = body_world(id)
     if w == null { return }
@@ -3095,6 +3901,7 @@ body_is_contact_recycling_enabled(id: BodyId) -> bool { return (get_body_full_id
 // The share of its smallest extent a body may move in a step before the
 // continuous pass sweeps it (b3Body_SetSafetyFactor).
 body_set_safety_factor(id: BodyId, factor: float) {
+    if recording_on(id.world0) { recorder = rec_begin(id.world0, OP_BODY_SET_SAFETY_FACTOR); rec_id(recorder, id.index1, id.generation); rec_float(recorder, factor); rec_end(recorder) }
     if valid_nonnegative(factor) == false { return }
     w = body_world(id)
     if w == null { return }
@@ -3103,6 +3910,7 @@ body_set_safety_factor(id: BodyId, factor: float) {
 body_get_safety_factor(id: BodyId) -> float { return get_body_full_id(body_world(id), id).safety_factor }
 
 body_set_angular_velocity(id: BodyId, v: Vec3) {
+    if recording_on(id.world0) { recorder = rec_begin(id.world0, OP_BODY_SET_ANGULAR_VELOCITY); rec_id(recorder, id.index1, id.generation); rec_vec3(recorder, v); rec_end(recorder) }
     if math.is_valid_vec3(v) == false { return }
     w = body_world(id)
     body = get_body_full_id(w, id)
@@ -3126,8 +3934,8 @@ body_get_local_point_velocity(id: BodyId, local_point: Vec3) -> Vec3 {
     state = get_body_state(w, body)
     if state == null { return math.vec3_zero() }
     sim = get_body_sim(w, body)
-    r = math.rotate_vector(sim.transform.q, math.sub(local_point, sim.local_center))
-    return math.add(state.linear_velocity, math.cross(state.angular_velocity, r))
+    r = math.rotate_vector(sim.transform.q, math.sub(local_point, math.widen3(sim.local_center)))
+    return math.add(math.widen3(state.v), math.cross(math.widen3(state.w), r))
 }
 
 body_get_world_point_velocity(id: BodyId, world_point: Vec3) -> Vec3 {
@@ -3158,6 +3966,7 @@ body_get_max_extent_origin(id: BodyId) -> Vec3 {
 // world inertia under the body's rotation, the velocity re-referenced
 // to the new centre, the extents about it; fixed rotation zeroes the inertia.
 body_set_mass_data(id: BodyId, mass_data: MassData) {
+    if recording_on(id.world0) { recorder = rec_begin(id.world0, OP_BODY_SET_MASS_DATA); rec_id(recorder, id.index1, id.generation); rec_mass_data_value(recorder, mass_data); rec_end(recorder) }
     if valid_nonnegative(mass_data.mass) == false || math.is_valid_matrix3(mass_data.inertia) == false || math.is_valid_vec3(mass_data.center) == false { return }
     w = body_world(id)
     if w.locked { return }
@@ -3211,24 +4020,28 @@ body_get_mass_data(id: BodyId) -> MassData {
 }
 
 body_apply_mass_from_shapes(id: BodyId) {
+    if recording_on(id.world0) { recorder = rec_begin(id.world0, OP_BODY_APPLY_MASS_FROM_SHAPES); rec_id(recorder, id.index1, id.generation); rec_end(recorder) }
     w = body_world(id)
     if w.locked { return }
     update_body_mass_data(w, get_body_full_id(w, id))
 }
 
 body_set_linear_damping(id: BodyId, damping: float) {
+    if recording_on(id.world0) { recorder = rec_begin(id.world0, OP_BODY_SET_LINEAR_DAMPING); rec_id(recorder, id.index1, id.generation); rec_float(recorder, damping); rec_end(recorder) }
     if valid_nonnegative(damping) == false { return }
     w = body_world(id)
     get_body_sim(w, get_body_full_id(w, id)).linear_damping = damping
 }
 body_get_linear_damping(id: BodyId) -> float { w = body_world(id); return get_body_sim(w, get_body_full_id(w, id)).linear_damping }
 body_set_angular_damping(id: BodyId, damping: float) {
+    if recording_on(id.world0) { recorder = rec_begin(id.world0, OP_BODY_SET_ANGULAR_DAMPING); rec_id(recorder, id.index1, id.generation); rec_float(recorder, damping); rec_end(recorder) }
     if valid_nonnegative(damping) == false { return }
     w = body_world(id)
     get_body_sim(w, get_body_full_id(w, id)).angular_damping = damping
 }
 body_get_angular_damping(id: BodyId) -> float { w = body_world(id); return get_body_sim(w, get_body_full_id(w, id)).angular_damping }
 body_set_gravity_scale(id: BodyId, scale: float) {
+    if recording_on(id.world0) { recorder = rec_begin(id.world0, OP_BODY_SET_GRAVITY_SCALE); rec_id(recorder, id.index1, id.generation); rec_float(recorder, scale); rec_end(recorder) }
     if math.is_valid_float(scale) == false { return }
     w = body_world(id)
     get_body_sim(w, get_body_full_id(w, id)).gravity_scale = scale
@@ -3241,6 +4054,7 @@ body_is_enabled(id: BodyId) -> bool { return get_body_full_id(body_world(id), id
 body_is_sleep_enabled(id: BodyId) -> bool { return (get_body_full_id(body_world(id), id).flags & ENABLE_SLEEP) != 0 }
 body_get_sleep_threshold(id: BodyId) -> float { return get_body_full_id(body_world(id), id).sleep_threshold }
 body_set_sleep_threshold(id: BodyId, threshold: float) {
+    if recording_on(id.world0) { recorder = rec_begin(id.world0, OP_BODY_SET_SLEEP_THRESHOLD); rec_id(recorder, id.index1, id.generation); rec_float(recorder, threshold); rec_end(recorder) }
     if valid_nonnegative(threshold) == false { return }
     get_body_full_id(body_world(id), id).sleep_threshold = threshold
 }
@@ -3251,6 +4065,7 @@ body_get_flags(id: BodyId) -> int { return get_body_full_id(body_world(id), id).
 // (b3Body_SetAwake): split first if a constraint left it, so only what
 // is still connected sleeps.
 body_set_awake(id: BodyId, awake: bool) {
+    if recording_on(id.world0) { recorder = rec_begin(id.world0, OP_BODY_SET_AWAKE); rec_id(recorder, id.index1, id.generation); rec_bool(recorder, awake); rec_end(recorder) }
     w = body_world(id)
     if w.locked { return }
     w.locked = true
@@ -3265,6 +4080,7 @@ body_set_awake(id: BodyId, awake: bool) {
 }
 
 body_enable_sleep(id: BodyId, enable: bool) {
+    if recording_on(id.world0) { recorder = rec_begin(id.world0, OP_BODY_ENABLE_SLEEP); rec_id(recorder, id.index1, id.generation); rec_bool(recorder, enable); rec_end(recorder) }
     w = body_world(id)
     body = get_body_full_id(w, id)
     // Unchanged is nothing to do: a repeated disable does not wake the body.
@@ -3279,6 +4095,7 @@ body_enable_sleep(id: BodyId, enable: bool) {
 }
 
 body_set_motion_locks(id: BodyId, locks: MotionLocks) {
+    if recording_on(id.world0) { recorder = rec_begin(id.world0, OP_BODY_SET_MOTION_LOCKS); rec_id(recorder, id.index1, id.generation); rec_motion_locks_value(recorder, locks); rec_end(recorder) }
     w = body_world(id)
     body = get_body_full_id(w, id)
     flags = body.flags & (0 - 1 - ALL_LOCKS)
@@ -5571,6 +6388,17 @@ valid_spring(hertz: float, damping_ratio: float) -> bool { return valid_nonnegat
 valid_range(lower: float, upper: float) -> bool { return math.is_valid_float(lower) && math.is_valid_float(upper) && lower <= upper }
 
 create_distance_joint(world_id: WorldId, def: *DistanceJointDef) -> JointId {
+    if recording_on(world_id.index1 - 1) == false { return create_distance_joint_internal(world_id, def) }
+    recorder = rec_begin(world_id.index1 - 1, OP_CREATE_DISTANCE_JOINT)
+    rec_distance_joint_def(recorder, def)
+    made = create_distance_joint_internal(world_id, def)
+    rec_id(recorder, made.index1, made.generation)
+    rec_end(recorder)
+    return made
+}
+
+// create_distance_joint's work, unrecorded.
+create_distance_joint_internal(world_id: WorldId, def: *DistanceJointDef) -> JointId {
     w = joint_world(world_id, &def.base)
     if w == null { return null_joint_id() }
     if math.is_valid_float(def.length) == false || def.length <= 0.0 || valid_range(def.lower_spring_force, def.upper_spring_force) == false { return null_joint_id() }
@@ -5596,6 +6424,17 @@ create_distance_joint(world_id: WorldId, def: *DistanceJointDef) -> JointId {
 }
 
 create_motor_joint(world_id: WorldId, def: *MotorJointDef) -> JointId {
+    if recording_on(world_id.index1 - 1) == false { return create_motor_joint_internal(world_id, def) }
+    recorder = rec_begin(world_id.index1 - 1, OP_CREATE_MOTOR_JOINT)
+    rec_motor_joint_def(recorder, def)
+    made = create_motor_joint_internal(world_id, def)
+    rec_id(recorder, made.index1, made.generation)
+    rec_end(recorder)
+    return made
+}
+
+// create_motor_joint's work, unrecorded.
+create_motor_joint_internal(world_id: WorldId, def: *MotorJointDef) -> JointId {
     w = joint_world(world_id, &def.base)
     if w == null { return null_joint_id() }
     if math.is_valid_vec3(def.linear_velocity) == false || math.is_valid_vec3(def.angular_velocity) == false { return null_joint_id() }
@@ -5620,6 +6459,17 @@ create_motor_joint(world_id: WorldId, def: *MotorJointDef) -> JointId {
 }
 
 create_filter_joint(world_id: WorldId, def: *FilterJointDef) -> JointId {
+    if recording_on(world_id.index1 - 1) == false { return create_filter_joint_internal(world_id, def) }
+    recorder = rec_begin(world_id.index1 - 1, OP_CREATE_FILTER_JOINT)
+    rec_filter_joint_def(recorder, def)
+    made = create_filter_joint_internal(world_id, def)
+    rec_id(recorder, made.index1, made.generation)
+    rec_end(recorder)
+    return made
+}
+
+// create_filter_joint's work, unrecorded.
+create_filter_joint_internal(world_id: WorldId, def: *FilterJointDef) -> JointId {
     w = joint_world(world_id, &def.base)
     if w == null { return null_joint_id() }
     w.locked = true
@@ -5629,6 +6479,17 @@ create_filter_joint(world_id: WorldId, def: *FilterJointDef) -> JointId {
 }
 
 create_parallel_joint(world_id: WorldId, def: *ParallelJointDef) -> JointId {
+    if recording_on(world_id.index1 - 1) == false { return create_parallel_joint_internal(world_id, def) }
+    recorder = rec_begin(world_id.index1 - 1, OP_CREATE_PARALLEL_JOINT)
+    rec_parallel_joint_def(recorder, def)
+    made = create_parallel_joint_internal(world_id, def)
+    rec_id(recorder, made.index1, made.generation)
+    rec_end(recorder)
+    return made
+}
+
+// create_parallel_joint's work, unrecorded.
+create_parallel_joint_internal(world_id: WorldId, def: *ParallelJointDef) -> JointId {
     w = joint_world(world_id, &def.base)
     if w == null { return null_joint_id() }
     if valid_spring(def.hertz, def.damping_ratio) == false || valid_nonnegative(def.max_torque) == false { return null_joint_id() }
@@ -5643,6 +6504,17 @@ create_parallel_joint(world_id: WorldId, def: *ParallelJointDef) -> JointId {
 }
 
 create_prismatic_joint(world_id: WorldId, def: *PrismaticJointDef) -> JointId {
+    if recording_on(world_id.index1 - 1) == false { return create_prismatic_joint_internal(world_id, def) }
+    recorder = rec_begin(world_id.index1 - 1, OP_CREATE_PRISMATIC_JOINT)
+    rec_prismatic_joint_def(recorder, def)
+    made = create_prismatic_joint_internal(world_id, def)
+    rec_id(recorder, made.index1, made.generation)
+    rec_end(recorder)
+    return made
+}
+
+// create_prismatic_joint's work, unrecorded.
+create_prismatic_joint_internal(world_id: WorldId, def: *PrismaticJointDef) -> JointId {
     w = joint_world(world_id, &def.base)
     if w == null { return null_joint_id() }
     if valid_range(def.lower_translation, def.upper_translation) == false || math.is_valid_float(def.target_translation) == false { return null_joint_id() }
@@ -5665,6 +6537,17 @@ create_prismatic_joint(world_id: WorldId, def: *PrismaticJointDef) -> JointId {
 }
 
 create_revolute_joint(world_id: WorldId, def: *RevoluteJointDef) -> JointId {
+    if recording_on(world_id.index1 - 1) == false { return create_revolute_joint_internal(world_id, def) }
+    recorder = rec_begin(world_id.index1 - 1, OP_CREATE_REVOLUTE_JOINT)
+    rec_revolute_joint_def(recorder, def)
+    made = create_revolute_joint_internal(world_id, def)
+    rec_id(recorder, made.index1, made.generation)
+    rec_end(recorder)
+    return made
+}
+
+// create_revolute_joint's work, unrecorded.
+create_revolute_joint_internal(world_id: WorldId, def: *RevoluteJointDef) -> JointId {
     w = joint_world(world_id, &def.base)
     if w == null { return null_joint_id() }
     if math.is_valid_float(def.lower_angle) == false || math.is_valid_float(def.upper_angle) == false || math.is_valid_float(def.target_angle) == false { return null_joint_id() }
@@ -5690,6 +6573,17 @@ create_revolute_joint(world_id: WorldId, def: *RevoluteJointDef) -> JointId {
 }
 
 create_spherical_joint(world_id: WorldId, def: *SphericalJointDef) -> JointId {
+    if recording_on(world_id.index1 - 1) == false { return create_spherical_joint_internal(world_id, def) }
+    recorder = rec_begin(world_id.index1 - 1, OP_CREATE_SPHERICAL_JOINT)
+    rec_spherical_joint_def(recorder, def)
+    made = create_spherical_joint_internal(world_id, def)
+    rec_id(recorder, made.index1, made.generation)
+    rec_end(recorder)
+    return made
+}
+
+// create_spherical_joint's work, unrecorded.
+create_spherical_joint_internal(world_id: WorldId, def: *SphericalJointDef) -> JointId {
     w = joint_world(world_id, &def.base)
     if w == null { return null_joint_id() }
     pi = math.PI
@@ -5835,6 +6729,17 @@ spherical_cone_push_axis(s: *SphericalJoint, frame_a_q: Quat, twist_axis: Vec3) 
 }
 
 create_weld_joint(world_id: WorldId, def: *WeldJointDef) -> JointId {
+    if recording_on(world_id.index1 - 1) == false { return create_weld_joint_internal(world_id, def) }
+    recorder = rec_begin(world_id.index1 - 1, OP_CREATE_WELD_JOINT)
+    rec_weld_joint_def(recorder, def)
+    made = create_weld_joint_internal(world_id, def)
+    rec_id(recorder, made.index1, made.generation)
+    rec_end(recorder)
+    return made
+}
+
+// create_weld_joint's work, unrecorded.
+create_weld_joint_internal(world_id: WorldId, def: *WeldJointDef) -> JointId {
     w = joint_world(world_id, &def.base)
     if w == null { return null_joint_id() }
     if valid_spring(def.angular_hertz, def.angular_damping_ratio) == false || valid_spring(def.linear_hertz, def.linear_damping_ratio) == false { return null_joint_id() }
@@ -5850,6 +6755,17 @@ create_weld_joint(world_id: WorldId, def: *WeldJointDef) -> JointId {
 }
 
 create_wheel_joint(world_id: WorldId, def: *WheelJointDef) -> JointId {
+    if recording_on(world_id.index1 - 1) == false { return create_wheel_joint_internal(world_id, def) }
+    recorder = rec_begin(world_id.index1 - 1, OP_CREATE_WHEEL_JOINT)
+    rec_wheel_joint_def(recorder, def)
+    made = create_wheel_joint_internal(world_id, def)
+    rec_id(recorder, made.index1, made.generation)
+    rec_end(recorder)
+    return made
+}
+
+// create_wheel_joint's work, unrecorded.
+create_wheel_joint_internal(world_id: WorldId, def: *WheelJointDef) -> JointId {
     w = joint_world(world_id, &def.base)
     if w == null { return null_joint_id() }
     if valid_range(def.lower_suspension_limit, def.upper_suspension_limit) == false { return null_joint_id() }
@@ -5922,6 +6838,7 @@ destroy_joint_internal(w: *World, j: *Joint, wake_bodies: bool) {
 }
 
 destroy_joint(id: JointId, wake_attached: bool) {
+    if recording_on(id.world0) { recorder = rec_begin(id.world0, OP_DESTROY_JOINT); rec_id(recorder, id.index1, id.generation); rec_bool(recorder, wake_attached); rec_end(recorder) }
     if joint_is_valid(id) == false { return }
     w = world_at(id.world0)
     if w.locked { return }
@@ -5946,6 +6863,7 @@ joint_get_world(id: JointId) -> WorldId {
     return WorldId { index1: id.world0 + 1, generation: w.generation }
 }
 joint_set_local_frame_a(id: JointId, frame: Transform) {
+    if recording_on(id.world0) { recorder = rec_begin(id.world0, OP_JOINT_SET_LOCAL_FRAME_A); rec_id(recorder, id.index1, id.generation); rec_transform(recorder, frame); rec_end(recorder) }
     if math.is_valid_transform(frame) == false { return }
     w = world_at(id.world0)
     get_joint_sim(w, get_joint_full_id(w, id)).local_frame_a = frame
@@ -5955,6 +6873,7 @@ joint_get_local_frame_a(id: JointId) -> Transform {
     return get_joint_sim(w, get_joint_full_id(w, id)).local_frame_a
 }
 joint_set_local_frame_b(id: JointId, frame: Transform) {
+    if recording_on(id.world0) { recorder = rec_begin(id.world0, OP_JOINT_SET_LOCAL_FRAME_B); rec_id(recorder, id.index1, id.generation); rec_transform(recorder, frame); rec_end(recorder) }
     if math.is_valid_transform(frame) == false { return }
     w = world_at(id.world0)
     get_joint_sim(w, get_joint_full_id(w, id)).local_frame_b = frame
@@ -5969,6 +6888,7 @@ joint_get_collide_connected(id: JointId) -> bool { return get_joint_full_id(worl
 joint_is_awake(id: JointId) -> bool { return get_joint_full_id(world_at(id.world0), id).set_index == AWAKE_SET }
 
 joint_set_constraint_tuning(id: JointId, hertz: float, damping_ratio: float) {
+    if recording_on(id.world0) { recorder = rec_begin(id.world0, OP_JOINT_SET_CONSTRAINT_TUNING); rec_id(recorder, id.index1, id.generation); rec_float(recorder, hertz); rec_float(recorder, damping_ratio); rec_end(recorder) }
     if valid_spring(hertz, damping_ratio) == false { return }
     w = world_at(id.world0)
     sim = get_joint_sim(w, get_joint_full_id(w, id))
@@ -5984,6 +6904,7 @@ joint_get_constraint_damping_ratio(id: JointId) -> float {
     return get_joint_sim(w, get_joint_full_id(w, id)).constraint_damping_ratio
 }
 joint_set_force_threshold(id: JointId, threshold: float) {
+    if recording_on(id.world0) { recorder = rec_begin(id.world0, OP_JOINT_SET_FORCE_THRESHOLD); rec_id(recorder, id.index1, id.generation); rec_float(recorder, threshold); rec_end(recorder) }
     if valid_nonnegative(threshold) == false { return }
     w = world_at(id.world0)
     get_joint_sim(w, get_joint_full_id(w, id)).force_threshold = threshold
@@ -5993,6 +6914,7 @@ joint_get_force_threshold(id: JointId) -> float {
     return get_joint_sim(w, get_joint_full_id(w, id)).force_threshold
 }
 joint_set_torque_threshold(id: JointId, threshold: float) {
+    if recording_on(id.world0) { recorder = rec_begin(id.world0, OP_JOINT_SET_TORQUE_THRESHOLD); rec_id(recorder, id.index1, id.generation); rec_float(recorder, threshold); rec_end(recorder) }
     if valid_nonnegative(threshold) == false { return }
     w = world_at(id.world0)
     get_joint_sim(w, get_joint_full_id(w, id)).torque_threshold = threshold
@@ -6006,6 +6928,7 @@ joint_get_torque_threshold(id: JointId) -> float {
 // phase for their pairs again (the body with fewer shapes is marked
 // moved), turning it off destroys the contacts between them.
 joint_set_collide_connected(id: JointId, should_collide: bool) {
+    if recording_on(id.world0) { recorder = rec_begin(id.world0, OP_JOINT_SET_COLLIDE_CONNECTED); rec_id(recorder, id.index1, id.generation); rec_bool(recorder, should_collide); rec_end(recorder) }
     w = world_at(id.world0)
     if w.locked { return }
     j = get_joint_full_id(w, id)
@@ -6027,6 +6950,7 @@ joint_set_collide_connected(id: JointId, should_collide: bool) {
 }
 
 joint_wake_bodies(id: JointId) {
+    if recording_on(id.world0) { recorder = rec_begin(id.world0, OP_JOINT_WAKE_BODIES); rec_id(recorder, id.index1, id.generation); rec_end(recorder) }
     w = world_at(id.world0)
     if w.locked { return }
     w.locked = true
@@ -6378,6 +7302,7 @@ merge_solver_sets(w: *World, set_id1: int, set_id2: int) {
 // right tree, the joints relinked. Refused for compound and height
 // field shapes on a body that would move.
 body_set_type(id: BodyId, kind: int) {
+    if recording_on(id.world0) { recorder = rec_begin(id.world0, OP_BODY_SET_TYPE); rec_id(recorder, id.index1, id.generation); rec_int(recorder, kind); rec_end(recorder) }
     if body_is_valid(id) == false { return }
     w = world_at(id.world0)
     if w.locked { return }
@@ -6464,6 +7389,7 @@ body_set_type(id: BodyId, kind: int) {
 // bodies woken), its joints unlinked and parked in the disabled set with
 // it, its proxies removed, its island left.
 body_disable(id: BodyId) {
+    if recording_on(id.world0) { recorder = rec_begin(id.world0, OP_BODY_DISABLE); rec_id(recorder, id.index1, id.generation); rec_end(recorder) }
     if body_is_valid(id) == false { return }
     w = world_at(id.world0)
     if w.locked { return }
@@ -6505,6 +7431,7 @@ body_disable(id: BodyId) {
 // island of its own, its joints whose other body is enabled into the
 // right set and linked (a sleeping other body wakes through the link).
 body_enable(id: BodyId) {
+    if recording_on(id.world0) { recorder = rec_begin(id.world0, OP_BODY_ENABLE); rec_id(recorder, id.index1, id.generation); rec_end(recorder) }
     if body_is_valid(id) == false { return }
     w = world_at(id.world0)
     if w.locked { return }
@@ -6661,6 +7588,7 @@ destroy_sensor(w: *World, s: *WorldShape) {
 }
 
 shape_enable_sensor_events(id: ShapeId, flag: bool) {
+    if recording_on(id.world0) { recorder = rec_begin(id.world0, OP_SHAPE_ENABLE_SENSOR_EVENTS); rec_id(recorder, id.index1, id.generation); rec_bool(recorder, flag); rec_end(recorder) }
     s = get_shape_full_id(world_at(id.world0), id)
     if flag { s.flags = s.flags | SHAPE_ENABLE_SENSOR_EVENTS } else { s.flags = s.flags & (0 - 1 - SHAPE_ENABLE_SENSOR_EVENTS) }
 }
@@ -6668,12 +7596,14 @@ shape_are_sensor_events_enabled(id: ShapeId) -> bool { return (get_shape_full_id
 
 // Contact and hit events on a shape after its creation (b3Shape_EnableContactEvents, b3Shape_EnableHitEvents).
 shape_enable_contact_events(id: ShapeId, flag: bool) {
+    if recording_on(id.world0) { recorder = rec_begin(id.world0, OP_SHAPE_ENABLE_CONTACT_EVENTS); rec_id(recorder, id.index1, id.generation); rec_bool(recorder, flag); rec_end(recorder) }
     s = get_shape_full_id(world_at(id.world0), id)
     if flag { s.flags = s.flags | SHAPE_ENABLE_CONTACT_EVENTS } else { s.flags = s.flags & (0 - 1 - SHAPE_ENABLE_CONTACT_EVENTS) }
 }
 shape_are_contact_events_enabled(id: ShapeId) -> bool { return (get_shape_full_id(world_at(id.world0), id).flags & SHAPE_ENABLE_CONTACT_EVENTS) != 0 }
 // Hit events on every shape of a body (b3Body_EnableHitEvents).
 body_enable_hit_events(id: BodyId, flag: bool) {
+    if recording_on(id.world0) { recorder = rec_begin(id.world0, OP_BODY_ENABLE_HIT_EVENTS); rec_id(recorder, id.index1, id.generation); rec_bool(recorder, flag); rec_end(recorder) }
     w = world_at(id.world0)
     shape_id = get_body_full_id(w, id).head_shape_id
     while shape_id != NULL_INDEX {
@@ -6683,6 +7613,7 @@ body_enable_hit_events(id: BodyId, flag: bool) {
     }
 }
 shape_enable_hit_events(id: ShapeId, flag: bool) {
+    if recording_on(id.world0) { recorder = rec_begin(id.world0, OP_SHAPE_ENABLE_HIT_EVENTS); rec_id(recorder, id.index1, id.generation); rec_bool(recorder, flag); rec_end(recorder) }
     s = get_shape_full_id(world_at(id.world0), id)
     if flag { s.flags = s.flags | SHAPE_ENABLE_HIT_EVENTS } else { s.flags = s.flags & (0 - 1 - SHAPE_ENABLE_HIT_EVENTS) }
 }

@@ -1,0 +1,2257 @@
+// Recording and replay (#149, the reference's recording.c and
+// recording_replay.c): a world records every call that changes it while a
+// recording is started, and a player replays the recording into a world of
+// its own, frame by frame (a frame is the calls before a step, the step and
+// the state check after it), checking after every step that its world
+// hashes as the recorded one did.
+//
+// A recording is a header, a snapshot of the world it started from
+// (aephysics.snapshot), the world's state hash, then one record per call
+// (its opcode, its length and its arguments field by field, written by the
+// hooks at the top of every recorded function in dynamics, physics_world
+// and joint_solver; a create's record ends with the id it made, which the
+// replay must make too), a state hash after every step, the joined bounds,
+// an end marker, and last the geometry the calls named, each block once.
+//
+// The player owns a copy of the bytes and a world it restores in place, so
+// the world's id stays the same through a restart or a seek backward; it
+// keeps keyframes (a snapshot every so many frames, the spacing widening to
+// stay under a memory budget) to seek backward without replaying from the
+// start, and the bodies in the order they were made (a destroyed one
+// leaves a hole) so a viewer's selection survives seeking. A record it does
+// not know is skipped, as a newer minor version may add some; a record
+// that does not read whole, or a create that makes another id than the one
+// recorded, stops the replay (the player has failed); a state hash that
+// differs marks the frame it was found at (the player has diverged) and the
+// replay goes on.
+//
+// Not recorded: what the host wires in (user data, callbacks, filters, the
+// worker count), and the world queries (#149 leaves them for later).
+
+import std.string
+import std.fs
+import aephysics.math
+import aephysics.native
+import aephysics.basics
+import aephysics.hull
+import aephysics.mesh
+import aephysics.height_field
+import aephysics.compound
+import aephysics.shape
+import aephysics.material
+import aephysics.manifold
+import aephysics.dynamics
+import aephysics.joint_solver
+import aephysics.physics_world
+import aephysics.snapshot
+
+exports (
+    Player, PlayerInfo, create_recording, destroy_recording, recording_data, recording_size, start_recording,
+    stop_recording, save_recording_to_file, load_recording_from_file, create_player, destroy_player, player_step_frame,
+    player_sub_step_frame, player_restart, player_seek_frame, player_world, player_frame, player_frame_count,
+    player_at_end, player_at_pre_step, player_has_diverged, player_diverge_frame, player_failed, player_info,
+    player_set_worker_count, player_set_keyframe_policy, player_keyframe_budget, player_keyframe_min_interval,
+    player_keyframe_interval, player_keyframe_bytes, player_keyframe_count, player_body_count, player_body_id,
+    validate_replay
+)
+
+extern memcpy(dst: ptr, src: ptr, size: int) -> ptr
+extern memset(block: ptr, value: int, size: int) -> ptr
+
+const NULL_INDEX = 0 - 1
+const STRING_SLOTS = 4
+const MAX_RECORDED_MATERIALS = 65536
+const DEFAULT_KEYFRAME_INTERVAL = 16
+const DEFAULT_KEYFRAME_BUDGET = 536870912
+
+// --- recordings -------------------------------------------------------------------------------------
+
+// A recording to start a world into: empty until then, the host's to free.
+create_recording() -> *Recording {
+    r = basics.alloc(sizeof(Recording)) as *Recording
+    r.data = null
+    r.size = 0
+    r.capacity = 0
+    r.record_start = 0
+    r.geometry = basics.buffer_create(sizeof(RecordedGeometry), 0)
+    r.geometry_heads = basics.map_create(16)
+    r.have_bounds = false
+    r.owner = 0
+    return r
+}
+
+// The recording's geometry copies forgotten, ready for a fresh session.
+clear_geometry(r: *Recording) {
+    i = 0
+    while i < r.geometry.count {
+        entry = dynamics.recorded_geometry_at(r, i)
+        basics.free_bytes(entry.block, entry.byte_count)
+        i = i + 1
+    }
+    r.geometry.count = 0
+    basics.map_clear(&r.geometry_heads)
+}
+
+// The recording freed; a world still recording into it stops first, so it
+// never writes into freed memory.
+destroy_recording(r: *Recording) {
+    if r == null { return }
+    if r.owner != 0 { dynamics.finish_recording(dynamics.get_world(r.owner - 1)) }
+    clear_geometry(r)
+    basics.buffer_destroy(&r.geometry)
+    basics.map_destroy(&r.geometry_heads)
+    if r.data != null { basics.free_bytes(r.data, r.capacity) }
+    basics.free_bytes(r as ptr, sizeof(Recording))
+}
+
+recording_data(r: *Recording) -> ptr { return r.data }
+recording_size(r: *Recording) -> int { return r.size }
+
+// The world starts recording into `r` (b3World_StartRecording): the
+// header, a snapshot of the world as it is, its state's hash; then every
+// call that changes it until stop_recording or its destroy. False for a
+// world that is not one, is mid-step or already records, and for a
+// recording another world is writing. A recording started again begins a
+// fresh session.
+start_recording(world_id: WorldId, r: *Recording) -> bool {
+    if r == null || r.owner != 0 || dynamics.world_is_valid(world_id) == false { return false }
+    w = dynamics.get_world(world_id.index1 - 1)
+    if w.locked || w.recording != null { return false }
+    snap, snap_count = snapshot.save_world(world_id)
+    if snap == null { return false }
+    r.size = 0
+    r.have_bounds = false
+    clear_geometry(r)
+    dynamics.rec_int(r, dynamics.RECORDING_MAGIC)
+    dynamics.rec_int(r, dynamics.RECORDING_MAJOR_VERSION)
+    dynamics.rec_int(r, snap_count)
+    dynamics.rec_int(r, 0)
+    dynamics.rec_int(r, 0)
+    dynamics.rec_int(r, dynamics.RECORDING_MINOR_VERSION)
+    dynamics.rec_int(r, 0)
+    dynamics.rec_int(r, 0)
+    dynamics.rec_raw(r, snap, snap_count)
+    snapshot.free_snapshot(snap, snap_count)
+    w.recording = r as ptr
+    r.owner = world_id.index1
+    recorder = dynamics.rec_begin(world_id.index1 - 1, dynamics.OP_STATE_HASH)
+    dynamics.rec_long(recorder, dynamics.hash_world_state(w))
+    dynamics.rec_end(recorder)
+    return true
+}
+
+// The world stops recording (b3World_StopRecording); the recording is
+// whole: its bounds, its end, the geometry the calls named.
+stop_recording(world_id: WorldId) {
+    if dynamics.world_is_valid(world_id) == false { return }
+    w = dynamics.get_world(world_id.index1 - 1)
+    if w.locked { return }
+    dynamics.finish_recording(w)
+}
+
+save_recording_to_file(r: *Recording, path: string) -> bool {
+    if r == null || r.size <= 0 { return false }
+    err = fs.write_binary(path, (r.data as byte[])[0..r.size])
+    return string.length(err) == 0
+}
+
+// A recording read from a file, to play; null when there is no such file.
+// Whether its bytes are a recording is the player's to find out.
+load_recording_from_file(path: string) -> *Recording {
+    data, length, err = fs.read_binary(path)
+    if string.length(err) > 0 { return null }
+    if length <= 0 {
+        string.free(data)
+        return null
+    }
+    r = create_recording()
+    dynamics.rec_raw(r, string.aether_string_raw_ptr(data), length)
+    string.free(data)
+    return r
+}
+
+// --- the player -------------------------------------------------------------------------------------
+
+// What a recording holds, read once when it is opened so a viewer can
+// frame and label it (b3RecPlayerInfo).
+struct PlayerInfo {
+    frame_count: int               // the recorded steps
+    worker_count: int              // the replay world's
+    time_step: float               // the first step's
+    sub_step_count: int            // the first step's
+    bounds: AABB                   // every step's bodies joined, zero when none were recorded
+}
+
+// A geometry block the recording's calls name, the player's own copy.
+struct PlayerGeometry {
+    kind: int
+    byte_count: int
+    block: ptr
+}
+
+// The world as it was at a frame, to seek back to: its snapshot, where the
+// next frame's records start, the divergence found so far and the bodies
+// in the order they were made.
+struct Keyframe {
+    frame: int
+    cursor: int
+    block: ptr
+    byte_count: int
+    diverged: bool
+    diverge_frame: int
+    bodies: ptr                    // BodyId[body_count]
+    body_count: int
+}
+
+struct Player {
+    data: ptr                      // the recording, the player's own copy
+    size: int
+    def: WorldDef                  // the world it plays into
+    world_id: WorldId
+    snapshot_at: int               // the recording's snapshot: frame 0
+    snapshot_bytes: int
+    ops_start: int
+    ops_end: int                   // where the records end (the geometry's offset)
+    cursor: int
+    record_end: int                // the end of the record being read
+    ok: bool                       // the record being read reads whole so far
+    failed: bool                   // a record did not read whole or made another id: nothing after it runs
+    frame: int
+    frame_count: int
+    at_end: bool
+    at_pre_step: bool
+    diverged: bool
+    diverge_frame: int
+    time_step: float
+    sub_step_count: int
+    bounds: AABB
+    materials: ptr                 // a shape def's materials while its call runs
+    material_count: int
+    strings: ptr                   // ptr[STRING_SLOTS]: the record's strings while its call runs
+    string_bytes: ptr              // int[STRING_SLOTS]
+    string_count: int
+    geometry: Buffer               // PlayerGeometry
+    bodies: Buffer                 // BodyId in the order they were made, null ids where destroyed
+    frame0_bodies: Buffer          // BodyId: the bodies of the recording's snapshot
+    keyframes: Buffer              // Keyframe
+    keyframe_interval: int
+    keyframe_min_interval: int
+    keyframe_budget: long
+    keyframe_bytes: long
+    last_keyframe_frame: int
+}
+
+player_geometry_at(p: *Player, index: int) -> *PlayerGeometry { return (p.geometry.data + index * sizeof(PlayerGeometry)) as *PlayerGeometry }
+keyframe_at(p: *Player, index: int) -> *Keyframe { return (p.keyframes.data + index * sizeof(Keyframe)) as *Keyframe }
+
+read_header_int(data: ptr, at: int) -> int {
+    holder = 0
+    memcpy((&holder) as ptr, data + at, 4)
+    return holder
+}
+
+read_header_float(data: ptr, at: int) -> float {
+    holder = 0.0
+    memcpy((&holder) as ptr, data + at, 8)
+    return holder
+}
+
+// A player of the recording in `size` bytes, its world stepped by
+// `worker_count` workers (a count other than the recorded one makes the
+// state checks a test of determinism across threads); null when the bytes
+// are not a recording of this major version and layout, any section fails
+// its checks, or the snapshot does not load.
+create_player(data: ptr, size: int, worker_count: int) -> *Player {
+    if data == null || size < dynamics.RECORDING_HEADER_BYTES { return null }
+    if read_header_int(data, 0) != dynamics.RECORDING_MAGIC || read_header_int(data, 4) != dynamics.RECORDING_MAJOR_VERSION { return null }
+    snap_bytes = read_header_int(data, 8)
+    registry_offset = read_header_int(data, 12)
+    registry_bytes = read_header_int(data, 16)
+    if snap_bytes <= 0 || snap_bytes > size - dynamics.RECORDING_HEADER_BYTES { return null }
+    ops_start = dynamics.RECORDING_HEADER_BYTES + snap_bytes
+    if registry_offset < ops_start || registry_offset > size - 4 || registry_bytes != size - registry_offset { return null }
+    p = basics.alloc(sizeof(Player)) as *Player
+    p.data = basics.alloc(size)
+    memcpy(p.data, data, size)
+    p.size = size
+    p.def = dynamics.default_world_def()
+    p.def.worker_count = math.clamp_int(worker_count, 1, native.MAX_WORKERS)
+    p.snapshot_at = dynamics.RECORDING_HEADER_BYTES
+    p.snapshot_bytes = snap_bytes
+    p.ops_start = ops_start
+    p.ops_end = registry_offset
+    p.cursor = ops_start
+    p.diverge_frame = NULL_INDEX
+    p.strings = basics.alloc(STRING_SLOTS * 8)
+    p.string_bytes = basics.alloc(STRING_SLOTS * 4)
+    p.geometry = basics.buffer_create(sizeof(PlayerGeometry), 0)
+    p.bodies = basics.buffer_create(sizeof(BodyId), 0)
+    p.frame0_bodies = basics.buffer_create(sizeof(BodyId), 0)
+    p.keyframes = basics.buffer_create(sizeof(Keyframe), 0)
+    p.keyframe_interval = DEFAULT_KEYFRAME_INTERVAL
+    p.keyframe_min_interval = DEFAULT_KEYFRAME_INTERVAL
+    p.keyframe_budget = DEFAULT_KEYFRAME_BUDGET as long
+    p.world_id = WorldId { index1: 0, generation: 0 }
+    if load_geometry(p, registry_offset, registry_bytes) == false || scan_records(p) == false {
+        destroy_player(p)
+        return null
+    }
+    p.world_id = snapshot.load_world(&p.def, p.data + p.snapshot_at, p.snapshot_bytes)
+    if dynamics.world_is_valid(p.world_id) == false {
+        destroy_player(p)
+        return null
+    }
+    // The snapshot's bodies were not made by a create record: the world is
+    // walked once for them, in slot order.
+    w = dynamics.get_world(p.world_id.index1 - 1)
+    i = 0
+    while i < w.bodies.count {
+        b = dynamics.body_at(w, i)
+        if b.set_index != NULL_INDEX {
+            index = basics.buffer_push(&p.frame0_bodies)
+            each = p.frame0_bodies.data as BodyId[]
+            each[index] = BodyId { index1: i + 1, world0: p.world_id.index1 - 1, generation: b.generation }
+        }
+        i = i + 1
+    }
+    copy_bodies(&p.bodies, p.frame0_bodies.data, p.frame0_bodies.count)
+    return p
+}
+
+// The player freed: its world first, then the geometry the world used.
+destroy_player(p: *Player) {
+    if p == null { return }
+    if dynamics.world_is_valid(p.world_id) { dynamics.destroy_world(p.world_id) }
+    i = 0
+    while i < p.geometry.count {
+        g = player_geometry_at(p, i)
+        basics.free_bytes(g.block, g.byte_count)
+        i = i + 1
+    }
+    basics.buffer_destroy(&p.geometry)
+    clear_keyframes(p)
+    basics.buffer_destroy(&p.keyframes)
+    basics.buffer_destroy(&p.bodies)
+    basics.buffer_destroy(&p.frame0_bodies)
+    release_record(p)
+    basics.free_bytes(p.strings, STRING_SLOTS * 8)
+    basics.free_bytes(p.string_bytes, STRING_SLOTS * 4)
+    basics.free_bytes(p.data, p.size)
+    basics.free_bytes(p as ptr, sizeof(Player))
+}
+
+// The geometry the records name: each block copied out and checked as
+// bytes from outside are.
+load_geometry(p: *Player, offset: int, byte_count: int) -> bool {
+    at = offset
+    end = offset + byte_count
+    count = read_header_int(p.data, at)
+    at = at + 4
+    if count < 0 || basics.section_fits(at, count, 8, end) == false { return false }
+    i = 0
+    while i < count {
+        if at + 8 > end { return false }
+        kind = read_header_int(p.data, at)
+        n = read_header_int(p.data, at + 4)
+        at = at + 8
+        if n <= 0 || n > end - at { return false }
+        block = basics.alloc(n)
+        memcpy(block, p.data + at, n)
+        at = at + n
+        index = basics.buffer_push(&p.geometry)
+        g = player_geometry_at(p, index)
+        g.kind = kind
+        g.byte_count = n
+        g.block = block
+        valid = false
+        if kind == shape.SHAPE_HULL { valid = hull.hull_bytes_valid(block as *HullData, n) && (block as *HullData).byte_count == n }
+        else if kind == shape.SHAPE_MESH { valid = mesh.mesh_bytes_valid(block as *MeshData, n) && (block as *MeshData).byte_count == n }
+        else if kind == shape.SHAPE_HEIGHT_FIELD { valid = height_field.height_field_bytes_valid(block as *HeightFieldData, n) && (block as *HeightFieldData).byte_count == n }
+        else if kind == shape.SHAPE_COMPOUND { valid = compound.convert_bytes_to_compound(block, n) != null }
+        if valid == false { return false }
+        i = i + 1
+    }
+    return at == end
+}
+
+// The records walked once without running them: their framing checked up
+// to the end marker, the frames counted, the first step's tuning and the
+// bounds read for the info.
+scan_records(p: *Player) -> bool {
+    at = p.ops_start
+    frames = 0
+    while at < p.ops_end {
+        if at + 8 > p.ops_end { return false }
+        op = read_header_int(p.data, at)
+        length = read_header_int(p.data, at + 4)
+        if length < 0 || length > p.ops_end - at - 8 { return false }
+        payload = at + 8
+        at = payload + length
+        if op == dynamics.OP_STEP {
+            if frames == 0 && length >= 12 {
+                p.time_step = read_header_float(p.data, payload)
+                p.sub_step_count = read_header_int(p.data, payload + 8)
+            }
+            frames = frames + 1
+        } else if op == dynamics.OP_BOUNDS && length >= 52 {
+            if read_header_int(p.data, payload) == 1 {
+                lower = math.vec3(read_header_float(p.data, payload + 4), read_header_float(p.data, payload + 12), read_header_float(p.data, payload + 20))
+                upper = math.vec3(read_header_float(p.data, payload + 28), read_header_float(p.data, payload + 36), read_header_float(p.data, payload + 44))
+                p.bounds = AABB { lower: lower, upper: upper }
+            }
+        } else if op == dynamics.OP_END {
+            p.frame_count = frames
+            return at == p.ops_end
+        }
+    }
+    return false
+}
+
+copy_bodies(into: *Buffer, from: ptr, count: int) {
+    into.count = 0
+    basics.buffer_reserve(into, count)
+    if count > 0 { memcpy(into.data, from, count * sizeof(BodyId)) }
+    into.count = count
+}
+
+// --- reading a record -------------------------------------------------------------------------------
+
+need(p: *Player, n: int) -> bool {
+    if p.ok == false { return false }
+    if n < 0 || n > p.record_end - p.cursor {
+        p.ok = false
+        return false
+    }
+    return true
+}
+
+read_int(p: *Player) -> int {
+    if need(p, 4) == false { return 0 }
+    holder = 0
+    memcpy((&holder) as ptr, p.data + p.cursor, 4)
+    p.cursor = p.cursor + 4
+    return holder
+}
+
+read_long(p: *Player) -> long {
+    if need(p, 8) == false { return 0 as long }
+    holder = 0 as long
+    memcpy((&holder) as ptr, p.data + p.cursor, 8)
+    p.cursor = p.cursor + 8
+    return holder
+}
+
+read_float(p: *Player) -> float {
+    if need(p, 8) == false { return 0.0 }
+    holder = 0.0
+    memcpy((&holder) as ptr, p.data + p.cursor, 8)
+    p.cursor = p.cursor + 8
+    return holder
+}
+
+read_bool(p: *Player) -> bool {
+    v = read_int(p)
+    if v != 0 && v != 1 { p.ok = false }
+    return v == 1
+}
+
+read_vec3(p: *Player) -> Vec3 {
+    x = read_float(p)
+    y = read_float(p)
+    z = read_float(p)
+    return math.vec3(x, y, z)
+}
+
+read_quat(p: *Player) -> Quat {
+    x = read_float(p)
+    y = read_float(p)
+    z = read_float(p)
+    w = read_float(p)
+    return Quat { x: x, y: y, z: z, w: w }
+}
+
+read_transform(p: *Player) -> Transform {
+    position = read_vec3(p)
+    rotation = read_quat(p)
+    return Transform { p: position, q: rotation }
+}
+
+// Ids in the player's world: the recorded index and generation, the
+// world the player's own.
+read_body_id(p: *Player) -> BodyId {
+    index1 = read_int(p)
+    generation = read_int(p)
+    return BodyId { index1: index1, world0: p.world_id.index1 - 1, generation: generation }
+}
+
+read_shape_id(p: *Player) -> ShapeId {
+    index1 = read_int(p)
+    generation = read_int(p)
+    return ShapeId { index1: index1, world0: p.world_id.index1 - 1, generation: generation }
+}
+
+read_joint_id(p: *Player) -> JointId {
+    index1 = read_int(p)
+    generation = read_int(p)
+    return JointId { index1: index1, world0: p.world_id.index1 - 1, generation: generation }
+}
+
+// A create's call made an id; the record says which it made when it was
+// recorded. Another one means the worlds have parted: the replay stops.
+check_made(p: *Player, index1: int, generation: int, recorded_index1: int, recorded_generation: int) {
+    if index1 != recorded_index1 || generation != recorded_generation { p.ok = false }
+}
+
+// A string, held until the record's call is done; null for none.
+read_string(p: *Player) -> string {
+    n = read_int(p)
+    if p.ok == false || n == NULL_INDEX { return null }
+    if need(p, n) == false || p.string_count >= STRING_SLOTS {
+        p.ok = false
+        return null
+    }
+    block = basics.alloc(n + 1)
+    memcpy(block, p.data + p.cursor, n)
+    memset(block + n, 0, 1)
+    p.cursor = p.cursor + n
+    slots = p.strings as ptr[]
+    sizes = p.string_bytes as int[]
+    slots[p.string_count] = block
+    sizes[p.string_count] = n + 1
+    p.string_count = p.string_count + 1
+    return native.name_text(block)
+}
+
+// A shape def's materials, held until the record's call is done.
+read_materials(p: *Player) -> ptr {
+    count = read_int(p)
+    p.material_count = 0
+    if p.ok == false || count == NULL_INDEX { return null }
+    if count <= 0 || count > MAX_RECORDED_MATERIALS || p.materials != null {
+        p.ok = false
+        return null
+    }
+    p.materials = basics.alloc(count * sizeof(SurfaceMaterial))
+    p.material_count = count
+    each = p.materials as SurfaceMaterial[]
+    i = 0
+    while i < count {
+        each[i] = read_surface_material(p)
+        i = i + 1
+    }
+    return p.materials
+}
+
+// A geometry block the recording holds, by id, of the kind the call takes.
+read_geometry(p: *Player, kind: int) -> ptr {
+    id = read_int(p)
+    if p.ok == false || id == NULL_INDEX { return null }
+    if id < 0 || id >= p.geometry.count || player_geometry_at(p, id).kind != kind {
+        p.ok = false
+        return null
+    }
+    return player_geometry_at(p, id).block
+}
+
+// What the record's call held, given back.
+release_record(p: *Player) {
+    if p.materials != null {
+        basics.free_bytes(p.materials, p.material_count * sizeof(SurfaceMaterial))
+        p.materials = null
+        p.material_count = 0
+    }
+    slots = p.strings as ptr[]
+    sizes = p.string_bytes as int[]
+    i = 0
+    while i < p.string_count {
+        basics.free_bytes(slots[i], sizes[i])
+        i = i + 1
+    }
+    p.string_count = 0
+}
+
+// A body made: the next ordinal. Ordinals are never reused.
+track_body_create(p: *Player, id: BodyId) {
+    index = basics.buffer_push(&p.bodies)
+    each = p.bodies.data as BodyId[]
+    each[index] = id
+}
+
+// A body destroyed leaves a hole, so the ordinals after it stay.
+track_body_destroy(p: *Player, id: BodyId) {
+    if id.index1 == 0 { return }
+    each = p.bodies.data as BodyId[]
+    i = 0
+    while i < p.bodies.count {
+        if each[i].index1 == id.index1 && each[i].generation == id.generation {
+            each[i] = dynamics.null_body_id()
+            return
+        }
+        i = i + 1
+    }
+}
+
+// --- playing ----------------------------------------------------------------------------------------
+
+// The next record run: its call made, its check done, or skipped when this
+// player does not know it. Its opcode, or NULL_INDEX when it does not read
+// whole or its create made another id (the player has failed).
+run_record(p: *Player) -> int {
+    if p.failed || p.cursor + 8 > p.ops_end {
+        p.failed = true
+        return NULL_INDEX
+    }
+    op = read_header_int(p.data, p.cursor)
+    length = read_header_int(p.data, p.cursor + 4)
+    if length < 0 || length > p.ops_end - p.cursor - 8 {
+        p.failed = true
+        return NULL_INDEX
+    }
+    p.cursor = p.cursor + 8
+    p.record_end = p.cursor + length
+    p.ok = true
+    if op == dynamics.OP_END {
+        p.cursor = p.record_end
+        return op
+    }
+    known = dispatch(p, op)
+    release_record(p)
+    if known == false {
+        // A newer minor version's record: skipped, as the reference does.
+        p.cursor = p.record_end
+        return op
+    }
+    if p.ok == false || p.cursor != p.record_end {
+        p.failed = true
+        return NULL_INDEX
+    }
+    return op
+}
+
+// The frame just stepped kept, when it falls on the keyframe spacing.
+keyframe_boundary(p: *Player) {
+    if p.frame > p.last_keyframe_frame && p.frame % p.keyframe_interval == 0 { capture_keyframe(p) }
+}
+
+// The next frame played (b3RecPlayer_StepFrame): its records up to and
+// through its step and the state check after it. False at the end of the
+// recording or when the player has failed.
+player_step_frame(p: *Player) -> bool {
+    p.at_pre_step = false
+    if p.at_end { return false }
+    stepped = false
+    while true {
+        if p.failed || p.cursor >= p.ops_end {
+            p.at_end = true
+            return stepped
+        }
+        // Once stepped, only the state check still belongs to this frame.
+        if stepped && read_header_int(p.data, p.cursor) != dynamics.OP_STATE_HASH {
+            keyframe_boundary(p)
+            return true
+        }
+        op = run_record(p)
+        if op == NULL_INDEX || op == dynamics.OP_END {
+            p.at_end = true
+            return stepped
+        }
+        if op == dynamics.OP_STEP {
+            p.frame = p.frame + 1
+            stepped = true
+        }
+    }
+    return stepped
+}
+
+// The next frame played in two calls when it makes a body
+// (b3RecPlayer_SubStepFrame): the first stops before its step, so a viewer
+// can draw the new bodies where they were made; the next steps.
+player_sub_step_frame(p: *Player) {
+    if p.at_end { return }
+    stepped = false
+    made_a_body = false
+    while true {
+        if p.failed || p.cursor >= p.ops_end {
+            p.at_end = true
+            p.at_pre_step = false
+            return
+        }
+        next = read_header_int(p.data, p.cursor)
+        if stepped && next != dynamics.OP_STATE_HASH {
+            keyframe_boundary(p)
+            return
+        }
+        if p.at_pre_step == false && made_a_body && next == dynamics.OP_STEP {
+            p.at_pre_step = true
+            return
+        }
+        op = run_record(p)
+        if op == NULL_INDEX || op == dynamics.OP_END {
+            p.at_end = true
+            p.at_pre_step = false
+            return
+        }
+        if op == dynamics.OP_CREATE_BODY { made_a_body = true }
+        if op == dynamics.OP_STEP {
+            p.at_pre_step = false
+            p.frame = p.frame + 1
+            stepped = true
+        }
+    }
+}
+
+// Back to frame 0 (b3RecPlayer_Restart), the world restored in place so its
+// id stays.
+player_restart(p: *Player) {
+    if snapshot.restore_world(p.world_id, &p.def, p.data + p.snapshot_at, p.snapshot_bytes) == false {
+        p.failed = true
+        p.at_end = true
+        return
+    }
+    p.cursor = p.ops_start
+    p.failed = false
+    p.diverged = false
+    p.diverge_frame = NULL_INDEX
+    p.frame = 0
+    p.at_end = false
+    p.at_pre_step = false
+    copy_bodies(&p.bodies, p.frame0_bodies.data, p.frame0_bodies.count)
+}
+
+// The world at `frame` (b3RecPlayer_SeekFrame): backward from the latest
+// keyframe before it, or from frame 0; forward through a keyframe when one
+// lies between; then frame by frame. It stops at the last frame when asked
+// past the end.
+player_seek_frame(p: *Player, frame: int) {
+    p.at_pre_step = false
+    target = math.max_int(frame, 0)
+    best = NULL_INDEX
+    i = 0
+    while i < p.keyframes.count {
+        k = keyframe_at(p, i)
+        if k.frame < target && (best == NULL_INDEX || k.frame > keyframe_at(p, best).frame) { best = i }
+        i = i + 1
+    }
+    if target < p.frame {
+        if best != NULL_INDEX { restore_keyframe(p, keyframe_at(p, best)) } else { player_restart(p) }
+    } else if best != NULL_INDEX && keyframe_at(p, best).frame > p.frame {
+        restore_keyframe(p, keyframe_at(p, best))
+    }
+    while p.frame < target && player_step_frame(p) {}
+}
+
+// The world as the keyframe holds it, in place, and the player where it was.
+restore_keyframe(p: *Player, k: *Keyframe) {
+    if snapshot.restore_world(p.world_id, &p.def, k.block, k.byte_count) == false {
+        p.failed = true
+        p.at_end = true
+        return
+    }
+    p.cursor = k.cursor
+    p.failed = false
+    p.diverged = k.diverged
+    p.diverge_frame = k.diverge_frame
+    p.frame = k.frame
+    p.at_end = false
+    p.at_pre_step = false
+    copy_bodies(&p.bodies, k.bodies, k.body_count)
+}
+
+free_keyframe(k: *Keyframe) {
+    snapshot.free_snapshot(k.block, k.byte_count)
+    if k.bodies != null { basics.free_bytes(k.bodies, k.body_count * sizeof(BodyId)) }
+}
+
+keyframe_cost(k: *Keyframe) -> long { return (k.byte_count + k.body_count * sizeof(BodyId)) as long }
+
+clear_keyframes(p: *Player) {
+    i = 0
+    while i < p.keyframes.count {
+        free_keyframe(keyframe_at(p, i))
+        i = i + 1
+    }
+    p.keyframes.count = 0
+    p.keyframe_bytes = 0 as long
+}
+
+// The frame just completed kept as a keyframe. Over the budget, the
+// spacing doubles and the keyframes off the wider grid go, until it fits
+// or nothing more can go (the newest is always kept).
+capture_keyframe(p: *Player) {
+    block, byte_count = snapshot.save_world(p.world_id)
+    if block == null { return }
+    cost = (byte_count + p.bodies.count * sizeof(BodyId)) as long
+    while p.keyframes.count > 0 && p.keyframe_bytes + cost > p.keyframe_budget {
+        p.keyframe_interval = p.keyframe_interval * 2
+        kept = 0
+        kept_bytes = 0 as long
+        i = 0
+        while i < p.keyframes.count {
+            k = keyframe_at(p, i)
+            if k.frame % p.keyframe_interval == 0 {
+                if kept != i { memcpy(keyframe_at(p, kept) as ptr, k as ptr, sizeof(Keyframe)) }
+                kept_bytes = kept_bytes + keyframe_cost(keyframe_at(p, kept))
+                kept = kept + 1
+            } else {
+                free_keyframe(k)
+            }
+            i = i + 1
+        }
+        progress = kept < p.keyframes.count
+        p.keyframes.count = kept
+        p.keyframe_bytes = kept_bytes
+        if progress == false { break }
+    }
+    index = basics.buffer_push(&p.keyframes)
+    k = keyframe_at(p, index)
+    k.frame = p.frame
+    k.cursor = p.cursor
+    k.block = block
+    k.byte_count = byte_count
+    k.diverged = p.diverged
+    k.diverge_frame = p.diverge_frame
+    k.body_count = p.bodies.count
+    k.bodies = null
+    if p.bodies.count > 0 {
+        k.bodies = basics.alloc(p.bodies.count * sizeof(BodyId))
+        memcpy(k.bodies, p.bodies.data, p.bodies.count * sizeof(BodyId))
+    }
+    p.keyframe_bytes = p.keyframe_bytes + cost
+    p.last_keyframe_frame = p.frame
+}
+
+// The keyframes' memory budget and finest spacing
+// (b3RecPlayer_SetKeyframePolicy): a budget or spacing not above zero keeps
+// the one there was. The keyframes kept so far go; a restart fills them
+// again under the new policy.
+player_set_keyframe_policy(p: *Player, budget_bytes: long, min_interval_frames: int) {
+    if budget_bytes > (0 as long) { p.keyframe_budget = budget_bytes }
+    if min_interval_frames > 0 { p.keyframe_min_interval = min_interval_frames }
+    clear_keyframes(p)
+    p.keyframe_interval = p.keyframe_min_interval
+    p.last_keyframe_frame = 0
+}
+
+// The replay world's workers, now and through every restore.
+player_set_worker_count(p: *Player, count: int) {
+    p.def.worker_count = math.clamp_int(count, 1, native.MAX_WORKERS)
+    if dynamics.world_is_valid(p.world_id) { physics_world.set_worker_count(p.world_id, p.def.worker_count) }
+}
+
+player_info(p: *Player) -> PlayerInfo {
+    return PlayerInfo { frame_count: p.frame_count, worker_count: p.def.worker_count, time_step: p.time_step, sub_step_count: p.sub_step_count, bounds: p.bounds }
+}
+
+player_keyframe_budget(p: *Player) -> long { return p.keyframe_budget }
+player_keyframe_min_interval(p: *Player) -> int { return p.keyframe_min_interval }
+player_keyframe_interval(p: *Player) -> int { return p.keyframe_interval }
+player_keyframe_bytes(p: *Player) -> long { return p.keyframe_bytes }
+player_keyframe_count(p: *Player) -> int { return p.keyframes.count }
+player_world(p: *Player) -> WorldId { return p.world_id }
+player_frame(p: *Player) -> int { return p.frame }
+player_frame_count(p: *Player) -> int { return p.frame_count }
+player_at_end(p: *Player) -> bool { return p.at_end }
+player_at_pre_step(p: *Player) -> bool { return p.at_pre_step }
+player_has_diverged(p: *Player) -> bool { return p.diverged }
+player_diverge_frame(p: *Player) -> int { return p.diverge_frame }
+player_failed(p: *Player) -> bool { return p.failed }
+
+// The bodies made so far, in order, holes included.
+player_body_count(p: *Player) -> int { return p.bodies.count }
+
+// The body made `ordinal`-th, or a null id when there is none or it was
+// destroyed.
+player_body_id(p: *Player, ordinal: int) -> BodyId {
+    if ordinal < 0 || ordinal >= p.bodies.count { return dynamics.null_body_id() }
+    each = p.bodies.data as BodyId[]
+    return each[ordinal]
+}
+
+// Whether the recording replays whole without diverging (b3ValidateReplay).
+validate_replay(data: ptr, size: int, worker_count: int) -> bool {
+    p = create_player(data, size, worker_count)
+    if p == null { return false }
+    while player_step_frame(p) {
+        if p.diverged { break }
+    }
+    result = p.failed == false && p.diverged == false
+    destroy_player(p)
+    return result
+}
+
+// --- the records ------------------------------------------------------------------------------------
+
+// The record's call made in the player's world, or its check done; false
+// for an opcode this player does not know.
+dispatch(p: *Player, op: int) -> bool {
+    if op == dynamics.OP_STATE_HASH {
+        recorded = read_long(p)
+        if p.ok && dynamics.hash_world_state(dynamics.get_world(p.world_id.index1 - 1)) != recorded {
+            if p.diverged == false { p.diverge_frame = p.frame }
+            p.diverged = true
+        }
+        return true
+    }
+    if op == dynamics.OP_BOUNDS {
+        // Read for the info when the player opened.
+        _have = read_bool(p)
+        _lower = read_vec3(p)
+        _upper = read_vec3(p)
+        return true
+    }
+    return dispatch_call(p, op)
+}
+
+read_body_def(p: *Player) -> BodyDef {
+    v = dynamics.default_body_def()
+    v.kind = read_int(p)
+    v.position = read_vec3(p)
+    v.rotation = read_quat(p)
+    v.linear_velocity = read_vec3(p)
+    v.angular_velocity = read_vec3(p)
+    v.linear_damping = read_float(p)
+    v.angular_damping = read_float(p)
+    v.gravity_scale = read_float(p)
+    v.sleep_threshold = read_float(p)
+    v.safety_factor = read_float(p)
+    v.name = read_string(p)
+    v.motion_locks = read_motion_locks(p)
+    v.enable_sleep = read_bool(p)
+    v.is_awake = read_bool(p)
+    v.is_bullet = read_bool(p)
+    v.is_enabled = read_bool(p)
+    v.allow_fast_rotation = read_bool(p)
+    v.enable_contact_recycling = read_bool(p)
+    return v
+}
+
+read_shape_def(p: *Player) -> ShapeDef {
+    v = dynamics.default_shape_def()
+    v.name = read_string(p)
+    v.materials = read_materials(p)
+    v.material_count = p.material_count
+    v.base_material = read_surface_material(p)
+    v.density = read_float(p)
+    v.explosion_scale = read_float(p)
+    v.filter = read_filter(p)
+    v.enable_custom_filtering = read_bool(p)
+    v.is_sensor = read_bool(p)
+    v.enable_sensor_events = read_bool(p)
+    v.enable_contact_events = read_bool(p)
+    v.enable_hit_events = read_bool(p)
+    v.enable_pre_solve_events = read_bool(p)
+    v.invoke_contact_creation = read_bool(p)
+    v.update_body_mass = read_bool(p)
+    v.enable_speculative_contact = read_bool(p)
+    return v
+}
+
+read_joint_def(p: *Player) -> JointDef {
+    v = dynamics.default_joint_def()
+    v.body_id_a = read_body_id(p)
+    v.body_id_b = read_body_id(p)
+    v.local_frame_a = read_transform(p)
+    v.local_frame_b = read_transform(p)
+    v.force_threshold = read_float(p)
+    v.torque_threshold = read_float(p)
+    v.constraint_hertz = read_float(p)
+    v.constraint_damping_ratio = read_float(p)
+    v.draw_scale = read_float(p)
+    v.collide_connected = read_bool(p)
+    return v
+}
+
+read_distance_joint_def(p: *Player) -> DistanceJointDef {
+    v = dynamics.default_distance_joint_def()
+    v.base = read_joint_def(p)
+    v.length = read_float(p)
+    v.enable_spring = read_bool(p)
+    v.lower_spring_force = read_float(p)
+    v.upper_spring_force = read_float(p)
+    v.hertz = read_float(p)
+    v.damping_ratio = read_float(p)
+    v.enable_limit = read_bool(p)
+    v.min_length = read_float(p)
+    v.max_length = read_float(p)
+    v.enable_motor = read_bool(p)
+    v.max_motor_force = read_float(p)
+    v.motor_speed = read_float(p)
+    return v
+}
+
+read_motor_joint_def(p: *Player) -> MotorJointDef {
+    v = dynamics.default_motor_joint_def()
+    v.base = read_joint_def(p)
+    v.linear_velocity = read_vec3(p)
+    v.max_velocity_force = read_float(p)
+    v.angular_velocity = read_vec3(p)
+    v.max_velocity_torque = read_float(p)
+    v.linear_hertz = read_float(p)
+    v.linear_damping_ratio = read_float(p)
+    v.max_spring_force = read_float(p)
+    v.angular_hertz = read_float(p)
+    v.angular_damping_ratio = read_float(p)
+    v.max_spring_torque = read_float(p)
+    return v
+}
+
+read_filter_joint_def(p: *Player) -> FilterJointDef {
+    v = dynamics.default_filter_joint_def()
+    v.base = read_joint_def(p)
+    return v
+}
+
+read_parallel_joint_def(p: *Player) -> ParallelJointDef {
+    v = dynamics.default_parallel_joint_def()
+    v.base = read_joint_def(p)
+    v.hertz = read_float(p)
+    v.damping_ratio = read_float(p)
+    v.max_torque = read_float(p)
+    return v
+}
+
+read_prismatic_joint_def(p: *Player) -> PrismaticJointDef {
+    v = dynamics.default_prismatic_joint_def()
+    v.base = read_joint_def(p)
+    v.enable_spring = read_bool(p)
+    v.hertz = read_float(p)
+    v.damping_ratio = read_float(p)
+    v.target_translation = read_float(p)
+    v.enable_limit = read_bool(p)
+    v.lower_translation = read_float(p)
+    v.upper_translation = read_float(p)
+    v.enable_motor = read_bool(p)
+    v.max_motor_force = read_float(p)
+    v.motor_speed = read_float(p)
+    return v
+}
+
+read_revolute_joint_def(p: *Player) -> RevoluteJointDef {
+    v = dynamics.default_revolute_joint_def()
+    v.base = read_joint_def(p)
+    v.target_angle = read_float(p)
+    v.enable_spring = read_bool(p)
+    v.hertz = read_float(p)
+    v.damping_ratio = read_float(p)
+    v.enable_limit = read_bool(p)
+    v.lower_angle = read_float(p)
+    v.upper_angle = read_float(p)
+    v.enable_motor = read_bool(p)
+    v.max_motor_torque = read_float(p)
+    v.motor_speed = read_float(p)
+    return v
+}
+
+read_spherical_joint_def(p: *Player) -> SphericalJointDef {
+    v = dynamics.default_spherical_joint_def()
+    v.base = read_joint_def(p)
+    v.enable_spring = read_bool(p)
+    v.hertz = read_float(p)
+    v.damping_ratio = read_float(p)
+    v.target_rotation = read_quat(p)
+    v.enable_cone_limit = read_bool(p)
+    v.cone_angle = read_float(p)
+    v.cone_axis = read_vec3(p)
+    v.cone_minor_angle = read_float(p)
+    v.cone_major_axis = read_vec3(p)
+    v.enable_twist_limit = read_bool(p)
+    v.lower_twist_angle = read_float(p)
+    v.upper_twist_angle = read_float(p)
+    v.enable_motor = read_bool(p)
+    v.max_motor_torque = read_float(p)
+    v.motor_velocity = read_vec3(p)
+    return v
+}
+
+read_weld_joint_def(p: *Player) -> WeldJointDef {
+    v = dynamics.default_weld_joint_def()
+    v.base = read_joint_def(p)
+    v.linear_hertz = read_float(p)
+    v.angular_hertz = read_float(p)
+    v.linear_damping_ratio = read_float(p)
+    v.angular_damping_ratio = read_float(p)
+    return v
+}
+
+read_wheel_joint_def(p: *Player) -> WheelJointDef {
+    v = dynamics.default_wheel_joint_def()
+    v.base = read_joint_def(p)
+    v.enable_suspension_spring = read_bool(p)
+    v.suspension_hertz = read_float(p)
+    v.suspension_damping_ratio = read_float(p)
+    v.enable_suspension_limit = read_bool(p)
+    v.lower_suspension_limit = read_float(p)
+    v.upper_suspension_limit = read_float(p)
+    v.enable_spin_motor = read_bool(p)
+    v.max_spin_torque = read_float(p)
+    v.spin_speed = read_float(p)
+    v.enable_steering = read_bool(p)
+    v.steering_hertz = read_float(p)
+    v.steering_damping_ratio = read_float(p)
+    v.target_steering_angle = read_float(p)
+    v.max_steering_torque = read_float(p)
+    v.enable_steering_limit = read_bool(p)
+    v.lower_steering_limit = read_float(p)
+    v.upper_steering_limit = read_float(p)
+    return v
+}
+
+read_mass_data(p: *Player) -> MassData {
+    v = MassData { mass: 0.0, center: math.vec3_zero(), inertia: Matrix3 { cx: math.vec3_zero(), cy: math.vec3_zero(), cz: math.vec3_zero() } }
+    v.mass = read_float(p)
+    v.center = read_vec3(p)
+    v.inertia = read_matrix3(p)
+    return v
+}
+
+read_motion_locks(p: *Player) -> MotionLocks {
+    v = MotionLocks { linear_x: false, linear_y: false, linear_z: false, angular_x: false, angular_y: false, angular_z: false }
+    v.linear_x = read_bool(p)
+    v.linear_y = read_bool(p)
+    v.linear_z = read_bool(p)
+    v.angular_x = read_bool(p)
+    v.angular_y = read_bool(p)
+    v.angular_z = read_bool(p)
+    return v
+}
+
+read_filter(p: *Player) -> Filter {
+    v = Filter { category_bits: 0 as long, mask_bits: 0 as long, group_index: 0 }
+    v.category_bits = read_long(p)
+    v.mask_bits = read_long(p)
+    v.group_index = read_int(p)
+    return v
+}
+
+read_surface_material(p: *Player) -> SurfaceMaterial {
+    v = SurfaceMaterial { friction: 0.0, restitution: 0.0, rolling_resistance: 0.0, tangent_velocity: math.vec3_zero(), user_material_id: 0 as long, custom_color: 0 }
+    v.friction = read_float(p)
+    v.restitution = read_float(p)
+    v.rolling_resistance = read_float(p)
+    v.tangent_velocity = read_vec3(p)
+    v.user_material_id = read_long(p)
+    v.custom_color = read_int(p)
+    return v
+}
+
+read_sphere(p: *Player) -> Sphere {
+    v = Sphere { center: math.vec3_zero(), radius: 0.0 }
+    v.center = read_vec3(p)
+    v.radius = read_float(p)
+    return v
+}
+
+read_capsule(p: *Player) -> Capsule {
+    v = Capsule { center1: math.vec3_zero(), center2: math.vec3_zero(), radius: 0.0 }
+    v.center1 = read_vec3(p)
+    v.center2 = read_vec3(p)
+    v.radius = read_float(p)
+    return v
+}
+
+read_matrix3(p: *Player) -> Matrix3 {
+    v = Matrix3 { cx: math.vec3_zero(), cy: math.vec3_zero(), cz: math.vec3_zero() }
+    v.cx = read_vec3(p)
+    v.cy = read_vec3(p)
+    v.cz = read_vec3(p)
+    return v
+}
+
+read_explosion_def(p: *Player) -> ExplosionDef {
+    v = physics_world.default_explosion_def()
+    v.mask_bits = read_long(p)
+    v.position = read_vec3(p)
+    v.radius = read_float(p)
+    v.falloff = read_float(p)
+    v.impulse_per_area = read_float(p)
+    return v
+}
+
+// The calls, one case an opcode.
+dispatch_call(p: *Player, op: int) -> bool {
+    if op == dynamics.OP_CREATE_BODY {
+        a_world_id_world_id = p.world_id
+        a_body_def_def = read_body_def(p)
+        recorded_index1 = read_int(p)
+        recorded_generation = read_int(p)
+        if p.ok {
+            made_body = dynamics.create_body(a_world_id_world_id, &a_body_def_def)
+            check_made(p, made_body.index1, made_body.generation, recorded_index1, recorded_generation)
+            track_body_create(p, made_body)
+        }
+        return true
+    }
+    if op == dynamics.OP_DESTROY_BODY {
+        a_body_id_id = read_body_id(p)
+        if p.ok {
+            track_body_destroy(p, a_body_id_id)
+            dynamics.destroy_body(a_body_id_id)
+        }
+        return true
+    }
+    if op == dynamics.OP_BODY_SET_TRANSFORM {
+        a_body_id_id = read_body_id(p)
+        a_vec3_position = read_vec3(p)
+        a_quat_rotation = read_quat(p)
+        if p.ok { dynamics.body_set_transform(a_body_id_id, a_vec3_position, a_quat_rotation) }
+        return true
+    }
+    if op == dynamics.OP_BODY_SET_LINEAR_VELOCITY {
+        a_body_id_id = read_body_id(p)
+        a_vec3_v = read_vec3(p)
+        if p.ok { dynamics.body_set_linear_velocity(a_body_id_id, a_vec3_v) }
+        return true
+    }
+    if op == dynamics.OP_BODY_SET_ANGULAR_VELOCITY {
+        a_body_id_id = read_body_id(p)
+        a_vec3_v = read_vec3(p)
+        if p.ok { dynamics.body_set_angular_velocity(a_body_id_id, a_vec3_v) }
+        return true
+    }
+    if op == dynamics.OP_BODY_SET_TARGET_TRANSFORM {
+        a_body_id_id = read_body_id(p)
+        a_transform_target = read_transform(p)
+        a_float_time_step = read_float(p)
+        a_bool_wake = read_bool(p)
+        if p.ok { dynamics.body_set_target_transform(a_body_id_id, a_transform_target, a_float_time_step, a_bool_wake) }
+        return true
+    }
+    if op == dynamics.OP_BODY_APPLY_FORCE {
+        a_body_id_id = read_body_id(p)
+        a_vec3_force = read_vec3(p)
+        a_vec3_point = read_vec3(p)
+        a_bool_wake = read_bool(p)
+        if p.ok { dynamics.body_apply_force(a_body_id_id, a_vec3_force, a_vec3_point, a_bool_wake) }
+        return true
+    }
+    if op == dynamics.OP_BODY_APPLY_FORCE_TO_CENTER {
+        a_body_id_id = read_body_id(p)
+        a_vec3_force = read_vec3(p)
+        a_bool_wake = read_bool(p)
+        if p.ok { dynamics.body_apply_force_to_center(a_body_id_id, a_vec3_force, a_bool_wake) }
+        return true
+    }
+    if op == dynamics.OP_BODY_APPLY_TORQUE {
+        a_body_id_id = read_body_id(p)
+        a_vec3_torque = read_vec3(p)
+        a_bool_wake = read_bool(p)
+        if p.ok { dynamics.body_apply_torque(a_body_id_id, a_vec3_torque, a_bool_wake) }
+        return true
+    }
+    if op == dynamics.OP_BODY_APPLY_LINEAR_IMPULSE {
+        a_body_id_id = read_body_id(p)
+        a_vec3_impulse = read_vec3(p)
+        a_vec3_point = read_vec3(p)
+        a_bool_wake = read_bool(p)
+        if p.ok { dynamics.body_apply_linear_impulse(a_body_id_id, a_vec3_impulse, a_vec3_point, a_bool_wake) }
+        return true
+    }
+    if op == dynamics.OP_BODY_APPLY_LINEAR_IMPULSE_TO_CENTER {
+        a_body_id_id = read_body_id(p)
+        a_vec3_impulse = read_vec3(p)
+        a_bool_wake = read_bool(p)
+        if p.ok { dynamics.body_apply_linear_impulse_to_center(a_body_id_id, a_vec3_impulse, a_bool_wake) }
+        return true
+    }
+    if op == dynamics.OP_BODY_APPLY_ANGULAR_IMPULSE {
+        a_body_id_id = read_body_id(p)
+        a_vec3_impulse = read_vec3(p)
+        a_bool_wake = read_bool(p)
+        if p.ok { dynamics.body_apply_angular_impulse(a_body_id_id, a_vec3_impulse, a_bool_wake) }
+        return true
+    }
+    if op == dynamics.OP_BODY_SET_BULLET {
+        a_body_id_id = read_body_id(p)
+        a_bool_flag = read_bool(p)
+        if p.ok { dynamics.body_set_bullet(a_body_id_id, a_bool_flag) }
+        return true
+    }
+    if op == dynamics.OP_BODY_SET_MASS_DATA {
+        a_body_id_id = read_body_id(p)
+        a_mass_mass_data = read_mass_data(p)
+        if p.ok { dynamics.body_set_mass_data(a_body_id_id, a_mass_mass_data) }
+        return true
+    }
+    if op == dynamics.OP_BODY_APPLY_MASS_FROM_SHAPES {
+        a_body_id_id = read_body_id(p)
+        if p.ok { dynamics.body_apply_mass_from_shapes(a_body_id_id) }
+        return true
+    }
+    if op == dynamics.OP_BODY_SET_LINEAR_DAMPING {
+        a_body_id_id = read_body_id(p)
+        a_float_damping = read_float(p)
+        if p.ok { dynamics.body_set_linear_damping(a_body_id_id, a_float_damping) }
+        return true
+    }
+    if op == dynamics.OP_BODY_SET_ANGULAR_DAMPING {
+        a_body_id_id = read_body_id(p)
+        a_float_damping = read_float(p)
+        if p.ok { dynamics.body_set_angular_damping(a_body_id_id, a_float_damping) }
+        return true
+    }
+    if op == dynamics.OP_BODY_SET_GRAVITY_SCALE {
+        a_body_id_id = read_body_id(p)
+        a_float_scale = read_float(p)
+        if p.ok { dynamics.body_set_gravity_scale(a_body_id_id, a_float_scale) }
+        return true
+    }
+    if op == dynamics.OP_BODY_SET_AWAKE {
+        a_body_id_id = read_body_id(p)
+        a_bool_awake = read_bool(p)
+        if p.ok { dynamics.body_set_awake(a_body_id_id, a_bool_awake) }
+        return true
+    }
+    if op == dynamics.OP_BODY_ENABLE_SLEEP {
+        a_body_id_id = read_body_id(p)
+        a_bool_enable = read_bool(p)
+        if p.ok { dynamics.body_enable_sleep(a_body_id_id, a_bool_enable) }
+        return true
+    }
+    if op == dynamics.OP_BODY_SET_SLEEP_THRESHOLD {
+        a_body_id_id = read_body_id(p)
+        a_float_threshold = read_float(p)
+        if p.ok { dynamics.body_set_sleep_threshold(a_body_id_id, a_float_threshold) }
+        return true
+    }
+    if op == dynamics.OP_BODY_SET_MOTION_LOCKS {
+        a_body_id_id = read_body_id(p)
+        a_motion_locks_locks = read_motion_locks(p)
+        if p.ok { dynamics.body_set_motion_locks(a_body_id_id, a_motion_locks_locks) }
+        return true
+    }
+    if op == dynamics.OP_CREATE_SPHERE_SHAPE {
+        a_body_id_body_id = read_body_id(p)
+        a_shape_def_def = read_shape_def(p)
+        a_sphere_s = read_sphere(p)
+        recorded_index1 = read_int(p)
+        recorded_generation = read_int(p)
+        if p.ok {
+            made_shape = dynamics.create_sphere_shape(a_body_id_body_id, &a_shape_def_def, a_sphere_s)
+            check_made(p, made_shape.index1, made_shape.generation, recorded_index1, recorded_generation)
+        }
+        return true
+    }
+    if op == dynamics.OP_CREATE_CAPSULE_SHAPE {
+        a_body_id_body_id = read_body_id(p)
+        a_shape_def_def = read_shape_def(p)
+        a_capsule_c = read_capsule(p)
+        recorded_index1 = read_int(p)
+        recorded_generation = read_int(p)
+        if p.ok {
+            made_shape = dynamics.create_capsule_shape(a_body_id_body_id, &a_shape_def_def, a_capsule_c)
+            check_made(p, made_shape.index1, made_shape.generation, recorded_index1, recorded_generation)
+        }
+        return true
+    }
+    if op == dynamics.OP_CREATE_HULL_SHAPE {
+        a_body_id_body_id = read_body_id(p)
+        a_shape_def_def = read_shape_def(p)
+        a_ptr__hull_h = read_geometry(p, shape.SHAPE_HULL) as *HullData
+        recorded_index1 = read_int(p)
+        recorded_generation = read_int(p)
+        if p.ok {
+            made_shape = dynamics.create_hull_shape(a_body_id_body_id, &a_shape_def_def, a_ptr__hull_h)
+            check_made(p, made_shape.index1, made_shape.generation, recorded_index1, recorded_generation)
+        }
+        return true
+    }
+    if op == dynamics.OP_CREATE_TRANSFORMED_HULL_SHAPE {
+        a_body_id_body_id = read_body_id(p)
+        a_shape_def_def = read_shape_def(p)
+        a_ptr__hull_h = read_geometry(p, shape.SHAPE_HULL) as *HullData
+        a_transform_transform = read_transform(p)
+        a_vec3_scale = read_vec3(p)
+        recorded_index1 = read_int(p)
+        recorded_generation = read_int(p)
+        if p.ok {
+            made_shape = dynamics.create_transformed_hull_shape(a_body_id_body_id, &a_shape_def_def, a_ptr__hull_h, a_transform_transform, a_vec3_scale)
+            check_made(p, made_shape.index1, made_shape.generation, recorded_index1, recorded_generation)
+        }
+        return true
+    }
+    if op == dynamics.OP_CREATE_MESH_SHAPE {
+        a_body_id_body_id = read_body_id(p)
+        a_shape_def_def = read_shape_def(p)
+        a_ptr__mesh_m = read_geometry(p, shape.SHAPE_MESH) as *MeshData
+        a_vec3_scale = read_vec3(p)
+        recorded_index1 = read_int(p)
+        recorded_generation = read_int(p)
+        if p.ok {
+            made_shape = dynamics.create_mesh_shape(a_body_id_body_id, &a_shape_def_def, a_ptr__mesh_m, a_vec3_scale)
+            check_made(p, made_shape.index1, made_shape.generation, recorded_index1, recorded_generation)
+        }
+        return true
+    }
+    if op == dynamics.OP_CREATE_HEIGHT_FIELD_SHAPE {
+        a_body_id_body_id = read_body_id(p)
+        a_shape_def_def = read_shape_def(p)
+        a_ptr__height_field_h = read_geometry(p, shape.SHAPE_HEIGHT_FIELD) as *HeightFieldData
+        recorded_index1 = read_int(p)
+        recorded_generation = read_int(p)
+        if p.ok {
+            made_shape = dynamics.create_height_field_shape(a_body_id_body_id, &a_shape_def_def, a_ptr__height_field_h)
+            check_made(p, made_shape.index1, made_shape.generation, recorded_index1, recorded_generation)
+        }
+        return true
+    }
+    if op == dynamics.OP_CREATE_COMPOUND_SHAPE {
+        a_body_id_body_id = read_body_id(p)
+        a_shape_def_def = read_shape_def(p)
+        a_ptr__compound_c = read_geometry(p, shape.SHAPE_COMPOUND) as *CompoundData
+        recorded_index1 = read_int(p)
+        recorded_generation = read_int(p)
+        if p.ok {
+            made_shape = dynamics.create_compound_shape(a_body_id_body_id, &a_shape_def_def, a_ptr__compound_c)
+            check_made(p, made_shape.index1, made_shape.generation, recorded_index1, recorded_generation)
+        }
+        return true
+    }
+    if op == dynamics.OP_DESTROY_SHAPE {
+        a_shape_id_id = read_shape_id(p)
+        a_bool_update_body_mass = read_bool(p)
+        if p.ok { dynamics.destroy_shape(a_shape_id_id, a_bool_update_body_mass) }
+        return true
+    }
+    if op == dynamics.OP_SHAPE_SET_DENSITY {
+        a_shape_id_id = read_shape_id(p)
+        a_float_density = read_float(p)
+        a_bool_update_body_mass = read_bool(p)
+        if p.ok { dynamics.shape_set_density(a_shape_id_id, a_float_density, a_bool_update_body_mass) }
+        return true
+    }
+    if op == dynamics.OP_SHAPE_SET_FILTER {
+        a_shape_id_id = read_shape_id(p)
+        a_filter_filter = read_filter(p)
+        if p.ok { dynamics.shape_set_filter(a_shape_id_id, a_filter_filter) }
+        return true
+    }
+    if op == dynamics.OP_SHAPE_SET_SURFACE_MATERIAL {
+        a_shape_id_id = read_shape_id(p)
+        a_surface_material_m = read_surface_material(p)
+        if p.ok { dynamics.shape_set_surface_material(a_shape_id_id, a_surface_material_m) }
+        return true
+    }
+    if op == dynamics.OP_SHAPE_SET_SPHERE {
+        a_shape_id_id = read_shape_id(p)
+        a_sphere_s = read_sphere(p)
+        if p.ok { dynamics.shape_set_sphere(a_shape_id_id, a_sphere_s) }
+        return true
+    }
+    if op == dynamics.OP_SHAPE_SET_CAPSULE {
+        a_shape_id_id = read_shape_id(p)
+        a_capsule_c = read_capsule(p)
+        if p.ok { dynamics.shape_set_capsule(a_shape_id_id, a_capsule_c) }
+        return true
+    }
+    if op == dynamics.OP_SHAPE_SET_HULL {
+        a_shape_id_id = read_shape_id(p)
+        a_ptr__hull_h = read_geometry(p, shape.SHAPE_HULL) as *HullData
+        if p.ok { dynamics.shape_set_hull(a_shape_id_id, a_ptr__hull_h) }
+        return true
+    }
+    if op == dynamics.OP_SHAPE_SET_MESH {
+        a_shape_id_id = read_shape_id(p)
+        a_ptr__mesh_m = read_geometry(p, shape.SHAPE_MESH) as *MeshData
+        a_vec3_scale = read_vec3(p)
+        if p.ok { dynamics.shape_set_mesh(a_shape_id_id, a_ptr__mesh_m, a_vec3_scale) }
+        return true
+    }
+    if op == dynamics.OP_SHAPE_SET_FRICTION {
+        a_shape_id_id = read_shape_id(p)
+        a_float_friction = read_float(p)
+        if p.ok { dynamics.shape_set_friction(a_shape_id_id, a_float_friction) }
+        return true
+    }
+    if op == dynamics.OP_SHAPE_SET_RESTITUTION {
+        a_shape_id_id = read_shape_id(p)
+        a_float_restitution = read_float(p)
+        if p.ok { dynamics.shape_set_restitution(a_shape_id_id, a_float_restitution) }
+        return true
+    }
+    if op == dynamics.OP_SHAPE_SET_MESH_MATERIAL {
+        a_shape_id_id = read_shape_id(p)
+        a_surface_material_m = read_surface_material(p)
+        a_int_index = read_int(p)
+        if p.ok { dynamics.shape_set_mesh_material(a_shape_id_id, a_surface_material_m, a_int_index) }
+        return true
+    }
+    if op == dynamics.OP_SHAPE_ENABLE_PRE_SOLVE_EVENTS {
+        a_shape_id_id = read_shape_id(p)
+        a_bool_flag = read_bool(p)
+        if p.ok { dynamics.shape_enable_pre_solve_events(a_shape_id_id, a_bool_flag) }
+        return true
+    }
+    if op == dynamics.OP_BODY_ENABLE_HIT_EVENTS {
+        a_body_id_id = read_body_id(p)
+        a_bool_flag = read_bool(p)
+        if p.ok { dynamics.body_enable_hit_events(a_body_id_id, a_bool_flag) }
+        return true
+    }
+    if op == dynamics.OP_BODY_ALLOW_FAST_ROTATION {
+        a_body_id_id = read_body_id(p)
+        a_bool_flag = read_bool(p)
+        if p.ok { dynamics.body_allow_fast_rotation(a_body_id_id, a_bool_flag) }
+        return true
+    }
+    if op == dynamics.OP_BODY_ENABLE_CONTACT_RECYCLING {
+        a_body_id_id = read_body_id(p)
+        a_bool_flag = read_bool(p)
+        if p.ok { dynamics.body_enable_contact_recycling(a_body_id_id, a_bool_flag) }
+        return true
+    }
+    if op == dynamics.OP_BODY_SET_SAFETY_FACTOR {
+        a_body_id_id = read_body_id(p)
+        a_float_factor = read_float(p)
+        if p.ok { dynamics.body_set_safety_factor(a_body_id_id, a_float_factor) }
+        return true
+    }
+    if op == dynamics.OP_SHAPE_APPLY_WIND {
+        a_shape_id_id = read_shape_id(p)
+        a_vec3_wind = read_vec3(p)
+        a_float_drag = read_float(p)
+        a_float_lift = read_float(p)
+        a_float_max_speed = read_float(p)
+        a_bool_wake = read_bool(p)
+        if p.ok { dynamics.shape_apply_wind(a_shape_id_id, a_vec3_wind, a_float_drag, a_float_lift, a_float_max_speed, a_bool_wake) }
+        return true
+    }
+    if op == dynamics.OP_BODY_SET_NAME {
+        a_body_id_id = read_body_id(p)
+        a_string_name = read_string(p)
+        if p.ok { dynamics.body_set_name(a_body_id_id, a_string_name) }
+        return true
+    }
+    if op == dynamics.OP_SHAPE_SET_NAME {
+        a_shape_id_id = read_shape_id(p)
+        a_string_name = read_string(p)
+        if p.ok { dynamics.shape_set_name(a_shape_id_id, a_string_name) }
+        return true
+    }
+    if op == dynamics.OP_CREATE_DISTANCE_JOINT {
+        a_world_id_world_id = p.world_id
+        a_distance_joint_def_def = read_distance_joint_def(p)
+        recorded_index1 = read_int(p)
+        recorded_generation = read_int(p)
+        if p.ok {
+            made_joint = dynamics.create_distance_joint(a_world_id_world_id, &a_distance_joint_def_def)
+            check_made(p, made_joint.index1, made_joint.generation, recorded_index1, recorded_generation)
+        }
+        return true
+    }
+    if op == dynamics.OP_CREATE_MOTOR_JOINT {
+        a_world_id_world_id = p.world_id
+        a_motor_joint_def_def = read_motor_joint_def(p)
+        recorded_index1 = read_int(p)
+        recorded_generation = read_int(p)
+        if p.ok {
+            made_joint = dynamics.create_motor_joint(a_world_id_world_id, &a_motor_joint_def_def)
+            check_made(p, made_joint.index1, made_joint.generation, recorded_index1, recorded_generation)
+        }
+        return true
+    }
+    if op == dynamics.OP_CREATE_FILTER_JOINT {
+        a_world_id_world_id = p.world_id
+        a_filter_joint_def_def = read_filter_joint_def(p)
+        recorded_index1 = read_int(p)
+        recorded_generation = read_int(p)
+        if p.ok {
+            made_joint = dynamics.create_filter_joint(a_world_id_world_id, &a_filter_joint_def_def)
+            check_made(p, made_joint.index1, made_joint.generation, recorded_index1, recorded_generation)
+        }
+        return true
+    }
+    if op == dynamics.OP_CREATE_PARALLEL_JOINT {
+        a_world_id_world_id = p.world_id
+        a_parallel_joint_def_def = read_parallel_joint_def(p)
+        recorded_index1 = read_int(p)
+        recorded_generation = read_int(p)
+        if p.ok {
+            made_joint = dynamics.create_parallel_joint(a_world_id_world_id, &a_parallel_joint_def_def)
+            check_made(p, made_joint.index1, made_joint.generation, recorded_index1, recorded_generation)
+        }
+        return true
+    }
+    if op == dynamics.OP_CREATE_PRISMATIC_JOINT {
+        a_world_id_world_id = p.world_id
+        a_prismatic_joint_def_def = read_prismatic_joint_def(p)
+        recorded_index1 = read_int(p)
+        recorded_generation = read_int(p)
+        if p.ok {
+            made_joint = dynamics.create_prismatic_joint(a_world_id_world_id, &a_prismatic_joint_def_def)
+            check_made(p, made_joint.index1, made_joint.generation, recorded_index1, recorded_generation)
+        }
+        return true
+    }
+    if op == dynamics.OP_CREATE_REVOLUTE_JOINT {
+        a_world_id_world_id = p.world_id
+        a_revolute_joint_def_def = read_revolute_joint_def(p)
+        recorded_index1 = read_int(p)
+        recorded_generation = read_int(p)
+        if p.ok {
+            made_joint = dynamics.create_revolute_joint(a_world_id_world_id, &a_revolute_joint_def_def)
+            check_made(p, made_joint.index1, made_joint.generation, recorded_index1, recorded_generation)
+        }
+        return true
+    }
+    if op == dynamics.OP_CREATE_SPHERICAL_JOINT {
+        a_world_id_world_id = p.world_id
+        a_spherical_joint_def_def = read_spherical_joint_def(p)
+        recorded_index1 = read_int(p)
+        recorded_generation = read_int(p)
+        if p.ok {
+            made_joint = dynamics.create_spherical_joint(a_world_id_world_id, &a_spherical_joint_def_def)
+            check_made(p, made_joint.index1, made_joint.generation, recorded_index1, recorded_generation)
+        }
+        return true
+    }
+    if op == dynamics.OP_CREATE_WELD_JOINT {
+        a_world_id_world_id = p.world_id
+        a_weld_joint_def_def = read_weld_joint_def(p)
+        recorded_index1 = read_int(p)
+        recorded_generation = read_int(p)
+        if p.ok {
+            made_joint = dynamics.create_weld_joint(a_world_id_world_id, &a_weld_joint_def_def)
+            check_made(p, made_joint.index1, made_joint.generation, recorded_index1, recorded_generation)
+        }
+        return true
+    }
+    if op == dynamics.OP_CREATE_WHEEL_JOINT {
+        a_world_id_world_id = p.world_id
+        a_wheel_joint_def_def = read_wheel_joint_def(p)
+        recorded_index1 = read_int(p)
+        recorded_generation = read_int(p)
+        if p.ok {
+            made_joint = dynamics.create_wheel_joint(a_world_id_world_id, &a_wheel_joint_def_def)
+            check_made(p, made_joint.index1, made_joint.generation, recorded_index1, recorded_generation)
+        }
+        return true
+    }
+    if op == dynamics.OP_DESTROY_JOINT {
+        a_joint_id_id = read_joint_id(p)
+        a_bool_wake_attached = read_bool(p)
+        if p.ok { dynamics.destroy_joint(a_joint_id_id, a_bool_wake_attached) }
+        return true
+    }
+    if op == dynamics.OP_JOINT_SET_LOCAL_FRAME_A {
+        a_joint_id_id = read_joint_id(p)
+        a_transform_frame = read_transform(p)
+        if p.ok { dynamics.joint_set_local_frame_a(a_joint_id_id, a_transform_frame) }
+        return true
+    }
+    if op == dynamics.OP_JOINT_SET_LOCAL_FRAME_B {
+        a_joint_id_id = read_joint_id(p)
+        a_transform_frame = read_transform(p)
+        if p.ok { dynamics.joint_set_local_frame_b(a_joint_id_id, a_transform_frame) }
+        return true
+    }
+    if op == dynamics.OP_JOINT_SET_COLLIDE_CONNECTED {
+        a_joint_id_id = read_joint_id(p)
+        a_bool_should_collide = read_bool(p)
+        if p.ok { dynamics.joint_set_collide_connected(a_joint_id_id, a_bool_should_collide) }
+        return true
+    }
+    if op == dynamics.OP_JOINT_WAKE_BODIES {
+        a_joint_id_id = read_joint_id(p)
+        if p.ok { dynamics.joint_wake_bodies(a_joint_id_id) }
+        return true
+    }
+    if op == dynamics.OP_JOINT_SET_CONSTRAINT_TUNING {
+        a_joint_id_id = read_joint_id(p)
+        a_float_hertz = read_float(p)
+        a_float_damping_ratio = read_float(p)
+        if p.ok { dynamics.joint_set_constraint_tuning(a_joint_id_id, a_float_hertz, a_float_damping_ratio) }
+        return true
+    }
+    if op == dynamics.OP_JOINT_SET_FORCE_THRESHOLD {
+        a_joint_id_id = read_joint_id(p)
+        a_float_threshold = read_float(p)
+        if p.ok { dynamics.joint_set_force_threshold(a_joint_id_id, a_float_threshold) }
+        return true
+    }
+    if op == dynamics.OP_JOINT_SET_TORQUE_THRESHOLD {
+        a_joint_id_id = read_joint_id(p)
+        a_float_threshold = read_float(p)
+        if p.ok { dynamics.joint_set_torque_threshold(a_joint_id_id, a_float_threshold) }
+        return true
+    }
+    if op == dynamics.OP_BODY_SET_TYPE {
+        a_body_id_id = read_body_id(p)
+        a_int_kind = read_int(p)
+        if p.ok { dynamics.body_set_type(a_body_id_id, a_int_kind) }
+        return true
+    }
+    if op == dynamics.OP_BODY_DISABLE {
+        a_body_id_id = read_body_id(p)
+        if p.ok { dynamics.body_disable(a_body_id_id) }
+        return true
+    }
+    if op == dynamics.OP_BODY_ENABLE {
+        a_body_id_id = read_body_id(p)
+        if p.ok { dynamics.body_enable(a_body_id_id) }
+        return true
+    }
+    if op == dynamics.OP_SHAPE_ENABLE_SENSOR_EVENTS {
+        a_shape_id_id = read_shape_id(p)
+        a_bool_flag = read_bool(p)
+        if p.ok { dynamics.shape_enable_sensor_events(a_shape_id_id, a_bool_flag) }
+        return true
+    }
+    if op == dynamics.OP_SHAPE_ENABLE_CONTACT_EVENTS {
+        a_shape_id_id = read_shape_id(p)
+        a_bool_flag = read_bool(p)
+        if p.ok { dynamics.shape_enable_contact_events(a_shape_id_id, a_bool_flag) }
+        return true
+    }
+    if op == dynamics.OP_SHAPE_ENABLE_HIT_EVENTS {
+        a_shape_id_id = read_shape_id(p)
+        a_bool_flag = read_bool(p)
+        if p.ok { dynamics.shape_enable_hit_events(a_shape_id_id, a_bool_flag) }
+        return true
+    }
+    if op == dynamics.OP_STEP {
+        a_world_id_id = p.world_id
+        a_float_time_step = read_float(p)
+        a_int_sub_step_count = read_int(p)
+        if p.ok { physics_world.step(a_world_id_id, a_float_time_step, a_int_sub_step_count) }
+        return true
+    }
+    if op == dynamics.OP_ENABLE_SLEEPING {
+        a_world_id_id = p.world_id
+        a_bool_flag = read_bool(p)
+        if p.ok { physics_world.enable_sleeping(a_world_id_id, a_bool_flag) }
+        return true
+    }
+    if op == dynamics.OP_ENABLE_WARM_STARTING {
+        a_world_id_id = p.world_id
+        a_bool_flag = read_bool(p)
+        if p.ok { physics_world.enable_warm_starting(a_world_id_id, a_bool_flag) }
+        return true
+    }
+    if op == dynamics.OP_ENABLE_CONTINUOUS {
+        a_world_id_id = p.world_id
+        a_bool_flag = read_bool(p)
+        if p.ok { physics_world.enable_continuous(a_world_id_id, a_bool_flag) }
+        return true
+    }
+    if op == dynamics.OP_ENABLE_SPECULATIVE {
+        a_world_id_id = p.world_id
+        a_bool_flag = read_bool(p)
+        if p.ok { physics_world.enable_speculative(a_world_id_id, a_bool_flag) }
+        return true
+    }
+    if op == dynamics.OP_SET_RESTITUTION_THRESHOLD {
+        a_world_id_id = p.world_id
+        a_float_value = read_float(p)
+        if p.ok { physics_world.set_restitution_threshold(a_world_id_id, a_float_value) }
+        return true
+    }
+    if op == dynamics.OP_SET_RESTITUTION_ITERATIONS {
+        a_world_id_id = p.world_id
+        a_int_count = read_int(p)
+        if p.ok { physics_world.set_restitution_iterations(a_world_id_id, a_int_count) }
+        return true
+    }
+    if op == dynamics.OP_ENABLE_RESTITUTION_PROPAGATION {
+        a_world_id_id = p.world_id
+        a_bool_flag = read_bool(p)
+        if p.ok { physics_world.enable_restitution_propagation(a_world_id_id, a_bool_flag) }
+        return true
+    }
+    if op == dynamics.OP_ENABLE_KINEMATIC_STATIC_SOFTNESS {
+        a_world_id_id = p.world_id
+        a_bool_flag = read_bool(p)
+        if p.ok { physics_world.enable_kinematic_static_softness(a_world_id_id, a_bool_flag) }
+        return true
+    }
+    if op == dynamics.OP_SET_HIT_EVENT_THRESHOLD {
+        a_world_id_id = p.world_id
+        a_float_value = read_float(p)
+        if p.ok { physics_world.set_hit_event_threshold(a_world_id_id, a_float_value) }
+        return true
+    }
+    if op == dynamics.OP_SET_CONTACT_TUNING {
+        a_world_id_id = p.world_id
+        a_float_hertz = read_float(p)
+        a_float_damping_ratio = read_float(p)
+        a_float_contact_speed = read_float(p)
+        if p.ok { physics_world.set_contact_tuning(a_world_id_id, a_float_hertz, a_float_damping_ratio, a_float_contact_speed) }
+        return true
+    }
+    if op == dynamics.OP_SET_CONTACT_RECYCLE_DISTANCE {
+        a_world_id_id = p.world_id
+        a_float_distance = read_float(p)
+        if p.ok { physics_world.set_contact_recycle_distance(a_world_id_id, a_float_distance) }
+        return true
+    }
+    if op == dynamics.OP_SET_MAXIMUM_LINEAR_SPEED {
+        a_world_id_id = p.world_id
+        a_float_speed = read_float(p)
+        if p.ok { physics_world.set_maximum_linear_speed(a_world_id_id, a_float_speed) }
+        return true
+    }
+    if op == dynamics.OP_SET_GRAVITY {
+        a_world_id_id = p.world_id
+        a_vec3_gravity = read_vec3(p)
+        if p.ok { physics_world.set_gravity(a_world_id_id, a_vec3_gravity) }
+        return true
+    }
+    if op == dynamics.OP_REBUILD_STATIC_TREE {
+        a_world_id_id = p.world_id
+        if p.ok { physics_world.rebuild_static_tree(a_world_id_id) }
+        return true
+    }
+    if op == dynamics.OP_EXPLODE {
+        a_world_id_id = p.world_id
+        a_explosion_def_def = read_explosion_def(p)
+        if p.ok { physics_world.explode(a_world_id_id, &a_explosion_def_def) }
+        return true
+    }
+    if op == dynamics.OP_DISTANCE_JOINT_SET_LENGTH {
+        a_joint_id_id = read_joint_id(p)
+        a_float_length = read_float(p)
+        if p.ok { joint_solver.distance_joint_set_length(a_joint_id_id, a_float_length) }
+        return true
+    }
+    if op == dynamics.OP_DISTANCE_JOINT_ENABLE_LIMIT {
+        a_joint_id_id = read_joint_id(p)
+        a_bool_flag = read_bool(p)
+        if p.ok { joint_solver.distance_joint_enable_limit(a_joint_id_id, a_bool_flag) }
+        return true
+    }
+    if op == dynamics.OP_DISTANCE_JOINT_SET_LENGTH_RANGE {
+        a_joint_id_id = read_joint_id(p)
+        a_float_min_length = read_float(p)
+        a_float_max_length = read_float(p)
+        if p.ok { joint_solver.distance_joint_set_length_range(a_joint_id_id, a_float_min_length, a_float_max_length) }
+        return true
+    }
+    if op == dynamics.OP_DISTANCE_JOINT_ENABLE_SPRING {
+        a_joint_id_id = read_joint_id(p)
+        a_bool_flag = read_bool(p)
+        if p.ok { joint_solver.distance_joint_enable_spring(a_joint_id_id, a_bool_flag) }
+        return true
+    }
+    if op == dynamics.OP_DISTANCE_JOINT_SET_SPRING_FORCE_RANGE {
+        a_joint_id_id = read_joint_id(p)
+        a_float_lower = read_float(p)
+        a_float_upper = read_float(p)
+        if p.ok { joint_solver.distance_joint_set_spring_force_range(a_joint_id_id, a_float_lower, a_float_upper) }
+        return true
+    }
+    if op == dynamics.OP_DISTANCE_JOINT_SET_SPRING_HERTZ {
+        a_joint_id_id = read_joint_id(p)
+        a_float_hertz = read_float(p)
+        if p.ok { joint_solver.distance_joint_set_spring_hertz(a_joint_id_id, a_float_hertz) }
+        return true
+    }
+    if op == dynamics.OP_DISTANCE_JOINT_SET_SPRING_DAMPING_RATIO {
+        a_joint_id_id = read_joint_id(p)
+        a_float_ratio = read_float(p)
+        if p.ok { joint_solver.distance_joint_set_spring_damping_ratio(a_joint_id_id, a_float_ratio) }
+        return true
+    }
+    if op == dynamics.OP_DISTANCE_JOINT_ENABLE_MOTOR {
+        a_joint_id_id = read_joint_id(p)
+        a_bool_flag = read_bool(p)
+        if p.ok { joint_solver.distance_joint_enable_motor(a_joint_id_id, a_bool_flag) }
+        return true
+    }
+    if op == dynamics.OP_DISTANCE_JOINT_SET_MOTOR_SPEED {
+        a_joint_id_id = read_joint_id(p)
+        a_float_speed = read_float(p)
+        if p.ok { joint_solver.distance_joint_set_motor_speed(a_joint_id_id, a_float_speed) }
+        return true
+    }
+    if op == dynamics.OP_DISTANCE_JOINT_SET_MAX_MOTOR_FORCE {
+        a_joint_id_id = read_joint_id(p)
+        a_float_force = read_float(p)
+        if p.ok { joint_solver.distance_joint_set_max_motor_force(a_joint_id_id, a_float_force) }
+        return true
+    }
+    if op == dynamics.OP_MOTOR_JOINT_SET_LINEAR_VELOCITY {
+        a_joint_id_id = read_joint_id(p)
+        a_vec3_v = read_vec3(p)
+        if p.ok { joint_solver.motor_joint_set_linear_velocity(a_joint_id_id, a_vec3_v) }
+        return true
+    }
+    if op == dynamics.OP_MOTOR_JOINT_SET_ANGULAR_VELOCITY {
+        a_joint_id_id = read_joint_id(p)
+        a_vec3_v = read_vec3(p)
+        if p.ok { joint_solver.motor_joint_set_angular_velocity(a_joint_id_id, a_vec3_v) }
+        return true
+    }
+    if op == dynamics.OP_MOTOR_JOINT_SET_MAX_VELOCITY_TORQUE {
+        a_joint_id_id = read_joint_id(p)
+        a_float_value = read_float(p)
+        if p.ok { joint_solver.motor_joint_set_max_velocity_torque(a_joint_id_id, a_float_value) }
+        return true
+    }
+    if op == dynamics.OP_MOTOR_JOINT_SET_MAX_VELOCITY_FORCE {
+        a_joint_id_id = read_joint_id(p)
+        a_float_value = read_float(p)
+        if p.ok { joint_solver.motor_joint_set_max_velocity_force(a_joint_id_id, a_float_value) }
+        return true
+    }
+    if op == dynamics.OP_MOTOR_JOINT_SET_LINEAR_HERTZ {
+        a_joint_id_id = read_joint_id(p)
+        a_float_value = read_float(p)
+        if p.ok { joint_solver.motor_joint_set_linear_hertz(a_joint_id_id, a_float_value) }
+        return true
+    }
+    if op == dynamics.OP_MOTOR_JOINT_SET_LINEAR_DAMPING_RATIO {
+        a_joint_id_id = read_joint_id(p)
+        a_float_value = read_float(p)
+        if p.ok { joint_solver.motor_joint_set_linear_damping_ratio(a_joint_id_id, a_float_value) }
+        return true
+    }
+    if op == dynamics.OP_MOTOR_JOINT_SET_ANGULAR_HERTZ {
+        a_joint_id_id = read_joint_id(p)
+        a_float_value = read_float(p)
+        if p.ok { joint_solver.motor_joint_set_angular_hertz(a_joint_id_id, a_float_value) }
+        return true
+    }
+    if op == dynamics.OP_MOTOR_JOINT_SET_ANGULAR_DAMPING_RATIO {
+        a_joint_id_id = read_joint_id(p)
+        a_float_value = read_float(p)
+        if p.ok { joint_solver.motor_joint_set_angular_damping_ratio(a_joint_id_id, a_float_value) }
+        return true
+    }
+    if op == dynamics.OP_MOTOR_JOINT_SET_MAX_SPRING_FORCE {
+        a_joint_id_id = read_joint_id(p)
+        a_float_value = read_float(p)
+        if p.ok { joint_solver.motor_joint_set_max_spring_force(a_joint_id_id, a_float_value) }
+        return true
+    }
+    if op == dynamics.OP_MOTOR_JOINT_SET_MAX_SPRING_TORQUE {
+        a_joint_id_id = read_joint_id(p)
+        a_float_value = read_float(p)
+        if p.ok { joint_solver.motor_joint_set_max_spring_torque(a_joint_id_id, a_float_value) }
+        return true
+    }
+    if op == dynamics.OP_PARALLEL_JOINT_SET_SPRING_HERTZ {
+        a_joint_id_id = read_joint_id(p)
+        a_float_value = read_float(p)
+        if p.ok { joint_solver.parallel_joint_set_spring_hertz(a_joint_id_id, a_float_value) }
+        return true
+    }
+    if op == dynamics.OP_PARALLEL_JOINT_SET_SPRING_DAMPING_RATIO {
+        a_joint_id_id = read_joint_id(p)
+        a_float_value = read_float(p)
+        if p.ok { joint_solver.parallel_joint_set_spring_damping_ratio(a_joint_id_id, a_float_value) }
+        return true
+    }
+    if op == dynamics.OP_PARALLEL_JOINT_SET_MAX_TORQUE {
+        a_joint_id_id = read_joint_id(p)
+        a_float_value = read_float(p)
+        if p.ok { joint_solver.parallel_joint_set_max_torque(a_joint_id_id, a_float_value) }
+        return true
+    }
+    if op == dynamics.OP_PRISMATIC_JOINT_ENABLE_SPRING {
+        a_joint_id_id = read_joint_id(p)
+        a_bool_flag = read_bool(p)
+        if p.ok { joint_solver.prismatic_joint_enable_spring(a_joint_id_id, a_bool_flag) }
+        return true
+    }
+    if op == dynamics.OP_PRISMATIC_JOINT_SET_SPRING_HERTZ {
+        a_joint_id_id = read_joint_id(p)
+        a_float_value = read_float(p)
+        if p.ok { joint_solver.prismatic_joint_set_spring_hertz(a_joint_id_id, a_float_value) }
+        return true
+    }
+    if op == dynamics.OP_PRISMATIC_JOINT_SET_SPRING_DAMPING_RATIO {
+        a_joint_id_id = read_joint_id(p)
+        a_float_value = read_float(p)
+        if p.ok { joint_solver.prismatic_joint_set_spring_damping_ratio(a_joint_id_id, a_float_value) }
+        return true
+    }
+    if op == dynamics.OP_PRISMATIC_JOINT_SET_TARGET_TRANSLATION {
+        a_joint_id_id = read_joint_id(p)
+        a_float_value = read_float(p)
+        if p.ok { joint_solver.prismatic_joint_set_target_translation(a_joint_id_id, a_float_value) }
+        return true
+    }
+    if op == dynamics.OP_PRISMATIC_JOINT_ENABLE_LIMIT {
+        a_joint_id_id = read_joint_id(p)
+        a_bool_flag = read_bool(p)
+        if p.ok { joint_solver.prismatic_joint_enable_limit(a_joint_id_id, a_bool_flag) }
+        return true
+    }
+    if op == dynamics.OP_PRISMATIC_JOINT_SET_LIMITS {
+        a_joint_id_id = read_joint_id(p)
+        a_float_lower = read_float(p)
+        a_float_upper = read_float(p)
+        if p.ok { joint_solver.prismatic_joint_set_limits(a_joint_id_id, a_float_lower, a_float_upper) }
+        return true
+    }
+    if op == dynamics.OP_PRISMATIC_JOINT_ENABLE_MOTOR {
+        a_joint_id_id = read_joint_id(p)
+        a_bool_flag = read_bool(p)
+        if p.ok { joint_solver.prismatic_joint_enable_motor(a_joint_id_id, a_bool_flag) }
+        return true
+    }
+    if op == dynamics.OP_PRISMATIC_JOINT_SET_MOTOR_SPEED {
+        a_joint_id_id = read_joint_id(p)
+        a_float_value = read_float(p)
+        if p.ok { joint_solver.prismatic_joint_set_motor_speed(a_joint_id_id, a_float_value) }
+        return true
+    }
+    if op == dynamics.OP_PRISMATIC_JOINT_SET_MAX_MOTOR_FORCE {
+        a_joint_id_id = read_joint_id(p)
+        a_float_value = read_float(p)
+        if p.ok { joint_solver.prismatic_joint_set_max_motor_force(a_joint_id_id, a_float_value) }
+        return true
+    }
+    if op == dynamics.OP_REVOLUTE_JOINT_ENABLE_LIMIT {
+        a_joint_id_id = read_joint_id(p)
+        a_bool_flag = read_bool(p)
+        if p.ok { joint_solver.revolute_joint_enable_limit(a_joint_id_id, a_bool_flag) }
+        return true
+    }
+    if op == dynamics.OP_REVOLUTE_JOINT_SET_LIMITS {
+        a_joint_id_id = read_joint_id(p)
+        a_float_lower = read_float(p)
+        a_float_upper = read_float(p)
+        if p.ok { joint_solver.revolute_joint_set_limits(a_joint_id_id, a_float_lower, a_float_upper) }
+        return true
+    }
+    if op == dynamics.OP_REVOLUTE_JOINT_ENABLE_SPRING {
+        a_joint_id_id = read_joint_id(p)
+        a_bool_flag = read_bool(p)
+        if p.ok { joint_solver.revolute_joint_enable_spring(a_joint_id_id, a_bool_flag) }
+        return true
+    }
+    if op == dynamics.OP_REVOLUTE_JOINT_SET_TARGET_ANGLE {
+        a_joint_id_id = read_joint_id(p)
+        a_float_value = read_float(p)
+        if p.ok { joint_solver.revolute_joint_set_target_angle(a_joint_id_id, a_float_value) }
+        return true
+    }
+    if op == dynamics.OP_REVOLUTE_JOINT_SET_SPRING_HERTZ {
+        a_joint_id_id = read_joint_id(p)
+        a_float_value = read_float(p)
+        if p.ok { joint_solver.revolute_joint_set_spring_hertz(a_joint_id_id, a_float_value) }
+        return true
+    }
+    if op == dynamics.OP_REVOLUTE_JOINT_SET_SPRING_DAMPING_RATIO {
+        a_joint_id_id = read_joint_id(p)
+        a_float_value = read_float(p)
+        if p.ok { joint_solver.revolute_joint_set_spring_damping_ratio(a_joint_id_id, a_float_value) }
+        return true
+    }
+    if op == dynamics.OP_REVOLUTE_JOINT_ENABLE_MOTOR {
+        a_joint_id_id = read_joint_id(p)
+        a_bool_flag = read_bool(p)
+        if p.ok { joint_solver.revolute_joint_enable_motor(a_joint_id_id, a_bool_flag) }
+        return true
+    }
+    if op == dynamics.OP_REVOLUTE_JOINT_SET_MOTOR_SPEED {
+        a_joint_id_id = read_joint_id(p)
+        a_float_value = read_float(p)
+        if p.ok { joint_solver.revolute_joint_set_motor_speed(a_joint_id_id, a_float_value) }
+        return true
+    }
+    if op == dynamics.OP_REVOLUTE_JOINT_SET_MAX_MOTOR_TORQUE {
+        a_joint_id_id = read_joint_id(p)
+        a_float_value = read_float(p)
+        if p.ok { joint_solver.revolute_joint_set_max_motor_torque(a_joint_id_id, a_float_value) }
+        return true
+    }
+    if op == dynamics.OP_SPHERICAL_JOINT_ENABLE_CONE_LIMIT {
+        a_joint_id_id = read_joint_id(p)
+        a_bool_flag = read_bool(p)
+        if p.ok { joint_solver.spherical_joint_enable_cone_limit(a_joint_id_id, a_bool_flag) }
+        return true
+    }
+    if op == dynamics.OP_SPHERICAL_JOINT_SET_CONE_LIMIT {
+        a_joint_id_id = read_joint_id(p)
+        a_float_angle = read_float(p)
+        if p.ok { joint_solver.spherical_joint_set_cone_limit(a_joint_id_id, a_float_angle) }
+        return true
+    }
+    if op == dynamics.OP_SPHERICAL_JOINT_SET_CONE_AXIS {
+        a_joint_id_id = read_joint_id(p)
+        a_vec3_axis = read_vec3(p)
+        if p.ok { joint_solver.spherical_joint_set_cone_axis(a_joint_id_id, a_vec3_axis) }
+        return true
+    }
+    if op == dynamics.OP_SPHERICAL_JOINT_SET_CONE_ELLIPSE {
+        a_joint_id_id = read_joint_id(p)
+        a_float_major_angle = read_float(p)
+        a_float_minor_angle = read_float(p)
+        a_vec3_major_axis = read_vec3(p)
+        if p.ok { joint_solver.spherical_joint_set_cone_ellipse(a_joint_id_id, a_float_major_angle, a_float_minor_angle, a_vec3_major_axis) }
+        return true
+    }
+    if op == dynamics.OP_SPHERICAL_JOINT_ENABLE_TWIST_LIMIT {
+        a_joint_id_id = read_joint_id(p)
+        a_bool_flag = read_bool(p)
+        if p.ok { joint_solver.spherical_joint_enable_twist_limit(a_joint_id_id, a_bool_flag) }
+        return true
+    }
+    if op == dynamics.OP_SPHERICAL_JOINT_SET_TWIST_LIMITS {
+        a_joint_id_id = read_joint_id(p)
+        a_float_lower = read_float(p)
+        a_float_upper = read_float(p)
+        if p.ok { joint_solver.spherical_joint_set_twist_limits(a_joint_id_id, a_float_lower, a_float_upper) }
+        return true
+    }
+    if op == dynamics.OP_SPHERICAL_JOINT_ENABLE_SPRING {
+        a_joint_id_id = read_joint_id(p)
+        a_bool_flag = read_bool(p)
+        if p.ok { joint_solver.spherical_joint_enable_spring(a_joint_id_id, a_bool_flag) }
+        return true
+    }
+    if op == dynamics.OP_SPHERICAL_JOINT_SET_TARGET_ROTATION {
+        a_joint_id_id = read_joint_id(p)
+        a_quat_q = read_quat(p)
+        if p.ok { joint_solver.spherical_joint_set_target_rotation(a_joint_id_id, a_quat_q) }
+        return true
+    }
+    if op == dynamics.OP_SPHERICAL_JOINT_SET_SPRING_HERTZ {
+        a_joint_id_id = read_joint_id(p)
+        a_float_value = read_float(p)
+        if p.ok { joint_solver.spherical_joint_set_spring_hertz(a_joint_id_id, a_float_value) }
+        return true
+    }
+    if op == dynamics.OP_SPHERICAL_JOINT_SET_SPRING_DAMPING_RATIO {
+        a_joint_id_id = read_joint_id(p)
+        a_float_value = read_float(p)
+        if p.ok { joint_solver.spherical_joint_set_spring_damping_ratio(a_joint_id_id, a_float_value) }
+        return true
+    }
+    if op == dynamics.OP_SPHERICAL_JOINT_ENABLE_MOTOR {
+        a_joint_id_id = read_joint_id(p)
+        a_bool_flag = read_bool(p)
+        if p.ok { joint_solver.spherical_joint_enable_motor(a_joint_id_id, a_bool_flag) }
+        return true
+    }
+    if op == dynamics.OP_SPHERICAL_JOINT_SET_MOTOR_VELOCITY {
+        a_joint_id_id = read_joint_id(p)
+        a_vec3_v = read_vec3(p)
+        if p.ok { joint_solver.spherical_joint_set_motor_velocity(a_joint_id_id, a_vec3_v) }
+        return true
+    }
+    if op == dynamics.OP_SPHERICAL_JOINT_SET_MAX_MOTOR_TORQUE {
+        a_joint_id_id = read_joint_id(p)
+        a_float_value = read_float(p)
+        if p.ok { joint_solver.spherical_joint_set_max_motor_torque(a_joint_id_id, a_float_value) }
+        return true
+    }
+    if op == dynamics.OP_WELD_JOINT_SET_LINEAR_HERTZ {
+        a_joint_id_id = read_joint_id(p)
+        a_float_value = read_float(p)
+        if p.ok { joint_solver.weld_joint_set_linear_hertz(a_joint_id_id, a_float_value) }
+        return true
+    }
+    if op == dynamics.OP_WELD_JOINT_SET_LINEAR_DAMPING_RATIO {
+        a_joint_id_id = read_joint_id(p)
+        a_float_value = read_float(p)
+        if p.ok { joint_solver.weld_joint_set_linear_damping_ratio(a_joint_id_id, a_float_value) }
+        return true
+    }
+    if op == dynamics.OP_WELD_JOINT_SET_ANGULAR_HERTZ {
+        a_joint_id_id = read_joint_id(p)
+        a_float_value = read_float(p)
+        if p.ok { joint_solver.weld_joint_set_angular_hertz(a_joint_id_id, a_float_value) }
+        return true
+    }
+    if op == dynamics.OP_WELD_JOINT_SET_ANGULAR_DAMPING_RATIO {
+        a_joint_id_id = read_joint_id(p)
+        a_float_value = read_float(p)
+        if p.ok { joint_solver.weld_joint_set_angular_damping_ratio(a_joint_id_id, a_float_value) }
+        return true
+    }
+    if op == dynamics.OP_WHEEL_JOINT_ENABLE_SUSPENSION {
+        a_joint_id_id = read_joint_id(p)
+        a_bool_flag = read_bool(p)
+        if p.ok { joint_solver.wheel_joint_enable_suspension(a_joint_id_id, a_bool_flag) }
+        return true
+    }
+    if op == dynamics.OP_WHEEL_JOINT_SET_SUSPENSION_HERTZ {
+        a_joint_id_id = read_joint_id(p)
+        a_float_value = read_float(p)
+        if p.ok { joint_solver.wheel_joint_set_suspension_hertz(a_joint_id_id, a_float_value) }
+        return true
+    }
+    if op == dynamics.OP_WHEEL_JOINT_SET_SUSPENSION_DAMPING_RATIO {
+        a_joint_id_id = read_joint_id(p)
+        a_float_value = read_float(p)
+        if p.ok { joint_solver.wheel_joint_set_suspension_damping_ratio(a_joint_id_id, a_float_value) }
+        return true
+    }
+    if op == dynamics.OP_WHEEL_JOINT_ENABLE_SUSPENSION_LIMIT {
+        a_joint_id_id = read_joint_id(p)
+        a_bool_flag = read_bool(p)
+        if p.ok { joint_solver.wheel_joint_enable_suspension_limit(a_joint_id_id, a_bool_flag) }
+        return true
+    }
+    if op == dynamics.OP_WHEEL_JOINT_SET_SUSPENSION_LIMITS {
+        a_joint_id_id = read_joint_id(p)
+        a_float_lower = read_float(p)
+        a_float_upper = read_float(p)
+        if p.ok { joint_solver.wheel_joint_set_suspension_limits(a_joint_id_id, a_float_lower, a_float_upper) }
+        return true
+    }
+    if op == dynamics.OP_WHEEL_JOINT_ENABLE_SPIN_MOTOR {
+        a_joint_id_id = read_joint_id(p)
+        a_bool_flag = read_bool(p)
+        if p.ok { joint_solver.wheel_joint_enable_spin_motor(a_joint_id_id, a_bool_flag) }
+        return true
+    }
+    if op == dynamics.OP_WHEEL_JOINT_SET_SPIN_MOTOR_SPEED {
+        a_joint_id_id = read_joint_id(p)
+        a_float_value = read_float(p)
+        if p.ok { joint_solver.wheel_joint_set_spin_motor_speed(a_joint_id_id, a_float_value) }
+        return true
+    }
+    if op == dynamics.OP_WHEEL_JOINT_SET_MAX_SPIN_TORQUE {
+        a_joint_id_id = read_joint_id(p)
+        a_float_value = read_float(p)
+        if p.ok { joint_solver.wheel_joint_set_max_spin_torque(a_joint_id_id, a_float_value) }
+        return true
+    }
+    if op == dynamics.OP_WHEEL_JOINT_ENABLE_STEERING {
+        a_joint_id_id = read_joint_id(p)
+        a_bool_flag = read_bool(p)
+        if p.ok { joint_solver.wheel_joint_enable_steering(a_joint_id_id, a_bool_flag) }
+        return true
+    }
+    if op == dynamics.OP_WHEEL_JOINT_SET_STEERING_HERTZ {
+        a_joint_id_id = read_joint_id(p)
+        a_float_value = read_float(p)
+        if p.ok { joint_solver.wheel_joint_set_steering_hertz(a_joint_id_id, a_float_value) }
+        return true
+    }
+    if op == dynamics.OP_WHEEL_JOINT_SET_STEERING_DAMPING_RATIO {
+        a_joint_id_id = read_joint_id(p)
+        a_float_value = read_float(p)
+        if p.ok { joint_solver.wheel_joint_set_steering_damping_ratio(a_joint_id_id, a_float_value) }
+        return true
+    }
+    if op == dynamics.OP_WHEEL_JOINT_SET_MAX_STEERING_TORQUE {
+        a_joint_id_id = read_joint_id(p)
+        a_float_value = read_float(p)
+        if p.ok { joint_solver.wheel_joint_set_max_steering_torque(a_joint_id_id, a_float_value) }
+        return true
+    }
+    if op == dynamics.OP_WHEEL_JOINT_ENABLE_STEERING_LIMIT {
+        a_joint_id_id = read_joint_id(p)
+        a_bool_flag = read_bool(p)
+        if p.ok { joint_solver.wheel_joint_enable_steering_limit(a_joint_id_id, a_bool_flag) }
+        return true
+    }
+    if op == dynamics.OP_WHEEL_JOINT_SET_STEERING_LIMITS {
+        a_joint_id_id = read_joint_id(p)
+        a_float_lower = read_float(p)
+        a_float_upper = read_float(p)
+        if p.ok { joint_solver.wheel_joint_set_steering_limits(a_joint_id_id, a_float_lower, a_float_upper) }
+        return true
+    }
+    if op == dynamics.OP_WHEEL_JOINT_SET_TARGET_STEERING_ANGLE {
+        a_joint_id_id = read_joint_id(p)
+        a_float_value = read_float(p)
+        if p.ok { joint_solver.wheel_joint_set_target_steering_angle(a_joint_id_id, a_float_value) }
+        return true
+    }
+    return false
+}
