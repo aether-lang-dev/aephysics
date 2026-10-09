@@ -29,9 +29,10 @@ import aephysics.contact_solver
 import aephysics.joint_solver
 import aephysics.solver
 import aephysics.parallel
+import aephysics.debug_draw
 
 exports (
-    get_profile, get_max_capacity, world_byte_count, dump_memory_stats, Version, get_version, is_double_precision, is_avx2_available, get_world_count, get_max_world_count,
+    get_profile, get_max_capacity, world_byte_count, dump_memory_stats, world_draw, Version, get_version, is_double_precision, is_avx2_available, get_world_count, get_max_world_count,
     RayResult, BodyCastResult, BodyPlaneResult, BodyTOIResult, ExplosionDef, Counters,
     step, world_of, is_valid,
     body_event_count, body_event, contact_begin_event_count, contact_begin_event, contact_end_event_count, contact_end_event,
@@ -1287,6 +1288,278 @@ cast_mover(id: WorldId, origin: Vec3, mover: Capsule, translation: Vec3, filter:
     dynamics.rec_float(q.payload, fraction)
     finish_query(id, dynamics.OP_QUERY_CAST_MOVER, &q, filter)
     return fraction
+}
+
+// --- debug draw (the reference's b3World_Draw) ---------------------------------------------------------
+
+struct DrawContext {
+    w: *World
+    draw: *DebugDraw
+}
+
+// A shape's colour as the reference picks it: its material's own colour
+// when it has one, else its body's state as a hue and its energy as a
+// material (calm matte for resting masses, glossy for fast bodies,
+// metallic for a driven kinematic; diagnostic states saturated).
+shape_draw_color(w: *World, s: *WorldShape, body: *Body, sim: *BodySim) -> int {
+    first = s.material
+    if s.materials != null { first = (s.materials as SurfaceMaterial[])[0] }
+    if first.custom_color != 0 { return first.custom_color }
+    flags = body.flags | sim.flags
+    rgb = debug_draw.COLOR_LIGHT_SLATE_GRAY
+    look = debug_draw.DEBUG_MATERIAL_DEAD
+    if body.kind == dynamics.BODY_DYNAMIC && body.mass == 0.0 {
+        // A dynamic body without mass.
+        rgb = debug_draw.COLOR_RED
+        look = debug_draw.DEBUG_MATERIAL_DEFAULT
+    } else if body.set_index == dynamics.DISABLED_SET {
+        rgb = debug_draw.COLOR_SLATE_GRAY
+        look = debug_draw.DEBUG_MATERIAL_DEFAULT
+    } else if s.sensor_index != NULL_INDEX {
+        rgb = debug_draw.COLOR_WHEAT
+        look = debug_draw.DEBUG_MATERIAL_DEFAULT
+    } else if (flags & dynamics.HAD_TIME_OF_IMPACT) != 0 {
+        rgb = debug_draw.COLOR_LIME
+        look = debug_draw.DEBUG_MATERIAL_DEFAULT
+    } else if (flags & dynamics.IS_BULLET) != 0 && body.set_index == dynamics.AWAKE_SET {
+        rgb = debug_draw.COLOR_TURQUOISE
+        look = debug_draw.DEBUG_MATERIAL_DEFAULT
+    } else if (flags & dynamics.IS_SPEED_CAPPED) != 0 {
+        rgb = debug_draw.COLOR_YELLOW
+        look = debug_draw.DEBUG_MATERIAL_DEFAULT
+    } else if (flags & dynamics.IS_FAST) != 0 {
+        rgb = debug_draw.COLOR_ORANGE
+        look = debug_draw.DEBUG_MATERIAL_GLOSSY
+    } else if body.kind == dynamics.BODY_STATIC {
+        rgb = debug_draw.COLOR_DARK_GRAY
+        look = debug_draw.DEBUG_MATERIAL_MATTE
+    } else if body.kind == dynamics.BODY_KINEMATIC {
+        if body.set_index == dynamics.AWAKE_SET {
+            rgb = debug_draw.COLOR_STEEL_BLUE
+            look = debug_draw.DEBUG_MATERIAL_METALLIC
+        } else {
+            rgb = debug_draw.COLOR_LIGHT_STEEL_BLUE
+            look = debug_draw.DEBUG_MATERIAL_MATTE
+        }
+    } else if body.set_index == dynamics.AWAKE_SET {
+        rgb = debug_draw.COLOR_TAN
+        look = debug_draw.DEBUG_MATERIAL_SOFT
+    }
+    return debug_draw.make_debug_color(rgb, look)
+}
+
+// The host's drawable for the shape, made the first time the shape is drawn.
+debug_shape_of(w: *World, s: *WorldShape) -> ptr {
+    if s.user_shape != null { return s.user_shape }
+    g = &s.geometry
+    shown = DebugShape { shape_id: dynamics.make_shape_id(w, s), kind: g.kind, sphere: null, capsule: null, hull: null, mesh: null,
+                         height_field: null, compound: null }
+    if g.kind == shape.SHAPE_SPHERE { shown.sphere = &g.sphere }
+    else if g.kind == shape.SHAPE_CAPSULE { shown.capsule = &g.capsule }
+    else if g.kind == shape.SHAPE_HULL { shown.hull = g.hull }
+    else if g.kind == shape.SHAPE_MESH { shown.mesh = &g.mesh }
+    else if g.kind == shape.SHAPE_HEIGHT_FIELD { shown.height_field = g.height_field }
+    else if g.kind == shape.SHAPE_COMPOUND { shown.compound = g.compound }
+    create = w.create_debug_shape
+    s.user_shape = create(&shown, w.debug_shape_context)
+    return s.user_shape
+}
+
+draw_query_visitor(proxy_id: int, user_data: long, context: ptr) -> bool {
+    dc = context as *DrawContext
+    w = dc.w
+    draw = dc.draw
+    s = dynamics.world_shape_at(w, user_data as int)
+    basics.bitset_set(&w.debug_body_set, s.body_id)
+    if draw.draw_shapes {
+        body = dynamics.body_at(w, s.body_id)
+        sim = dynamics.get_body_sim(w, body)
+        color = shape_draw_color(w, s, body, sim)
+        user_shape = debug_shape_of(w, s)
+        if user_shape != null {
+            show = draw.draw_shape
+            show(user_shape, sim.transform, color, draw.context)
+        }
+    }
+    if draw.draw_bounds_option {
+        bounds = draw.draw_bounds
+        bounds(math.aabb_widen(dynamics.shape_fat_aabb(w, s.id)), debug_draw.COLOR_GOLD, draw.context)
+    }
+    return true
+}
+
+// The world drawn through the host's callbacks (b3World_Draw): the shapes
+// whose bounds overlap the drawing bounds (and whose categories the mask
+// takes), then for their bodies what the options ask: names, mass, sleep,
+// joints, contacts (points by state or graph colour, normals with
+// separations, forces, features) and islands. Nothing while the world
+// steps.
+world_draw(id: WorldId, draw: *DebugDraw, mask_bits: long) {
+    w = world_of(id)
+    if w == null || math.is_valid_aabb(draw.drawing_bounds) == false { return }
+    axis_scale = 0.3
+    basics.bitset_set_count_and_clear(&w.debug_body_set, basics.idpool_capacity(&w.body_id_pool))
+    basics.bitset_set_count_and_clear(&w.debug_joint_set, basics.idpool_capacity(&w.joint_id_pool))
+    basics.bitset_set_count_and_clear(&w.debug_contact_set, basics.idpool_capacity(&w.contact_id_pool))
+    basics.bitset_set_count_and_clear(&w.debug_island_set, basics.idpool_capacity(&w.island_id_pool))
+    dc = DrawContext { w: w, draw: draw }
+    i = 0
+    while i < BODY_KIND_COUNT {
+        dynamic_tree.tree_query(broad_phase.broad_phase_tree(&w.broad_phase, i), draw.drawing_bounds, mask_bits, false, draw_query_visitor, (&dc) as ptr)
+        i = i + 1
+    }
+    body_id = 0
+    while body_id < w.bodies.count {
+        if basics.bitset_get(&w.debug_body_set, body_id) { draw_body_extras(w, draw, body_id, axis_scale) }
+        body_id = body_id + 1
+    }
+}
+
+// What the options ask of one drawn body.
+draw_body_extras(w: *World, draw: *DebugDraw, body_id: int, axis_scale: float) {
+    point = draw.draw_point
+    label = draw.draw_string
+    body = dynamics.body_at(w, body_id)
+    sim = dynamics.get_body_sim(w, body)
+    at_center = Transform { p: sim.center, q: sim.transform.q }
+    offset = math.vec3(0.05, 0.05, 0.05)
+    if draw.draw_body_names && body.name_id != basics.NULL_NAME {
+        name = basics.name_cache_find(&w.names, body.name_id)
+        if name != null { label(math.transform_point(at_center, offset), native.name_text(name), debug_draw.COLOR_WHITE, draw.context) }
+    }
+    if draw.draw_mass {
+        show_transform = draw.draw_transform
+        show_transform(at_center, draw.context)
+        if body.kind == dynamics.BODY_DYNAMIC { label(math.transform_point(at_center, offset), debug_draw.fixed(body.mass, 2), debug_draw.COLOR_WHITE, draw.context) }
+    }
+    if draw.draw_sleep && dynamics.get_body_state(w, body) != null {
+        color = debug_draw.COLOR_BLACK
+        if body.sleep_threshold > 0.0 {
+            index = math.clamp_int((body.sleep_velocity / body.sleep_threshold) as int, 0, 3)
+            if index == 0 { color = debug_draw.COLOR_BLUE }
+            else if index == 1 { color = debug_draw.COLOR_SKY_BLUE }
+            else if index == 2 { color = debug_draw.COLOR_ORANGE }
+            else { color = debug_draw.COLOR_RED }
+        }
+        point(sim.center, 10.0, color, draw.context)
+        label(math.add(sim.center, math.vec3(0.1, 0.1, 0.1)), "  ${debug_draw.fixed(body.sleep_velocity, 3)}", color, draw.context)
+    }
+    if draw.draw_joints {
+        key = body.head_joint_key
+        while key != NULL_INDEX {
+            joint_index = key >> 1
+            j = dynamics.joint_at(w, joint_index)
+            if basics.bitset_get(&w.debug_joint_set, joint_index) == false {
+                joint_solver.draw_joint(draw, w, j)
+                basics.bitset_set(&w.debug_joint_set, joint_index)
+            }
+            key = dynamics.joint_edge_next(w, key)
+        }
+    }
+    if draw.draw_contacts && body.kind == dynamics.BODY_DYNAMIC && body.set_index == dynamics.AWAKE_SET {
+        key = body.head_contact_key
+        while key != NULL_INDEX {
+            contact_index = key >> 1
+            c = dynamics.contact_at(w, contact_index)
+            key = dynamics.contact_edge_next(w, key)
+            if c.set_index == dynamics.AWAKE_SET && c.color_index != NULL_INDEX && basics.bitset_get(&w.debug_contact_set, contact_index) == false {
+                draw_contact(w, draw, c, axis_scale)
+                basics.bitset_set(&w.debug_contact_set, contact_index)
+            }
+        }
+    }
+    if draw.draw_islands && body.island_id != NULL_INDEX && basics.bitset_get(&w.debug_island_set, body.island_id) == false {
+        island = dynamics.island_at(w, body.island_id)
+        if island.set_index != NULL_INDEX {
+            shapes = 0
+            box = AABB { lower: math.vec3(math.HUGE, math.HUGE, math.HUGE), upper: math.vec3(0.0 - math.HUGE, 0.0 - math.HUGE, 0.0 - math.HUGE) }
+            members = island.bodies.data as int[]
+            b = 0
+            while b < island.bodies.count {
+                shape_id = dynamics.body_at(w, members[b]).head_shape_id
+                while shape_id != NULL_INDEX {
+                    box = math.aabb_union(box, math.aabb_widen(dynamics.shape_fat_aabb(w, shape_id)))
+                    shapes = shapes + 1
+                    shape_id = dynamics.world_shape_at(w, shape_id).next_shape_id
+                }
+                b = b + 1
+            }
+            if shapes > 0 {
+                bounds = draw.draw_bounds
+                bounds(box, debug_draw.COLOR_ORANGE_RED, draw.context)
+            }
+            basics.bitset_set(&w.debug_island_set, body.island_id)
+        }
+    }
+}
+
+// A contact's manifolds: each point at an anchor of A or of B, coloured
+// by whether it was added, is speculative far or near, or persists (or by
+// its graph colour), with its normal and separation, its force, or its
+// feature, and the friction's anchor and force.
+draw_contact(w: *World, draw: *DebugDraw, c: *Contact, axis_scale: float) {
+    segment = draw.draw_segment
+    point = draw.draw_point
+    label = draw.draw_string
+    sim_a = dynamics.get_body_sim(w, dynamics.body_at(w, c.edge_a.body_id))
+    sim_b = dynamics.get_body_sim(w, dynamics.body_at(w, c.edge_b.body_id))
+    // Hack inv_dt for single step debugging, as the reference does.
+    inv_dt = w.inv_dt
+    if inv_dt <= 0.0 { inv_dt = 60.0 }
+    inv_tau = 1.0 / dynamics.SPECULATIVE_DISTANCE
+    m = 0
+    while m < c.manifold_count {
+        manifold = dynamics.manifold_at(c, m)
+        normal = math.widen3(manifold.normal)
+        center = sim_b.center
+        if draw.draw_anchor_a { center = sim_a.center }
+        friction_anchor = math.vec3_zero()
+        total_weight = 0.0
+        k = 0
+        while k < manifold.point_count {
+            mp = dynamics.manifold_point_at(manifold, k)
+            anchor = math.widen3(mp.anchor_b)
+            if draw.draw_anchor_a { anchor = math.widen3(mp.anchor_a) }
+            p = math.add(center, anchor)
+            separation = mp.separation as float
+            weight = math.clamp_float(2.0 - separation * inv_tau, contact_solver.MIN_FRICTION_WEIGHT, 1.0)
+            friction_anchor = math.add(friction_anchor, math.mul_sv(weight, anchor))
+            total_weight = total_weight + weight
+            if draw.draw_contact_normals {
+                segment(p, math.add(p, math.mul_sv(axis_scale, normal)), debug_draw.COLOR_LIGHT_GRAY, draw.context)
+                label(p, "   ${debug_draw.fixed(100.0 * separation, 2)}", debug_draw.COLOR_WHITE, draw.context)
+            } else if draw.draw_contact_forces {
+                force = (mp.total_normal_impulse as float) * inv_dt
+                tip = math.add(p, math.mul_sv(draw.force_scale * force, normal))
+                segment(p, tip, debug_draw.COLOR_MAGENTA, draw.context)
+                label(p, "  ${debug_draw.fixed(force, 1)}", debug_draw.COLOR_WHITE, draw.context)
+            } else if draw.draw_contact_features {
+                label(p, "   ${debug_draw.hex(mp.feature_id)}", debug_draw.COLOR_WHITE, draw.context)
+            }
+            if draw.draw_graph_colors {
+                size = 10.0
+                if c.color_index == dynamics.OVERFLOW_INDEX { size = 15.0 }
+                point(p, size, debug_draw.graph_color(c.color_index), draw.context)
+            } else if mp.persisted == false {
+                point(p, 20.0, debug_draw.COLOR_LIME_GREEN, draw.context)
+            } else if separation > dynamics.SPECULATIVE_DISTANCE {
+                point(p, 10.0, debug_draw.COLOR_DARK_BLUE, draw.context)
+            } else if separation > 0.0 {
+                point(p, 10.0, debug_draw.COLOR_BLUE, draw.context)
+            } else {
+                point(p, 10.0, debug_draw.COLOR_LIGHT_BLUE, draw.context)
+            }
+            k = k + 1
+        }
+        if draw.draw_contact_forces && total_weight > 0.0 {
+            p1 = math.add(center, math.mul_sv(1.0 / total_weight, friction_anchor))
+            friction_force = math.mul_sv(0.5 * inv_dt, math.widen3(manifold.friction_impulse))
+            segment(p1, math.add(p1, math.mul_sv(draw.force_scale, friction_force)), debug_draw.COLOR_YELLOW, draw.context)
+            point(p1, 5.0, debug_draw.COLOR_YELLOW, draw.context)
+            label(math.add(p1, math.mul_sv(0.05, normal)), debug_draw.fixed(math.length(friction_force), 2), debug_draw.COLOR_WHITE, draw.context)
+        }
+        m = m + 1
+    }
 }
 
 // --- the body queries ------------------------------------------------------------------------------------------------
