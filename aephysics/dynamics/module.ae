@@ -102,6 +102,7 @@ exports (
     create_island, destroy_island, validate_island, create_solver_set, destroy_solver_set, wake_solver_set,
     validate_solver_sets, get_solver_set, get_island, world_island_count, world_solver_set_count,
     body_sim_at, body_state_at, island_sim_at, world_shape_at, island_at, solver_set_at, body_at,
+    encode_body_sim_index, decode_awake_index, is_static_sim_index, shape_fat_aabb, set_shape_fat_aabb,
     Manifold, ManifoldPoint, ContactSpec, ContactId, ContactBeginTouchEvent, ContactEndTouchEvent, JointSim, GraphColor, ConstraintGraph,
     GRAPH_COLOR_COUNT, OVERFLOW_INDEX, DYNAMIC_COLOR_COUNT, MAX_MANIFOLD_POINTS,
     CONTACT_TOUCHING, CONTACT_ENABLE_CONTACT_EVENTS, CONTACT_STATIC, CONTACT_RECYCLE, SIM_TOUCHING, SIM_MESH_CONTACT,
@@ -434,13 +435,12 @@ struct BodySim {
 
 // A shape in the world: its geometry (the shape module's Shape, with
 // its density) and its place among its body's shapes and in the broad phase.
-// What the collide pass reads of every contact's two shapes comes first,
-// in one cache line: the id, the body and the fat box; then what finalize
-// reads to refit it; the geometry and the rest after.
+// Its fat box, the bounds the broad phase holds, is kept apart in the
+// world's fat_aabbs (the collide pass reads only that of a shape); what
+// finalize reads to refit it comes first, the geometry and the rest after.
 struct WorldShape {
     id: int                        // NULL_INDEX when the slot is free
     body_id: int
-    fat_aabb: AABB
     aabb: AABB
     aabb_margin: float
     proxy_key: int
@@ -477,8 +477,11 @@ struct Contact {
     flags: int
     manifold_count: int
     manifolds: ptr                 // Manifold[manifold_count], a heap block of the contact's
-    body_sim_index_a: int
-    body_sim_index_b: int
+    // The bodies' sims as encode_body_sim_index gives them (the reference's
+    // encodedBodySimA/B), kept current as the bodies move between sets, so
+    // the collide pass and the prepares reach a sim without the body.
+    encoded_body_sim_a: int
+    encoded_body_sim_b: int
     // For the recycling, single precision as the reference's: the bodies'
     // rotations and B's pose relative to A at the last narrow phase (a
     // relative pose of touching bodies is small; the world positions stay
@@ -1209,6 +1212,7 @@ struct World {
     islands: Buffer                // Island
     shape_id_pool: IdPool
     shapes: Buffer                 // WorldShape
+    fat_aabbs: Buffer              // AABB by shape id: the fat boxes, dense for the collide pass (the reference's fatAABBs)
     sensors: Buffer                // Sensor
     sensor_begin_events: Buffer    // SensorBeginTouchEvent
     sensor_end_events0: Buffer     // SensorEndTouchEvent, double buffered with the contacts' index
@@ -1287,6 +1291,14 @@ world_at(index: int) -> *World { return (g_worlds + index * sizeof(World)) as *W
 
 body_at(w: *World, id: int) -> *Body { return (w.bodies.data + id * sizeof(Body)) as *Body }
 world_shape_at(w: *World, id: int) -> *WorldShape { return (w.shapes.data + id * sizeof(WorldShape)) as *WorldShape }
+shape_fat_aabb(w: *World, id: int) -> AABB {
+    boxes = w.fat_aabbs.data as AABB[]
+    return boxes[id]
+}
+set_shape_fat_aabb(w: *World, id: int, box: AABB) {
+    boxes = w.fat_aabbs.data as AABB[]
+    boxes[id] = box
+}
 island_at(w: *World, id: int) -> *Island { return (w.islands.data + id * sizeof(Island)) as *Island }
 solver_set_at(w: *World, index: int) -> *SolverSet { return (w.solver_sets.data + index * sizeof(SolverSet)) as *SolverSet }
 body_sim_at(set: *SolverSet, index: int) -> *BodySim { return (set.body_sims.data + index * sizeof(BodySim)) as *BodySim }
@@ -1438,6 +1450,7 @@ create_world(def: *WorldDef) -> WorldId {
     basics.buffer_reserve(&solver_set_at(w, awake_set).body_states, math.max_int(16, def.dynamic_body_count))
     w.shape_id_pool = basics.idpool_create()
     w.shapes = basics.buffer_create(sizeof(WorldShape), math.max_int(16, def.static_shape_count + def.dynamic_shape_count))
+    w.fat_aabbs = basics.buffer_create(sizeof(AABB), math.max_int(16, def.static_shape_count + def.dynamic_shape_count))
     w.sensors = basics.buffer_create(sizeof(Sensor), 0)
     w.sensor_begin_events = basics.buffer_create(sizeof(SensorBeginTouchEvent), 4)
     w.sensor_end_events0 = basics.buffer_create(sizeof(SensorEndTouchEvent), 4)
@@ -1567,6 +1580,7 @@ destroy_world(id: WorldId) {
     basics.buffer_destroy(&w.bodies)
     basics.idpool_destroy(&w.body_id_pool)
     basics.buffer_destroy(&w.shapes)
+    basics.buffer_destroy(&w.fat_aabbs)
     basics.idpool_destroy(&w.shape_id_pool)
     basics.buffer_destroy(&w.contacts)
     basics.idpool_destroy(&w.contact_id_pool)
@@ -1708,6 +1722,46 @@ body_is_valid(id: BodyId) -> bool {
 get_body_full_id(w: *World, id: BodyId) -> *Body { return body_at(w, id.index1 - 1) }
 get_body(w: *World, body_id: int) -> *Body { return body_at(w, body_id) }
 get_body_sim(w: *World, body: *Body) -> *BodySim { return body_sim_at(solver_set_at(w, body.set_index), body.local_index) }
+
+// A body's sim as a contact keeps it (b3EncodeBodySimIndex): its index for
+// an awake body, -(index + 2) for a static one, NULL_INDEX for any other
+// (asleep or disabled), whose sim is found through the body.
+encode_body_sim_index(body: *Body) -> int {
+    if body.set_index == AWAKE_SET { return body.local_index }
+    if body.set_index == STATIC_SET { return 0 - (body.local_index + 2) }
+    return NULL_INDEX
+}
+is_static_sim_index(encoded: int) -> bool { return encoded < NULL_INDEX }
+// The awake index, or NULL_INDEX for a static or sleeping body.
+decode_awake_index(encoded: int) -> int {
+    if encoded >= 0 { return encoded }
+    return NULL_INDEX
+}
+// What an encoding becomes when its body falls asleep: a static body's stays.
+sleep_body_sim_index(encoded: int) -> int {
+    if encoded >= 0 { return NULL_INDEX }
+    return encoded
+}
+
+// A contact's body sim from its encoding, through the body when the body
+// is neither awake nor static (b3ResolveContactBodySim).
+resolve_contact_body_sim(w: *World, awake_sims: ptr, static_sims: ptr, encoded: int, body_id: int) -> *BodySim {
+    if encoded >= 0 { return (awake_sims + encoded * sizeof(BodySim)) as *BodySim }
+    if encoded < NULL_INDEX { return (static_sims + (0 - encoded - 2) * sizeof(BodySim)) as *BodySim }
+    return get_body_sim(w, body_at(w, body_id))
+}
+
+// Every contact of a body given the body's encoding again, after its sim
+// moved (b3RefreshBodyContactIndices).
+refresh_body_contact_indices(w: *World, body: *Body) {
+    encoded = encode_body_sim_index(body)
+    key = body.head_contact_key
+    while key != NULL_INDEX {
+        c = contact_at(w, key >> 1)
+        if (key & 1) == 0 { c.encoded_body_sim_a = encoded } else { c.encoded_body_sim_b = encoded }
+        key = contact_edge_next(w, key)
+    }
+}
 
 // The state exists for the awake set only; null otherwise.
 get_body_state(w: *World, body: *Body) -> *BodyState {
@@ -1891,6 +1945,7 @@ destroy_body(id: BodyId) {
         native.name_free(s.name)
         s.name = null
         basics.idpool_free(&w.shape_id_pool, shape_id)
+        set_shape_fat_aabb(w, shape_id, AABB { lower: math.vec3_zero(), upper: math.vec3_zero() })
         s.id = NULL_INDEX
         shape_id = s.next_shape_id
     }
@@ -1901,7 +1956,9 @@ destroy_body(id: BodyId) {
     moved_index = basics.buffer_remove_swap(&set.body_sims, body.local_index)
     if moved_index != NULL_INDEX && moved_index != body.local_index {
         moved_sim = body_sim_at(set, body.local_index)
-        body_at(w, moved_sim.body_id).local_index = body.local_index
+        moved_body = body_at(w, moved_sim.body_id)
+        moved_body.local_index = body.local_index
+        refresh_body_contact_indices(w, moved_body)
     }
     if body.set_index == AWAKE_SET {
         basics.buffer_remove_swap(&set.body_states, body.local_index)
@@ -1941,17 +1998,17 @@ compute_shape_margin(g: *Shape) -> float {
 
 // The shape's bounds with the speculative margin, and the fat bounds the
 // broad phase holds (a static body's grow only by the speculative distance).
-update_shape_aabbs(s: *WorldShape, t: Transform, proxy_kind: int) {
+update_shape_aabbs(w: *World, s: *WorldShape, t: Transform, proxy_kind: int) {
     box = shape.compute_fat_shape_aabb(&s.geometry, t, SPECULATIVE_DISTANCE)
     s.aabb = box
     margin = s.aabb_margin
     if proxy_kind == BODY_STATIC { margin = SPECULATIVE_DISTANCE }
-    s.fat_aabb = AABB { lower: math.sub(box.lower, math.vec3(margin, margin, margin)), upper: math.add(box.upper, math.vec3(margin, margin, margin)) }
+    set_shape_fat_aabb(w, s.id, AABB { lower: math.sub(box.lower, math.vec3(margin, margin, margin)), upper: math.add(box.upper, math.vec3(margin, margin, margin)) })
 }
 
 create_shape_proxy(w: *World, s: *WorldShape, kind: int, t: Transform, force_pair_creation: bool) {
-    update_shape_aabbs(s, t, kind)
-    s.proxy_key = broad_phase.broad_phase_create_proxy(&w.broad_phase, kind, s.fat_aabb, s.filter.category_bits, s.id, force_pair_creation)
+    update_shape_aabbs(w, s, t, kind)
+    s.proxy_key = broad_phase.broad_phase_create_proxy(&w.broad_phase, kind, shape_fat_aabb(w, s.id), s.filter.category_bits, s.id, force_pair_creation)
 }
 
 // A shape on a body: its slot, its geometry, its materials, its proxy in
@@ -1988,6 +2045,7 @@ create_shape(body_id: BodyId, def: *ShapeDef, geometry: Shape) -> ShapeId {
         index = basics.buffer_push(&w.shapes)
         fresh = world_shape_at(w, index)
         fresh.generation = 0
+        basics.buffer_push(&w.fat_aabbs)
     }
     s = world_shape_at(w, shape_id)
     s.geometry = geometry
@@ -2009,7 +2067,7 @@ create_shape(body_id: BodyId, def: *ShapeDef, geometry: Shape) -> ShapeId {
     s.local_centroid = shape.get_shape_centroid(&s.geometry)
     s.aabb_margin = compute_shape_margin(&s.geometry)
     s.aabb = AABB { lower: math.vec3_zero(), upper: math.vec3_zero() }
-    s.fat_aabb = s.aabb
+    set_shape_fat_aabb(w, shape_id, s.aabb)
     s.generation = s.generation + 1
     s.sensor_index = NULL_INDEX
     s.name = null
@@ -2141,6 +2199,7 @@ destroy_shape(id: ShapeId, update_body_mass: bool) {
     native.name_free(s.name)
     s.name = null
     basics.idpool_free(&w.shape_id_pool, s.id)
+    set_shape_fat_aabb(w, s.id, AABB { lower: math.vec3_zero(), upper: math.vec3_zero() })
     s.id = NULL_INDEX
     if update_body_mass { update_body_mass_data(w, body) }
     w.locked = false
@@ -2192,16 +2251,16 @@ reset_shape_proxy(w: *World, s: *WorldShape, wake_bodies: bool, remake: bool) {
     t = get_body_transform(w, s.body_id)
     if s.proxy_key != NULL_INDEX {
         kind = broad_phase.proxy_type(s.proxy_key)
-        update_shape_aabbs(s, t, kind)
+        update_shape_aabbs(w, s, t, kind)
         if remake {
             broad_phase.broad_phase_destroy_proxy(&w.broad_phase, s.proxy_key)
-            s.proxy_key = broad_phase.broad_phase_create_proxy(&w.broad_phase, kind, s.fat_aabb, s.filter.category_bits, s.id, true)
+            s.proxy_key = broad_phase.broad_phase_create_proxy(&w.broad_phase, kind, shape_fat_aabb(w, s.id), s.filter.category_bits, s.id, true)
         } else {
-            broad_phase.broad_phase_move_proxy(&w.broad_phase, s.proxy_key, s.fat_aabb)
+            broad_phase.broad_phase_move_proxy(&w.broad_phase, s.proxy_key, shape_fat_aabb(w, s.id))
         }
     } else {
         // A disabled body's shape: its bounds kept current for when it returns.
-        update_shape_aabbs(s, t, body.kind)
+        update_shape_aabbs(w, s, t, body.kind)
     }
     w.locked = false
 }
@@ -2620,12 +2679,12 @@ body_set_transform(id: BodyId, position: Vec3, rotation: Quat) {
         // with it. The proxy moves only when the new bounds leave the old
         // fat ones, as the reference's does: a body moved a little every
         // frame is not taken out of the tree and put back each time.
-        old_fat = s.fat_aabb
-        update_shape_aabbs(s, sim.transform, body.kind)
+        old_fat = shape_fat_aabb(w, s.id)
+        update_shape_aabbs(w, s, sim.transform, body.kind)
         if math.aabb_contains(old_fat, s.aabb) {
-            s.fat_aabb = old_fat
+            set_shape_fat_aabb(w, s.id, old_fat)
         } else if s.proxy_key != NULL_INDEX {
-            broad_phase.broad_phase_move_proxy(&w.broad_phase, s.proxy_key, s.fat_aabb)
+            broad_phase.broad_phase_move_proxy(&w.broad_phase, s.proxy_key, shape_fat_aabb(w, s.id))
         }
         shape_id = s.next_shape_id
     }
@@ -3081,6 +3140,16 @@ body_compute_aabb(id: BodyId) -> AABB {
 // awake set and none elsewhere, every set's sims point back at live
 // bodies, every island is consistent, and the shape lists close.
 validate_solver_sets(w: *World) -> bool {
+    // Every contact's encodings are its bodies' (b3ValidateSolverSets).
+    i = 0
+    while i < w.contacts.count {
+        c = contact_at(w, i)
+        if c.contact_id != NULL_INDEX {
+            if c.encoded_body_sim_a != encode_body_sim_index(body_at(w, c.edge_a.body_id)) { return false }
+            if c.encoded_body_sim_b != encode_body_sim_index(body_at(w, c.edge_b.body_id)) { return false }
+        }
+        i = i + 1
+    }
     body_count = 0
     i = 0
     while i < w.bodies.count {
@@ -3264,10 +3333,8 @@ add_contact_to_graph(w: *World, c: *Contact) {
     is_scalar = (c.flags & SIM_MESH_CONTACT) != 0 || color_index == OVERFLOW_INDEX
     color = graph_color(w, color_index)
     c.color_index = color_index
-    c.body_sim_index_a = body_a.local_index
-    if body_a.kind == BODY_STATIC { c.body_sim_index_a = NULL_INDEX }
-    c.body_sim_index_b = body_b.local_index
-    if body_b.kind == BODY_STATIC { c.body_sim_index_b = NULL_INDEX }
+    c.encoded_body_sim_a = encode_body_sim_index(body_a)
+    c.encoded_body_sim_b = encode_body_sim_index(body_b)
     if is_scalar {
         c.local_index = color.contacts.count
         index = basics.buffer_push(&color.contacts)
@@ -3348,8 +3415,8 @@ create_contact(w: *World, shape_a: *WorldShape, shape_b: *WorldShape, child_inde
     c.local_index = set.contact_indices.count
     c.island_id = NULL_INDEX
     c.island_index = NULL_INDEX
-    c.body_sim_index_a = NULL_INDEX
-    c.body_sim_index_b = NULL_INDEX
+    c.encoded_body_sim_a = encode_body_sim_index(body_a)
+    c.encoded_body_sim_b = encode_body_sim_index(body_b)
     c.shape_id_a = shape_a.id
     c.shape_id_b = shape_b.id
     c.child_index = child_index
@@ -4295,11 +4362,17 @@ wake_solver_set(w: *World, set_index: int) {
         body.set_index = AWAKE_SET
         body.local_index = target
         body.sleep_time = 0.0
-        // The body's non-touching contacts, from the disabled set to the awake one.
+        // The body's non-touching contacts, from the disabled set to the
+        // awake one, and its awake ones, with its index; the touching ones
+        // take theirs entering the graph.
         key = body.head_contact_key
         while key != NULL_INDEX {
             c = contact_at(w, key >> 1)
+            edge_index = key & 1
             key = contact_edge_next(w, key)
+            if c.set_index == AWAKE_SET || c.set_index == DISABLED_SET {
+                if edge_index == 0 { c.encoded_body_sim_a = target } else { c.encoded_body_sim_b = target }
+            }
             if c.set_index == DISABLED_SET {
                 local_index = c.local_index
                 c.set_index = AWAKE_SET
@@ -4388,7 +4461,10 @@ try_sleep_island(w: *World, island_id: int) -> bool {
         memcpy(sleep_set.body_sims.data + sleep_index * sizeof(BodySim), body_sim_at(awake, awake_index) as ptr, sizeof(BodySim))
         moved = basics.buffer_remove_swap(&awake.body_sims, awake_index)
         if moved != NULL_INDEX && moved != awake_index {
-            body_at(w, body_sim_at(awake, awake_index).body_id).local_index = awake_index
+            moved_body = body_at(w, body_sim_at(awake, awake_index).body_id)
+            moved_body.local_index = awake_index
+            // One of this island's bodies is re-encoded below as it sleeps.
+            if moved_body.island_id != island_id { refresh_body_contact_indices(w, moved_body) }
         }
         basics.buffer_remove_swap(&awake.body_states, awake_index)
         body.set_index = sleep_set_id
@@ -4399,14 +4475,16 @@ try_sleep_island(w: *World, island_id: int) -> bool {
             body_move_event_at(w, body.body_move_index).fell_asleep = true
         }
         body.body_move_index = NULL_INDEX
-        // Its non-touching contacts whose other body is not awake go to the disabled set.
+        // Its non-touching contacts lose its index; those whose other body
+        // is not awake go to the disabled set.
         key = body.head_contact_key
         while key != NULL_INDEX {
             c = contact_at(w, key >> 1)
             edge_index = key & 1
             key = contact_edge_next(w, key)
-            if c.set_index == DISABLED_SET { continue }
             if c.color_index != NULL_INDEX { continue }
+            if edge_index == 0 { c.encoded_body_sim_a = NULL_INDEX } else { c.encoded_body_sim_b = NULL_INDEX }
+            if c.set_index == DISABLED_SET { continue }
             other_id = c.edge_b.body_id
             if edge_index == 1 { other_id = c.edge_a.body_id }
             if body_at(w, other_id).set_index == AWAKE_SET { continue }
@@ -4447,6 +4525,8 @@ try_sleep_island(w: *World, island_id: int) -> bool {
         c.set_index = sleep_set_id
         c.color_index = NULL_INDEX
         c.local_index = sleep_contact_index
+        c.encoded_body_sim_a = sleep_body_sim_index(c.encoded_body_sim_a)
+        c.encoded_body_sim_b = sleep_body_sim_index(c.encoded_body_sim_b)
         i = i + 1
     }
     i = 0
@@ -4588,23 +4668,21 @@ collide_contact(w: *World, contact_id: int) {
     c = contact_at(w, contact_id)
     shape_a = world_shape_at(w, c.shape_id_a)
     shape_b = world_shape_at(w, c.shape_id_b)
-    if math.aabb_overlaps(shape_a.fat_aabb, shape_b.fat_aabb) == false {
+    if math.aabb_overlaps(shape_fat_aabb(w, c.shape_id_a), shape_fat_aabb(w, c.shape_id_b)) == false {
         c.flags = (c.flags | SIM_DISJOINT) & (0 - 1 - SIM_TOUCHING)
         basics.bitset_set(&task_context(w).contact_state, contact_id)
         return
     }
-    body_a = body_at(w, shape_a.body_id)
-    body_b = body_at(w, shape_b.body_id)
-    static_a = body_a.kind == BODY_STATIC
-    static_b = body_b.kind == BODY_STATIC
+    // The sims straight from the contact's encodings, the bodies only for
+    // one asleep (a non-touching contact with a sleeping body).
+    encoded_a = c.encoded_body_sim_a
+    encoded_b = c.encoded_body_sim_b
+    sim_a = resolve_contact_body_sim(w, solver_set_at(w, AWAKE_SET).body_sims.data, solver_set_at(w, STATIC_SET).body_sims.data, encoded_a, c.edge_a.body_id)
+    sim_b = resolve_contact_body_sim(w, solver_set_at(w, AWAKE_SET).body_sims.data, solver_set_at(w, STATIC_SET).body_sims.data, encoded_b, c.edge_b.body_id)
+    static_a = is_static_sim_index(encoded_a)
+    static_b = is_static_sim_index(encoded_b)
     was_touching = (c.flags & SIM_TOUCHING) != 0
-    sim_a = get_body_sim(w, body_a)
-    sim_b = get_body_sim(w, body_b)
-    is_fast = (sim_a.flags & IS_FAST) != 0 || (sim_b.flags & IS_FAST) != 0
-    c.body_sim_index_a = body_a.local_index
-    if static_a { c.body_sim_index_a = NULL_INDEX }
-    c.body_sim_index_b = body_b.local_index
-    if static_b { c.body_sim_index_b = NULL_INDEX }
+    is_fast = ((sim_a.flags | sim_b.flags) & IS_FAST) != 0
     recycle_distance = w.contact_recycle_distance
     tolerance = recycle_distance
     if was_touching == false { tolerance = math.min_float(recycle_distance, SPECULATIVE_DISTANCE) }
@@ -4645,8 +4723,6 @@ add_non_touching_contact(w: *World, c: *Contact) {
     set = solver_set_at(w, AWAKE_SET)
     c.color_index = NULL_INDEX
     c.local_index = set.contact_indices.count
-    c.body_sim_index_a = NULL_INDEX
-    c.body_sim_index_b = NULL_INDEX
     basics.ints_push(&set.contact_indices, c.contact_id)
 }
 
@@ -4670,14 +4746,11 @@ struct CollideTask {
     indices: ptr                   // int[], the contacts of the pass
 }
 
-// The lines of a shape and of a body the collide pass reads: a shape's
-// body id and its bounds, a body's set and index and its kind.
-prefetch_shape(s: *WorldShape) {
-    native.prefetch(s as ptr)
-}
-
-prefetch_body(b: *Body) {
-    native.prefetch(b as ptr)
+// An awake or static body's sim, by a contact's encoding: its transform
+// and centre lead it.
+prefetch_sim(w: *World, encoded: int) {
+    if encoded >= 0 { native.prefetch(body_sim_at(solver_set_at(w, AWAKE_SET), encoded) as ptr) }
+    else if encoded < NULL_INDEX { native.prefetch(body_sim_at(solver_set_at(w, STATIC_SET), 0 - encoded - 2) as ptr) }
 }
 
 collide_range(start: int, end: int, worker: int, context: ptr) {
@@ -4689,20 +4762,15 @@ collide_range(start: int, end: int, worker: int, context: ptr) {
         // The contacts to come and their manifolds fetched ahead, as the
         // reference's narrow phase does: each pass's first touch of a
         // contact and of its separately allocated manifold missed the cache.
-        // Further in, what a contact leads to: its shapes (their bounds
-        // are what the pass reads first) four ahead, the contact fetched
-        // by then, and their bodies two ahead, the shapes fetched by then.
+        // Further in, what a contact leads to: its bodies' sims four ahead,
+        // the contact fetched by then (the fat boxes are dense, and the
+        // shapes are read only when the manifolds are made again).
         if i + 8 < end { native.prefetch(contact_at(w, indices[i + 8]) as ptr) }
         if i + 4 < end {
             ahead = contact_at(w, indices[i + 4])
             native.prefetch(ahead.manifolds)
-            prefetch_shape(world_shape_at(w, ahead.shape_id_a))
-            prefetch_shape(world_shape_at(w, ahead.shape_id_b))
-        }
-        if i + 2 < end {
-            near = contact_at(w, indices[i + 2])
-            prefetch_body(body_at(w, world_shape_at(w, near.shape_id_a).body_id))
-            prefetch_body(body_at(w, world_shape_at(w, near.shape_id_b).body_id))
+            prefetch_sim(w, ahead.encoded_body_sim_a)
+            prefetch_sim(w, ahead.encoded_body_sim_b)
         }
         collide_contact(w, indices[i])
         i = i + 1
@@ -5918,7 +5986,9 @@ transfer_body(w: *World, target: *SolverSet, source: *SolverSet, body: *Body) {
     target_sim.flags = target_sim.flags & (0 - 1 - (IS_FAST | IS_SPEED_CAPPED | HAD_TIME_OF_IMPACT))
     moved = basics.buffer_remove_swap(&source.body_sims, source_index)
     if moved != NULL_INDEX && moved != source_index {
-        body_at(w, body_sim_at(source, source_index).body_id).local_index = source_index
+        moved_body = body_at(w, body_sim_at(source, source_index).body_id)
+        moved_body.local_index = source_index
+        refresh_body_contact_indices(w, moved_body)
     }
     if source.set_index == AWAKE_SET {
         basics.buffer_remove_swap(&source.body_states, source_index)

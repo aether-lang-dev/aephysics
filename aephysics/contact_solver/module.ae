@@ -197,8 +197,8 @@ prepare_contact(ctx: *StepContext, c: *Contact, cc: *ContactConstraint, manifold
     warm_start_scale = 0.0
     if ctx.enable_warm_starting { warm_start_scale = 1.0 }
     inv_tau = 1.0 / dynamics.SPECULATIVE_DISTANCE
-    index_a = c.body_sim_index_a
-    index_b = c.body_sim_index_b
+    index_a = dynamics.decode_awake_index(c.encoded_body_sim_a)
+    index_b = dynamics.decode_awake_index(c.encoded_body_sim_b)
     m_a = 0.0
     i_a = math.mat3_zero()
     v_a = math.vec3_zero()

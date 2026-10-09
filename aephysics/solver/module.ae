@@ -314,12 +314,13 @@ continuous_query_visitor(proxy_id: int, user_data: long, context: ptr) -> bool {
 
 // A shape's bounds after the sweep, and the fat bounds and proxy grown when they no longer hold it.
 grow_bounds(w: *World, s: *WorldShape, sim: *BodySim, is_bullet: bool) {
-    if math.aabb_contains(s.fat_aabb, s.aabb) { return }
+    if math.aabb_contains(dynamics.shape_fat_aabb(w, s.id), s.aabb) { return }
     margin = math.vec3(s.aabb_margin, s.aabb_margin, s.aabb_margin)
-    s.fat_aabb = AABB { lower: math.sub(s.aabb.lower, margin), upper: math.add(s.aabb.upper, margin) }
+    fat = AABB { lower: math.sub(s.aabb.lower, margin), upper: math.add(s.aabb.upper, margin) }
+    dynamics.set_shape_fat_aabb(w, s.id, fat)
     native.atomic_or((&sim.flags) as ptr, dynamics.ENLARGE_BOUNDS)
     // A bullet's proxies are enlarged later, serially.
-    if is_bullet == false { broad_phase.broad_phase_mark_proxy_moved(&w.broad_phase, s.proxy_key, s.fat_aabb) }
+    if is_bullet == false { broad_phase.broad_phase_mark_proxy_moved(&w.broad_phase, s.proxy_key, fat) }
 }
 
 // A fast body swept against the static world (a bullet against the
@@ -519,10 +520,11 @@ finalize_range(start: int, end: int, worker: int, context: ptr) {
             while shape_id != NULL_INDEX {
                 s = dynamics.world_shape_at(w, shape_id)
                 s.aabb = shape.compute_fat_shape_aabb(&s.geometry, t, dynamics.SPECULATIVE_DISTANCE)
-                if math.aabb_contains(s.fat_aabb, s.aabb) == false {
+                if math.aabb_contains(dynamics.shape_fat_aabb(w, shape_id), s.aabb) == false {
                     margin = math.vec3(s.aabb_margin, s.aabb_margin, s.aabb_margin)
-                    s.fat_aabb = AABB { lower: math.sub(s.aabb.lower, margin), upper: math.add(s.aabb.upper, margin) }
-                    broad_phase.broad_phase_mark_proxy_moved(&w.broad_phase, s.proxy_key, s.fat_aabb)
+                    fat = AABB { lower: math.sub(s.aabb.lower, margin), upper: math.add(s.aabb.upper, margin) }
+                    dynamics.set_shape_fat_aabb(w, shape_id, fat)
+                    broad_phase.broad_phase_mark_proxy_moved(&w.broad_phase, s.proxy_key, fat)
                 }
                 shape_id = s.next_shape_id
             }
@@ -1315,8 +1317,9 @@ solve_step(w: *World, ctx: *StepContext) {
             while shape_id != NULL_INDEX {
                 s = dynamics.world_shape_at(w, shape_id)
                 proxy_id = broad_phase.proxy_id(s.proxy_key)
-                if math.aabb_contains(dynamic_tree.tree_get_aabb(tree, proxy_id), s.fat_aabb) == false {
-                    dynamic_tree.tree_enlarge_proxy(tree, proxy_id, s.fat_aabb)
+                fat = dynamics.shape_fat_aabb(w, shape_id)
+                if math.aabb_contains(dynamic_tree.tree_get_aabb(tree, proxy_id), fat) == false {
+                    dynamic_tree.tree_enlarge_proxy(tree, proxy_id, fat)
                 }
                 shape_id = s.next_shape_id
             }
