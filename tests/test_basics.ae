@@ -38,6 +38,58 @@ struct Thing {
     tag: long
 }
 
+// The name cache (the reference's test_name_cache.c CacheUnit): an empty
+// or no name is the null id, which stands for nothing; distinct names get
+// distinct ids and read back; the same name again is the same id and no
+// second entry; a long name reads back whole; a different name on an id
+// already taken gets another id and keeps its own text; a snapshot's
+// names load with their ids, and bad ones are refused; everything comes
+// back when the cache goes.
+name_cache_unit() {
+    before = basics.alloc_count()
+    before_bytes = basics.bytes_in_use()
+    c = basics.name_cache_create()
+    ensure("names: empty is none", basics.name_cache_add(&c, "") == basics.NULL_NAME)
+    ensure("names: null is none", basics.name_cache_add(&c, null) == basics.NULL_NAME)
+    ensure("names: none stands for nothing", basics.name_cache_find(&c, basics.NULL_NAME) == null && string.length(basics.name_cache_text(&c, basics.NULL_NAME)) == 0)
+    crate = basics.name_cache_add(&c, "crate")
+    barrel = basics.name_cache_add(&c, "barrel")
+    ensure("names: distinct ids", crate != basics.NULL_NAME && barrel != basics.NULL_NAME && crate != barrel)
+    ensure("names: read back", string.equals(basics.name_cache_text(&c, crate), "crate") == 1 && string.equals(basics.name_cache_text(&c, barrel), "barrel") == 1)
+    ensure("names: the same name, the same id, one entry", basics.name_cache_add(&c, "crate") == crate && basics.name_cache_count(&c) == 2)
+    // The id is the reference's b3Hash32 of the bytes (FNV-1a, Murmur3's
+    // finish), its values from the reference's own function compiled in C.
+    ensure("names: the reference's hash of crate", basics.name_hash32(string.aether_string_raw_ptr("crate"), 5) == (3832558763 as long) && crate == 0 - 462408533)
+    ensure("names: the reference's hash of barrel", basics.name_hash32(string.aether_string_raw_ptr("barrel"), 6) == (2907559280 as long) && barrel == 0 - 1387408016)
+    long_block = calloc(4096, 1)
+    long_bytes = long_block as byte[]
+    i = 0
+    while i < 4095 {
+        long_bytes[i] = (97 + i % 26) as byte
+        i = i + 1
+    }
+    long_name = string.from_cstr(long_block)
+    long_id = basics.name_cache_add(&c, long_name)
+    ensure("names: a long name whole", string.length(basics.name_cache_text(&c, long_id)) == 4095 && string.equals(basics.name_cache_text(&c, long_id), long_name) == 1 && basics.name_cache_count(&c) == 3)
+    string.free(long_name)
+    free(long_block)
+    // Another name on a taken id: loaded under crate's id first, "crate"
+    // itself then probes past it.
+    d = basics.name_cache_create()
+    other = string.aether_string_raw_ptr("other")
+    ensure("names: loaded with its id", basics.name_cache_load(&d, crate, other, 5))
+    moved = basics.name_cache_add(&d, "crate")
+    ensure("names: a collision takes the next id", moved == crate + 1 && string.equals(basics.name_cache_text(&d, crate), "other") == 1 && string.equals(basics.name_cache_text(&d, moved), "crate") == 1)
+    ensure("names: and finds it again", basics.name_cache_add(&d, "crate") == moved && basics.name_cache_count(&d) == 2)
+    ensure("names: a taken id refused", basics.name_cache_load(&d, crate, other, 5) == false)
+    ensure("names: the null id refused", basics.name_cache_load(&d, basics.NULL_NAME, other, 5) == false)
+    ensure("names: an empty name refused", basics.name_cache_load(&d, 77, other, 0) == false)
+    ensure("names: a zero inside refused", basics.name_cache_load(&d, 78, string.aether_string_raw_ptr("crate"), 6) == false)
+    basics.name_cache_destroy(&d)
+    basics.name_cache_destroy(&c)
+    ensure("names: nothing left (${basics.alloc_count() - before} blocks, ${basics.bytes_in_use() - before_bytes} bytes)", basics.alloc_count() == before && basics.bytes_in_use() == before_bytes)
+}
+
 main() {
     // Bit math.
     ensure("clz of 9 is 28", basics.clz32(9) == 31 - 3)
@@ -369,6 +421,7 @@ main() {
 
     ensure("every allocation the module counted was freed", basics.alloc_count() == 0 && basics.bytes_in_use() == 0)
 
+    name_cache_unit()
     println("basics: ${checks} checks")
     if failures == 0 {
         println("basics: all checks passed")

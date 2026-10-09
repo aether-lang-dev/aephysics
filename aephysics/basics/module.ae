@@ -34,6 +34,9 @@ exports (
     set_count, set_bytes, set_prefetch, SetItem,
     LongMap, map_create, map_destroy, map_clear, map_set, map_get, map_has, map_remove, map_count, map_bytes,
     hash_bytes, section_fits,
+    NameCache, NULL_NAME, name_cache_create, name_cache_destroy, name_hash32, name_cache_add, name_cache_find,
+    name_cache_text, name_cache_load, name_cache_count, name_cache_id_at, name_cache_name_at, name_cache_length_at,
+    name_cache_bytes,
     ints_create, ints_destroy, ints_reserve, ints_push, ints_pop, ints_get, ints_set, ints_clear,
     ints_remove_swap, ints_count, ints_capacity, ints_bytes,
     buffer_create, buffer_destroy, buffer_reserve, buffer_push, buffer_pop, buffer_clear,
@@ -50,6 +53,9 @@ extern free(block: ptr)
 extern memset(block: ptr, value: int, size: int) -> ptr
 extern memcpy(dst: ptr, src: ptr, size: int) -> ptr
 extern memmove(dst: ptr, src: ptr, size: int) -> ptr
+extern memcmp(a: ptr, b: ptr, size: int) -> int
+extern strlen(s: ptr) -> int
+extern memchr(block: ptr, value: int, size: int) -> ptr
 
 // --- allocation, counted ---------------------------------------------------
 
@@ -391,6 +397,151 @@ map_remove(m: *LongMap, key: long) -> bool {
 
 map_count(m: *LongMap) -> int { return m.count }
 map_bytes(m: *LongMap) -> int { return m.capacity * sizeof(MapItem) }
+
+// --- the name cache ------------------------------------------------------------
+
+// The names a world's bodies and shapes go by, each kept once (the
+// reference's name_cache.c): a body or shape holds its name's id, never a
+// copy of its own, so a record of it copies whole and a snapshot carries
+// every name once. The id is the name's 32-bit hash (name_hash32), and
+// NULL_NAME for no name or an empty one. A different name on an id already
+// taken goes to the next free id, where the reference gives both names the
+// first one. Names stay until the cache goes: they are for debugging, and
+// few.
+const NULL_NAME = 0
+
+struct NameEntry {
+    id: int
+    length: int
+    name: ptr          // the cache's own copy, its length and a terminating zero (alloc's)
+}
+
+struct NameCache {
+    entries: Buffer    // NameEntry
+    ids: LongMap       // a name's id to its entry
+}
+
+name_cache_create() -> NameCache {
+    return NameCache { entries: buffer_create(sizeof(NameEntry), 0), ids: map_create(16) }
+}
+
+name_entry_at(c: *NameCache, index: int) -> *NameEntry { return (c.entries.data + index * sizeof(NameEntry)) as *NameEntry }
+
+name_cache_destroy(c: *NameCache) {
+    i = 0
+    while i < c.entries.count {
+        entry = name_entry_at(c, i)
+        free_bytes(entry.name, entry.length + 1)
+        i = i + 1
+    }
+    buffer_destroy(&c.entries)
+    map_destroy(&c.ids)
+}
+
+// The bytes' 32-bit hash, unsigned: FNV-1a, then Murmur3's finish so short
+// names spread (the reference's b3Hash32; a recording's names keep their
+// ids only while it stays the same).
+name_hash32(data: ptr, length: int) -> long {
+    mask = (1 as long << 32) - (1 as long)
+    h = 0x811c9dc5 as long
+    i = 0
+    while i < length {
+        h = ((h ^ (native.load_u8(data, i as long) as long)) * (0x01000193 as long)) & mask
+        i = i + 1
+    }
+    h = h ^ (h >> 16)
+    h = (h * (0x85ebca6b as long)) & mask
+    h = h ^ (h >> 13)
+    h = (h * (0xc2b2ae35 as long)) & mask
+    h = h ^ (h >> 16)
+    return h
+}
+
+// The entry an id names, or NULL_INDEX.
+name_entry_of(c: *NameCache, id: int) -> int {
+    if id == NULL_NAME { return 0 - 1 }
+    return map_get(&c.ids, id as long, 0 - 1)
+}
+
+// The id of `name`, interned when it is new; NULL_NAME for none.
+name_cache_add(c: *NameCache, name: string) -> int {
+    text = native.name_copy(name)
+    if text == null { return NULL_NAME }
+    length = strlen(text)
+    id = NULL_NAME
+    if length > 0 { id = name_cache_add_bytes(c, text, length) }
+    native.name_free(text)
+    return id
+}
+
+// The id of the `length` bytes at `text`, interned when they are new.
+name_cache_add_bytes(c: *NameCache, text: ptr, length: int) -> int {
+    id = (name_hash32(text, length) as int)
+    if id == NULL_NAME { id = 1 }
+    while true {
+        index = name_entry_of(c, id)
+        if index < 0 { break }
+        entry = name_entry_at(c, index)
+        if entry.length == length && memcmp(entry.name, text, length) == 0 { return id }
+        // Another name on this id: the next one.
+        id = id + 1
+        if id == NULL_NAME { id = 1 }
+    }
+    copy = alloc(length + 1)
+    memcpy(copy, text, length)
+    name_cache_put(c, id, copy, length)
+    return id
+}
+
+name_cache_put(c: *NameCache, id: int, name: ptr, length: int) {
+    index = buffer_push(&c.entries)
+    entry = name_entry_at(c, index)
+    entry.id = id
+    entry.length = length
+    entry.name = name
+    map_set(&c.ids, id as long, index)
+}
+
+// The name an id stands for, as a C string; null for NULL_NAME or an id
+// the cache does not hold.
+name_cache_find(c: *NameCache, id: int) -> ptr {
+    index = name_entry_of(c, id)
+    if index < 0 { return null }
+    return name_entry_at(c, index).name
+}
+
+// The name an id stands for; empty for none.
+name_cache_text(c: *NameCache, id: int) -> string { return native.name_text(name_cache_find(c, id)) }
+
+// A name read back with its id (a snapshot's): the `length` bytes at
+// `text` copied in. False for NULL_NAME, an empty name, a name with a zero
+// in it, or an id the cache already holds.
+name_cache_load(c: *NameCache, id: int, text: ptr, length: int) -> bool {
+    if id == NULL_NAME || length <= 0 || name_entry_of(c, id) >= 0 { return false }
+    if memchr(text, 0, length) != null { return false }
+    copy = alloc(length + 1)
+    memcpy(copy, text, length)
+    name_cache_put(c, id, copy, length)
+    return true
+}
+
+name_cache_count(c: *NameCache) -> int { return c.entries.count }
+
+// The entry at `index`, in the order they came: its id, length and text.
+name_cache_id_at(c: *NameCache, index: int) -> int { return name_entry_at(c, index).id }
+name_cache_name_at(c: *NameCache, index: int) -> ptr { return name_entry_at(c, index).name }
+name_cache_length_at(c: *NameCache, index: int) -> int { return name_entry_at(c, index).length }
+
+// What the cache holds, in bytes.
+name_cache_bytes(c: *NameCache) -> int {
+    total = buffer_bytes(&c.entries) + map_bytes(&c.ids)
+    i = 0
+    while i < c.entries.count {
+        total = total + name_entry_at(c, i).length + 1
+        i = i + 1
+    }
+    return total
+}
 
 // --- a section of a block ------------------------------------------------------
 

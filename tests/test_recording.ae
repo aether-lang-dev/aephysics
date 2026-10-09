@@ -15,6 +15,7 @@
 import std.string
 import aephysics.math
 import aephysics.basics
+import aephysics.distance
 import aephysics.hull
 import aephysics.mesh
 import aephysics.height_field
@@ -670,12 +671,42 @@ geometry_dedup() {
     steps(world_id, 5)
     recording.stop_recording(world_id)
     ensure("dedup: two blocks for eleven shapes (${registry_count(r)})", registry_count(r) == 2)
+    ensure("dedup: the recording holds two", r.geometry.count == 2)
     ensure("dedup: replays", recording.validate_replay(recording.recording_data(r), recording.recording_size(r), 1))
     hull.destroy_hull(first)
     hull.destroy_hull(twin)
     hull.destroy_hull(other)
     dynamics.destroy_world(world_id)
     recording.destroy_recording(r)
+}
+
+// Blocks on one content hash with other bytes stay two blocks; either one
+// interned again is found through the hash's chain, the one behind the
+// head too, and adds nothing (the reference's GeometryHashCollision).
+geometry_hash_collision() {
+    r = recording.create_recording()
+    shared = 0xABCD1234 as long
+    a = filled_block(170)
+    b = filled_block(187)
+    id_a = dynamics.intern_geometry(r, shape.SHAPE_HULL, shared, a, 16)
+    id_b = dynamics.intern_geometry(r, shape.SHAPE_HULL, shared, b, 16)
+    ensure("collision: two blocks, not one", id_a != id_b && r.geometry.count == 2)
+    ensure("collision: the first found again", dynamics.intern_geometry(r, shape.SHAPE_HULL, shared, filled_block(170), 16) == id_a && r.geometry.count == 2)
+    ensure("collision: the second found again", dynamics.intern_geometry(r, shape.SHAPE_HULL, shared, filled_block(187), 16) == id_b && r.geometry.count == 2)
+    ensure("collision: another kind is another block", dynamics.intern_geometry(r, shape.SHAPE_MESH, shared, filled_block(170), 16) != id_a && r.geometry.count == 3)
+    recording.destroy_recording(r)
+}
+
+// Sixteen bytes of one value, counted (the recording frees what it takes).
+filled_block(value: int) -> ptr {
+    block = basics.alloc(16)
+    bytes = block as byte[]
+    i = 0
+    while i < 16 {
+        bytes[i] = value as byte
+        i = i + 1
+    }
+    return block
 }
 
 // Seeking: backward and forward through keyframes, the world at every
@@ -840,6 +871,14 @@ corruptions() {
     memcpy(copy, recording.recording_data(r), size)
     poke_int(copy, 8, 7)
     ensure("bad snapshot size refused", recording.create_player(copy, size, 1) == null)
+    // The reserved bytes and the minor version are not the player's to
+    // refuse (the reference's ReservedHeaderBytes): a newer minor version
+    // only adds records, which are skipped.
+    memcpy(copy, recording.recording_data(r), size)
+    poke_int(copy, 20, 7)
+    poke_int(copy, 24, 0x12345678)
+    poke_int(copy, 28, 0 - 1)
+    ensure("reserved header bytes and another minor version play", recording.validate_replay(copy, size, 1))
 
     // The first record after the snapshot and its state hash.
     first = 32 + peek_int(recording.recording_data(r), 8)
@@ -1312,14 +1351,333 @@ all_ops() {
 }
 
 
+// --- names (the reference's test_name_cache.c) -------------------------------------------------------
+
+// A ground and four named boxes, each with a named shape: two bodies share
+// a name, two shapes share one, a shape shares a body's, and one of each is
+// long. Ground is ordinal 0, the boxes 1 to 4.
+named_body(i: int) -> string {
+    if i == 0 { return "crate" }
+    if i == 1 { return "barrel" }
+    if i == 2 { return "crate" }
+    return "a_very_long_body_name_that_exceeds_any_inline_name_buffer"
+}
+
+named_shape(i: int) -> string {
+    if i == 0 { return "box_hull" }
+    if i == 1 { return "box_hull" }
+    if i == 2 { return "crate" }
+    return "a_very_long_shape_name_that_never_fit_the_old_inline_buffer"
+}
+
+build_named_scene(world_id: WorldId) {
+    fixtures_ready()
+    physics_world.set_gravity(world_id, math.vec3(0.0, 0.0 - 10.0, 0.0))
+    sdef = dynamics.default_shape_def()
+    ground_def = dynamics.default_body_def()
+    ground = dynamics.create_body(world_id, &ground_def)
+    floor_hull = hull.make_box_hull(20.0, 1.0, 20.0)
+    dynamics.create_hull_shape(ground, &sdef, floor_hull)
+    hull.destroy_hull(floor_hull)
+    i = 0
+    while i < 4 {
+        bdef = dynamics.default_body_def()
+        bdef.kind = dynamics.BODY_DYNAMIC
+        bdef.position = math.vec3(0.0, 1.0 + 1.1 * (i as float), 0.0)
+        bdef.name = named_body(i)
+        b = dynamics.create_body(world_id, &bdef)
+        box_def = dynamics.default_shape_def()
+        box_def.name = named_shape(i)
+        dynamics.create_hull_shape(b, &box_def, g_box as *HullData)
+        i = i + 1
+    }
+}
+
+// Every box and its shape named as built, in the player's world.
+names_hold(p: *Player) -> bool {
+    i = 0
+    while i < 4 {
+        id = recording.player_body_id(p, 1 + i)
+        if dynamics.body_is_valid(id) == false { return false }
+        if string.equals(dynamics.body_get_name(id), named_body(i)) != 1 { return false }
+        if string.equals(dynamics.shape_get_name(first_shape(id)), named_shape(i)) != 1 { return false }
+        i = i + 1
+    }
+    return true
+}
+
+// Names live on the world, so the snapshot a recording starts from
+// carries them (NameRoundTrip); a seek backward restores them from a
+// keyframe every time and leaks nothing (RollbackNames).
+names() {
+    wdef = world_def()
+    world_id = dynamics.create_world(&wdef)
+    build_named_scene(world_id)
+    w = dynamics.get_world(world_id.index1 - 1)
+    ensure("names: shared names kept once (${basics.name_cache_count(&w.names)})", basics.name_cache_count(&w.names) == 5)
+    r = recording.create_recording()
+    recording.start_recording(world_id, r)
+    steps(world_id, 20)
+    recording.stop_recording(world_id)
+    dynamics.destroy_world(world_id)
+    ensure("names round trip: validates", recording.validate_replay(recording.recording_data(r), recording.recording_size(r), 1))
+    p = recording.create_player(recording.recording_data(r), recording.recording_size(r), 1)
+    recording.player_seek_frame(p, 20)
+    ensure("names round trip: every name after 20 frames", recording.player_has_diverged(p) == false && names_hold(p))
+    recording.destroy_player(p)
+    recording.destroy_recording(r)
+
+    // Rollback: a recording long enough for several keyframes, scrubbed.
+    world_id = dynamics.create_world(&wdef)
+    build_named_scene(world_id)
+    steps(world_id, 10)
+    r = recording.create_recording()
+    recording.start_recording(world_id, r)
+    steps(world_id, 80)
+    recording.stop_recording(world_id)
+    dynamics.destroy_world(world_id)
+    warm = recording.create_player(recording.recording_data(r), recording.recording_size(r), 1)
+    recording.player_seek_frame(warm, 80)
+    recording.destroy_player(warm)
+    before = basics.alloc_count()
+    p = recording.create_player(recording.recording_data(r), recording.recording_size(r), 1)
+    recording.player_seek_frame(p, 80)
+    ensure("rollback: played to the end", recording.player_frame(p) == 80 && recording.player_has_diverged(p) == false && recording.player_keyframe_count(p) == 5)
+    targets = [10, 60, 5, 70, 1, 40]
+    good = 0
+    i = 0
+    while i < 6 {
+        recording.player_seek_frame(p, targets[i])
+        if recording.player_frame(p) == targets[i] && recording.player_has_diverged(p) == false && names_hold(p) { good = good + 1 }
+        i = i + 1
+    }
+    ensure("rollback: every name at every frame (${good} of 6)", good == 6)
+    recording.destroy_player(p)
+    ensure("rollback: nothing leaked (${basics.alloc_count() - before})", basics.alloc_count() == before)
+    recording.destroy_recording(r)
+}
+
+// --- queries (the reference's QueryReplay and TaggedQuery) -------------------------------------------
+
+// What the host's visitors saw in the frame being watched, to compare
+// with what the player keeps.
+var g_watching = false
+var g_seen: ptr = null         // ShapeId[64]: the cast ray's hits, in order
+var g_seen_count = 0
+var g_overlaps = 0
+
+// An overlap visitor that stops at the second shape: the replay must give
+// the same answers to visit the same shapes.
+stop_at_second(shape_id: ShapeId, context: ptr) -> bool {
+    g_overlaps = g_overlaps + 1
+    return g_overlaps % 2 != 0
+}
+
+accept_all(shape_id: ShapeId, context: ptr) -> bool { return true }
+
+// A cast visitor that clips the ray at each hit (the closest hits come
+// after), watched in the frame of interest.
+clip_at_hit(shape_id: ShapeId, point: Vec3, normal: Vec3, fraction: float, user_material_id: long, triangle_index: int, child_index: int, context: ptr) -> float {
+    if g_watching && g_seen_count < 64 {
+        seen = g_seen as ShapeId[]
+        seen[g_seen_count] = shape_id
+        g_seen_count = g_seen_count + 1
+    }
+    return fraction
+}
+
+keep_all(shape_id: ShapeId, point: Vec3, normal: Vec3, fraction: float, user_material_id: long, triangle_index: int, child_index: int, context: ptr) -> float { return 1.0 }
+
+accept_planes_visitor(shape_id: ShapeId, planes: PlaneResult[], count: int, context: ptr) -> bool { return true }
+
+// A ground and four spheres for the queries to find.
+build_query_scene(world_id: WorldId) {
+    physics_world.set_gravity(world_id, math.vec3(0.0, 0.0 - 10.0, 0.0))
+    sdef = dynamics.default_shape_def()
+    ground_def = dynamics.default_body_def()
+    ground = dynamics.create_body(world_id, &ground_def)
+    floor_hull = hull.make_box_hull(20.0, 1.0, 20.0)
+    dynamics.create_hull_shape(ground, &sdef, floor_hull)
+    hull.destroy_hull(floor_hull)
+    i = 0
+    while i < 4 {
+        b = dynamic_body(world_id, math.vec3((i as float) - 1.5, 3.0, 0.0))
+        dynamics.create_sphere_shape(b, &sdef, manifold.sphere(math.vec3_zero(), 0.5))
+        i = i + 1
+    }
+}
+
+// The seven queries of a frame, one tagged by `tag` when it is not 0.
+ask_queries(world_id: WorldId, frame: int) {
+    filter = shape.default_query_filter()
+    origin = math.vec3(0.0, 6.0, 0.0)
+    translation = math.vec3(0.0, 0.0 - 8.0, 0.0)
+    box = AABB { lower: math.vec3(0.0 - 5.0, 0.0 - 1.0, 0.0 - 5.0), upper: math.vec3(5.0, 6.0, 5.0) }
+    point_block = calloc(1, sizeof(Vec3))
+    proxy = distance.shape_proxy(point_block, 1, 0.5)
+    mover = Capsule { center1: math.vec3_zero(), center2: math.vec3(0.0, 1.0, 0.0), radius: 0.3 }
+    g_overlaps = 0
+    physics_world.overlap_aabb(world_id, box, filter, stop_at_second, null)
+    physics_world.overlap_shape(world_id, origin, proxy, filter, accept_all, null)
+    g_watching = frame == 15
+    physics_world.cast_ray(world_id, origin, translation, filter, clip_at_hit, null)
+    g_watching = false
+    physics_world.cast_ray_closest(world_id, origin, translation, filter)
+    physics_world.cast_shape(world_id, origin, proxy, translation, filter, keep_all, null)
+    physics_world.cast_mover(world_id, origin, mover, translation, filter, false, accept_all, null)
+    // A mover sunk into the ground's top, so it has planes to give.
+    physics_world.collide_mover(world_id, math.vec3(0.0, 1.2, 0.0), mover, filter, accept_planes_visitor, null)
+    free(point_block)
+}
+
+queries() {
+    fixtures_ready()
+    g_seen = calloc(64, sizeof(ShapeId))
+    wdef = world_def()
+    world_id = dynamics.create_world(&wdef)
+    build_query_scene(world_id)
+    r = recording.create_recording()
+    recording.start_recording(world_id, r)
+    frame = 0
+    while frame < 30 {
+        ask_queries(world_id, frame)
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        frame = frame + 1
+    }
+    recording.stop_recording(world_id)
+    dynamics.destroy_world(world_id)
+    ensure("queries: the replay asks them again alike", recording.validate_replay(recording.recording_data(r), recording.recording_size(r), 1))
+    ensure("queries: and on four workers", recording.validate_replay(recording.recording_data(r), recording.recording_size(r), 4))
+
+    p = recording.create_player(recording.recording_data(r), recording.recording_size(r), 1)
+    recording.player_seek_frame(p, 15)
+    ensure("queries: frame 15 not diverged", recording.player_has_diverged(p) == false && recording.player_frame(p) == 15)
+    ensure("queries: seven kept for the frame (${recording.player_frame_query_count(p)})", recording.player_frame_query_count(p) == 7)
+    kinds_ok = true
+    expected = [recording.QUERY_OVERLAP_AABB, recording.QUERY_OVERLAP_SHAPE, recording.QUERY_CAST_RAY, recording.QUERY_CAST_RAY_CLOSEST,
+                recording.QUERY_CAST_SHAPE, recording.QUERY_CAST_MOVER, recording.QUERY_COLLIDE_MOVER]
+    i = 0
+    while i < 7 {
+        if recording.player_frame_query(p, i).kind != expected[i] { kinds_ok = false }
+        i = i + 1
+    }
+    ensure("queries: in the order asked", kinds_ok)
+    aabb_query = recording.player_frame_query(p, 0)
+    ensure("queries: the overlap stopped at its second shape", aabb_query.hit_count == 2 && aabb_query.aabb.lower.x == 0.0 - 5.0 && aabb_query.aabb.upper.y == 6.0)
+    ray = recording.player_frame_query(p, 2)
+    seen = g_seen as ShapeId[]
+    same = ray.hit_count == g_seen_count && g_seen_count > 0
+    i = 0
+    while same && i < ray.hit_count {
+        hit = recording.player_frame_query_hit(p, 2, i)
+        if hit.shape.index1 != seen[i].index1 || hit.shape.generation != seen[i].generation || hit.fraction <= 0.0 || hit.fraction > 1.0 { same = false }
+        i = i + 1
+    }
+    ensure("queries: the ray's hits as the host saw them (${ray.hit_count} of ${g_seen_count})", same)
+    ensure("queries: the ray's bounds along its translation", ray.aabb.lower.y == 0.0 - 2.0 && ray.aabb.upper.y == 6.0 && ray.translation.y == 0.0 - 8.0)
+    closest = recording.player_frame_query(p, 3)
+    ensure("queries: the closest ray kept its hit", closest.hit_count == 1 && closest.fraction > 0.0 && closest.fraction < 1.0)
+    mover_cast = recording.player_frame_query(p, 5)
+    ensure("queries: the mover cast kept its fraction", mover_cast.fraction > 0.0 && mover_cast.fraction < 1.0 && mover_cast.hit_count == 0)
+    mover_planes = recording.player_frame_query(p, 6)
+    plane = recording.player_frame_query_hit(p, 6, 0)
+    ensure("queries: the mover's planes (${mover_planes.hit_count})", mover_planes.hit_count > 0 && plane.normal.y > 0.9 && plane.shape.index1 != 0)
+    ensure("queries: untagged", aabb_query.key == (0 as long) && aabb_query.filter.id == (0 as long) && aabb_query.filter.name == null)
+    ensure("queries: none past the ends", recording.player_frame_query(p, 7).kind == 0 - 1 && recording.player_frame_query_hit(p, 2, ray.hit_count).shape.index1 == 0)
+    recording.player_restart(p)
+    ensure("queries: a restart forgets them", recording.player_frame_query_count(p) == 0)
+    recording.player_step_frame(p)
+    ensure("queries: the next frame's kept alone", recording.player_frame_query_count(p) == 7)
+    recording.destroy_player(p)
+
+    // A recorded hit changed: the query answers differently, found at the
+    // frame it was asked in (its step's state check), and the replay goes on.
+    size = recording.recording_size(r)
+    copy = calloc(size, 1)
+    memcpy(copy, recording.recording_data(r), size)
+    at = 32 + peek_int(copy, 8)
+    queries_seen = 0
+    while at < peek_int(copy, 12) && queries_seen < 4 {
+        if peek_int(copy, at) == dynamics.OP_QUERY_OVERLAP_AABB {
+            queries_seen = queries_seen + 1
+            // Its payload: the box (48), the filter (16), the count (4), then the first shape's index.
+            if queries_seen == 4 { poke_int(copy, at + 8 + 68, peek_int(copy, at + 8 + 68) + 1) }
+        }
+        at = at + 8 + peek_int(copy, at + 4)
+    }
+    p = recording.create_player(copy, size, 1)
+    while recording.player_step_frame(p) {}
+    ensure("queries: a changed hit diverges at its frame (${recording.player_diverge_frame(p)})", recording.player_has_diverged(p) && recording.player_diverge_frame(p) == 4 && recording.player_failed(p) == false && recording.player_frame(p) == 30)
+    recording.destroy_player(p)
+    free(copy)
+    recording.destroy_recording(r)
+    free(g_seen)
+}
+
+// Tagged queries: the caller's id and name hashed into a key that rides a
+// tag record, the id and name kept once in the tag table; the same name
+// under two ids is two keys; all survive a file round trip; an untagged
+// query has no key.
+tagged_queries() {
+    wdef = world_def()
+    world_id = dynamics.create_world(&wdef)
+    build_query_scene(world_id)
+    r = recording.create_recording()
+    recording.start_recording(world_id, r)
+    origin = math.vec3(0.0, 6.0, 0.0)
+    translation = math.vec3(0.0, 0.0 - 8.0, 0.0)
+    frame = 0
+    while frame < 5 {
+        bullet = shape.default_query_filter()
+        bullet.id = 42 as long
+        bullet.name = "bullet"
+        physics_world.cast_ray_closest(world_id, origin, translation, bullet)
+        other = shape.default_query_filter()
+        other.id = 7 as long
+        other.name = "bullet"
+        physics_world.cast_ray_closest(world_id, origin, translation, other)
+        id_only = shape.default_query_filter()
+        id_only.id = 9 as long
+        physics_world.cast_ray_closest(world_id, origin, translation, id_only)
+        physics_world.cast_ray_closest(world_id, origin, translation, shape.default_query_filter())
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        frame = frame + 1
+    }
+    recording.stop_recording(world_id)
+    dynamics.destroy_world(world_id)
+    ensure("tags: saved", recording.save_recording_to_file(r, "target/tagged.aprc"))
+    loaded = recording.load_recording_from_file("target/tagged.aprc")
+    p = recording.create_player(recording.recording_data(loaded), recording.recording_size(loaded), 1)
+    recording.player_seek_frame(p, 3)
+    a = recording.player_frame_query(p, 0)
+    b = recording.player_frame_query(p, 1)
+    c = recording.player_frame_query(p, 2)
+    d = recording.player_frame_query(p, 3)
+    ensure("tags: four queries", recording.player_frame_query_count(p) == 4 && recording.player_has_diverged(p) == false)
+    ensure("tags: the caller's id and name", a.key != (0 as long) && a.filter.id == (42 as long) && a.filter.name != null && string.equals(a.filter.name, "bullet") == 1)
+    ensure("tags: the same name under another id is another key", b.key != (0 as long) && b.key != a.key && b.filter.id == (7 as long) && string.equals(b.filter.name, "bullet") == 1)
+    ensure("tags: an id alone has no name", c.key != (0 as long) && c.filter.id == (9 as long) && c.filter.name == null)
+    ensure("tags: untagged has no key", d.key == (0 as long) && d.filter.id == (0 as long) && d.filter.name == null)
+    ensure("tags: the key is the reference's hash of the id and name", a.key == dynamics.query_tag_key(42 as long, "bullet") && c.key == dynamics.query_tag_key(9 as long, null))
+    recording.player_seek_frame(p, 1)
+    ensure("tags: the same keys every frame", recording.player_frame_query(p, 0).key == a.key && recording.player_frame_query(p, 1).key == b.key)
+    recording.destroy_player(p)
+    recording.destroy_recording(loaded)
+    recording.destroy_recording(r)
+}
+
 main() {
     round_trips()
     sessions()
     geometry_dedup()
+    geometry_hash_collision()
     seeking()
     files()
     corruptions()
     all_ops()
+    names()
+    queries()
+    tagged_queries()
     fixtures_free()
     if failures > 0 {
         println("recording: ${failures} of ${checks} checks failed")
