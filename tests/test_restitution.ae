@@ -1,0 +1,913 @@
+// The reference's test_restitution.c (e77352c, #144): restitution measured
+// across scenes, each subtest printing its measurements before its gates,
+// every subtest run so one bad scene does not hide the rest. Head-on balls
+// at three density ratios, a ground bounce at sixteen impact phases, an
+// impactor on a column of dead balls with propagation off and on, a flat
+// landing and a spinning one, elastic drops from 40, 20 and 10 m, a cube
+// dropped flat four times, the threshold, a resting stack that must not
+// wake, the published normal velocity, the narrow-floor overshoot, the
+// impulse balance of a drop at every step, the energy of thirteen elastic
+// scenes, and the same scene at one, two and four workers.
+
+import std.string
+import aephysics.math
+import aephysics.basics
+import aephysics.hull
+import aephysics.manifold
+import aephysics.dynamics
+import aephysics.physics_world
+
+extern calloc(count: int, size: int) -> ptr
+extern exit(code: int)
+extern free(p: ptr)
+extern sqrt(x: float) -> float
+
+const TIME_STEP = 0.016666666666666666
+const SUB_STEP_COUNT = 4
+// A flat landing converges its coupling in four stage iterations and the
+// default is two, so the tests that read a flat landing's coefficient or
+// spin pin the count.
+const RESTITUTION_ITERATIONS = 4
+// Well above the restitution threshold, so the bounce is always armed.
+const IMPACT_SPEED = 5.0
+
+var failures = 0
+var checks = 0
+
+ensure(name: string, ok: bool) {
+    checks = checks + 1
+    if !ok {
+        println("restitution: FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+// The hulls a scene's shapes hold, freed after its world.
+var g_hulls: ptr = null
+var g_hull_count = 0
+
+kept_hull(h: *HullData) -> *HullData {
+    hulls = g_hulls as ptr[]
+    hulls[g_hull_count] = h as ptr
+    g_hull_count = g_hull_count + 1
+    return h
+}
+
+end_world(world_id: WorldId) {
+    dynamics.destroy_world(world_id)
+    hulls = g_hulls as ptr[]
+    i = 0
+    while i < g_hull_count {
+        hull.destroy_hull(hulls[i] as *HullData)
+        i = i + 1
+    }
+    g_hull_count = 0
+}
+
+make_world_iterations(gravity_y: float, iterations: int) -> WorldId {
+    wdef = dynamics.default_world_def()
+    wdef.gravity = math.vec3(0.0, gravity_y, 0.0)
+    wdef.enable_sleep = false
+    wdef.restitution_iterations = iterations
+    return dynamics.create_world(&wdef)
+}
+
+make_world(gravity_y: float) -> WorldId {
+    wdef = dynamics.default_world_def()
+    wdef.gravity = math.vec3(0.0, gravity_y, 0.0)
+    wdef.enable_sleep = false
+    return dynamics.create_world(&wdef)
+}
+
+// Ground with its top at y = 0.
+make_ground(world_id: WorldId, restitution: float) {
+    bdef = dynamics.default_body_def()
+    bdef.position = math.vec3(0.0, 0.0 - 1.0, 0.0)
+    ground = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    sdef.base_material.friction = 0.0
+    sdef.base_material.restitution = restitution
+    dynamics.create_hull_shape(ground, &sdef, kept_hull(hull.make_box_hull(40.0, 1.0, 40.0)))
+}
+
+make_ball(world_id: WorldId, x: float, y: float, velocity_y: float, restitution: float) -> BodyId {
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.position = math.vec3(x, y, 0.0)
+    bdef.linear_velocity = math.vec3(0.0, velocity_y, 0.0)
+    body = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    sdef.base_material.friction = 0.0
+    sdef.base_material.restitution = restitution
+    dynamics.create_sphere_shape(body, &sdef, manifold.sphere(math.vec3_zero(), 0.5))
+    return body
+}
+
+steps(world_id: WorldId, count: int) {
+    i = 0
+    while i < count {
+        physics_world.step(world_id, TIME_STEP, SUB_STEP_COUNT)
+        i = i + 1
+    }
+}
+
+// --- the coefficient --------------------------------------------------------------------------------------------
+
+var g_momentum_error = 0.0
+
+// Two free spheres closing head on with no gravity: the coefficient is the
+// ratio of relative normal speeds, the mass-free definition.
+measure_head_on(restitution: float, density_b: float) -> float {
+    world_id = make_world(0.0)
+    sdef = dynamics.default_shape_def()
+    sdef.density = 1.0
+    sdef.base_material.friction = 0.0
+    sdef.base_material.restitution = restitution
+    ball = manifold.sphere(math.vec3_zero(), 0.5)
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.position = math.vec3(0.0 - 1.0, 0.0, 0.0)
+    bdef.linear_velocity = math.vec3(0.5 * IMPACT_SPEED, 0.0, 0.0)
+    a = dynamics.create_body(world_id, &bdef)
+    dynamics.create_sphere_shape(a, &sdef, ball)
+    bdef.position = math.vec3(1.0, 0.0, 0.0)
+    bdef.linear_velocity = math.vec3(0.0 - 0.5 * IMPACT_SPEED, 0.0, 0.0)
+    b = dynamics.create_body(world_id, &bdef)
+    sdef.density = density_b
+    dynamics.create_sphere_shape(b, &sdef, ball)
+    mass_a = dynamics.body_get_mass(a)
+    mass_b = dynamics.body_get_mass(b)
+    momentum0 = mass_a * dynamics.body_get_linear_velocity(a).x + mass_b * dynamics.body_get_linear_velocity(b).x
+    steps(world_id, 120)
+    va = dynamics.body_get_linear_velocity(a).x
+    vb = dynamics.body_get_linear_velocity(b).x
+    momentum1 = mass_a * va + mass_b * vb
+    end_world(world_id)
+    g_momentum_error = (momentum1 - momentum0) / (mass_a + mass_b)
+    return (vb - va) / IMPACT_SPEED
+}
+
+test_head_on() {
+    restitutions = [ 0.0, 0.25, 0.5, 0.75, 1.0 ]
+    densities = [ 1.0, 10.0, 100.0 ]
+    i = 0
+    while i < 3 {
+        worst = 0.0
+        worst_momentum = 0.0
+        j = 0
+        while j < 5 {
+            measured = measure_head_on(restitutions[j], densities[i])
+            error = math.abs_float(measured - restitutions[j])
+            worst = math.max_float(worst, error)
+            if math.abs_float(g_momentum_error) > math.abs_float(worst_momentum) { worst_momentum = g_momentum_error }
+            ensure("head on: density ${densities[i]} e ${restitutions[j]} -> ${measured}", error <= 0.02)
+            j = j + 1
+        }
+        println("restitution: head on density ${densities[i]} worst error ${worst} momentum drift ${worst_momentum}")
+        ensure("head on: density ${densities[i]} momentum kept (${worst_momentum})", math.abs_float(worst_momentum) <= 0.0001)
+        i = i + 1
+    }
+}
+
+// A ball driven into the ground with no gravity; the gap moves where in
+// the step the impact lands.
+measure_ground_bounce(restitution: float, gap: float) -> float {
+    world_id = make_world(0.0)
+    make_ground(world_id, 0.0)
+    ball = make_ball(world_id, 0.0, 0.5 + gap, 0.0 - IMPACT_SPEED, restitution)
+    steps(world_id, 60)
+    speed = dynamics.body_get_linear_velocity(ball).y
+    end_world(world_id)
+    return speed / IMPACT_SPEED
+}
+
+test_phase() {
+    restitutions = [ 0.25, 0.5, 0.9 ]
+    j = 0
+    while j < 3 {
+        low = math.MAX_FLOAT
+        high = 0.0 - math.MAX_FLOAT
+        sum = 0.0
+        i = 0
+        while i < 16 {
+            gap = ((i as float) / 16.0) * IMPACT_SPEED * TIME_STEP
+            measured = measure_ground_bounce(restitutions[j], gap)
+            low = math.min_float(low, measured)
+            high = math.max_float(high, measured)
+            sum = sum + measured
+            i = i + 1
+        }
+        mean = sum / 16.0
+        println("restitution: phase e ${restitutions[j]} -> mean ${mean} spread ${high - low} [${low}, ${high}]")
+        ensure("phase: e ${restitutions[j]} spread ${high - low} and mean ${mean} within 0.05", high - low <= 0.05 && math.abs_float(mean - restitutions[j]) <= 0.05)
+        j = j + 1
+    }
+}
+
+// An impactor driven onto a column of dead balls on the ground: a
+// supported target has infinite effective mass along the normal, so the
+// coefficient must not depend on the column. Without propagation the
+// stage sweeps only the contacts with restitution and the column gives way
+// a step late; with it the ground answers within the stage. Never above
+// the free coefficient, never collapsed.
+measure_supported(restitution: float, supports: int, propagate: bool) -> float {
+    wdef = dynamics.default_world_def()
+    wdef.gravity = math.vec3_zero()
+    wdef.enable_sleep = false
+    wdef.enable_restitution_propagation = propagate
+    wdef.restitution_iterations = RESTITUTION_ITERATIONS
+    world_id = dynamics.create_world(&wdef)
+    make_ground(world_id, 0.0)
+    i = 0
+    while i < supports {
+        make_ball(world_id, 0.0, 0.5 + 1.0 * (i as float), 0.0, 0.0)
+        i = i + 1
+    }
+    y = 0.5 + 1.0 * (supports as float) + 0.5 * IMPACT_SPEED * TIME_STEP
+    ball = make_ball(world_id, 0.0, y, 0.0 - IMPACT_SPEED, restitution)
+    steps(world_id, 60)
+    speed = dynamics.body_get_linear_velocity(ball).y
+    end_world(world_id)
+    return speed / IMPACT_SPEED
+}
+
+test_supported() {
+    restitutions = [ 0.5, 0.9 ]
+    propagate = 0
+    while propagate <= 1 {
+        floor_ratio = 0.5
+        if propagate == 1 { floor_ratio = 0.75 }
+        j = 0
+        while j < 2 {
+            n = 0
+            while n <= 3 {
+                measured = measure_supported(restitutions[j], n, propagate == 1)
+                println("restitution: supported e ${restitutions[j]} supports ${n} propagation ${propagate} -> ${measured}")
+                ensure("supported: e ${restitutions[j]} on ${n} propagation ${propagate}, ${measured} not above e nor below ${floor_ratio} e",
+                       measured <= restitutions[j] + 0.01 && measured >= floor_ratio * restitutions[j])
+                n = n + 1
+            }
+            j = j + 1
+        }
+        propagate = propagate + 1
+    }
+}
+
+// A flat box landing on four corners at once with no gravity.
+measure_flat(restitution: float, sub_steps: int, spin_z: float) -> Vec3 {
+    world_id = make_world_iterations(0.0, RESTITUTION_ITERATIONS)
+    make_ground(world_id, 0.0)
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.position = math.vec3(0.0, 0.25 + 0.5 * IMPACT_SPEED * TIME_STEP, 0.0)
+    bdef.linear_velocity = math.vec3(0.0, 0.0 - IMPACT_SPEED, 0.0)
+    bdef.angular_velocity = math.vec3(0.0, 0.0, spin_z)
+    box = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    sdef.density = 1.0
+    sdef.base_material.friction = 0.0
+    sdef.base_material.restitution = restitution
+    dynamics.create_hull_shape(box, &sdef, kept_hull(hull.make_box_hull(1.0, 0.25, 1.0)))
+    i = 0
+    while i < 60 {
+        physics_world.step(world_id, TIME_STEP, sub_steps)
+        i = i + 1
+    }
+    v = dynamics.body_get_linear_velocity(box)
+    w = dynamics.body_get_angular_velocity(box)
+    end_world(world_id)
+    // The speed ratio, the spin's size, and the spin about z.
+    return math.vec3(v.y / IMPACT_SPEED, math.length(w), w.z)
+}
+
+// One sweep over four coplanar points leaves the box spinning; four stage
+// iterations converge the coupling. Only the shipping sub-step count gates.
+test_flat_landing() {
+    restitutions = [ 0.5, 0.9 ]
+    counts = [ 4, 8 ]
+    j = 0
+    while j < 2 {
+        k = 0
+        while k < 2 {
+            m = measure_flat(restitutions[j], counts[k], 0.0)
+            println("restitution: flat e ${restitutions[j]} substeps ${counts[k]} -> ${m.x} spin ${m.y}")
+            if counts[k] == SUB_STEP_COUNT {
+                ensure("flat landing: e ${restitutions[j]} -> ${m.x} within 0.01, spin ${m.y} under 0.03", math.abs_float(m.x - restitutions[j]) <= 0.01 && m.y <= 0.03)
+            }
+            k = k + 1
+        }
+        j = j + 1
+    }
+}
+
+// A flat box carrying spin, perfectly elastic: the linear and angular
+// velocity come back reversed.
+test_spin() {
+    spins = [ 0.0, 0.5, 1.0, 2.0 ]
+    j = 0
+    while j < 4 {
+        m = measure_flat(1.0, SUB_STEP_COUNT, spins[j])
+        speed = m.x * IMPACT_SPEED
+        println("restitution: spin in ${spins[j]} -> vy ${speed} (want ${IMPACT_SPEED}) wz ${m.z} (want ${0.0 - spins[j]})")
+        ensure("spin: ${spins[j]} reversed (vy ${speed}, wz ${m.z})", math.abs_float(speed - IMPACT_SPEED) <= 0.05 && math.abs_float(m.z + spins[j]) <= 0.05)
+        j = j + 1
+    }
+}
+
+// --- drops --------------------------------------------------------------------------------------------------------
+
+// A perfectly elastic ball dropped under gravity; its apexes. Only heights
+// where continuous collision engages: it lands the ball on the surface, so
+// the apex holds.
+test_drop() {
+    heights = [ 40.0, 20.0, 10.0 ]
+    apexes_block = calloc(6, 8)
+    apexes = apexes_block as float[]
+    j = 0
+    while j < 3 {
+        world_id = make_world(0.0 - 10.0)
+        make_ground(world_id, 0.0)
+        ball = make_ball(world_id, 0.0, heights[j], 0.0, 1.0)
+        count = 0
+        previous = 0.0
+        i = 0
+        while i < 4000 && count < 6 {
+            physics_world.step(world_id, TIME_STEP, SUB_STEP_COUNT)
+            speed = dynamics.body_get_linear_velocity(ball).y
+            if previous > 0.0 && speed <= 0.0 {
+                apexes[count] = dynamics.body_get_position(ball).y
+                count = count + 1
+            }
+            previous = speed
+            i = i + 1
+        }
+        end_world(world_id)
+        line = "restitution: drop ${heights[j]} ->"
+        highest = 0.0
+        k = 0
+        while k < count {
+            line = string.concat(line, " ${apexes[k]}")
+            highest = math.max_float(highest, apexes[k])
+            k = k + 1
+        }
+        println(line)
+        ensure("drop ${heights[j]}: six apexes (${count})", count == 6)
+        if count == 6 {
+            ensure("drop ${heights[j]}: no apex above the first, the first not above the drop, the last above 0.8 of the first",
+                   highest <= 1.001 * apexes[0] && apexes[0] <= 1.001 * heights[j] && apexes[count - 1] >= 0.8 * apexes[0])
+        }
+        j = j + 1
+    }
+    free(apexes_block)
+}
+
+// A cube dropped flat from 10 m with a tight continuous safety factor,
+// elastic and frictionless: it comes back to the drop with no spin, four
+// times.
+test_single_box() {
+    world_id = make_world_iterations(0.0 - 10.0, RESTITUTION_ITERATIONS)
+    make_ground(world_id, 0.0)
+    sdef = dynamics.default_shape_def()
+    sdef.density = 1.0
+    sdef.base_material.friction = 0.0
+    sdef.base_material.restitution = 1.0
+    drop = 10.0
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.position = math.vec3(0.0, drop, 0.0)
+    bdef.safety_factor = 0.01
+    box = dynamics.create_body(world_id, &bdef)
+    dynamics.create_hull_shape(box, &sdef, kept_hull(hull.make_cube_hull(0.5)))
+    first_spin = 0.0
+    apexes_block = calloc(8, 8)
+    apexes = apexes_block as float[]
+    count = 0
+    previous = 0.0
+    i = 0
+    while i < 1200 && count < 4 {
+        physics_world.step(world_id, TIME_STEP, SUB_STEP_COUNT)
+        speed = dynamics.body_get_linear_velocity(box).y
+        if count == 0 && previous <= 0.0 && speed > 0.0 { first_spin = math.length(dynamics.body_get_angular_velocity(box)) }
+        if previous > 0.0 && speed <= 0.0 {
+            apexes[count] = dynamics.body_get_position(box).y
+            apexes[4 + count] = math.length(dynamics.body_get_angular_velocity(box))
+            count = count + 1
+        }
+        previous = speed
+        i = i + 1
+    }
+    end_world(world_id)
+    line = "restitution: single box first bounce spin ${first_spin} apexes"
+    k = 0
+    while k < count {
+        line = string.concat(line, " ${apexes[k]} (spin ${apexes[4 + k]})")
+        k = k + 1
+    }
+    println(line)
+    ensure("single box: four apexes (${count})", count == 4)
+    ensure("single box: no spin off the first bounce (${first_spin})", first_spin <= 0.01)
+    k = 0
+    while k < count {
+        ensure("single box: apex ${k} at the drop (${apexes[k]})", apexes[k] >= 0.95 * drop && apexes[k] <= 1.001 * drop)
+        k = k + 1
+    }
+    free(apexes_block)
+}
+
+// Below the threshold no bounce; above it, nearly all of it.
+test_threshold() {
+    wdef = dynamics.default_world_def()
+    threshold = wdef.restitution_threshold
+    scales = [ 0.5, 0.9, 1.5, 4.0 ]
+    j = 0
+    while j < 4 {
+        speed = scales[j] * threshold
+        world_id = make_world(0.0)
+        make_ground(world_id, 0.0)
+        ball = make_ball(world_id, 0.0, 0.5 + 0.5 * speed * TIME_STEP, 0.0 - speed, 1.0)
+        steps(world_id, 60)
+        ratio = dynamics.body_get_linear_velocity(ball).y / speed
+        end_world(world_id)
+        println("restitution: threshold ${scales[j]}x -> ${ratio}")
+        if scales[j] < 1.0 { ensure("threshold: ${scales[j]}x does not bounce (${ratio})", ratio <= 0.05) }
+        else { ensure("threshold: ${scales[j]}x bounces (${ratio})", ratio >= 0.9) }
+        j = j + 1
+    }
+}
+
+// High restitution does not wake a settled stack back up.
+test_resting() {
+    world_id = make_world(0.0 - 10.0)
+    make_ground(world_id, 0.9)
+    ids_block = calloc(10, sizeof(BodyId))
+    ids = ids_block as BodyId[]
+    sdef = dynamics.default_shape_def()
+    sdef.density = 1.0
+    sdef.base_material.friction = 0.6
+    sdef.base_material.restitution = 0.9
+    cube = kept_hull(hull.make_cube_hull(0.5))
+    i = 0
+    while i < 10 {
+        bdef = dynamics.default_body_def()
+        bdef.kind = dynamics.BODY_DYNAMIC
+        bdef.position = math.vec3(0.0, 0.5 + 1.0 * (i as float), 0.0)
+        ids[i] = dynamics.create_body(world_id, &bdef)
+        dynamics.create_hull_shape(ids[i], &sdef, cube)
+        i = i + 1
+    }
+    steps(world_id, 240)
+    settled = dynamics.body_get_position(ids[9]).y
+    drift = 0.0
+    peak = 0.0
+    i = 0
+    while i < 300 {
+        physics_world.step(world_id, TIME_STEP, SUB_STEP_COUNT)
+        drift = math.max_float(drift, math.abs_float(dynamics.body_get_position(ids[9]).y - settled))
+        j = 0
+        while j < 10 {
+            peak = math.max_float(peak, math.length(dynamics.body_get_linear_velocity(ids[j])))
+            j = j + 1
+        }
+        i = i + 1
+    }
+    end_world(world_id)
+    free(ids_block)
+    println("restitution: resting drift ${drift} peak speed ${peak}")
+    ensure("resting: the stack does not drift (${drift})", drift < 0.01)
+    ensure("resting: nor wake (${peak})", peak < 0.05)
+}
+
+// --- what a manifold publishes --------------------------------------------------------------------------------
+
+// The approach speed is published only for contacts with hit events: zero
+// otherwise, so a reader can tell "not measured" from "measured zero".
+first_touch_normal_velocity(hit_events: bool) -> float {
+    world_id = make_world(0.0)
+    make_ground(world_id, 0.0)
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.position = math.vec3(0.0, 0.6, 0.0)
+    ball = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    sdef.base_material.friction = 0.0
+    sdef.base_material.restitution = 0.0
+    sdef.enable_hit_events = hit_events
+    dynamics.create_sphere_shape(ball, &sdef, manifold.sphere(math.vec3_zero(), 0.5))
+    data_block = calloc(1, sizeof(ContactData))
+    data = data_block as ContactData[]
+    value = math.MAX_FLOAT
+    i = 0
+    while i < 20 {
+        dynamics.body_set_linear_velocity(ball, math.vec3(0.0, 0.0 - IMPACT_SPEED, 0.0))
+        physics_world.step(world_id, TIME_STEP, SUB_STEP_COUNT)
+        if dynamics.body_get_contact_data(ball, data, 1) == 1 && data[0].manifold_count > 0 {
+            m = data[0].manifolds as *Manifold
+            if m.point_count > 0 {
+                value = m.point0.normal_velocity as float
+                break
+            }
+        }
+        i = i + 1
+    }
+    free(data_block)
+    end_world(world_id)
+    return value
+}
+
+test_normal_velocity() {
+    quiet = first_touch_normal_velocity(false)
+    published = first_touch_normal_velocity(true)
+    println("restitution: normal velocity hit events off ${quiet} on ${published} (closing at ${0.0 - IMPACT_SPEED})")
+    ensure("normal velocity: zero without hit events (${quiet})", quiet == 0.0)
+    ensure("normal velocity: the approach with them (${published})", published <= 0.0 - 0.8 * IMPACT_SPEED)
+}
+
+// --- energy ---------------------------------------------------------------------------------------------------
+
+// Mechanical energy as symplectic Euler keeps it: kinetic plus potential
+// plus half a sub-step of gravity's power, so free flight is flat to
+// round-off and a gain or a loss at a bounce is real.
+measure_energy(body: BodyId, world_id: WorldId) -> float {
+    md = dynamics.body_get_mass_data(body)
+    v = dynamics.body_get_linear_velocity(body)
+    gravity = math.mul_sv(dynamics.body_get_gravity_scale(body), physics_world.get_gravity(world_id))
+    h = TIME_STEP / (SUB_STEP_COUNT as float)
+    w_local = math.inv_rotate_vector(dynamics.body_get_rotation(body), dynamics.body_get_angular_velocity(body))
+    kinetic = 0.5 * md.mass * math.dot(v, v) + 0.5 * math.dot(w_local, math.mul_mv(md.inertia, w_local))
+    potential = 0.0 - md.mass * math.dot(gravity, dynamics.body_get_world_center(body))
+    phase = 0.5 * h * md.mass * math.dot(v, gravity)
+    return kinetic + potential + phase
+}
+
+struct Overshoot {
+    first_apex: float
+    first_energy: float
+    peak_energy: float
+    speed_ratio: float
+    bounces: int
+}
+
+// The reference's Restitution Overshoot sample: a unit cube dropped flat
+// on a floor narrower than itself, perfectly elastic, the contact points
+// inboard of the corners. It can come back no higher than it fell and
+// gain no energy.
+measure_overshoot(continuous: bool) -> Overshoot {
+    world_id = make_world_iterations(0.0 - 10.0, RESTITUTION_ITERATIONS)
+    fdef = dynamics.default_body_def()
+    fdef.position = math.vec3(0.0, 0.0 - 0.25, 0.0)
+    floor_body = dynamics.create_body(world_id, &fdef)
+    fsdef = dynamics.default_shape_def()
+    dynamics.create_hull_shape(floor_body, &fsdef, kept_hull(hull.make_box_hull(0.375, 0.25, 0.375)))
+    drop = 10.0
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.position = math.vec3(0.0, drop, 0.0)
+    if continuous { bdef.safety_factor = 0.1 }
+    box = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    sdef.base_material.restitution = 1.0
+    dynamics.create_hull_shape(box, &sdef, kept_hull(hull.make_cube_hull(0.5)))
+    r = Overshoot { first_apex: 0.0, first_energy: 0.0, peak_energy: 0.0, speed_ratio: 0.0, bounces: 0 }
+    start = measure_energy(box, world_id)
+    impact = 0.0
+    rebound = 0.0
+    bounce_height = 0.0
+    previous = 0.0
+    i = 0
+    while i < 600 && r.bounces < 2 {
+        before = dynamics.body_get_linear_velocity(box).y
+        height_before = dynamics.body_get_position(box).y
+        physics_world.step(world_id, TIME_STEP, SUB_STEP_COUNT)
+        speed = dynamics.body_get_linear_velocity(box).y
+        if rebound == 0.0 && before < 0.0 && speed > 0.0 {
+            impact = 0.0 - before
+            rebound = speed
+            bounce_height = height_before
+        }
+        if rebound != 0.0 {
+            ratio = measure_energy(box, world_id) / start
+            r.peak_energy = math.max_float(r.peak_energy, ratio)
+            if previous > 0.0 && speed <= 0.0 {
+                if r.bounces == 0 {
+                    r.first_apex = dynamics.body_get_position(box).y
+                    r.first_energy = ratio
+                }
+                r.bounces = r.bounces + 1
+            }
+            previous = speed
+        }
+        i = i + 1
+    }
+    end_world(world_id)
+    if impact > 0.0 { r.speed_ratio = rebound / impact }
+    println("restitution: overshoot continuous ${continuous} apex ${r.first_apex} of ${drop} at y ${bounce_height}, speed ratio ${r.speed_ratio}, energy ${r.first_energy} then ${r.peak_energy}")
+    return r
+}
+
+// Never more speed back than received, in both runs. With continuous
+// collision the cube lands on the surface and comes in under its start;
+// without, it lands 0.1 m deep and climbs back through that depth for
+// free, so only its first bounce is gated.
+test_overshoot() {
+    discrete = measure_overshoot(false)
+    continuous = measure_overshoot(true)
+    ensure("overshoot: no more speed back than received (${discrete.speed_ratio}, ${continuous.speed_ratio})",
+           discrete.speed_ratio <= 1.00001 && continuous.speed_ratio <= 1.00001)
+    ensure("overshoot: continuous, no higher than the drop and no energy gained (${continuous.first_apex}, ${continuous.peak_energy})",
+           continuous.first_apex <= 10.0 && continuous.peak_energy <= 1.001)
+    ensure("overshoot: discrete, its first bounce within its bounds (${discrete.first_apex}, ${discrete.first_energy})",
+           discrete.first_apex <= 10.15 && discrete.first_energy <= 1.02)
+    ensure("overshoot: the bounces counted (${discrete.bounces}, ${continuous.bounces})", discrete.bounces >= 2 && continuous.bounces >= 1)
+}
+
+struct ImpulseRun {
+    worst_error: float
+    approach_speed: float
+    first_separation: float
+    bounce_impulse: float
+    contact_steps: int
+    toi_steps: int
+    toi_impulse_steps: int
+}
+
+// A ball dropped under gravity with the contact's impulse read every step:
+// gravity taken out, the change of momentum over a step is what the
+// contact applied, and the total normal impulse must say so. A time of
+// impact step is left out: no contact was solved on it.
+measure_drop_impulse(restitution: float, drop: float) -> ImpulseRun {
+    world_id = make_world(0.0 - 10.0)
+    make_ground(world_id, 0.0)
+    ball = make_ball(world_id, 0.0, 0.5 + drop, 0.0, restitution)
+    w = dynamics.get_world(world_id.index1 - 1)
+    mass = dynamics.body_get_mass(ball)
+    gravity_y = physics_world.get_gravity(world_id).y
+    r = ImpulseRun { worst_error: 0.0, approach_speed: 0.0, first_separation: 0.0, bounce_impulse: 0.0, contact_steps: 0, toi_steps: 0, toi_impulse_steps: 0 }
+    touched = false
+    bouncing = false
+    data_block = calloc(4, sizeof(ContactData))
+    data = data_block as ContactData[]
+    i = 0
+    while i < 240 {
+        before = dynamics.body_get_linear_velocity(ball).y
+        physics_world.step(world_id, TIME_STEP, SUB_STEP_COUNT)
+        after = dynamics.body_get_linear_velocity(ball).y
+        measured = 0.0
+        separation = 0.0
+        contacts = dynamics.body_get_contact_data(ball, data, 4)
+        c = 0
+        while c < contacts {
+            m = 0
+            while m < data[c].manifold_count {
+                mf = (data[c].manifolds + m * sizeof(Manifold)) as *Manifold
+                p = 0
+                while p < mf.point_count {
+                    mp = dynamics.manifold_point_at(mf, p)
+                    measured = measured + (mp.total_normal_impulse as float)
+                    separation = mp.separation as float
+                    p = p + 1
+                }
+                m = m + 1
+            }
+            c = c + 1
+        }
+        flags = dynamics.get_body_sim(w, dynamics.get_body_full_id(w, ball)).flags
+        if (flags & dynamics.HAD_TIME_OF_IMPACT) != 0 {
+            r.toi_steps = r.toi_steps + 1
+            if measured != 0.0 { r.toi_impulse_steps = r.toi_impulse_steps + 1 }
+        } else {
+            expected = mass * (after - before) - mass * gravity_y * TIME_STEP
+            r.worst_error = math.max_float(r.worst_error, math.abs_float(measured - expected))
+            if contacts > 0 {
+                if touched == false {
+                    touched = true
+                    bouncing = true
+                    r.approach_speed = 0.0 - before
+                    r.first_separation = separation
+                }
+                if bouncing {
+                    r.bounce_impulse = r.bounce_impulse + measured
+                    r.contact_steps = r.contact_steps + 1
+                }
+            } else {
+                bouncing = false
+            }
+        }
+        i = i + 1
+    }
+    free(data_block)
+    end_world(world_id)
+    return r
+}
+
+// Heights either side of the continuous threshold. The step balance is the
+// gate; the bounce's total is bracketed by the reversal at the coefficient
+// and the weight carried while the contact lasted.
+test_impulse() {
+    restitutions = [ 0.0, 0.25, 0.5, 0.75, 1.0 ]
+    heights = [ 1.0, 5.0, 20.0, 45.0 ]
+    world_id = make_world(0.0 - 10.0)
+    probe = make_ball(world_id, 0.0, 0.5, 0.0, 0.0)
+    mass = dynamics.body_get_mass(probe)
+    fast_speed = dynamics.body_get_safety_factor(probe) * dynamics.body_get_min_extent(probe) / TIME_STEP
+    end_world(world_id)
+    weight_impulse = mass * 10.0 * TIME_STEP
+    j = 0
+    while j < 4 {
+        impact_speed = sqrt(20.0 * heights[j])
+        expect_toi = impact_speed > fast_speed
+        tolerance = 0.00001 * mass * (10.0 + impact_speed)
+        k = 0
+        while k < 5 {
+            r = measure_drop_impulse(restitutions[k], heights[j])
+            reversal = (1.0 + restitutions[k]) * mass * r.approach_speed
+            lower = reversal - weight_impulse
+            upper = reversal + weight_impulse * (r.contact_steps as float)
+            slack = (r.contact_steps as float) * tolerance
+            println("restitution: impulse drop ${heights[j]} e ${restitutions[k]} toi ${r.toi_steps} at ${r.first_separation} -> worst step error ${r.worst_error}, bounce ${r.bounce_impulse} in [${lower}, ${upper}] over ${r.contact_steps} steps")
+            ensure("impulse: drop ${heights[j]} e ${restitutions[k]}, every step's impulse balanced (${r.worst_error} against ${tolerance})", r.worst_error <= tolerance)
+            ensure("impulse: drop ${heights[j]} e ${restitutions[k]}, contact steps and none on a time of impact", r.contact_steps > 0 && r.toi_impulse_steps == 0)
+            ensure("impulse: drop ${heights[j]} e ${restitutions[k]}, the bounce bracketed", r.bounce_impulse >= lower - slack && r.bounce_impulse <= upper + slack)
+            ensure("impulse: drop ${heights[j]} e ${restitutions[k]}, continuous collision as the speed says (${r.toi_steps > 0} at ${impact_speed} against ${fast_speed})", (r.toi_steps > 0) == expect_toi)
+            k = k + 1
+        }
+        j = j + 1
+    }
+}
+
+struct EnergyScene {
+    safety_factor: float
+    friction: float
+    angle: float
+    spin: float
+    height: float
+    velocity_y: float
+    half_width: float
+    half_height: float
+    bullet: bool
+    stack: bool
+    step_count: int
+}
+
+var g_peak_step = 0
+
+// The peak energy over the run against the start, every dynamic body: an
+// elastic bounce may return at most what the contact took.
+peak_energy(scene: EnergyScene) -> float {
+    world_id = make_world(0.0 - 10.0)
+    gdef = dynamics.default_body_def()
+    gdef.position = math.vec3(0.0, 0.0 - 1.0, 0.0)
+    ground = dynamics.create_body(world_id, &gdef)
+    gsdef = dynamics.default_shape_def()
+    gsdef.base_material.friction = scene.friction
+    dynamics.create_hull_shape(ground, &gsdef, kept_hull(hull.make_box_hull(40.0, 1.0, 40.0)))
+    sdef = dynamics.default_shape_def()
+    sdef.density = 1.0
+    sdef.base_material.friction = scene.friction
+    sdef.base_material.restitution = 1.0
+    box = kept_hull(hull.make_box_hull(scene.half_width, scene.half_height, scene.half_width))
+    ids_block = calloc(2, sizeof(BodyId))
+    ids = ids_block as BodyId[]
+    count = 0
+    if scene.stack {
+        bdef = dynamics.default_body_def()
+        bdef.kind = dynamics.BODY_DYNAMIC
+        bdef.position = math.vec3(0.0, scene.half_height, 0.0)
+        bdef.safety_factor = scene.safety_factor
+        ids[count] = dynamics.create_body(world_id, &bdef)
+        dynamics.create_hull_shape(ids[count], &sdef, box)
+        count = count + 1
+    }
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.position = math.vec3(0.0, scene.height, 0.0)
+    bdef.rotation = math.make_quat_from_axis_angle(math.vec3_axis_z(), scene.angle)
+    bdef.angular_velocity = math.vec3(0.0, 0.0, scene.spin)
+    bdef.linear_velocity = math.vec3(0.0, scene.velocity_y, 0.0)
+    bdef.safety_factor = scene.safety_factor
+    bdef.is_bullet = scene.bullet
+    ids[count] = dynamics.create_body(world_id, &bdef)
+    dynamics.create_hull_shape(ids[count], &sdef, box)
+    count = count + 1
+    start = 0.0
+    k = 0
+    while k < count {
+        start = start + measure_energy(ids[k], world_id)
+        k = k + 1
+    }
+    peak = start
+    g_peak_step = 0 - 1
+    i = 0
+    while i < scene.step_count {
+        physics_world.step(world_id, TIME_STEP, SUB_STEP_COUNT)
+        energy = 0.0
+        k = 0
+        while k < count {
+            energy = energy + measure_energy(ids[k], world_id)
+            k = k + 1
+        }
+        if energy > peak {
+            peak = energy
+            g_peak_step = i
+        }
+        i = i + 1
+    }
+    end_world(world_id)
+    free(ids_block)
+    return peak / start
+}
+
+energy_scene(safety_factor: float, friction: float, angle: float, spin: float, height: float, velocity_y: float, half_width: float, half_height: float, bullet: bool, stack: bool, step_count: int) -> EnergyScene {
+    return EnergyScene { safety_factor: safety_factor, friction: friction, angle: angle, spin: spin, height: height, velocity_y: velocity_y,
+                         half_width: half_width, half_height: half_height, bullet: bullet, stack: stack, step_count: step_count }
+}
+
+// Perfectly elastic, with friction, dropped every way that once gained
+// energy: the energy never rises above the start (0.5% with continuous
+// collision, 2% discrete).
+test_energy() {
+    names = [ "spinning edge", "spinning edge fast", "tumble", "tumble discrete", "flat with spin", "flat frictionless", "edge",
+              "two box", "two box discrete", "tall flat frictionless", "tall flat friction", "narrow flat frictionless", "narrow flat friction" ]
+    scenes_block = calloc(13, sizeof(EnergyScene))
+    scenes = scenes_block as EnergyScene[]
+    scenes[0] = energy_scene(0.01, 0.6, 0.0 - 1.43, 7.9, 0.7, 0.0 - 1.9, 0.5, 0.5, false, false, 300)
+    scenes[1] = energy_scene(0.01, 0.6, 0.0 - 0.8, 12.0, 3.0, 0.0 - 8.0, 0.5, 0.5, false, false, 300)
+    scenes[2] = energy_scene(0.01, 0.6, 0.0 - 0.3, 3.0, 8.0, 0.0, 0.5, 0.5, false, false, 600)
+    scenes[3] = energy_scene(0.5, 0.6, 0.0 - 0.3, 3.0, 8.0, 0.0, 0.5, 0.5, false, false, 600)
+    scenes[4] = energy_scene(0.01, 0.6, 0.0, 2.0, 2.0, 0.0 - 5.0, 0.5, 0.5, false, false, 300)
+    scenes[5] = energy_scene(0.01, 0.0, 0.0, 0.0, 10.0, 0.0, 0.5, 0.5, false, false, 1200)
+    scenes[6] = energy_scene(0.01, 0.6, 0.0 - 0.2, 0.0, 5.0, 0.0, 0.5, 0.5, false, false, 600)
+    scenes[7] = energy_scene(0.02, 0.6, 0.0, 0.0, 4.0, 0.0, 0.5, 0.5, true, true, 1500)
+    scenes[8] = energy_scene(0.5, 0.6, 0.0, 0.0, 4.0, 0.0, 0.5, 0.5, false, true, 1500)
+    scenes[9] = energy_scene(0.01, 0.0, 0.0, 0.0, 10.0, 0.0, 0.5, 1.0, false, false, 1200)
+    scenes[10] = energy_scene(0.01, 0.6, 0.0, 0.0, 10.0, 0.0, 0.5, 1.0, false, false, 1200)
+    scenes[11] = energy_scene(0.01, 0.0, 0.0, 0.0, 10.0, 0.0, 0.25, 1.0, false, false, 1200)
+    scenes[12] = energy_scene(0.01, 0.6, 0.0, 0.0, 10.0, 0.0, 0.25, 1.0, false, false, 1200)
+    i = 0
+    while i < 13 {
+        ratio = peak_energy(scenes[i])
+        limit = 0.02
+        if scenes[i].safety_factor < 0.1 { limit = 0.005 }
+        println("restitution: energy ${names[i]} peak ${ratio} at step ${g_peak_step}")
+        ensure("energy: ${names[i]} never above the start (${ratio}, within ${limit})", ratio <= 1.0 + limit)
+        i = i + 1
+    }
+    free(scenes_block)
+}
+
+// --- workers ----------------------------------------------------------------------------------------------------
+
+// The per-point state the restitution stage keeps survives the split
+// across workers: one, two and four, hashed alike.
+worker_scene(workers: int) -> long {
+    wdef = dynamics.default_world_def()
+    wdef.gravity = math.vec3(0.0, 0.0 - 10.0, 0.0)
+    wdef.enable_sleep = false
+    wdef.worker_count = workers
+    world_id = dynamics.create_world(&wdef)
+    make_ground(world_id, 0.6)
+    i = 0
+    while i < 20 {
+        make_ball(world_id, 0.0 - 10.0 + 1.05 * (i as float), 3.0 + 0.13 * (i as float), 0.0, 0.6)
+        i = i + 1
+    }
+    steps(world_id, 200)
+    hash = dynamics.hash_world_state(dynamics.get_world(world_id.index1 - 1))
+    end_world(world_id)
+    return hash
+}
+
+test_worker_parity() {
+    one = worker_scene(1)
+    two = worker_scene(2)
+    four = worker_scene(4)
+    println("restitution: worker hashes ${one} ${two} ${four}")
+    ensure("workers: two alike to one", one == two)
+    ensure("workers: four alike to one", one == four)
+}
+
+main() {
+    g_hulls = calloc(16, 8)
+    test_head_on()
+    test_phase()
+    test_supported()
+    test_flat_landing()
+    test_spin()
+    test_drop()
+    test_single_box()
+    test_threshold()
+    test_resting()
+    test_normal_velocity()
+    test_overshoot()
+    test_energy()
+    test_impulse()
+    test_worker_parity()
+    free(g_hulls)
+
+    println("restitution: ${checks} checks")
+    if failures == 0 {
+        println("restitution: all checks passed")
+    } else {
+        println("restitution: ${failures} failure(s)")
+        exit(1)
+    }
+}

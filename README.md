@@ -50,7 +50,7 @@ so a test written against the reference reads the same here.
 | `aephysics.joint_solver` | the seven joints solved: each kind's prepare (frames relative to the centres of mass, effective masses, spring softness), warm start and solve (rigid or soft constraints, speculative limits, springs, motors), the kinds' accessors (limits, springs, motors, current angles and translations, forces and torques), joint.c's dispatch with the constraint hertz clamp; beyond the reference, a spherical joint's cone may be centred off frame A's z and may be an ellipse of two half-angles (the circle stays the default, bit for bit) | `test_joint_solver.ae` (181 checks: test_joint.c's accessors on every kind, each kind solved by hand) | [ours alone](bench/RESULTS.md#joint_solver) |
 | `aephysics.solver` | the Soft Step over the workers, the reference's stages: the work in blocks (the bodies', each colour's joints, wide and scalar constraints) that workers claim by compare-and-swap, the stages published as sync bits by worker 0 -- the constraints prepared, per sub-step the velocities integrated (gravity, damping, the gyroscopic torque), warm start, solve, positions, relax, colour by colour with the overflow first on worker 0; restitution, the impulses stored; the bodies finalised in parallel (sleep velocities, move events, fast bodies swept for the time of impact, bounds and proxies), the joint and hit events, the trees refit, bullets, the sensors' hits, islands put to sleep | `test_solver.ae` (45 checks: free fall against the closed form, resting and sleeping, a stack, a bounce and its hit event, a joint event, a pendulum, a fast sphere stopped by a thin wall, a bullet, a sensor swept, two worlds bit for bit alike) | [1.2-1.3x the reference's step, stage by stage](bench/RESULTS.md#stage-by-stage) |
 | `aephysics.physics_world` | the world's face: the step (pairs, narrow phase, solve, sensors, events), the events read back, the settings and counters, queries over every shape (overlap of a box or a proxy, the mover's planes, ray, shape and mover casts, the closest ray hit) and against one body at a transform of the caller's, explosions | `test_physics_world.ae` (238 checks: test_world.c whole but the hull database, among it empty and recycled worlds, every setting, the worker count set between steps, contact, hit, move and sensor events, a compound child's hit events and materials, the overflow colour pile, the explosion near and far, the bullet and sleep flags, the compound count, an enlarged proxy destroyed; test_body_query.c whole: casts, overlaps of hull proxies and turned compounds, mover planes, and the mover's time of impact against 2,000 random sweeps; test_broad_phase.c's static rebuild and its stress test, a swarm through every proxy change with the pair set checked by brute force every step; test_id.c; the world queries; a wave pile stepping alike twice) | [the reference's own benchmark scenes with the same checksums: 1.2x its AVX2 build on the large pyramid, 1.15x on the many pyramids, 1.05x on the joint grid, ours at eight lanes in AVX2 with float records (#121)](bench/RESULTS.md#the-collide-pass-as-the-reference-keeps-it-2026-10-09-121); [the rest of its suite, nine scenes and the SAT runs, at 1.04-1.21x](bench/RESULTS.md#suite-the-references-benchmark-suite) |
-| `aephysics.human` | the ragdoll: twelve capsule bones on spherical joints with cone and twist limits and revolute joints with angle limits -- a person's ranges by default (shoulders that reach overhead on a cone centred off the rest, hips on an elliptical cone through 125 degrees ahead, 25 back, 45 out and 30 across, knees and elbows that never pass straight), the reference's tight ones on request -- soles that grip, a spring on every joint toward the reference pose, a motor whose torque limit is joint friction, filter joints for the limbs that clash; the align spring, kinematic anchors through motor or parallel joints and their targets driven over a step (the pose drive of an active ragdoll), velocity, kicks, bullets | `test_human.ae` (96 checks: the figure's shape, a fall to rest in one piece, the setters, a kick, standing under the align spring, the pose held on anchors, the anchors driven two metres and the figure walked behind them, the same drop twice bit for bit, a fitted shape, each arm reaching flexion 170, abduction 160 and extension 45 degrees standing and prone, the hips' cone through a person's four ranges and short of a split, the hinges stopping at straight and folding to their range, the soles' grip) | [the reference's rain benchmark, 300 ragdolls over 400 steps, at 0.9x](bench/RESULTS.md#human) |
+| `aephysics.human` | the ragdoll: twelve capsule bones on spherical joints with cone and twist limits and revolute joints with angle limits -- a person's ranges by default (shoulders that reach overhead on a cone centred off the rest, hips on an elliptical cone through 125 degrees ahead, 25 back, 45 out and 30 across, knees and elbows that never pass straight), the reference's tight ones on request -- soles that grip, and on request (`Human.ankles`, past the reference) the feet as bones of their own on ankles, an elliptical cone through 50 degrees down, 35 up and 15 aside with 15 of roll, so a crouched figure's soles lie flat, a spring on every joint toward the reference pose, a motor whose torque limit is joint friction, filter joints for the limbs that clash; the align spring, kinematic anchors through motor or parallel joints and their targets driven over a step (the pose drive of an active ragdoll), velocity, kicks, bullets | `test_human.ae` (115 checks: the figure's shape, a fall to rest in one piece, the setters, a kick, standing under the align spring, the pose held on anchors, the anchors driven two metres and the figure walked behind them, the same drop twice bit for bit, a fitted shape, each arm reaching flexion 170, abduction 160 and extension 45 degrees standing and prone, the hips' cone through a person's four ranges and short of a split, the hinges stopping at straight and folding to their range, the soles' grip, the ankles' four ranges measured through the joint and the soles flat under shins tipped 25 degrees over them) | [the reference's rain benchmark, 300 ragdolls over 400 steps, at 0.9x](bench/RESULTS.md#human) |
 | `aephysics` | the public API | |
 
 Deliberate choices:
@@ -77,11 +77,11 @@ Install the released toolchain with the shared, version-pinned installer
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/aether-lang-dev/aeb/main/get.sh \
-  | AE_PIN=0.794.0 AEB_REF=v0.325 sh
+  | AE_PIN=0.795.0 AEB_REF=v0.325 sh
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-This installs `ae` 0.794.0, the release CI pins, and `aeb` v0.325 under
+This installs `ae` 0.795.0, the release CI pins, and `aeb` v0.325 under
 `~/.local` (`PREFIX` overrides it), using release binaries where available.
 The code needs 0.788.0 or newer (the eight-wide lanes, `f32x8`).
 
@@ -166,7 +166,17 @@ origin-relative queries at x = 0 and at x = 1e7 agree, the whole
 engine being in doubles; 43 checks), `test_collision.ae` (the reference's
 test_collision.c: boxes valid and not, a ray against a box in its twelve
 cases, a hull manifold and a shape's fat bounds at 1e7 against the origin;
-56 checks) and `test_edge_cases.ae` (every
+56 checks), `test_restitution.ae` (the reference's test_restitution.c
+whole: the coefficient head on at three mass ratios and at sixteen impact
+phases, a ball on a column of dead balls with propagation off and on, flat
+and spinning landings, elastic drops from 40, 20 and 10 m, a cube dropped
+flat four times, the threshold, a resting stack that stays put, the
+published approach speed, the narrow-floor overshoot, the energy of
+thirteen elastic scenes, every step's impulse balanced on drops either side
+of continuous collision, and one, two and four workers hashing alike; its
+numbers are Box3D's own run's to every printed digit, the few that differ
+in the last digit differing between the reference's single and double
+builds too; 162 checks) and `test_edge_cases.ae` (every
 number a world takes refused when it is NaN, infinite or negative where
 it must not be, as the reference asserts it, the world left as it was;
 a world or a ragdoll of such numbers never made, a ragdoll made whole

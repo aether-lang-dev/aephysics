@@ -70,4 +70,20 @@ static inline int aephysics_load_u16(const void *p, long long index)
     return value;
 }
 
+// A single's and a double's bits, unsigned in the single's case (the
+// world state hash, which mixes every value as its bits).
+static inline long long aephysics_f32_bits(float value)
+{
+    unsigned int bits;
+    __builtin_memcpy(&bits, &value, 4);
+    return bits;
+}
+
+static inline long long aephysics_f64_bits(double value)
+{
+    long long bits;
+    __builtin_memcpy(&bits, &value, 8);
+    return bits;
+}
+
 #endif
