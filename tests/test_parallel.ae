@@ -7,6 +7,7 @@
 // thousand rounds of tasks leave the pool as they found it.
 import std.string
 import std.sync
+import std.os
 import aephysics.basics
 import aephysics.native
 import aephysics.parallel
@@ -54,10 +55,22 @@ struct Range {
 }
 
 var g_spin = 0   // the work an item costs, so a block takes long enough for the pool's threads to join
+var g_wait_for_pool = false    // the calling thread's first block waits for a pool thread to take one
+var g_pool_joined = 0          // a pool thread took a block (set atomically)
+const POOL_WAIT_NS = 2000000000
 
 range_callback(start: int, end: int, worker: int, context: ptr) {
     r = context as *Range
     marks = r.marks as int[]
+    if worker != 0 { native.atomic_store((&g_pool_joined) as ptr, 1) }
+    else if g_wait_for_pool {
+        // The calling thread gives the pool up to two seconds to wake and
+        // take a block, so the check is whether the pool joins in, not
+        // whether it wakes before the calling thread could finish alone.
+        deadline = os.now_monotonic_ns() + (POOL_WAIT_NS as long)
+        while native.atomic_load((&g_pool_joined) as ptr) == 0 && os.now_monotonic_ns() < deadline { native.yield_thread() }
+        g_wait_for_pool = false
+    }
     i = start
     while i < end {
         marks[i] = marks[i] + 1
@@ -144,17 +157,17 @@ main() {
     r = run_range(s, 10000, 16)
     ensure("10,000 items in blocks of 16: every item once", every_item_once(r))
     ensure("10,000 items: the callback's worker is the thread's", r.worker_index_agreed)
-    // Whether a pool thread wakes before the main thread has taken every
-    // block is the system's scheduling: on a loaded machine the main thread
-    // can finish alone (it failed one run in four under load). The pool
-    // joining in is what is held, so a run where it did not is tried again.
-    attempts = 1
-    while workers_used(r) < 2 && attempts < 8 {
-        free_range(r)
-        r = run_range(s, 10000, 16)
-        attempts = attempts + 1
-    }
-    ensure("10,000 items: more than one worker took blocks (${workers_used(r)}, in ${attempts} runs)", workers_used(r) >= 2)
+    // Whether a pool thread wakes before the calling thread has taken every
+    // block is the system's scheduling: on a loaded machine the calling
+    // thread can finish alone (a macOS runner did, eight runs in a row). The
+    // pool joining in is what is held, so the calling thread's first block
+    // waits for a pool thread to take one.
+    free_range(r)
+    native.atomic_store((&g_pool_joined) as ptr, 0)
+    g_wait_for_pool = true
+    r = run_range(s, 10000, 16)
+    ensure("10,000 items, the pool given time: every item once", every_item_once(r))
+    ensure("10,000 items: more than one worker took blocks (${workers_used(r)})", workers_used(r) >= 2)
     ensure("10,000 items: blocks of 16 until the count bounds them (${r.smallest_block}, ${r.largest_block})", r.largest_block >= 16 && r.largest_block <= 10000)
     ensure("10,000 items: the block count parallel_for reports is the range over the largest block (${r.block_count})", r.block_count == (10000 + r.largest_block - 1) / r.largest_block)
     free_range(r)
