@@ -15,13 +15,13 @@ jobs:
       - name: Checkout aephysics
         uses: actions/checkout@v4
 
-      # Pin: 0.796.0, the latest release (f32x8 arrived in 0.788.0, aether#2428,
+      # Pin: 0.797.0, the latest release (f32x8 arrived in 0.788.0, aether#2428,
       # which the wide contact solver is written in). A reproducible bootstrap
       # version: the floor this code needs, verified on Linux by this job.
       - name: Install the released Aether toolchain and aeb
         run: |
           curl -fsSL https://raw.githubusercontent.com/aether-lang-dev/aeb/main/get.sh \
-            | AE_PIN=0.796.0 AEB_REF=v0.325 sh
+            | AE_PIN=0.797.0 AEB_REF=v0.325 sh
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Run the tests with ae
@@ -54,7 +54,7 @@ jobs:
       - name: Install the released Aether toolchain and aeb
         run: |
           curl -fsSL https://raw.githubusercontent.com/aether-lang-dev/aeb/main/get.sh \
-            | AE_PIN=0.796.0 AEB_REF=v0.325 sh
+            | AE_PIN=0.797.0 AEB_REF=v0.325 sh
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Run the tests with ae

@@ -168,8 +168,7 @@ read_float(r: *Reader) -> float {
 load_height_field(path: string) -> *HeightFieldData {
     text, length, err = fs.read_binary(path)
     if string.length(err) > 0 { return null }
-    // The reader takes the text over and frees it when it goes (aether#2602:
-    // a free through the local now would free it twice).
+    // The reader takes the text over and frees it when it goes.
     r = Reader { text: text, length: length, at: 0, ok: true }
     def = height_field.height_field_def()
     def.count_x = read_int(&r)
