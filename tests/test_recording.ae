@@ -1,0 +1,1329 @@
+// aephysics.recording (#149, the reference's test_recording.c): the
+// snapshot test's scene recorded from an empty world and from mid stream,
+// with the host changing it between steps (velocities, impulses, names,
+// materials, filters, types, locks, joints made, driven and destroyed,
+// bodies destroyed and their slots reused, geometry the host frees at
+// once), played back frame by frame on one worker and several: the
+// player's world hashes as the recorded one every frame and its bodies end
+// where the recorded ones did. Geometry is kept once however often it is
+// named; seeking back and forth through keyframes lands on the recorded
+// frames; a recording saved to a file plays the same; bytes that are not a
+// recording load no player and leave nothing allocated; a record the
+// player does not know stops it and a state hash that differs marks the
+// frame it was found at.
+
+import std.string
+import aephysics.math
+import aephysics.basics
+import aephysics.hull
+import aephysics.mesh
+import aephysics.height_field
+import aephysics.material
+import aephysics.compound
+import aephysics.shape
+import aephysics.manifold
+import aephysics.dynamics
+import aephysics.joint_solver
+import aephysics.physics_world
+import aephysics.human
+import aephysics.recording
+
+extern calloc(count: int, size: int) -> ptr
+extern exit(code: int)
+extern free(p: ptr)
+extern memcmp(a: ptr, b: ptr, size: int) -> int
+extern memcpy(dst: ptr, src: ptr, size: int) -> ptr
+
+var failures = 0
+var checks = 0
+
+ensure(name: string, ok: bool) {
+    checks = checks + 1
+    if !ok {
+        println("recording: FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+// The geometry the scene's shapes are made from, kept until the end: the
+// hulls go into the worlds' databases, the rest the worlds point at.
+var g_box: ptr = null
+var g_rock: ptr = null
+var g_wave: ptr = null
+var g_field: ptr = null
+var g_compound: ptr = null
+var g_ragdoll: ptr = null
+
+fixtures_ready() {
+    if g_box != null { return }
+    g_box = hull.make_box_hull(0.4, 0.4, 0.4) as ptr
+    g_rock = hull.create_rock(0.35) as ptr
+    g_wave = mesh.create_wave_mesh(20, 20, 1.0, 0.4, 0.3, 0.2) as ptr
+    g_field = height_field.create_grid(12, 12, math.vec3(1.0, 1.0, 1.0), true) as ptr
+    hulls_block = calloc(2, sizeof(CompoundHullDef))
+    defs = hulls_block as CompoundHullDef[]
+    mat = material.default_surface_material()
+    defs[0] = compound.compound_hull_def(g_box as *HullData, Transform { p: math.vec3(0.0 - 1.0, 0.0, 0.0), q: math.quat_identity() }, mat)
+    defs[1] = compound.compound_hull_def(g_box as *HullData, Transform { p: math.vec3(1.0, 0.5, 0.0), q: math.quat_identity() }, mat)
+    cdef = compound.compound_def()
+    cdef.hulls = hulls_block
+    cdef.hull_count = 2
+    g_compound = compound.create_compound(&cdef) as ptr
+    free(hulls_block)
+    g_ragdoll = calloc(1, sizeof(Human))
+}
+
+fixtures_free() {
+    hull.destroy_hull(g_box as *HullData)
+    hull.destroy_hull(g_rock as *HullData)
+    mesh.destroy_mesh(g_wave as *MeshData)
+    height_field.destroy_height_field(g_field as *HeightFieldData)
+    compound.destroy_compound(g_compound as *CompoundData)
+    free(g_ragdoll)
+}
+
+world_def() -> WorldDef {
+    wdef = dynamics.default_world_def()
+    wdef.gravity = math.vec3(0.0, 0.0 - 10.0, 0.0)
+    return wdef
+}
+
+static_body(world_id: WorldId, p: Vec3, name: string) -> BodyId {
+    bdef = dynamics.default_body_def()
+    bdef.position = p
+    bdef.name = name
+    return dynamics.create_body(world_id, &bdef)
+}
+
+dynamic_body(world_id: WorldId, p: Vec3) -> BodyId {
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.position = p
+    return dynamics.create_body(world_id, &bdef)
+}
+
+// The scene: every kind of thing a world holds.
+build_scene(world_id: WorldId) {
+    fixtures_ready()
+    sdef = dynamics.default_shape_def()
+    floor_def = dynamics.default_shape_def()
+    floor_def.name = "floor"
+    ground = static_body(world_id, math.vec3(0.0, 0.0 - 1.0, 0.0), "ground")
+    floor_hull = hull.make_box_hull(30.0, 1.0, 30.0)
+    dynamics.create_hull_shape(ground, &floor_def, floor_hull)
+    hull.destroy_hull(floor_hull)
+
+    // A mesh with three materials, a height field with holes, a compound.
+    materials_block = calloc(3, sizeof(SurfaceMaterial))
+    materials = materials_block as SurfaceMaterial[]
+    k = 0
+    while k < 3 {
+        materials[k] = material.default_surface_material()
+        materials[k].friction = 0.2 + 0.3 * (k as float)
+        k = k + 1
+    }
+    mdef = dynamics.default_shape_def()
+    mdef.materials = materials_block
+    mdef.material_count = 3
+    dynamics.create_mesh_shape(static_body(world_id, math.vec3(8.0, 0.0, 0.0 - 4.0), "waves"), &mdef, g_wave as *MeshData, math.vec3_one())
+    free(materials_block)
+    dynamics.create_height_field_shape(static_body(world_id, math.vec3(0.0 - 14.0, 0.0, 0.0 - 6.0), "field"), &sdef, g_field as *HeightFieldData)
+    dynamics.create_compound_shape(static_body(world_id, math.vec3(0.0 - 6.0, 0.4, 6.0), "compound"), &sdef, g_compound as *CompoundData)
+
+    // A sensor over the pyramid, which the boxes report to.
+    sensor_def = dynamics.default_shape_def()
+    sensor_def.is_sensor = true
+    sensor_def.enable_sensor_events = true
+    sensor_hull = hull.make_box_hull(2.0, 2.0, 2.0)
+    dynamics.create_hull_shape(static_body(world_id, math.vec3(0.0, 1.0, 0.0), "sensor"), &sensor_def, sensor_hull)
+    hull.destroy_hull(sensor_hull)
+
+    // A pyramid of boxes, each reporting to the sensor; one named.
+    box_def = dynamics.default_shape_def()
+    box_def.enable_sensor_events = true
+    row = 0
+    while row < 5 {
+        col = 0
+        while col < 5 - row {
+            b = dynamic_body(world_id, math.vec3(0.82 * (col as float) - 0.41 * ((4 - row) as float), 0.4 + 0.81 * (row as float), 0.0))
+            if row == 4 { dynamics.body_set_name(b, "apex") }
+            dynamics.create_hull_shape(b, &box_def, g_box as *HullData)
+            col = col + 1
+        }
+        row = row + 1
+    }
+
+    // Spheres, capsules and rocks onto the mesh, the field and the compound.
+    i = 0
+    while i < 12 {
+        x = 6.0 + 0.9 * ((i % 4) as float)
+        z = 0.0 - 6.0 + 1.1 * ((i / 4) as float)
+        b = dynamic_body(world_id, math.vec3(x, 2.0 + 0.3 * (i as float), z))
+        if i % 3 == 0 { dynamics.create_sphere_shape(b, &sdef, manifold.sphere(math.vec3_zero(), 0.3)) }
+        else if i % 3 == 1 { dynamics.create_capsule_shape(b, &sdef, Capsule { center1: math.vec3(0.0 - 0.3, 0.0, 0.0), center2: math.vec3(0.3, 0.0, 0.0), radius: 0.2 }) }
+        else { dynamics.create_hull_shape(b, &sdef, g_rock as *HullData) }
+        f = dynamic_body(world_id, math.vec3(0.0 - 14.0 + 1.3 * ((i % 4) as float), 2.5 + 0.2 * (i as float), 0.0 - 4.0 + 1.2 * ((i / 4) as float)))
+        dynamics.create_sphere_shape(f, &sdef, manifold.sphere(math.vec3_zero(), 0.35))
+        c = dynamic_body(world_id, math.vec3(0.0 - 6.5 + 0.8 * ((i % 3) as float), 3.0 + 0.4 * (i as float), 6.0))
+        dynamics.create_hull_shape(c, &sdef, g_rock as *HullData)
+        i = i + 1
+    }
+
+    // A chain of capsules on hinges from an anchor, its first hinge driven.
+    anchor = static_body(world_id, math.vec3(10.0, 8.0, 8.0), "anchor")
+    previous = anchor
+    i = 0
+    while i < 6 {
+        link = dynamic_body(world_id, math.vec3(10.0 + 0.6 * (i as float) + 0.3, 8.0, 8.0))
+        dynamics.create_capsule_shape(link, &sdef, Capsule { center1: math.vec3(0.0 - 0.25, 0.0, 0.0), center2: math.vec3(0.25, 0.0, 0.0), radius: 0.1 })
+        rdef = dynamics.default_revolute_joint_def()
+        rdef.base.body_id_a = previous
+        rdef.base.body_id_b = link
+        rdef.base.local_frame_a = Transform { p: math.vec3(0.3, 0.0, 0.0), q: math.quat_identity() }
+        if i == 0 { rdef.base.local_frame_a = math.transform_identity() }
+        rdef.base.local_frame_b = Transform { p: math.vec3(0.0 - 0.3, 0.0, 0.0), q: math.quat_identity() }
+        if i == 0 {
+            rdef.enable_motor = true
+            rdef.motor_speed = 1.5
+            rdef.max_motor_torque = 50.0
+        }
+        dynamics.create_revolute_joint(world_id, &rdef)
+        previous = link
+        i = i + 1
+    }
+
+    // A ragdoll with ankles, its filter joints among them.
+    h = g_ragdoll as *Human
+    h.bones = null
+    h.filter_joints = null
+    h.filter_joint_count = 0
+    h.is_spawned = false
+    h.ankles = true
+    human.create_human(h, world_id, math.vec3(4.0, 3.0, 6.0), 2.0, 1.0, 0.5, 1, null)
+
+    // A pair of each other joint kind, off to the side.
+    joint_pair(world_id, 0, math.vec3(14.0, 3.0, 0.0 - 10.0))
+    joint_pair(world_id, 1, math.vec3(16.0, 3.0, 0.0 - 10.0))
+    joint_pair(world_id, 2, math.vec3(18.0, 3.0, 0.0 - 10.0))
+    joint_pair(world_id, 3, math.vec3(20.0, 3.0, 0.0 - 10.0))
+    joint_pair(world_id, 4, math.vec3(22.0, 3.0, 0.0 - 10.0))
+    joint_pair(world_id, 5, math.vec3(24.0, 3.0, 0.0 - 10.0))
+
+    // A body disabled, in the disabled set with its shape out of the trees.
+    sleeper = dynamic_body(world_id, math.vec3(0.0 - 20.0, 4.0, 10.0))
+    dynamics.create_hull_shape(sleeper, &sdef, g_box as *HullData)
+    dynamics.body_disable(sleeper)
+
+    // A kinematic paddle sweeping and a bullet at the pyramid.
+    kdef = dynamics.default_body_def()
+    kdef.kind = dynamics.BODY_KINEMATIC
+    kdef.position = math.vec3(0.0 - 3.0, 0.5, 3.0)
+    kdef.linear_velocity = math.vec3(1.0, 0.0, 0.0)
+    kdef.angular_velocity = math.vec3(0.0, 1.0, 0.0)
+    paddle = dynamics.create_body(world_id, &kdef)
+    paddle_hull = hull.make_box_hull(1.0, 0.2, 0.2)
+    dynamics.create_hull_shape(paddle, &sdef, paddle_hull)
+    hull.destroy_hull(paddle_hull)
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.position = math.vec3(0.0, 1.5, 12.0)
+    bdef.linear_velocity = math.vec3(0.0, 0.0, 0.0 - 60.0)
+    bdef.is_bullet = true
+    bdef.name = "bullet"
+    bullet = dynamics.create_body(world_id, &bdef)
+    dynamics.create_sphere_shape(bullet, &sdef, manifold.sphere(math.vec3_zero(), 0.1))
+}
+
+// Two boxes joined by a joint of one kind: a weld, a prismatic spring, a
+// rope, a wheel, a motor or a parallel joint.
+joint_pair(world_id: WorldId, kind: int, p: Vec3) {
+    sdef = dynamics.default_shape_def()
+    a = dynamic_body(world_id, p)
+    dynamics.create_hull_shape(a, &sdef, g_box as *HullData)
+    b = dynamic_body(world_id, math.add(p, math.vec3(0.0, 0.0, 1.2)))
+    dynamics.create_hull_shape(b, &sdef, g_box as *HullData)
+    frame_a = Transform { p: math.vec3(0.0, 0.0, 0.6), q: math.quat_identity() }
+    frame_b = Transform { p: math.vec3(0.0, 0.0, 0.0 - 0.6), q: math.quat_identity() }
+    if kind == 0 {
+        weld_def = dynamics.default_weld_joint_def()
+        weld_def.base.body_id_a = a
+        weld_def.base.body_id_b = b
+        weld_def.base.local_frame_a = frame_a
+        weld_def.base.local_frame_b = frame_b
+        weld_def.linear_hertz = 5.0
+        dynamics.create_weld_joint(world_id, &weld_def)
+    } else if kind == 1 {
+        prismatic_def = dynamics.default_prismatic_joint_def()
+        prismatic_def.base.body_id_a = a
+        prismatic_def.base.body_id_b = b
+        prismatic_def.base.local_frame_a = frame_a
+        prismatic_def.base.local_frame_b = frame_b
+        prismatic_def.enable_spring = true
+        prismatic_def.hertz = 2.0
+        prismatic_def.damping_ratio = 0.3
+        prismatic_def.enable_limit = true
+        prismatic_def.lower_translation = 0.0 - 0.3
+        prismatic_def.upper_translation = 0.3
+        dynamics.create_prismatic_joint(world_id, &prismatic_def)
+    } else if kind == 2 {
+        rope_def = dynamics.default_distance_joint_def()
+        rope_def.base.body_id_a = a
+        rope_def.base.body_id_b = b
+        rope_def.base.local_frame_a = frame_a
+        rope_def.base.local_frame_b = frame_b
+        rope_def.length = 0.2
+        rope_def.enable_limit = true
+        rope_def.min_length = 0.1
+        rope_def.max_length = 0.5
+        dynamics.create_distance_joint(world_id, &rope_def)
+    } else if kind == 3 {
+        wheel_def = dynamics.default_wheel_joint_def()
+        wheel_def.base.body_id_a = a
+        wheel_def.base.body_id_b = b
+        wheel_def.base.local_frame_a = frame_a
+        wheel_def.base.local_frame_b = frame_b
+        wheel_def.enable_spin_motor = true
+        wheel_def.spin_speed = 4.0
+        wheel_def.max_spin_torque = 10.0
+        dynamics.create_wheel_joint(world_id, &wheel_def)
+    } else if kind == 4 {
+        motor_def = dynamics.default_motor_joint_def()
+        motor_def.base.body_id_a = a
+        motor_def.base.body_id_b = b
+        motor_def.base.local_frame_a = frame_a
+        motor_def.base.local_frame_b = frame_b
+        motor_def.angular_velocity = math.vec3(0.0, 1.0, 0.0)
+        motor_def.max_velocity_torque = 20.0
+        dynamics.create_motor_joint(world_id, &motor_def)
+    } else {
+        parallel_def = dynamics.default_parallel_joint_def()
+        parallel_def.base.body_id_a = a
+        parallel_def.base.body_id_b = b
+        parallel_def.base.local_frame_a = frame_a
+        parallel_def.base.local_frame_b = frame_b
+        parallel_def.hertz = 3.0
+        parallel_def.max_torque = 30.0
+        dynamics.create_parallel_joint(world_id, &parallel_def)
+    }
+}
+
+// The events of the last step, folded into one number to compare.
+events_of(world_id: WorldId) -> long {
+    w = dynamics.get_world(world_id.index1 - 1)
+    folded = dynamics.world_contact_begin_event_count(w) as long
+    folded = folded * (1009 as long) + (dynamics.world_contact_end_event_count(w) as long)
+    folded = folded * (1009 as long) + (dynamics.world_sensor_begin_event_count(w) as long)
+    folded = folded * (1009 as long) + (dynamics.world_sensor_end_event_count(w) as long)
+    folded = folded * (1009 as long) + (dynamics.world_contact_hit_event_count(w) as long)
+    return folded
+}
+
+state_hash(world_id: WorldId) -> long { return dynamics.hash_world_state(dynamics.get_world(world_id.index1 - 1)) }
+
+steps(world_id: WorldId, count: int) {
+    i = 0
+    while i < count {
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        i = i + 1
+    }
+}
+
+
+// A body's first shape.
+first_shape(body_id: BodyId) -> ShapeId {
+    ids = calloc(4, sizeof(ShapeId))
+    each = ids as ShapeId[]
+    dynamics.body_get_shapes(body_id, each, 4)
+    found = each[0]
+    free(ids)
+    return found
+}
+
+same_place(a: Transform, b: Transform) -> bool {
+    return a.p.x == b.p.x && a.p.y == b.p.y && a.p.z == b.p.z && a.q.x == b.q.x && a.q.y == b.q.y && a.q.z == b.q.z && a.q.w == b.q.w
+}
+
+// --- what a recording session does to the world -----------------------------------------------------
+
+// The calls a host makes between steps, by frame: every kind of change the
+// recording carries (velocities, impulses, forces, transforms, names,
+// materials, filters, a body's type, mass and locks, joints' motors and
+// limits, gravity, an explosion, bodies and joints destroyed and their slots
+// reused, shapes swapped for geometry the host frees at once).
+var g_victims: ptr = null    // BodyId[8]: bodies made and destroyed during the session
+var g_hinge: ptr = null      // JointId[1]: a hinge made, driven and destroyed during it
+
+mutate(world_id: WorldId, frame: int) {
+    sdef = dynamics.default_shape_def()
+    victims = g_victims as BodyId[]
+    hinge = g_hinge as JointId[]
+    if frame == 3 {
+        i = 0
+        while i < 8 {
+            victims[i] = dynamic_body(world_id, math.vec3(0.0 - 10.0 + 0.9 * (i as float), 6.0, 0.0 - 12.0))
+            dynamics.create_sphere_shape(victims[i], &sdef, manifold.sphere(math.vec3_zero(), 0.3))
+            i = i + 1
+        }
+    }
+    if frame == 10 {
+        b = victims[0]
+        dynamics.body_set_linear_velocity(b, math.vec3(1.0, 4.0, 0.0))
+        dynamics.body_set_angular_velocity(b, math.vec3(0.0, 3.0, 1.0))
+        dynamics.body_apply_linear_impulse(victims[1], math.vec3(0.0, 2.0, 1.0), math.add(dynamics.body_get_position(victims[1]), math.vec3(0.1, 0.0, 0.0)), true)
+        dynamics.body_apply_force_to_center(victims[2], math.vec3(30.0, 0.0, 0.0), true)
+        dynamics.body_apply_torque(victims[3], math.vec3(0.0, 5.0, 0.0), true)
+        dynamics.body_set_transform(victims[4], math.vec3(0.0 - 3.0, 7.0, 0.0 - 12.0), math.make_quat_from_axis_angle(math.vec3(0.0, 1.0, 0.0), 0.7))
+        dynamics.body_set_name(victims[4], "renamed")
+        dynamics.body_set_gravity_scale(victims[6], 0.5)
+        dynamics.body_set_linear_damping(victims[7], 0.3)
+    }
+    if frame == 20 {
+        // Slots freed and reused with a new generation.
+        dynamics.destroy_body(victims[0])
+        dynamics.destroy_body(victims[3])
+        dynamics.destroy_body(victims[6])
+        victims[0] = dynamic_body(world_id, math.vec3(0.0 - 8.0, 8.0, 0.0 - 11.0))
+        dynamics.create_hull_shape(victims[0], &sdef, g_rock as *HullData)
+        victims[3] = dynamic_body(world_id, math.vec3(0.0 - 7.0, 8.0, 0.0 - 11.0))
+        dynamics.create_capsule_shape(victims[3], &sdef, Capsule { center1: math.vec3(0.0, 0.0 - 0.2, 0.0), center2: math.vec3(0.0, 0.2, 0.0), radius: 0.2 })
+        victims[6] = dynamic_body(world_id, math.vec3(0.0 - 6.0, 8.0, 0.0 - 11.0))
+        // A hull the host frees at once: the recording keeps its own copy.
+        temporary = hull.make_box_hull(0.3, 0.2, 0.5)
+        dynamics.create_transformed_hull_shape(victims[6], &sdef, temporary, Transform { p: math.vec3(0.0, 0.1, 0.0), q: math.quat_identity() }, math.vec3(1.0, 2.0, 1.0))
+        hull.destroy_hull(temporary)
+        rdef = dynamics.default_revolute_joint_def()
+        rdef.base.body_id_a = victims[0]
+        rdef.base.body_id_b = victims[3]
+        rdef.base.local_frame_a = Transform { p: math.vec3(0.5, 0.0, 0.0), q: math.quat_identity() }
+        rdef.base.local_frame_b = Transform { p: math.vec3(0.0 - 0.5, 0.0, 0.0), q: math.quat_identity() }
+        rdef.enable_limit = true
+        rdef.lower_angle = 0.0 - 0.5
+        rdef.upper_angle = 0.5
+        hinge[0] = dynamics.create_revolute_joint(world_id, &rdef)
+    }
+    if frame == 30 {
+        shape_id = first_shape(victims[1])
+        dynamics.shape_set_friction(shape_id, 0.05)
+        dynamics.shape_set_restitution(shape_id, 0.8)
+        dynamics.shape_set_name(shape_id, "slippery")
+        filter = shape.default_filter()
+        filter.category_bits = 2 as long
+        dynamics.shape_set_filter(first_shape(victims[2]), filter)
+        replacement = hull.make_box_hull(0.25, 0.25, 0.25)
+        dynamics.shape_set_hull(first_shape(victims[0]), replacement)
+        hull.destroy_hull(replacement)
+        physics_world.set_gravity(world_id, math.vec3(0.5, 0.0 - 9.0, 0.0))
+        edef = physics_world.default_explosion_def()
+        edef.position = math.vec3(0.0, 0.5, 0.0)
+        edef.radius = 3.0
+        edef.falloff = 1.0
+        edef.impulse_per_area = 4.0
+        physics_world.explode(world_id, &edef)
+    }
+    if frame == 40 {
+        joint_solver.revolute_joint_set_motor_speed(hinge[0], 2.0)
+        joint_solver.revolute_joint_enable_motor(hinge[0], true)
+        joint_solver.revolute_joint_set_max_motor_torque(hinge[0], 4.0)
+        joint_solver.revolute_joint_set_limits(hinge[0], 0.0 - 0.3, 0.9)
+        dynamics.body_set_type(victims[7], dynamics.BODY_KINEMATIC)
+        dynamics.body_set_linear_velocity(victims[7], math.vec3(0.0, 0.0, 1.0))
+        locks = dynamics.body_get_motion_locks(victims[5])
+        locks.angular_x = true
+        locks.angular_z = true
+        dynamics.body_set_motion_locks(victims[5], locks)
+        mass = dynamics.body_get_mass_data(victims[4])
+        mass.mass = mass.mass * 2.0
+        dynamics.body_set_mass_data(victims[4], mass)
+    }
+    if frame == 55 {
+        dynamics.destroy_joint(hinge[0], true)
+        dynamics.body_set_type(victims[7], dynamics.BODY_DYNAMIC)
+        dynamics.destroy_shape(first_shape(victims[2]), true)
+        dynamics.create_sphere_shape(victims[2], &sdef, manifold.sphere(math.vec3_zero(), 0.4))
+        dynamics.body_disable(victims[1])
+    }
+    if frame == 70 {
+        dynamics.body_enable(victims[1])
+        dynamics.destroy_body(victims[5])
+        victims[5] = dynamic_body(world_id, math.vec3(0.0 - 9.0, 9.0, 0.0 - 12.0))
+        dynamics.create_sphere_shape(victims[5], &sdef, manifold.sphere(math.vec3_zero(), 0.25))
+        physics_world.set_gravity(world_id, math.vec3(0.0, 0.0 - 10.0, 0.0))
+    }
+}
+
+
+// The world recorded: `before` steps run first (the recording starts mid
+// stream), the scene built before or during the session, `frames` steps
+// with the host's changes, every step's hash kept in `hashes`.
+record_session(world_id: WorldId, r: *Recording, build_during: bool, before: int, frames: int, hashes: ptr) -> bool {
+    if build_during == false { build_scene(world_id) }
+    i = 0
+    while i < before {
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        i = i + 1
+    }
+    if recording.start_recording(world_id, r) == false { return false }
+    // Frame 0 is the world the recording starts from.
+    each = hashes as long[]
+    each[0] = state_hash(world_id)
+    if build_during { build_scene(world_id) }
+    frame = 0
+    while frame < frames {
+        mutate(world_id, frame)
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        frame = frame + 1
+        each[frame] = state_hash(world_id)
+    }
+    recording.stop_recording(world_id)
+    return true
+}
+
+// The recording played frame by frame: the player's world hashes as the
+// recorded one every frame and never diverges.
+replay_matches(name: string, r: *Recording, frames: int, hashes: ptr, workers: int) {
+    each = hashes as long[]
+    p = recording.create_player(recording.recording_data(r), recording.recording_size(r), workers)
+    ensure("${name}: the player loads", p != null)
+    if p == null { return }
+    ensure("${name}: ${frames} frames", recording.player_frame_count(p) == frames)
+    ensure("${name}: frame 0 as recorded", state_hash(recording.player_world(p)) == each[0])
+    matched = 0
+    while recording.player_step_frame(p) {
+        if state_hash(recording.player_world(p)) == each[recording.player_frame(p)] { matched = matched + 1 }
+    }
+    ensure("${name}: every frame as recorded (${matched} of ${frames})", matched == frames)
+    ensure("${name}: no divergence", recording.player_has_diverged(p) == false && recording.player_diverge_frame(p) < 0)
+    ensure("${name}: at the end", recording.player_at_end(p) && recording.player_frame(p) == frames)
+    ensure("${name}: no frame past the end", recording.player_step_frame(p) == false)
+    recording.destroy_player(p)
+}
+
+// A recording of the whole scene built and changed during the session.
+round_trips() {
+    g_victims = calloc(8, sizeof(BodyId))
+    g_hinge = calloc(1, sizeof(JointId))
+    hashes = calloc(201, 8)
+    wdef = world_def()
+
+    // Built during the session from an empty world.
+    world_id = dynamics.create_world(&wdef)
+    r = recording.create_recording()
+    ensure("from empty: starts", record_session(world_id, r, true, 0, 120, hashes))
+    replay_matches("from empty", r, 120, hashes, 1)
+    replay_matches("from empty, four workers", r, 120, hashes, 4)
+    ensure("from empty: validates", recording.validate_replay(recording.recording_data(r), recording.recording_size(r), 2))
+
+    // The player's world is the recorded one at the end, body by body: the
+    // bodies in the order they were made, a hole for each destroyed.
+    p = recording.create_player(recording.recording_data(r), recording.recording_size(r), 1)
+    info = recording.player_info(p)
+    ensure("info: frames, workers and the first step", info.frame_count == 120 && info.worker_count == 1 && info.time_step == 1.0 / 60.0 && info.sub_step_count == 4)
+    ensure("info: the bounds of every step", info.bounds.lower.x < info.bounds.upper.x && info.bounds.lower.y < info.bounds.upper.y && info.bounds.lower.z < info.bounds.upper.z)
+    ensure("accessors: no bodies before the first frame", recording.player_body_count(p) == 0)
+    stable = recording.player_world(p)
+    while recording.player_step_frame(p) {}
+    live = 0
+    holes = 0
+    same = 0
+    ordinal = 0
+    while ordinal < recording.player_body_count(p) {
+        played = recording.player_body_id(p, ordinal)
+        if played.index1 == 0 { holes = holes + 1 }
+        else {
+            live = live + 1
+            original = BodyId { index1: played.index1, world0: world_id.index1 - 1, generation: played.generation }
+            if dynamics.body_is_valid(played) && dynamics.body_is_valid(original) && same_place(dynamics.body_get_transform(played), dynamics.body_get_transform(original)) { same = same + 1 }
+        }
+        ordinal = ordinal + 1
+    }
+    ensure("accessors: every body made, once (${live} live, ${holes} holes)", live == dynamics.world_body_count(dynamics.get_world(world_id.index1 - 1)) && holes == 4)
+    ensure("accessors: every body at the same place (${same} of ${live})", same == live)
+    ensure("accessors: no body past the ends", recording.player_body_id(p, recording.player_body_count(p)).index1 == 0 && recording.player_body_id(p, 0 - 1).index1 == 0)
+    victims = g_victims as BodyId[]
+    played_victim = recording.player_body_id(p, recording.player_body_count(p) - 1)
+    ensure("accessors: the last body made is the last ordinal", played_victim.index1 == victims[5].index1 && played_victim.generation == victims[5].generation)
+    played_renamed = BodyId { index1: victims[4].index1, world0: recording.player_world(p).index1 - 1, generation: victims[4].generation }
+    ensure("names: a body renamed in the session", dynamics.body_is_valid(played_renamed) && string.equals(dynamics.body_get_name(played_renamed), "renamed"))
+    played_slippery = BodyId { index1: victims[1].index1, world0: recording.player_world(p).index1 - 1, generation: victims[1].generation }
+    ensure("names: a shape renamed in the session", string.equals(dynamics.shape_get_name(first_shape(played_slippery)), "slippery"))
+    played_apex = BodyId { index1: 0, world0: 0, generation: 0 }
+    ordinal = 0
+    while ordinal < recording.player_body_count(p) {
+        candidate_id = recording.player_body_id(p, ordinal)
+        if candidate_id.index1 != 0 && string.equals(dynamics.body_get_name(candidate_id), "apex") { played_apex = candidate_id }
+        ordinal = ordinal + 1
+    }
+    ensure("names: a body named at its creation", played_apex.index1 != 0)
+    recording.player_restart(p)
+    ensure("restart: the same world, its bodies those of frame 0", recording.player_world(p).index1 == stable.index1 && recording.player_world(p).generation == stable.generation && recording.player_body_count(p) == 0 && recording.player_frame(p) == 0)
+
+    // A frame that makes bodies played in two calls: the first stops
+    // before its step, the new bodies where they were made.
+    recording.player_sub_step_frame(p)
+    ensure("sub step: paused before the first step", recording.player_at_pre_step(p) && recording.player_frame(p) == 0 && recording.player_body_count(p) > 0)
+    recording.player_sub_step_frame(p)
+    ensure("sub step: then stepped", recording.player_at_pre_step(p) == false && recording.player_frame(p) == 1)
+    recording.player_sub_step_frame(p)
+    ensure("sub step: a frame that makes no body steps at once", recording.player_at_pre_step(p) == false && recording.player_frame(p) == 2)
+    // The workers changed mid replay: the state checks still hold.
+    recording.player_set_worker_count(p, 3)
+    while recording.player_step_frame(p) {}
+    ensure("workers changed mid replay: no divergence", recording.player_has_diverged(p) == false && recording.player_failed(p) == false && recording.player_info(p).worker_count == 3)
+    recording.destroy_player(p)
+    dynamics.destroy_world(world_id)
+    recording.destroy_recording(r)
+
+    // Started mid stream: sleeping bodies, warm contacts, joints at work.
+    world_id = dynamics.create_world(&wdef)
+    r = recording.create_recording()
+    ensure("mid stream: starts", record_session(world_id, r, false, 45, 120, hashes))
+    replay_matches("mid stream", r, 120, hashes, 1)
+    replay_matches("mid stream, three workers", r, 120, hashes, 3)
+    dynamics.destroy_world(world_id)
+
+    // Started again on the same recording: a fresh session.
+    world_id = dynamics.create_world(&wdef)
+    ensure("again: starts", record_session(world_id, r, false, 10, 40, hashes))
+    replay_matches("again", r, 40, hashes, 1)
+    dynamics.destroy_world(world_id)
+    recording.destroy_recording(r)
+
+    // A world destroyed while it records ends the recording whole.
+    world_id = dynamics.create_world(&wdef)
+    r = recording.create_recording()
+    build_scene(world_id)
+    recording.start_recording(world_id, r)
+    steps(world_id, 30)
+    dynamics.destroy_world(world_id)
+    ensure("destroyed while recording: validates", recording.validate_replay(recording.recording_data(r), recording.recording_size(r), 1))
+    recording.destroy_recording(r)
+
+    free(hashes)
+    free(g_victims)
+    free(g_hinge)
+}
+
+// What starting and stopping refuse.
+sessions() {
+    wdef = world_def()
+    world_id = dynamics.create_world(&wdef)
+    r = recording.create_recording()
+    other = recording.create_recording()
+    ensure("sessions: no recording to start into", recording.start_recording(world_id, null) == false)
+    ensure("sessions: no world", recording.start_recording(WorldId { index1: 0, generation: 0 }, r) == false)
+    ensure("sessions: starts", recording.start_recording(world_id, r))
+    ensure("sessions: one recording at a time", recording.start_recording(world_id, other) == false)
+    second_world = dynamics.create_world(&wdef)
+    ensure("sessions: a recording another world writes", recording.start_recording(second_world, r) == false)
+    ensure("sessions: the other world records into its own", recording.start_recording(second_world, other))
+    // A recording freed while its world writes it: the world stops first.
+    recording.destroy_recording(other)
+    steps(second_world, 3)
+    other = recording.create_recording()
+    ensure("sessions: a world whose recording was freed records again", recording.start_recording(second_world, other))
+    recording.stop_recording(second_world)
+    dynamics.destroy_world(second_world)
+    recording.stop_recording(world_id)
+    recording.stop_recording(world_id)
+    ensure("sessions: stopping twice changes nothing", recording.validate_replay(recording.recording_data(r), recording.recording_size(r), 1))
+
+    // An empty session: no frames, nothing to play.
+    p = recording.create_player(recording.recording_data(r), recording.recording_size(r), 1)
+    ensure("empty: plays", p != null)
+    if p != null {
+        ensure("empty: no frames", recording.player_frame_count(p) == 0 && recording.player_step_frame(p) == false && recording.player_at_end(p))
+        ensure("empty: no divergence", recording.player_has_diverged(p) == false)
+        recording.destroy_player(p)
+    }
+    dynamics.destroy_world(world_id)
+    recording.destroy_recording(r)
+    recording.destroy_recording(other)
+}
+
+// The geometry a session names, each block once however often or from
+// however many copies it is used.
+registry_count(r: *Recording) -> int {
+    data = recording.recording_data(r)
+    holder = 0
+    memcpy((&holder) as ptr, data + 12, 4)
+    offset = holder
+    memcpy((&holder) as ptr, data + offset, 4)
+    return holder
+}
+
+geometry_dedup() {
+    wdef = world_def()
+    world_id = dynamics.create_world(&wdef)
+    r = recording.create_recording()
+    recording.start_recording(world_id, r)
+    sdef = dynamics.default_shape_def()
+    first = hull.make_box_hull(0.5, 0.5, 0.5)
+    twin = hull.make_box_hull(0.5, 0.5, 0.5)
+    other = hull.make_box_hull(0.5, 0.25, 0.5)
+    i = 0
+    while i < 10 {
+        b = dynamic_body(world_id, math.vec3(1.1 * (i as float), 1.0, 0.0))
+        if i % 2 == 0 { dynamics.create_hull_shape(b, &sdef, first) } else { dynamics.create_hull_shape(b, &sdef, twin) }
+        i = i + 1
+    }
+    dynamics.create_hull_shape(dynamic_body(world_id, math.vec3(0.0, 3.0, 0.0)), &sdef, other)
+    steps(world_id, 5)
+    recording.stop_recording(world_id)
+    ensure("dedup: two blocks for eleven shapes (${registry_count(r)})", registry_count(r) == 2)
+    ensure("dedup: replays", recording.validate_replay(recording.recording_data(r), recording.recording_size(r), 1))
+    hull.destroy_hull(first)
+    hull.destroy_hull(twin)
+    hull.destroy_hull(other)
+    dynamics.destroy_world(world_id)
+    recording.destroy_recording(r)
+}
+
+// Seeking: backward and forward through keyframes, the world at every
+// frame as it was the first time through.
+seeking() {
+    g_victims = calloc(8, sizeof(BodyId))
+    g_hinge = calloc(1, sizeof(JointId))
+    hashes = calloc(201, 8)
+    wdef = world_def()
+    world_id = dynamics.create_world(&wdef)
+    r = recording.create_recording()
+    record_session(world_id, r, true, 0, 100, hashes)
+    dynamics.destroy_world(world_id)
+    each = hashes as long[]
+    p = recording.create_player(recording.recording_data(r), recording.recording_size(r), 1)
+    ensure("seek: the default policy", recording.player_keyframe_interval(p) == 16 && recording.player_keyframe_min_interval(p) == 16 && recording.player_keyframe_budget(p) == (536870912 as long))
+    recording.player_set_keyframe_policy(p, (1 << 30) as long, 8)
+    stable = recording.player_world(p)
+    while recording.player_step_frame(p) {}
+    ensure("seek: a keyframe every 8 frames (${recording.player_keyframe_count(p)})", recording.player_keyframe_count(p) == 12 && recording.player_keyframe_bytes(p) > (0 as long) && recording.player_keyframe_interval(p) == 8)
+    targets = [77, 3, 64, 0, 100, 41, 41, 8, 99, 16, 15, 250, 0 - 5]
+    good = 0
+    i = 0
+    while i < 13 {
+        recording.player_seek_frame(p, targets[i])
+        expected = math.clamp_int(targets[i], 0, 100)
+        if recording.player_frame(p) == expected && state_hash(recording.player_world(p)) == each[expected] { good = good + 1 }
+        else { println("seek: frame ${targets[i]} landed at ${recording.player_frame(p)}") }
+        i = i + 1
+    }
+    ensure("seek: every frame as recorded (${good} of 13)", good == 13)
+    ensure("seek: no divergence", recording.player_has_diverged(p) == false && recording.player_failed(p) == false)
+    ensure("seek: the world kept its id", recording.player_world(p).index1 == stable.index1 && recording.player_world(p).generation == stable.generation)
+    recording.player_restart(p)
+    ensure("seek: restart at frame 0", recording.player_frame(p) == 0 && state_hash(recording.player_world(p)) == each[0])
+    recording.destroy_player(p)
+
+    // No keyframe within reach: seeking back replays from the start.
+    p = recording.create_player(recording.recording_data(r), recording.recording_size(r), 1)
+    recording.player_set_keyframe_policy(p, 0 as long, 1000)
+    recording.player_seek_frame(p, 90)
+    recording.player_seek_frame(p, 25)
+    ensure("seek without keyframes: frame 25 as recorded", recording.player_frame(p) == 25 && state_hash(recording.player_world(p)) == each[25] && recording.player_keyframe_count(p) == 0)
+    recording.destroy_player(p)
+
+    // A budget of a few keyframes: the spacing widens to stay under it, and
+    // the keyframes left still land on the recorded frames.
+    p = recording.create_player(recording.recording_data(r), recording.recording_size(r), 1)
+    recording.player_set_keyframe_policy(p, (1 << 30) as long, 4)
+    recording.player_seek_frame(p, 5)
+    one = recording.player_keyframe_bytes(p)
+    recording.player_set_keyframe_policy(p, one * (3 as long), 4)
+    recording.player_restart(p)
+    while recording.player_step_frame(p) {}
+    ensure("budget: the spacing widened (${recording.player_keyframe_interval(p)})", recording.player_keyframe_interval(p) > 4 && recording.player_keyframe_min_interval(p) == 4)
+    ensure("budget: few keyframes kept (${recording.player_keyframe_count(p)})", recording.player_keyframe_count(p) >= 1 && recording.player_keyframe_count(p) <= 4)
+    good = 0
+    i = 0
+    while i < 13 {
+        recording.player_seek_frame(p, targets[i])
+        expected = math.clamp_int(targets[i], 0, 100)
+        if recording.player_frame(p) == expected && state_hash(recording.player_world(p)) == each[expected] { good = good + 1 }
+        i = i + 1
+    }
+    ensure("budget: every frame as recorded (${good} of 13)", good == 13)
+    recording.destroy_player(p)
+    recording.destroy_recording(r)
+    free(hashes)
+    free(g_victims)
+    free(g_hinge)
+}
+
+// A recording saved to a file and read back plays the same.
+files() {
+    g_victims = calloc(8, sizeof(BodyId))
+    g_hinge = calloc(1, sizeof(JointId))
+    hashes = calloc(201, 8)
+    wdef = world_def()
+    world_id = dynamics.create_world(&wdef)
+    r = recording.create_recording()
+    record_session(world_id, r, true, 0, 60, hashes)
+    dynamics.destroy_world(world_id)
+    ensure("file: saved", recording.save_recording_to_file(r, "target/recording.aprc"))
+    loaded = recording.load_recording_from_file("target/recording.aprc")
+    ensure("file: read back", loaded != null && recording.recording_size(loaded) == recording.recording_size(r))
+    if loaded != null {
+        ensure("file: the same bytes", memcmp(recording.recording_data(loaded), recording.recording_data(r), recording.recording_size(r)) == 0)
+        replay_matches("file", loaded, 60, hashes, 2)
+        recording.destroy_recording(loaded)
+    }
+    ensure("file: no such file", recording.load_recording_from_file("target/no_such_recording.aprc") == null)
+    empty = recording.create_recording()
+    ensure("file: nothing to save", recording.save_recording_to_file(empty, "target/empty.aprc") == false)
+    recording.destroy_recording(empty)
+    recording.destroy_recording(r)
+    free(hashes)
+    free(g_victims)
+    free(g_hinge)
+}
+
+poke_int(data: ptr, at: int, value: int) {
+    holder = value
+    memcpy(data + at, (&holder) as ptr, 4)
+}
+
+peek_int(data: ptr, at: int) -> int {
+    holder = 0
+    memcpy((&holder) as ptr, data + at, 4)
+    return holder
+}
+
+// Bytes that are not a recording load no player and leave nothing
+// allocated; a record the player does not know is skipped; a record that
+// does not read whole, or a create that makes another id, stops the
+// replay; a state hash that differs marks the frame it was found at.
+corruptions() {
+    g_victims = calloc(8, sizeof(BodyId))
+    g_hinge = calloc(1, sizeof(JointId))
+    hashes = calloc(201, 8)
+    wdef = world_def()
+    world_id = dynamics.create_world(&wdef)
+    r = recording.create_recording()
+    record_session(world_id, r, true, 0, 30, hashes)
+    dynamics.destroy_world(world_id)
+    size = recording.recording_size(r)
+    copy = calloc(size, 1)
+    // Warm-up: the solver's lazy buffers are not a leak.
+    warm = recording.create_player(recording.recording_data(r), size, 1)
+    while recording.player_step_frame(warm) {}
+    recording.destroy_player(warm)
+    before = basics.alloc_count()
+
+    refused = 0
+    tries = 0
+    cut = 0
+    while cut < size {
+        p = recording.create_player(recording.recording_data(r), cut, 1)
+        if p == null { refused = refused + 1 } else { recording.destroy_player(p) }
+        tries = tries + 1
+        cut = cut + 1 + cut / 7
+    }
+    ensure("truncated: every cut refused (${refused} of ${tries})", refused == tries)
+
+    memcpy(copy, recording.recording_data(r), size)
+    poke_int(copy, 0, 0x12345678)
+    ensure("bad magic refused", recording.create_player(copy, size, 1) == null)
+    memcpy(copy, recording.recording_data(r), size)
+    poke_int(copy, 4, 99)
+    ensure("bad version refused", recording.create_player(copy, size, 1) == null)
+    memcpy(copy, recording.recording_data(r), size)
+    poke_int(copy, 12, size - 2)
+    ensure("bad registry offset refused", recording.create_player(copy, size, 1) == null)
+    memcpy(copy, recording.recording_data(r), size)
+    poke_int(copy, peek_int(copy, 12), 1000000)
+    ensure("bad registry count refused", recording.create_player(copy, size, 1) == null)
+    memcpy(copy, recording.recording_data(r), size)
+    poke_int(copy, peek_int(copy, 12) + 8, 0x7fffffff)
+    ensure("bad geometry size refused", recording.create_player(copy, size, 1) == null)
+    memcpy(copy, recording.recording_data(r), size)
+    poke_int(copy, peek_int(copy, 12) + 12, 0x7fffffff)
+    ensure("bad geometry bytes refused", recording.create_player(copy, size, 1) == null)
+    memcpy(copy, recording.recording_data(r), size)
+    poke_int(copy, 8, 7)
+    ensure("bad snapshot size refused", recording.create_player(copy, size, 1) == null)
+
+    // The first record after the snapshot and its state hash.
+    first = 32 + peek_int(recording.recording_data(r), 8)
+    second = first + 8 + peek_int(recording.recording_data(r), first + 4)
+    memcpy(copy, recording.recording_data(r), size)
+    poke_int(copy, second + 4, 0x7fffffff)
+    ensure("bad record length refused", recording.create_player(copy, size, 1) == null)
+
+    // The bounds record made one this player does not know: skipped.
+    bounds_at = 0 - 1
+    at = first
+    while at < peek_int(recording.recording_data(r), 12) {
+        if peek_int(recording.recording_data(r), at) == dynamics.OP_BOUNDS { bounds_at = at }
+        at = at + 8 + peek_int(recording.recording_data(r), at + 4)
+    }
+    memcpy(copy, recording.recording_data(r), size)
+    poke_int(copy, bounds_at, 9999)
+    ensure("unknown record: skipped", recording.validate_replay(copy, size, 1))
+
+    // The first call skipped: the creates after it make other ids.
+    memcpy(copy, recording.recording_data(r), size)
+    poke_int(copy, second, 9999)
+    p = recording.create_player(copy, size, 1)
+    ensure("other ids: loads", p != null)
+    if p != null {
+        while recording.player_step_frame(p) {}
+        ensure("other ids: failed in frame 1, stopped", recording.player_failed(p) && recording.player_at_end(p) && recording.player_frame(p) == 0)
+        recording.player_restart(p)
+        ensure("other ids: a restart clears it", recording.player_failed(p) == false && recording.player_at_end(p) == false)
+        recording.destroy_player(p)
+    }
+    ensure("other ids: does not validate", recording.validate_replay(copy, size, 1) == false)
+
+    // The first create's recorded id changed.
+    memcpy(copy, recording.recording_data(r), size)
+    third = second + 8 + peek_int(copy, second + 4)
+    poke_int(copy, third - 4, peek_int(copy, third - 4) + 1)
+    ensure("changed id: does not validate", recording.validate_replay(copy, size, 1) == false)
+
+    // A call's record taken for a state check: it does not read whole.
+    memcpy(copy, recording.recording_data(r), size)
+    poke_int(copy, second, dynamics.OP_STATE_HASH)
+    p = recording.create_player(copy, size, 1)
+    recording.player_step_frame(p)
+    ensure("short read: failed", recording.player_failed(p) && recording.player_at_end(p))
+    recording.destroy_player(p)
+
+    // A state hash changed at frame 12: the divergence is found there.
+    memcpy(copy, recording.recording_data(r), size)
+    at = first
+    hashes_seen = 0
+    while at < peek_int(copy, 12) && hashes_seen < 13 {
+        if peek_int(copy, at) == dynamics.OP_STATE_HASH {
+            hashes_seen = hashes_seen + 1
+            if hashes_seen == 13 { poke_int(copy, at + 8, peek_int(copy, at + 8) ^ 1) }
+        }
+        at = at + 8 + peek_int(copy, at + 4)
+    }
+    p = recording.create_player(copy, size, 1)
+    while recording.player_step_frame(p) {}
+    ensure("changed hash: diverged at frame 12 (${recording.player_diverge_frame(p)})", recording.player_has_diverged(p) && recording.player_diverge_frame(p) == 12)
+    ensure("changed hash: played on to the end", recording.player_frame(p) == 30)
+    recording.player_seek_frame(p, 20)
+    ensure("changed hash: kept by the keyframe after it", recording.player_has_diverged(p) && recording.player_diverge_frame(p) == 12 && recording.player_frame(p) == 20)
+    recording.player_seek_frame(p, 5)
+    ensure("changed hash: forgotten before it", recording.player_has_diverged(p) == false && recording.player_diverge_frame(p) < 0)
+    recording.destroy_player(p)
+    ensure("changed hash: does not validate", recording.validate_replay(copy, size, 1) == false)
+
+    ensure("corruptions: nothing left allocated (${basics.alloc_count() - before})", basics.alloc_count() == before)
+    free(copy)
+    recording.destroy_recording(r)
+    free(hashes)
+    free(g_victims)
+    free(g_hinge)
+}
+
+// --- every call the recording carries ---------------------------------------------------------------
+
+// Two boxes side by side for a joint.
+pair_bodies(world_id: WorldId, x: float) -> (BodyId, BodyId) {
+    sdef = dynamics.default_shape_def()
+    a = dynamic_body(world_id, math.vec3(x, 2.0, 0.0 - 8.0))
+    dynamics.create_hull_shape(a, &sdef, g_box as *HullData)
+    b = dynamic_body(world_id, math.vec3(x, 2.0, 0.0 - 6.8))
+    dynamics.create_hull_shape(b, &sdef, g_box as *HullData)
+    return a, b
+}
+
+joint_base(a: BodyId, b: BodyId) -> JointDef {
+    base = dynamics.default_joint_def()
+    base.body_id_a = a
+    base.body_id_b = b
+    base.local_frame_a = Transform { p: math.vec3(0.0, 0.0, 0.6), q: math.quat_identity() }
+    base.local_frame_b = Transform { p: math.vec3(0.0, 0.0, 0.0 - 0.6), q: math.quat_identity() }
+    return base
+}
+
+// The records of a recording, each opcode marked in `seen` (int[4096]).
+mark_ops(r: *Recording, seen: ptr) {
+    data = recording.recording_data(r)
+    marks = seen as int[]
+    at = 32 + peek_int(data, 8)
+    end = peek_int(data, 12)
+    while at < end {
+        op = peek_int(data, at)
+        if op >= 0 && op < 4096 { marks[op] = 1 }
+        at = at + 8 + peek_int(data, at + 4)
+    }
+}
+
+// Every recorded call made once (Box3D's AllOps), steps between them: the
+// recording holds every opcode there is and plays back to the same world.
+all_ops() {
+    fixtures_ready()
+    wdef = world_def()
+    world_id = dynamics.create_world(&wdef)
+    r = recording.create_recording()
+    recording.start_recording(world_id, r)
+    sdef = dynamics.default_shape_def()
+    tinted = material.default_surface_material()
+    tinted.friction = 0.35
+    tinted.restitution = 0.2
+    blast = physics_world.default_explosion_def()
+    blast.position = math.vec3(0.0, 1.0, 0.0)
+    blast.radius = 2.0
+    blast.falloff = 0.5
+    blast.impulse_per_area = 2.0
+
+    ground = static_body(world_id, math.vec3(0.0, 0.0 - 1.0, 0.0), "ground")
+    floor_hull = hull.make_box_hull(20.0, 1.0, 20.0)
+    dynamics.create_hull_shape(ground, &sdef, floor_hull)
+    hull.destroy_hull(floor_hull)
+    materials_block = calloc(3, sizeof(SurfaceMaterial))
+    materials = materials_block as SurfaceMaterial[]
+    k = 0
+    while k < 3 {
+        materials[k] = material.default_surface_material()
+        materials[k].friction = 0.1 + 0.2 * (k as float)
+        k = k + 1
+    }
+    mdef = dynamics.default_shape_def()
+    mdef.materials = materials_block
+    mdef.material_count = 3
+    mesh_shape = dynamics.create_mesh_shape(static_body(world_id, math.vec3(8.0, 0.0, 0.0 - 4.0), "waves"), &mdef, g_wave as *MeshData, math.vec3_one())
+    free(materials_block)
+    dynamics.create_height_field_shape(static_body(world_id, math.vec3(0.0 - 14.0, 0.0, 0.0 - 6.0), "field"), &sdef, g_field as *HeightFieldData)
+    dynamics.create_compound_shape(static_body(world_id, math.vec3(0.0 - 6.0, 0.4, 6.0), "compound"), &sdef, g_compound as *CompoundData)
+
+    subject = dynamic_body(world_id, math.vec3(0.0, 2.0, 0.0))
+    sphere_shape = dynamics.create_sphere_shape(subject, &sdef, manifold.sphere(math.vec3_zero(), 0.3))
+    capsule_shape = dynamics.create_capsule_shape(dynamic_body(world_id, math.vec3(1.5, 2.0, 0.0)), &sdef, Capsule { center1: math.vec3(0.0 - 0.2, 0.0, 0.0), center2: math.vec3(0.2, 0.0, 0.0), radius: 0.2 })
+    hull_shape = dynamics.create_hull_shape(dynamic_body(world_id, math.vec3(0.0 - 1.5, 2.0, 0.0)), &sdef, g_box as *HullData)
+    heavy = dynamic_body(world_id, math.vec3(3.0, 2.0, 0.0))
+    dynamics.create_hull_shape(heavy, &sdef, g_box as *HullData)
+    spare = dynamic_body(world_id, math.vec3(0.0 - 3.0, 2.0, 0.0))
+    kdef = dynamics.default_body_def()
+    kdef.kind = dynamics.BODY_KINEMATIC
+    kdef.position = math.vec3(0.0 - 3.0, 0.5, 3.0)
+    paddle = dynamics.create_body(world_id, &kdef)
+    dynamics.create_hull_shape(paddle, &sdef, g_box as *HullData)
+
+    a, b = pair_bodies(world_id, 0.0 - 8.0)
+    distance_def = dynamics.default_distance_joint_def()
+    distance_def.base = joint_base(a, b)
+    distance_def.length = 0.5
+    j_distance = dynamics.create_distance_joint(world_id, &distance_def)
+    a, b = pair_bodies(world_id, 0.0 - 6.0)
+    motor_def = dynamics.default_motor_joint_def()
+    motor_def.base = joint_base(a, b)
+    j_motor = dynamics.create_motor_joint(world_id, &motor_def)
+    a, b = pair_bodies(world_id, 0.0 - 4.0)
+    filter_def = dynamics.default_filter_joint_def()
+    filter_def.base = joint_base(a, b)
+    j_filter = dynamics.create_filter_joint(world_id, &filter_def)
+    a, b = pair_bodies(world_id, 0.0 - 2.0)
+    parallel_def = dynamics.default_parallel_joint_def()
+    parallel_def.base = joint_base(a, b)
+    j_parallel = dynamics.create_parallel_joint(world_id, &parallel_def)
+    a, b = pair_bodies(world_id, 0.0)
+    prismatic_def = dynamics.default_prismatic_joint_def()
+    prismatic_def.base = joint_base(a, b)
+    j_prismatic = dynamics.create_prismatic_joint(world_id, &prismatic_def)
+    a, b = pair_bodies(world_id, 2.0)
+    revolute_def = dynamics.default_revolute_joint_def()
+    revolute_def.base = joint_base(a, b)
+    j_revolute = dynamics.create_revolute_joint(world_id, &revolute_def)
+    a, b = pair_bodies(world_id, 4.0)
+    spherical_def = dynamics.default_spherical_joint_def()
+    spherical_def.base = joint_base(a, b)
+    j_spherical = dynamics.create_spherical_joint(world_id, &spherical_def)
+    a, b = pair_bodies(world_id, 6.0)
+    weld_def = dynamics.default_weld_joint_def()
+    weld_def.base = joint_base(a, b)
+    j_weld = dynamics.create_weld_joint(world_id, &weld_def)
+    a, b = pair_bodies(world_id, 8.0)
+    wheel_def = dynamics.default_wheel_joint_def()
+    wheel_def.base = joint_base(a, b)
+    j_wheel = dynamics.create_wheel_joint(world_id, &wheel_def)
+    physics_world.step(world_id, 1.0 / 60.0, 4)
+
+    dynamics.body_set_transform(subject, math.vec3(0.0, 3.0, 0.0), math.make_quat_from_axis_angle(math.vec3(0.0, 0.0, 1.0), 0.3))
+    dynamics.body_set_linear_velocity(subject, math.vec3(0.1, 0.4, 0.2))
+    dynamics.body_set_angular_velocity(subject, math.vec3(0.1, 0.4, 0.2))
+    dynamics.body_set_target_transform(paddle, Transform { p: math.vec3(0.0 - 2.0, 0.6, 3.0), q: math.quat_identity() }, 1.0 / 60.0, true)
+    dynamics.body_apply_force(subject, math.vec3(3.0, 0.0, 0.0), math.vec3(0.1, 3.0, 0.0), true)
+    dynamics.body_apply_force_to_center(subject, math.vec3(0.1, 0.4, 0.2), true)
+    physics_world.step(world_id, 1.0 / 60.0, 4)
+    dynamics.body_apply_torque(subject, math.vec3(0.1, 0.4, 0.2), true)
+    dynamics.body_apply_linear_impulse(subject, math.vec3(0.0, 0.5, 0.0), math.vec3(0.1, 3.0, 0.0), true)
+    dynamics.body_apply_linear_impulse_to_center(subject, math.vec3(0.1, 0.4, 0.2), true)
+    dynamics.body_apply_angular_impulse(subject, math.vec3(0.1, 0.4, 0.2), true)
+    dynamics.body_set_bullet(subject, true)
+    dynamics.body_set_mass_data(heavy, MassData { mass: 3.0, center: math.vec3(0.0, 0.1, 0.0), inertia: math.mul_sm(0.2, math.mat3_identity()) })
+    physics_world.step(world_id, 1.0 / 60.0, 4)
+    dynamics.body_apply_mass_from_shapes(heavy)
+    dynamics.body_set_linear_damping(subject, 0.75)
+    dynamics.body_set_angular_damping(subject, 0.75)
+    dynamics.body_set_gravity_scale(subject, 0.75)
+    dynamics.body_set_awake(subject, true)
+    dynamics.body_enable_sleep(subject, true)
+    physics_world.step(world_id, 1.0 / 60.0, 4)
+    dynamics.body_set_sleep_threshold(subject, 0.04)
+    dynamics.body_set_motion_locks(heavy, MotionLocks { linear_x: false, linear_y: false, linear_z: true, angular_x: true, angular_y: false, angular_z: false })
+    dynamics.create_transformed_hull_shape(spare, &sdef, g_box as *HullData, Transform { p: math.vec3(0.0, 0.2, 0.0), q: math.quat_identity() }, math.vec3(1.0, 0.5, 2.0))
+    dynamics.shape_set_density(sphere_shape, 2.0, true)
+    dynamics.shape_set_filter(sphere_shape, Filter { category_bits: 3 as long, mask_bits: 0 - (1 as long), group_index: 0 - 2 })
+    dynamics.shape_set_surface_material(sphere_shape, tinted)
+    physics_world.step(world_id, 1.0 / 60.0, 4)
+    dynamics.shape_set_sphere(sphere_shape, manifold.sphere(math.vec3(0.0, 0.05, 0.0), 0.35))
+    dynamics.shape_set_capsule(capsule_shape, Capsule { center1: math.vec3(0.0 - 0.3, 0.0, 0.0), center2: math.vec3(0.3, 0.0, 0.0), radius: 0.15 })
+    dynamics.shape_set_hull(hull_shape, g_rock as *HullData)
+    dynamics.shape_set_mesh(mesh_shape, g_wave as *MeshData, math.vec3(1.0, 0.8, 1.0))
+    dynamics.shape_set_friction(hull_shape, 0.3)
+    dynamics.shape_set_restitution(hull_shape, 0.4)
+    physics_world.step(world_id, 1.0 / 60.0, 4)
+    dynamics.shape_set_mesh_material(mesh_shape, tinted, 1)
+    dynamics.shape_enable_pre_solve_events(sphere_shape, true)
+    dynamics.body_enable_hit_events(subject, true)
+    dynamics.body_allow_fast_rotation(subject, true)
+    dynamics.body_enable_contact_recycling(subject, true)
+    dynamics.body_set_safety_factor(subject, 0.3)
+    physics_world.step(world_id, 1.0 / 60.0, 4)
+    dynamics.shape_apply_wind(sphere_shape, math.vec3(2.0, 0.0, 1.0), 1.2, 0.5, 0.1, true)
+    dynamics.body_set_name(subject, "subject")
+    dynamics.shape_set_name(sphere_shape, "ball")
+    dynamics.joint_set_local_frame_a(j_revolute, Transform { p: math.vec3(0.0, 0.0, 0.62), q: math.quat_identity() })
+    dynamics.joint_set_local_frame_b(j_revolute, Transform { p: math.vec3(0.0, 0.0, 0.0 - 0.62), q: math.quat_identity() })
+    dynamics.joint_set_collide_connected(j_distance, true)
+    physics_world.step(world_id, 1.0 / 60.0, 4)
+    dynamics.joint_wake_bodies(j_wheel)
+    dynamics.joint_set_constraint_tuning(j_weld, 60.0, 5.0)
+    dynamics.joint_set_force_threshold(j_weld, 1000.0)
+    dynamics.joint_set_torque_threshold(j_weld, 1000.0)
+    dynamics.shape_enable_sensor_events(sphere_shape, true)
+    dynamics.shape_enable_contact_events(sphere_shape, true)
+    physics_world.step(world_id, 1.0 / 60.0, 4)
+    dynamics.shape_enable_hit_events(sphere_shape, true)
+    physics_world.enable_sleeping(world_id, true)
+    physics_world.enable_warm_starting(world_id, true)
+    physics_world.enable_continuous(world_id, true)
+    physics_world.enable_speculative(world_id, true)
+    physics_world.set_restitution_threshold(world_id, 0.8)
+    physics_world.step(world_id, 1.0 / 60.0, 4)
+    physics_world.set_restitution_iterations(world_id, 3)
+    physics_world.enable_restitution_propagation(world_id, true)
+    physics_world.enable_kinematic_static_softness(world_id, true)
+    physics_world.set_hit_event_threshold(world_id, 0.5)
+    physics_world.set_contact_tuning(world_id, 25.0, 8.0, 2.5)
+    physics_world.set_contact_recycle_distance(world_id, 0.02)
+    physics_world.step(world_id, 1.0 / 60.0, 4)
+    physics_world.set_maximum_linear_speed(world_id, 200.0)
+    physics_world.set_gravity(world_id, math.vec3(0.2, 0.0 - 9.5, 0.0))
+    physics_world.rebuild_static_tree(world_id)
+    physics_world.explode(world_id, &blast)
+    joint_solver.distance_joint_set_length(j_distance, 0.75)
+    joint_solver.distance_joint_enable_limit(j_distance, true)
+    physics_world.step(world_id, 1.0 / 60.0, 4)
+    joint_solver.distance_joint_set_length_range(j_distance, 0.3, 0.9)
+    joint_solver.distance_joint_enable_spring(j_distance, true)
+    joint_solver.distance_joint_set_spring_force_range(j_distance, 0.0 - 50.0, 50.0)
+    joint_solver.distance_joint_set_spring_hertz(j_distance, 0.75)
+    joint_solver.distance_joint_set_spring_damping_ratio(j_distance, 0.75)
+    joint_solver.distance_joint_enable_motor(j_distance, true)
+    physics_world.step(world_id, 1.0 / 60.0, 4)
+    joint_solver.distance_joint_set_motor_speed(j_distance, 0.75)
+    joint_solver.distance_joint_set_max_motor_force(j_distance, 0.75)
+    joint_solver.motor_joint_set_linear_velocity(j_motor, math.vec3(0.1, 0.4, 0.2))
+    joint_solver.motor_joint_set_angular_velocity(j_motor, math.vec3(0.1, 0.4, 0.2))
+    joint_solver.motor_joint_set_max_velocity_torque(j_motor, 0.75)
+    joint_solver.motor_joint_set_max_velocity_force(j_motor, 0.75)
+    physics_world.step(world_id, 1.0 / 60.0, 4)
+    joint_solver.motor_joint_set_linear_hertz(j_motor, 0.75)
+    joint_solver.motor_joint_set_linear_damping_ratio(j_motor, 0.75)
+    joint_solver.motor_joint_set_angular_hertz(j_motor, 0.75)
+    joint_solver.motor_joint_set_angular_damping_ratio(j_motor, 0.75)
+    joint_solver.motor_joint_set_max_spring_force(j_motor, 0.75)
+    joint_solver.motor_joint_set_max_spring_torque(j_motor, 0.75)
+    physics_world.step(world_id, 1.0 / 60.0, 4)
+    joint_solver.parallel_joint_set_spring_hertz(j_parallel, 0.75)
+    joint_solver.parallel_joint_set_spring_damping_ratio(j_parallel, 0.75)
+    joint_solver.parallel_joint_set_max_torque(j_parallel, 0.75)
+    joint_solver.prismatic_joint_enable_spring(j_prismatic, true)
+    joint_solver.prismatic_joint_set_spring_hertz(j_prismatic, 0.75)
+    joint_solver.prismatic_joint_set_spring_damping_ratio(j_prismatic, 0.75)
+    physics_world.step(world_id, 1.0 / 60.0, 4)
+    joint_solver.prismatic_joint_set_target_translation(j_prismatic, 0.75)
+    joint_solver.prismatic_joint_enable_limit(j_prismatic, true)
+    joint_solver.prismatic_joint_set_limits(j_prismatic, 0.0 - 0.25, 0.35)
+    joint_solver.prismatic_joint_enable_motor(j_prismatic, true)
+    joint_solver.prismatic_joint_set_motor_speed(j_prismatic, 0.75)
+    joint_solver.prismatic_joint_set_max_motor_force(j_prismatic, 0.75)
+    physics_world.step(world_id, 1.0 / 60.0, 4)
+    joint_solver.revolute_joint_enable_limit(j_revolute, true)
+    joint_solver.revolute_joint_set_limits(j_revolute, 0.0 - 0.6, 0.7)
+    joint_solver.revolute_joint_enable_spring(j_revolute, true)
+    joint_solver.revolute_joint_set_target_angle(j_revolute, 0.75)
+    joint_solver.revolute_joint_set_spring_hertz(j_revolute, 0.75)
+    joint_solver.revolute_joint_set_spring_damping_ratio(j_revolute, 0.75)
+    physics_world.step(world_id, 1.0 / 60.0, 4)
+    joint_solver.revolute_joint_enable_motor(j_revolute, true)
+    joint_solver.revolute_joint_set_motor_speed(j_revolute, 0.75)
+    joint_solver.revolute_joint_set_max_motor_torque(j_revolute, 0.75)
+    joint_solver.spherical_joint_enable_cone_limit(j_spherical, true)
+    joint_solver.spherical_joint_set_cone_limit(j_spherical, 0.75)
+    joint_solver.spherical_joint_set_cone_axis(j_spherical, math.vec3(0.1, 0.4, 0.2))
+    physics_world.step(world_id, 1.0 / 60.0, 4)
+    joint_solver.spherical_joint_set_cone_ellipse(j_spherical, 0.5, 0.3, math.vec3(1.0, 0.0, 0.0))
+    joint_solver.spherical_joint_enable_twist_limit(j_spherical, true)
+    joint_solver.spherical_joint_set_twist_limits(j_spherical, 0.0 - 0.4, 0.5)
+    joint_solver.spherical_joint_enable_spring(j_spherical, true)
+    joint_solver.spherical_joint_set_target_rotation(j_spherical, math.make_quat_from_axis_angle(math.vec3(0.0, 1.0, 0.0), 0.25))
+    joint_solver.spherical_joint_set_spring_hertz(j_spherical, 0.75)
+    physics_world.step(world_id, 1.0 / 60.0, 4)
+    joint_solver.spherical_joint_set_spring_damping_ratio(j_spherical, 0.75)
+    joint_solver.spherical_joint_enable_motor(j_spherical, true)
+    joint_solver.spherical_joint_set_motor_velocity(j_spherical, math.vec3(0.1, 0.4, 0.2))
+    joint_solver.spherical_joint_set_max_motor_torque(j_spherical, 0.75)
+    joint_solver.weld_joint_set_linear_hertz(j_weld, 0.75)
+    joint_solver.weld_joint_set_linear_damping_ratio(j_weld, 0.75)
+    physics_world.step(world_id, 1.0 / 60.0, 4)
+    joint_solver.weld_joint_set_angular_hertz(j_weld, 0.75)
+    joint_solver.weld_joint_set_angular_damping_ratio(j_weld, 0.75)
+    joint_solver.wheel_joint_enable_suspension(j_wheel, true)
+    joint_solver.wheel_joint_set_suspension_hertz(j_wheel, 0.75)
+    joint_solver.wheel_joint_set_suspension_damping_ratio(j_wheel, 0.75)
+    joint_solver.wheel_joint_enable_suspension_limit(j_wheel, true)
+    physics_world.step(world_id, 1.0 / 60.0, 4)
+    joint_solver.wheel_joint_set_suspension_limits(j_wheel, 0.0 - 0.2, 0.2)
+    joint_solver.wheel_joint_enable_spin_motor(j_wheel, true)
+    joint_solver.wheel_joint_set_spin_motor_speed(j_wheel, 0.75)
+    joint_solver.wheel_joint_set_max_spin_torque(j_wheel, 0.75)
+    joint_solver.wheel_joint_enable_steering(j_wheel, true)
+    joint_solver.wheel_joint_set_steering_hertz(j_wheel, 0.75)
+    physics_world.step(world_id, 1.0 / 60.0, 4)
+    joint_solver.wheel_joint_set_steering_damping_ratio(j_wheel, 0.75)
+    joint_solver.wheel_joint_set_max_steering_torque(j_wheel, 0.75)
+    joint_solver.wheel_joint_enable_steering_limit(j_wheel, true)
+    joint_solver.wheel_joint_set_steering_limits(j_wheel, 0.0 - 0.5, 0.5)
+    joint_solver.wheel_joint_set_target_steering_angle(j_wheel, 0.75)
+    dynamics.destroy_body(spare)
+    physics_world.step(world_id, 1.0 / 60.0, 4)
+    dynamics.destroy_shape(capsule_shape, true)
+    dynamics.destroy_joint(j_filter, true)
+    dynamics.body_set_type(heavy, dynamics.BODY_KINEMATIC)
+    dynamics.body_disable(heavy)
+    dynamics.body_enable(heavy)
+    physics_world.step(world_id, 1.0 / 60.0, 4)
+    steps(world_id, 20)
+    final_hash = state_hash(world_id)
+    recording.stop_recording(world_id)
+    dynamics.destroy_world(world_id)
+
+    // Every opcode a recording has.
+    all_op_count = 160
+    all_ops_list = [
+        dynamics.OP_CREATE_BODY, dynamics.OP_DESTROY_BODY, dynamics.OP_BODY_SET_TRANSFORM,
+        dynamics.OP_BODY_SET_LINEAR_VELOCITY, dynamics.OP_BODY_SET_ANGULAR_VELOCITY,
+        dynamics.OP_BODY_SET_TARGET_TRANSFORM, dynamics.OP_BODY_APPLY_FORCE, dynamics.OP_BODY_APPLY_FORCE_TO_CENTER,
+        dynamics.OP_BODY_APPLY_TORQUE, dynamics.OP_BODY_APPLY_LINEAR_IMPULSE,
+        dynamics.OP_BODY_APPLY_LINEAR_IMPULSE_TO_CENTER, dynamics.OP_BODY_APPLY_ANGULAR_IMPULSE,
+        dynamics.OP_BODY_SET_BULLET, dynamics.OP_BODY_SET_MASS_DATA, dynamics.OP_BODY_APPLY_MASS_FROM_SHAPES,
+        dynamics.OP_BODY_SET_LINEAR_DAMPING, dynamics.OP_BODY_SET_ANGULAR_DAMPING,
+        dynamics.OP_BODY_SET_GRAVITY_SCALE, dynamics.OP_BODY_SET_AWAKE, dynamics.OP_BODY_ENABLE_SLEEP,
+        dynamics.OP_BODY_SET_SLEEP_THRESHOLD, dynamics.OP_BODY_SET_MOTION_LOCKS, dynamics.OP_CREATE_SPHERE_SHAPE,
+        dynamics.OP_CREATE_CAPSULE_SHAPE, dynamics.OP_CREATE_HULL_SHAPE, dynamics.OP_CREATE_TRANSFORMED_HULL_SHAPE,
+        dynamics.OP_CREATE_MESH_SHAPE, dynamics.OP_CREATE_HEIGHT_FIELD_SHAPE, dynamics.OP_CREATE_COMPOUND_SHAPE,
+        dynamics.OP_DESTROY_SHAPE, dynamics.OP_SHAPE_SET_DENSITY, dynamics.OP_SHAPE_SET_FILTER,
+        dynamics.OP_SHAPE_SET_SURFACE_MATERIAL, dynamics.OP_SHAPE_SET_SPHERE, dynamics.OP_SHAPE_SET_CAPSULE,
+        dynamics.OP_SHAPE_SET_HULL, dynamics.OP_SHAPE_SET_MESH, dynamics.OP_SHAPE_SET_FRICTION,
+        dynamics.OP_SHAPE_SET_RESTITUTION, dynamics.OP_SHAPE_SET_MESH_MATERIAL,
+        dynamics.OP_SHAPE_ENABLE_PRE_SOLVE_EVENTS, dynamics.OP_BODY_ENABLE_HIT_EVENTS,
+        dynamics.OP_BODY_ALLOW_FAST_ROTATION, dynamics.OP_BODY_ENABLE_CONTACT_RECYCLING,
+        dynamics.OP_BODY_SET_SAFETY_FACTOR, dynamics.OP_SHAPE_APPLY_WIND, dynamics.OP_BODY_SET_NAME,
+        dynamics.OP_SHAPE_SET_NAME, dynamics.OP_CREATE_DISTANCE_JOINT, dynamics.OP_CREATE_MOTOR_JOINT,
+        dynamics.OP_CREATE_FILTER_JOINT, dynamics.OP_CREATE_PARALLEL_JOINT, dynamics.OP_CREATE_PRISMATIC_JOINT,
+        dynamics.OP_CREATE_REVOLUTE_JOINT, dynamics.OP_CREATE_SPHERICAL_JOINT, dynamics.OP_CREATE_WELD_JOINT,
+        dynamics.OP_CREATE_WHEEL_JOINT, dynamics.OP_DESTROY_JOINT, dynamics.OP_JOINT_SET_LOCAL_FRAME_A,
+        dynamics.OP_JOINT_SET_LOCAL_FRAME_B, dynamics.OP_JOINT_SET_COLLIDE_CONNECTED, dynamics.OP_JOINT_WAKE_BODIES,
+        dynamics.OP_JOINT_SET_CONSTRAINT_TUNING, dynamics.OP_JOINT_SET_FORCE_THRESHOLD,
+        dynamics.OP_JOINT_SET_TORQUE_THRESHOLD, dynamics.OP_BODY_SET_TYPE, dynamics.OP_BODY_DISABLE,
+        dynamics.OP_BODY_ENABLE, dynamics.OP_SHAPE_ENABLE_SENSOR_EVENTS, dynamics.OP_SHAPE_ENABLE_CONTACT_EVENTS,
+        dynamics.OP_SHAPE_ENABLE_HIT_EVENTS, dynamics.OP_STEP, dynamics.OP_ENABLE_SLEEPING,
+        dynamics.OP_ENABLE_WARM_STARTING, dynamics.OP_ENABLE_CONTINUOUS, dynamics.OP_ENABLE_SPECULATIVE,
+        dynamics.OP_SET_RESTITUTION_THRESHOLD, dynamics.OP_SET_RESTITUTION_ITERATIONS,
+        dynamics.OP_ENABLE_RESTITUTION_PROPAGATION, dynamics.OP_ENABLE_KINEMATIC_STATIC_SOFTNESS,
+        dynamics.OP_SET_HIT_EVENT_THRESHOLD, dynamics.OP_SET_CONTACT_TUNING,
+        dynamics.OP_SET_CONTACT_RECYCLE_DISTANCE, dynamics.OP_SET_MAXIMUM_LINEAR_SPEED, dynamics.OP_SET_GRAVITY,
+        dynamics.OP_REBUILD_STATIC_TREE, dynamics.OP_EXPLODE, dynamics.OP_DISTANCE_JOINT_SET_LENGTH,
+        dynamics.OP_DISTANCE_JOINT_ENABLE_LIMIT, dynamics.OP_DISTANCE_JOINT_SET_LENGTH_RANGE,
+        dynamics.OP_DISTANCE_JOINT_ENABLE_SPRING, dynamics.OP_DISTANCE_JOINT_SET_SPRING_FORCE_RANGE,
+        dynamics.OP_DISTANCE_JOINT_SET_SPRING_HERTZ, dynamics.OP_DISTANCE_JOINT_SET_SPRING_DAMPING_RATIO,
+        dynamics.OP_DISTANCE_JOINT_ENABLE_MOTOR, dynamics.OP_DISTANCE_JOINT_SET_MOTOR_SPEED,
+        dynamics.OP_DISTANCE_JOINT_SET_MAX_MOTOR_FORCE, dynamics.OP_MOTOR_JOINT_SET_LINEAR_VELOCITY,
+        dynamics.OP_MOTOR_JOINT_SET_ANGULAR_VELOCITY, dynamics.OP_MOTOR_JOINT_SET_MAX_VELOCITY_TORQUE,
+        dynamics.OP_MOTOR_JOINT_SET_MAX_VELOCITY_FORCE, dynamics.OP_MOTOR_JOINT_SET_LINEAR_HERTZ,
+        dynamics.OP_MOTOR_JOINT_SET_LINEAR_DAMPING_RATIO, dynamics.OP_MOTOR_JOINT_SET_ANGULAR_HERTZ,
+        dynamics.OP_MOTOR_JOINT_SET_ANGULAR_DAMPING_RATIO, dynamics.OP_MOTOR_JOINT_SET_MAX_SPRING_FORCE,
+        dynamics.OP_MOTOR_JOINT_SET_MAX_SPRING_TORQUE, dynamics.OP_PARALLEL_JOINT_SET_SPRING_HERTZ,
+        dynamics.OP_PARALLEL_JOINT_SET_SPRING_DAMPING_RATIO, dynamics.OP_PARALLEL_JOINT_SET_MAX_TORQUE,
+        dynamics.OP_PRISMATIC_JOINT_ENABLE_SPRING, dynamics.OP_PRISMATIC_JOINT_SET_SPRING_HERTZ,
+        dynamics.OP_PRISMATIC_JOINT_SET_SPRING_DAMPING_RATIO, dynamics.OP_PRISMATIC_JOINT_SET_TARGET_TRANSLATION,
+        dynamics.OP_PRISMATIC_JOINT_ENABLE_LIMIT, dynamics.OP_PRISMATIC_JOINT_SET_LIMITS,
+        dynamics.OP_PRISMATIC_JOINT_ENABLE_MOTOR, dynamics.OP_PRISMATIC_JOINT_SET_MOTOR_SPEED,
+        dynamics.OP_PRISMATIC_JOINT_SET_MAX_MOTOR_FORCE, dynamics.OP_REVOLUTE_JOINT_ENABLE_LIMIT,
+        dynamics.OP_REVOLUTE_JOINT_SET_LIMITS, dynamics.OP_REVOLUTE_JOINT_ENABLE_SPRING,
+        dynamics.OP_REVOLUTE_JOINT_SET_TARGET_ANGLE, dynamics.OP_REVOLUTE_JOINT_SET_SPRING_HERTZ,
+        dynamics.OP_REVOLUTE_JOINT_SET_SPRING_DAMPING_RATIO, dynamics.OP_REVOLUTE_JOINT_ENABLE_MOTOR,
+        dynamics.OP_REVOLUTE_JOINT_SET_MOTOR_SPEED, dynamics.OP_REVOLUTE_JOINT_SET_MAX_MOTOR_TORQUE,
+        dynamics.OP_SPHERICAL_JOINT_ENABLE_CONE_LIMIT, dynamics.OP_SPHERICAL_JOINT_SET_CONE_LIMIT,
+        dynamics.OP_SPHERICAL_JOINT_SET_CONE_AXIS, dynamics.OP_SPHERICAL_JOINT_SET_CONE_ELLIPSE,
+        dynamics.OP_SPHERICAL_JOINT_ENABLE_TWIST_LIMIT, dynamics.OP_SPHERICAL_JOINT_SET_TWIST_LIMITS,
+        dynamics.OP_SPHERICAL_JOINT_ENABLE_SPRING, dynamics.OP_SPHERICAL_JOINT_SET_TARGET_ROTATION,
+        dynamics.OP_SPHERICAL_JOINT_SET_SPRING_HERTZ, dynamics.OP_SPHERICAL_JOINT_SET_SPRING_DAMPING_RATIO,
+        dynamics.OP_SPHERICAL_JOINT_ENABLE_MOTOR, dynamics.OP_SPHERICAL_JOINT_SET_MOTOR_VELOCITY,
+        dynamics.OP_SPHERICAL_JOINT_SET_MAX_MOTOR_TORQUE, dynamics.OP_WELD_JOINT_SET_LINEAR_HERTZ,
+        dynamics.OP_WELD_JOINT_SET_LINEAR_DAMPING_RATIO, dynamics.OP_WELD_JOINT_SET_ANGULAR_HERTZ,
+        dynamics.OP_WELD_JOINT_SET_ANGULAR_DAMPING_RATIO, dynamics.OP_WHEEL_JOINT_ENABLE_SUSPENSION,
+        dynamics.OP_WHEEL_JOINT_SET_SUSPENSION_HERTZ, dynamics.OP_WHEEL_JOINT_SET_SUSPENSION_DAMPING_RATIO,
+        dynamics.OP_WHEEL_JOINT_ENABLE_SUSPENSION_LIMIT, dynamics.OP_WHEEL_JOINT_SET_SUSPENSION_LIMITS,
+        dynamics.OP_WHEEL_JOINT_ENABLE_SPIN_MOTOR, dynamics.OP_WHEEL_JOINT_SET_SPIN_MOTOR_SPEED,
+        dynamics.OP_WHEEL_JOINT_SET_MAX_SPIN_TORQUE, dynamics.OP_WHEEL_JOINT_ENABLE_STEERING,
+        dynamics.OP_WHEEL_JOINT_SET_STEERING_HERTZ, dynamics.OP_WHEEL_JOINT_SET_STEERING_DAMPING_RATIO,
+        dynamics.OP_WHEEL_JOINT_SET_MAX_STEERING_TORQUE, dynamics.OP_WHEEL_JOINT_ENABLE_STEERING_LIMIT,
+        dynamics.OP_WHEEL_JOINT_SET_STEERING_LIMITS, dynamics.OP_WHEEL_JOINT_SET_TARGET_STEERING_ANGLE
+    ]
+    seen = calloc(4096, 4)
+    mark_ops(r, seen)
+    marks = seen as int[]
+    missing = 0
+    i = 0
+    while i < all_op_count {
+        if marks[all_ops_list[i]] == 0 {
+            println("all ops: opcode ${all_ops_list[i]} not recorded")
+            missing = missing + 1
+        }
+        i = i + 1
+    }
+    free(seen)
+    ensure("all ops: every opcode recorded (${missing} missing)", missing == 0)
+    p = recording.create_player(recording.recording_data(r), recording.recording_size(r), 1)
+    ensure("all ops: plays", p != null)
+    if p != null {
+        while recording.player_step_frame(p) {}
+        ensure("all ops: no divergence (frame ${recording.player_diverge_frame(p)})", recording.player_has_diverged(p) == false)
+        ensure("all ops: the same world at the end", state_hash(recording.player_world(p)) == final_hash)
+        recording.destroy_player(p)
+    }
+    recording.destroy_recording(r)
+}
+
+
+main() {
+    round_trips()
+    sessions()
+    geometry_dedup()
+    seeking()
+    files()
+    corruptions()
+    all_ops()
+    fixtures_free()
+    if failures > 0 {
+        println("recording: ${failures} of ${checks} checks failed")
+        exit(1)
+    }
+    println("recording: ${checks} checks passed")
+}

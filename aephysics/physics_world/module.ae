@@ -133,6 +133,7 @@ is_valid(id: WorldId) -> bool { return dynamics.world_is_valid(id) }
 // the sensors, the stack grown to the step's peak, the end events
 // swapped. A zero time step collides without solving.
 step(id: WorldId, time_step: float, sub_step_count: int) {
+    if dynamics.recording_on(id.index1 - 1) { recorder = dynamics.rec_begin(id.index1 - 1, dynamics.OP_STEP); dynamics.rec_float(recorder, time_step); dynamics.rec_int(recorder, sub_step_count); dynamics.rec_end(recorder) }
     w = world_of(id)
     if w == null { return }
     // An infinite step would make every sub-step infinite; a NaN one is
@@ -193,6 +194,22 @@ step(id: WorldId, time_step: float, sub_step_count: int) {
     w.profile.step = ms(os.now_monotonic_ns() - t0)
     w.locked = false
     dynamics.leave_world(caller_index)
+    if dynamics.recording_on(id.index1 - 1) { record_step_result(id, w) }
+}
+
+// What a recorded step left: the state's hash, which a player checks its
+// own against, and the world's bounds joined into the recording's for a
+// viewer to frame it.
+record_step_result(id: WorldId, w: *World) {
+    recorder = dynamics.rec_begin(id.index1 - 1, dynamics.OP_STATE_HASH)
+    dynamics.rec_long(recorder, dynamics.hash_world_state(w))
+    dynamics.rec_end(recorder)
+    bounds = get_bounds(id)
+    if recorder.have_bounds { recorder.bounds = math.aabb_union(recorder.bounds, bounds) }
+    else {
+        recorder.bounds = bounds
+        recorder.have_bounds = true
+    }
 }
 
 ms(ns: long) -> float { return (ns as float) / 1000000.0 }
@@ -267,6 +284,7 @@ joint_event(id: WorldId, index: int) -> JointEvent { return dynamics.world_joint
 
 // Sleeping off wakes every sleeping set (the sets above the awake one, from the last down).
 enable_sleeping(id: WorldId, flag: bool) {
+    if dynamics.recording_on(id.index1 - 1) { recorder = dynamics.rec_begin(id.index1 - 1, dynamics.OP_ENABLE_SLEEPING); dynamics.rec_bool(recorder, flag); dynamics.rec_end(recorder) }
     w = world_of(id)
     if w == null { return }
     if flag == w.enable_sleep { return }
@@ -282,20 +300,24 @@ enable_sleeping(id: WorldId, flag: bool) {
 }
 is_sleeping_enabled(id: WorldId) -> bool { return dynamics.get_world(id.index1 - 1).enable_sleep }
 enable_warm_starting(id: WorldId, flag: bool) {
+    if dynamics.recording_on(id.index1 - 1) { recorder = dynamics.rec_begin(id.index1 - 1, dynamics.OP_ENABLE_WARM_STARTING); dynamics.rec_bool(recorder, flag); dynamics.rec_end(recorder) }
     w = world_of(id)
     if w != null { w.enable_warm_starting = flag }
 }
 is_warm_starting_enabled(id: WorldId) -> bool { return dynamics.get_world(id.index1 - 1).enable_warm_starting }
 enable_continuous(id: WorldId, flag: bool) {
+    if dynamics.recording_on(id.index1 - 1) { recorder = dynamics.rec_begin(id.index1 - 1, dynamics.OP_ENABLE_CONTINUOUS); dynamics.rec_bool(recorder, flag); dynamics.rec_end(recorder) }
     w = world_of(id)
     if w != null { w.enable_continuous = flag }
 }
 is_continuous_enabled(id: WorldId) -> bool { return dynamics.get_world(id.index1 - 1).enable_continuous }
 enable_speculative(id: WorldId, flag: bool) {
+    if dynamics.recording_on(id.index1 - 1) { recorder = dynamics.rec_begin(id.index1 - 1, dynamics.OP_ENABLE_SPECULATIVE); dynamics.rec_bool(recorder, flag); dynamics.rec_end(recorder) }
     w = world_of(id)
     if w != null { w.enable_speculative = flag }
 }
 set_restitution_threshold(id: WorldId, value: float) {
+    if dynamics.recording_on(id.index1 - 1) { recorder = dynamics.rec_begin(id.index1 - 1, dynamics.OP_SET_RESTITUTION_THRESHOLD); dynamics.rec_float(recorder, value); dynamics.rec_end(recorder) }
     if math.is_valid_float(value) == false { return }
     w = world_of(id)
     if w != null { w.restitution_threshold = math.clamp_float(value, 0.0, math.MAX_FLOAT) }
@@ -303,12 +325,14 @@ set_restitution_threshold(id: WorldId, value: float) {
 get_restitution_threshold(id: WorldId) -> float { return dynamics.get_world(id.index1 - 1).restitution_threshold }
 // The restitution passes after the sub-steps (0 to 63; Box3D's b3World_SetRestitutionIterations).
 set_restitution_iterations(id: WorldId, count: int) {
+    if dynamics.recording_on(id.index1 - 1) { recorder = dynamics.rec_begin(id.index1 - 1, dynamics.OP_SET_RESTITUTION_ITERATIONS); dynamics.rec_int(recorder, count); dynamics.rec_end(recorder) }
     w = world_of(id)
     if w != null { w.restitution_iterations = math.clamp_int(count, 0, dynamics.MAX_RESTITUTION_ITERATIONS) }
 }
 get_restitution_iterations(id: WorldId) -> int { return dynamics.get_world(id.index1 - 1).restitution_iterations }
 // Whether the restitution passes reach contacts without restitution too, so a bounce carries through a stack.
 enable_restitution_propagation(id: WorldId, flag: bool) {
+    if dynamics.recording_on(id.index1 - 1) { recorder = dynamics.rec_begin(id.index1 - 1, dynamics.OP_ENABLE_RESTITUTION_PROPAGATION); dynamics.rec_bool(recorder, flag); dynamics.rec_end(recorder) }
     w = world_of(id)
     if w != null { w.enable_restitution_propagation = flag }
 }
@@ -316,17 +340,20 @@ is_restitution_propagation_enabled(id: WorldId) -> bool { return dynamics.get_wo
 // Whether contacts with a kinematic body take the static softness, so a body
 // the game drives hard does not sink into what it meets (off: the reference's).
 enable_kinematic_static_softness(id: WorldId, flag: bool) {
+    if dynamics.recording_on(id.index1 - 1) { recorder = dynamics.rec_begin(id.index1 - 1, dynamics.OP_ENABLE_KINEMATIC_STATIC_SOFTNESS); dynamics.rec_bool(recorder, flag); dynamics.rec_end(recorder) }
     w = world_of(id)
     if w != null { w.enable_kinematic_static_softness = flag }
 }
 is_kinematic_static_softness_enabled(id: WorldId) -> bool { return dynamics.get_world(id.index1 - 1).enable_kinematic_static_softness }
 set_hit_event_threshold(id: WorldId, value: float) {
+    if dynamics.recording_on(id.index1 - 1) { recorder = dynamics.rec_begin(id.index1 - 1, dynamics.OP_SET_HIT_EVENT_THRESHOLD); dynamics.rec_float(recorder, value); dynamics.rec_end(recorder) }
     if math.is_valid_float(value) == false { return }
     w = world_of(id)
     if w != null { w.hit_event_threshold = math.clamp_float(value, 0.0, math.MAX_FLOAT) }
 }
 get_hit_event_threshold(id: WorldId) -> float { return dynamics.get_world(id.index1 - 1).hit_event_threshold }
 set_contact_tuning(id: WorldId, hertz: float, damping_ratio: float, contact_speed: float) {
+    if dynamics.recording_on(id.index1 - 1) { recorder = dynamics.rec_begin(id.index1 - 1, dynamics.OP_SET_CONTACT_TUNING); dynamics.rec_float(recorder, hertz); dynamics.rec_float(recorder, damping_ratio); dynamics.rec_float(recorder, contact_speed); dynamics.rec_end(recorder) }
     if math.is_valid_float(hertz) == false || math.is_valid_float(damping_ratio) == false || math.is_valid_float(contact_speed) == false { return }
     w = world_of(id)
     if w == null { return }
@@ -335,12 +362,14 @@ set_contact_tuning(id: WorldId, hertz: float, damping_ratio: float, contact_spee
     w.contact_speed = math.clamp_float(contact_speed, 0.0, math.MAX_FLOAT)
 }
 set_contact_recycle_distance(id: WorldId, distance: float) {
+    if dynamics.recording_on(id.index1 - 1) { recorder = dynamics.rec_begin(id.index1 - 1, dynamics.OP_SET_CONTACT_RECYCLE_DISTANCE); dynamics.rec_float(recorder, distance); dynamics.rec_end(recorder) }
     if math.is_valid_float(distance) == false { return }
     w = world_of(id)
     if w != null { w.contact_recycle_distance = math.clamp_float(distance, 0.0, math.MAX_FLOAT) }
 }
 get_contact_recycle_distance(id: WorldId) -> float { return dynamics.get_world(id.index1 - 1).contact_recycle_distance }
 set_maximum_linear_speed(id: WorldId, speed: float) {
+    if dynamics.recording_on(id.index1 - 1) { recorder = dynamics.rec_begin(id.index1 - 1, dynamics.OP_SET_MAXIMUM_LINEAR_SPEED); dynamics.rec_float(recorder, speed); dynamics.rec_end(recorder) }
     if math.is_valid_float(speed) == false || speed <= 0.0 { return }
     w = world_of(id)
     if w != null { w.max_linear_speed = speed }
@@ -348,6 +377,7 @@ set_maximum_linear_speed(id: WorldId, speed: float) {
 get_maximum_linear_speed(id: WorldId) -> float { return dynamics.get_world(id.index1 - 1).max_linear_speed }
 // Gravity and the user data change even mid-step, from a callback, as the reference's do (no lock).
 set_gravity(id: WorldId, gravity: Vec3) {
+    if dynamics.recording_on(id.index1 - 1) { recorder = dynamics.rec_begin(id.index1 - 1, dynamics.OP_SET_GRAVITY); dynamics.rec_vec3(recorder, gravity); dynamics.rec_end(recorder) }
     if math.is_valid_vec3(gravity) == false { return }
     if dynamics.world_is_valid(id) { dynamics.get_world(id.index1 - 1).gravity = gravity }
 }
@@ -436,6 +466,7 @@ get_bounds(id: WorldId) -> AABB {
 }
 
 rebuild_static_tree(id: WorldId) {
+    if dynamics.recording_on(id.index1 - 1) { recorder = dynamics.rec_begin(id.index1 - 1, dynamics.OP_REBUILD_STATIC_TREE); dynamics.rec_end(recorder) }
     w = world_of(id)
     if w != null { dynamic_tree.tree_rebuild(broad_phase.broad_phase_tree(&w.broad_phase, dynamics.BODY_STATIC), true) }
 }
@@ -923,6 +954,15 @@ body_time_of_impact_mover(id: BodyId, origin: Vec3, mover: Capsule, mover_transl
 
 // --- explosions ------------------------------------------------------------------------------------------------------
 
+// An explosion def into a recording, field by field.
+rec_explosion_def(r: *Recording, v: *ExplosionDef) {
+    dynamics.rec_long(r, v.mask_bits)
+    dynamics.rec_vec3(r, v.position)
+    dynamics.rec_float(r, v.radius)
+    dynamics.rec_float(r, v.falloff)
+    dynamics.rec_float(r, v.impulse_per_area)
+}
+
 default_explosion_def() -> ExplosionDef {
     return ExplosionDef { mask_bits: dynamic_tree.default_mask_bits(), position: math.vec3_zero(), radius: 0.0, falloff: 0.0, impulse_per_area: 0.0 }
 }
@@ -973,6 +1013,7 @@ explosion_visitor(proxy_id: int, user_data: long, context: ptr) -> bool {
 }
 
 explode(id: WorldId, def: *ExplosionDef) {
+    if dynamics.recording_on(id.index1 - 1) { recorder = dynamics.rec_begin(id.index1 - 1, dynamics.OP_EXPLODE); rec_explosion_def(recorder, def); dynamics.rec_end(recorder) }
     if math.is_valid_position(def.position) == false || nonnegative(def.radius) == false || nonnegative(def.falloff) == false || math.is_valid_float(def.impulse_per_area) == false { return }
     w = world_of(id)
     if w == null { return }

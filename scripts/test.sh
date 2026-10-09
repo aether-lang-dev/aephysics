@@ -11,6 +11,18 @@ cd "$root"
 export AETHER_AEPHYSICS_CFLAGS="${AETHER_AEPHYSICS_CFLAGS:-}"
 mkdir -p target
 failures=0
+# Every module checked whole first: building a test checks only what the
+# test reaches, so a function nothing calls yet, or a call into a module
+# the caller does not import, builds clean until something calls it
+# (aether#2613, aether#2614). A warning fails it too.
+for module in aephysics/*/module.ae; do
+    name="$(basename "$(dirname "$module")")"
+    if ! AETHER_LIB_DIR="$root" ae check "$module" >"target/check_$name.log" 2>&1 || grep -q "warning\[" "target/check_$name.log"; then
+        echo "FAIL  check $name"
+        grep -A3 "error\[\|warning\[" "target/check_$name.log" | head -12
+        failures=$((failures + 1))
+    fi
+done
 for test in tests/test_*.ae; do
     name="$(basename "$test" .ae)"
     if ! AETHER_LIB_DIR="$root" ae build "$test" -o "target/$name" >"target/$name.log" 2>&1; then
