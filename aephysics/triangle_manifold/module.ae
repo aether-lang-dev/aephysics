@@ -49,7 +49,6 @@ const AXIS_MANUAL_FACE_B = 7
 const AXIS_MANUAL_EDGE_PAIR = 8
 const FEATURE_SHAPE_A = 0
 const FEATURE_SHAPE_B = 1
-const SPECULATIVE_DISTANCE = 0.02
 const MAX_CLIP_POINTS = 64
 const FLOAT_EPSILON = 0.00000011920929
 const FLOAT_MIN = 0.000000000000000000000000000000000000011754944
@@ -222,6 +221,7 @@ set_point(m: *LocalManifold, i: int, point: Vec3, separation: float, pair: Featu
 
 // The sphere against the triangle's closest point; the back side culled.
 collide_triangle_and_sphere(m: *LocalManifold, capacity: int, v1: Vec3, v2: Vec3, v3: Vec3, sphere_b: Sphere) {
+    reach = manifold.speculative_distance()
     m.point_count = 0
     if capacity == 0 { return }
     center = sphere_b.center
@@ -231,7 +231,7 @@ collide_triangle_and_sphere(m: *LocalManifold, capacity: int, v1: Vec3, v2: Vec3
     radius = sphere_b.radius
     closest = closest_point_on_triangle(v1, v2, v3, center)
     squared_distance = math.distance_squared(closest.point, center)
-    max_distance = radius + SPECULATIVE_DISTANCE
+    max_distance = radius + reach
     if squared_distance > max_distance * max_distance { return }
 
     d = math.sqrt_float(squared_distance)
@@ -351,12 +351,13 @@ capsule_segment(c: Capsule) -> ClipVertex[] {
 }
 
 build_triangle_and_capsule_face_contact(m: *LocalManifold, v1: Vec3, v2: Vec3, v3: Vec3, plane: Plane, c: Capsule) {
+    reach = manifold.speculative_distance()
     segment = capsule_segment(c)
     if clip_segment_to_triangle_face(segment, v1, v2, v3, plane) == false { return }
     radius = c.radius
     distance1 = math.plane_separation(plane, segment[0].position)
     distance2 = math.plane_separation(plane, segment[1].position)
-    if distance1 > SPECULATIVE_DISTANCE + radius && distance2 > SPECULATIVE_DISTANCE + radius { return }
+    if distance1 > reach + radius && distance2 > reach + radius { return }
     point1 = math.mul_sub(segment[0].position, 0.5 * (distance1 + radius), plane.normal)
     point2 = math.mul_sub(segment[1].position, 0.5 * (distance2 + radius), plane.normal)
     m.normal = plane.normal
@@ -397,6 +398,7 @@ build_triangle_and_capsule_edge_contact(m: *LocalManifold, v1: Vec3, v2: Vec3, v
 // GJK for the shallow case, the segment clipped to the face when the
 // closest direction is near the normal; face and edge axes deep.
 collide_triangle_and_capsule(m: *LocalManifold, capacity: int, v1: Vec3, v2: Vec3, v3: Vec3, capsule_b: Capsule, cache: *SimplexCache) {
+    reach = manifold.speculative_distance()
     m.point_count = 0
     if capacity < 2 { return }
     plane = math.make_plane_from_points(v1, v2, v3)
@@ -407,7 +409,7 @@ collide_triangle_and_capsule(m: *LocalManifold, capacity: int, v1: Vec3, v2: Vec
                             transform: math.transform_identity(), use_radii: false }
     output = distance.shape_distance(&input, cache, null, 0)
     radius = capsule_b.radius
-    if output.distance > radius + SPECULATIVE_DISTANCE { return }
+    if output.distance > radius + reach { return }
 
     if output.distance > 100.0 * FLOAT_EPSILON {
         delta = math.normalize(math.sub(output.point_b, output.point_a))
@@ -546,6 +548,7 @@ query_triangle_and_hull_edges(t: *TriangleData, h: *HullData) -> SeparatingAxis 
 // the hull. Returns the clipped separation.
 collide_hull_face(m: *LocalManifold, point_capacity: int, t: *TriangleData, h: *HullData, query: SeparatingAxis,
                   cache: *SATCache, enable_speculative: bool) -> float {
+    reach = manifold.speculative_distance()
     m.point_count = 0
     faces = hull.hull_faces(h)
     edges = hull.hull_edges(h)
@@ -597,7 +600,7 @@ collide_hull_face(m: *LocalManifold, point_capacity: int, t: *TriangleData, h: *
         i = i + 1
     }
     speculative = 0.0
-    if enable_speculative { speculative = SPECULATIVE_DISTANCE }
+    if enable_speculative { speculative = reach }
     if min_separation > speculative {
         m.point_count = 0
         manifold.clear_sat_cache(cache)
@@ -618,6 +621,7 @@ collide_hull_face(m: *LocalManifold, point_capacity: int, t: *TriangleData, h: *
 // separation, or MAX_FLOAT when everything clipped away.
 collide_triangle_face(m: *LocalManifold, point_capacity: int, t: *TriangleData, h: *HullData, query: SeparatingAxis,
                       cache: *SATCache, enable_speculative: bool) -> float {
+    reach = manifold.speculative_distance()
     faces = hull.hull_faces(h)
     edges = hull.hull_edges(h)
     points = hull.hull_points(h)
@@ -668,7 +672,7 @@ collide_triangle_face(m: *LocalManifold, point_capacity: int, t: *TriangleData, 
         i = i + 1
     }
     speculative = 0.0
-    if enable_speculative { speculative = SPECULATIVE_DISTANCE }
+    if enable_speculative { speculative = reach }
     if min_separation >= speculative {
         manifold.clear_sat_cache(cache)
         return min_separation
@@ -715,6 +719,7 @@ collide_triangle_and_hull_edges(m: *LocalManifold, capacity: int, triangle_point
 // contact when the face finds nothing or is clearly worse; GJK last.
 collide_triangle_and_hull(m: *LocalManifold, capacity: int, v1: Vec3, v2: Vec3, v3: Vec3, triangle_flags: int,
                           hull_b: *HullData, cache: *SATCache, enable_speculative: bool) {
+    reach = manifold.speculative_distance()
     m.point_count = 0
     m.feature = FEATURE_NONE
     if capacity < 4 { return }
@@ -738,7 +743,7 @@ collide_triangle_and_hull(m: *LocalManifold, capacity: int, v1: Vec3, v2: Vec3, 
     planes = hull.hull_planes(hull_b)
     points = hull.hull_points(hull_b)
     speculative = 0.0
-    if enable_speculative { speculative = SPECULATIVE_DISTANCE }
+    if enable_speculative { speculative = reach }
     cache.hit = 1
 
     if cache.kind == AXIS_FACE_A {

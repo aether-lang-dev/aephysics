@@ -1039,6 +1039,200 @@ test_kinematic_softness() {
     dynamics.destroy_world(world_id)
 }
 
+// A fast kinematic body's strike (#167): with its contacts reaching out
+// over the step's travel, a slow body it meets is brought up to speed in
+// the step the gap closes, and the strike's first frame is under a
+// centimetre deep, where the reference's 2 cm of speculation leaves the
+// travel less 2 cm (8.3 cm at 7 m/s). A ball, a box and a capsule; at
+// 20 m/s, past the fat bounds' margin, where only the kinematic body's swept
+// bounds make the pair in time; a ball a spinning paddle swats; a ball a
+// kinematic wave mesh sweeps into. The deepest of the strike's frames is
+// the measure. A world without kinematic bodies steps the same bits either
+// way.
+const STRIKE_BALL = 0
+const STRIKE_BOX = 1
+const STRIKE_CAPSULE = 2
+
+kinematic_strike(speculate: bool, speed: float, kind: int) -> float {
+    fixtures_ready()
+    wdef = dynamics.default_world_def()
+    wdef.gravity = math.vec3_zero()
+    wdef.enable_kinematic_speculation = speculate
+    world_id = dynamics.create_world(&wdef)
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_KINEMATIC
+    bdef.position = math.vec3(0.0 - 2.0, 0.5, 0.0)
+    bdef.linear_velocity = math.vec3(speed, 0.0, 0.0)
+    car = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    dynamics.create_hull_shape(car, &sdef, g_box as *HullData)
+    target_def = dynamics.default_body_def()
+    target_def.kind = dynamics.BODY_DYNAMIC
+    target_def.position = math.vec3(0.0, 0.5, 0.0)
+    target = dynamics.create_body(world_id, &target_def)
+    // Half its width along the strike: what the gap is measured from.
+    half = 0.3
+    if kind == STRIKE_BALL { dynamics.create_sphere_shape(target, &sdef, manifold.sphere(math.vec3_zero(), 0.3)) }
+    else if kind == STRIKE_BOX {
+        small = hull.make_box_hull(0.2, 0.2, 0.2)
+        dynamics.create_hull_shape(target, &sdef, small)
+        hull.destroy_hull(small)
+        half = 0.2
+    } else {
+        // Across the strike, its rounded side to the car's face.
+        dynamics.create_capsule_shape(target, &sdef, Capsule { center1: math.vec3(0.0, 0.0, 0.0 - 0.3), center2: math.vec3(0.0, 0.0, 0.3), radius: 0.15 })
+        half = 0.15
+    }
+    deepest = 0.0
+    s = 0
+    while s < 40 {
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        // The target against the car's front face: its half width out when just touching.
+        gap = dynamics.body_get_position(target).x - (dynamics.body_get_position(car).x + 0.5) - half
+        if gap < deepest { deepest = gap }
+        s = s + 1
+    }
+    struck = dynamics.body_get_linear_velocity(target).x
+    dynamics.destroy_world(world_id)
+    // A target never struck has nothing to say: flagged as deep.
+    if struck < 0.5 * speed { return 0.0 - 1.0 }
+    return deepest
+}
+
+// A ball in the path of a kinematic paddle spinning about its middle at
+// 12 rad/s (a kinematic body turns about its centre of mass): at the
+// ball's 0.5 m the blade sweeps 10 cm a step. The ball sits where the
+// blade's face is 3 cm short of it one step, past the speculative
+// distance, and would be 6.6 cm into it the next.
+spinning_strike(speculate: bool) -> float {
+    fixtures_ready()
+    wdef = dynamics.default_world_def()
+    wdef.gravity = math.vec3_zero()
+    wdef.enable_kinematic_speculation = speculate
+    world_id = dynamics.create_world(&wdef)
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_KINEMATIC
+    bdef.angular_velocity = math.vec3(0.0, 12.0, 0.0)
+    paddle = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    blade = hull.make_box_hull(0.6, 0.1, 0.05)
+    dynamics.create_hull_shape(paddle, &sdef, blade)
+    hull.destroy_hull(blade)
+    ball_def = dynamics.default_body_def()
+    ball_def.kind = dynamics.BODY_DYNAMIC
+    // At 1.3683 rad round from +x, the way +y spin turns it (toward -z).
+    angle = 1.3683
+    turn = math.compute_cos_sin(angle)
+    ball_def.position = math.vec3(0.5 * turn.cosine, 0.0, 0.0 - 0.5 * turn.sine)
+    ball = dynamics.create_body(world_id, &ball_def)
+    dynamics.create_sphere_shape(ball, &sdef, manifold.sphere(math.vec3_zero(), 0.1))
+    deepest = 0.0
+    s = 0
+    while s < 12 {
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        // The ball's centre against the blade's face, in the paddle's frame.
+        local = math.inv_transform_point(dynamics.body_get_transform(paddle), dynamics.body_get_position(ball))
+        if math.abs_float(local.x) < 0.6 && math.abs_float(local.y) < 0.2 {
+            depth = math.abs_float(local.z) - 0.05 - 0.1
+            if depth < deepest { deepest = depth }
+        }
+        s = s + 1
+    }
+    dynamics.destroy_world(world_id)
+    return deepest
+}
+
+// A ball a kinematic wave mesh rises into at 7 m/s: the mesh contact's
+// triangles reach out too.
+mesh_strike(speculate: bool) -> float {
+    fixtures_ready()
+    wdef = dynamics.default_world_def()
+    wdef.gravity = math.vec3_zero()
+    wdef.enable_kinematic_speculation = speculate
+    world_id = dynamics.create_world(&wdef)
+    flat = mesh.create_wave_mesh(6, 6, 1.0, 0.0, 0.0, 0.0)
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_KINEMATIC
+    bdef.position = math.vec3(0.0 - 3.0, 0.0 - 1.0, 0.0 - 3.0)
+    bdef.linear_velocity = math.vec3(0.0, 7.0, 0.0)
+    floor = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    dynamics.create_mesh_shape(floor, &sdef, flat, math.vec3_one())
+    ball_def = dynamics.default_body_def()
+    ball_def.kind = dynamics.BODY_DYNAMIC
+    ball_def.position = math.vec3(0.0, 0.5, 0.0)
+    ball = dynamics.create_body(world_id, &ball_def)
+    dynamics.create_sphere_shape(ball, &sdef, manifold.sphere(math.vec3_zero(), 0.3))
+    deepest = 0.0
+    s = 0
+    while s < 30 {
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        gap = dynamics.body_get_position(ball).y - dynamics.body_get_position(floor).y - 0.3
+        if gap < deepest { deepest = gap }
+        s = s + 1
+    }
+    struck = dynamics.body_get_linear_velocity(ball).y
+    dynamics.destroy_world(world_id)
+    mesh.destroy_mesh(flat)
+    if struck < 3.5 { return 0.0 - 1.0 }
+    return deepest
+}
+
+// A pile with no kinematic body, stepped with and without the setting.
+pile_hash(speculate: bool) -> long {
+    fixtures_ready()
+    wdef = dynamics.default_world_def()
+    wdef.enable_kinematic_speculation = speculate
+    world_id = dynamics.create_world(&wdef)
+    ground_in(world_id, g_ground)
+    sdef = dynamics.default_shape_def()
+    i = 0
+    while i < 12 {
+        bdef = dynamics.default_body_def()
+        bdef.kind = dynamics.BODY_DYNAMIC
+        bdef.position = math.vec3(0.3 * ((i % 3) as float), 0.5 + 0.9 * ((i / 3) as float), 0.0)
+        dynamics.create_hull_shape(dynamics.create_body(world_id, &bdef), &sdef, g_box as *HullData)
+        i = i + 1
+    }
+    k = 0
+    while k < 120 {
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        k = k + 1
+    }
+    hash = dynamics.hash_world_state(dynamics.get_world(world_id.index1 - 1))
+    dynamics.destroy_world(world_id)
+    return hash
+}
+
+test_kinematic_speculation() {
+    ball = kinematic_strike(true, 7.0, STRIKE_BALL)
+    ensure("speculation: a ball struck at 7 m/s, its deepest under 1 cm (${ball} m)", ball > 0.0 - 0.01)
+    reference = kinematic_strike(false, 7.0, STRIKE_BALL)
+    ensure("and 6 cm or more without it, the reference's (${reference} m)", reference < 0.0 - 0.06)
+    box = kinematic_strike(true, 7.0, STRIKE_BOX)
+    ensure("speculation: a box struck at 7 m/s (${box} m)", box > 0.0 - 0.01)
+    capsule = kinematic_strike(true, 7.0, STRIKE_CAPSULE)
+    ensure("speculation: a capsule struck at 7 m/s (${capsule} m)", capsule > 0.0 - 0.01)
+    fast = kinematic_strike(true, 20.0, STRIKE_BALL)
+    ensure("speculation: a ball struck at 20 m/s, 33 cm a step past the bounds' margin (${fast} m)", fast > 0.0 - 0.01)
+    fast_reference = kinematic_strike(false, 20.0, STRIKE_BALL)
+    ensure("and deep without it (${fast_reference} m)", fast_reference < 0.0 - 0.1)
+    // A turning face's approach is linearized over each sub-step, so a
+    // spinning strike keeps a little of its depth: within 1.5 cm.
+    spun = spinning_strike(true)
+    ensure("speculation: a ball a spinning paddle swats, within 1.5 cm (${spun} m)", spun > 0.0 - 0.015)
+    spun_reference = spinning_strike(false)
+    ensure("and 3 cm or more without it (${spun_reference} m)", spun_reference < 0.0 - 0.03)
+    lifted = mesh_strike(true)
+    ensure("speculation: a ball a kinematic mesh rises into at 7 m/s (${lifted} m)", lifted > 0.0 - 0.01)
+    ensure("speculation: no kinematic body, the same bits", pile_hash(true) == pile_hash(false))
+    world_id = new_world()
+    ensure("speculation: off by default, the reference's", physics_world.is_kinematic_speculation_enabled(world_id) == false)
+    physics_world.enable_kinematic_speculation(world_id, true)
+    ensure("speculation: and a world turns it on", physics_world.is_kinematic_speculation_enabled(world_id))
+    dynamics.destroy_world(world_id)
+}
+
 // A hull of twelve random points rocking on the floor about one of its
 // vertices (#134), from its state at step 800 of the soak's seed 1. The
 // reference, and this engine before, rocked it in a cycle of 400 steps for
@@ -1541,6 +1735,7 @@ main() {
     test_limit_stiffness()
     test_elliptical_cone()
     test_kinematic_softness()
+    test_kinematic_speculation()
     test_rocking_hull()
     test_encoded_sims()
     test_non_dynamic_joint_disable()

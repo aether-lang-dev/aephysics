@@ -385,7 +385,12 @@ started until its tests pass.
    reference's b3World_Draw with its colours, its joints' drawings and the
    host's debug shapes, whose lives here also end with a geometry change
    or the world's end, where the reference keeps a stale one or leaves them
-   to the host. Two
+   to the host. A fast kinematic body's first frame (#167) is an
+   extension the reference does not have, off by default: with
+   `enable_kinematic_speculation`, a contact with a kinematic body keeps
+   speculative points out to the pair's travel over the step (the manifold
+   functions read a per-worker speculative distance the collide pass sets
+   per contact) and the kinematic body's fat bounds cover its next step. Two
    functions no test called hid type errors (`body_apply_force`,
    `body_get_local_point_velocity`) until the replay dispatcher called
    every recorded one: `ae build` checks only what a program reaches

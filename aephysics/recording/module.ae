@@ -2554,6 +2554,12 @@ dispatch_call(p: *Player, op: int) -> bool {
         if p.ok { physics_world.enable_kinematic_static_softness(a_world_id_id, a_bool_flag) }
         return true
     }
+    if op == dynamics.OP_ENABLE_KINEMATIC_SPECULATION {
+        a_world_id_id = p.world_id
+        a_bool_flag = read_bool(p)
+        if p.ok { physics_world.enable_kinematic_speculation(a_world_id_id, a_bool_flag) }
+        return true
+    }
     if op == dynamics.OP_SET_HIT_EVENT_THRESHOLD {
         a_world_id_id = p.world_id
         a_float_value = read_float(p)
