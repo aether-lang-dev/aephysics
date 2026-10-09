@@ -226,6 +226,53 @@ main() {
     ensure_small("invert_t is the transposed inverse", mt.cx.y - tt.cx.y, 100.0 * math.EPSILON)
     singular = math.matrix3(math.vec3(1.0, 2.0, 3.0), math.vec3(2.0, 4.0, 6.0), math.vec3(0.0, 1.0, 0.0))
     ensure("a singular matrix inverts to nothing", math.det(math.invert_matrix(singular)) == 0.0)
+    // test_math.c's MathTest, the rest: every component of m inv(m), the
+    // vector through m and back, inv(m) v against solve3.
+    ensure_small("m * inv(m), cx.y", id.cx.y, math.EPSILON)
+    ensure_small("m * inv(m), cx.z", id.cx.z, math.EPSILON)
+    ensure_small("m * inv(m), cy.y", id.cy.y - 1.0, math.EPSILON)
+    ensure_small("m * inv(m), cy.z", id.cy.z, math.EPSILON)
+    ensure_small("m * inv(m), cz.x", id.cz.x, math.EPSILON)
+    ensure_small("m * inv(m), cz.y", id.cz.y, math.EPSILON)
+    v3 = math.vec3(1.0, 0.0 - 2.0, 3.0)
+    round_trip = math.mul_mv(mi, math.mul_mv(m, v3))
+    ensure_small("inv(m) m v is v", math.length(math.sub(round_trip, v3)), math.EPSILON)
+    ensure_small("inv(m) v is solve3(m, v)", math.length(math.sub(math.mul_mv(mi, v3), math.solve3(m, v3))), math.EPSILON)
+    // The 2x2: m inv(m), the vector there and back, inv(m) v against solve2.
+    m2 = math.matrix2(math.vec2(3.0, 1.0), math.vec2(0.0 - 1.0, 3.0))
+    mi2 = math.invert2(m2)
+    c0 = math.mul_mv2(m2, mi2.cx)
+    c1 = math.mul_mv2(m2, mi2.cy)
+    ensure_small("2x2: m * inv(m), cx.x", c0.x - 1.0, math.EPSILON)
+    ensure_small("2x2: m * inv(m), cx.y", c0.y, math.EPSILON)
+    ensure_small("2x2: m * inv(m), cy.x", c1.x, math.EPSILON)
+    ensure_small("2x2: m * inv(m), cy.y", c1.y - 1.0, math.EPSILON)
+    v2 = math.vec2(1.0, 0.0 - 2.0)
+    back2 = math.mul_mv2(mi2, math.mul_mv2(m2, v2))
+    ensure_small("2x2: inv(m) m v is v, x", back2.x - v2.x, math.EPSILON)
+    ensure_small("2x2: inv(m) m v is v, y", back2.y - v2.y, math.EPSILON)
+    w2 = math.mul_mv2(mi2, v2)
+    u2 = math.solve2(m2, v2)
+    ensure_small("2x2: inv(m) v is solve2, x", w2.x - u2.x, math.EPSILON)
+    ensure_small("2x2: inv(m) v is solve2, y", w2.y - u2.y, math.EPSILON)
+    w2 = math.mul_mv2(m2, u2)
+    ensure_small("2x2: m solve2(m, v) is v, x", w2.x - v2.x, 10.0 * math.EPSILON)
+    ensure_small("2x2: m solve2(m, v) is v, y", w2.y - v2.y, 10.0 * math.EPSILON)
+    ensure("2x2: a singular matrix inverts to zero", math.det2(math.invert2(math.matrix2(math.vec2(1.0, 2.0), math.vec2(2.0, 4.0)))) == 0.0)
+    // The normalised lerp from the identity to a quarter turn about z: the
+    // twist follows alpha to within a degree.
+    q_end = math.make_quat_from_axis_angle(math.vec3_axis_z(), 0.5 * math.PI)
+    i = 0
+    while i <= 100 {
+        alpha = (i as float) / 100.0
+        twist_now = math.get_twist_angle(math.nlerp(math.quat_identity(), q_end, alpha))
+        ensure_small("nlerp: the twist at ${alpha}", alpha * 0.5 * math.PI - twist_now, math.DEG_TO_RAD)
+        i = i + 1
+    }
+    // The arbitrary perpendicular of the reference's unit normal.
+    normal = math.vec3(0.504055440, 0.621548057, 0.599671543)
+    ensure_small("arbitrary_perp is perpendicular", math.dot(normal, math.arbitrary_perp(normal)), 2.0 * math.EPSILON)
+    ensure_small("arbitrary_perp is unit", math.length(math.arbitrary_perp(normal)) - 1.0, math.EPSILON)
 
     // A rotation as a matrix and back.
     q = math.normalize_quat(math.quat(0.3, 0.0 - 0.4, 0.5, 0.7))

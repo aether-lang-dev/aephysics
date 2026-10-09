@@ -41,7 +41,7 @@ exports (
     min_int, max_int, clamp_int, abs_float, min_float, max_float, clamp_float, lerp_float,
     sqrt_float, atan2_approx, compute_cos_sin, sin_approx, cos_approx, unwind_angle,
     add, sub, mul, neg, dot, length, length_squared, distance, distance_squared,
-    normalize, get_length_and_normalize, perp, is_normalized, mul_add, mul_sub, mul_sv,
+    normalize, get_length_and_normalize, perp, arbitrary_perp, is_normalized, mul_add, mul_sub, mul_sv,
     cross, lerp, blend2, blend3, skew, delta_quat_to_rotation, integrate_rotation, modified_cross, abs_vec3, sign, min_vec3, max_vec3, clamp_vec3, safe_scale, scalar_triple_product,
     is_normalized_quat, rotate_vector, inv_rotate_vector, dot_quat, mul_quat, inv_mul_quat,
     conjugate, negate_quat, normalize_quat, make_quat_from_axis_angle, get_axis_angle,
@@ -346,6 +346,24 @@ perp(a: Vec3) -> Vec3 {
         return normalize(Vec3 { x: a.y, y: 0.0 - a.x, z: 0.0 })
     }
     return normalize(Vec3 { x: 0.0, y: a.z, z: 0.0 - a.y })
+}
+
+// A fixed perpendicular to a unit vector (b3ArbitraryPerp): no component
+// of the vector goes into its own slot, so the dot product cancels. The
+// manifold reduction searches along it, so its tie-break is the same on
+// every platform.
+arbitrary_perp(v: Vec3) -> Vec3 {
+    a = 0.67
+    b = 0.0 - 0.42
+    p = vec3_zero()
+    if v.x < 0.0 - 0.5 || 0.5 < v.x {
+        p = vec3(a * v.y + b * v.z, 0.0 - a * v.x, 0.0 - b * v.x)
+    } else if v.y < 0.0 - 0.5 || 0.5 < v.y {
+        p = vec3(a * v.y, 0.0 - a * v.x + b * v.z, 0.0 - b * v.y)
+    } else {
+        p = vec3(a * v.z, b * v.z, 0.0 - a * v.x - b * v.y)
+    }
+    return normalize(p)
 }
 
 is_normalized(a: Vec3) -> bool {

@@ -1,0 +1,389 @@
+// The reference's test_hash.c (e77352c, #145) on this engine's content
+// hash, basics.hash_bytes. The reference's is rapidhash; ours is its own,
+// so these are the properties the reference holds its hash to, not its
+// values: every input bit and the length reach the digest, sign bits and
+// one-ULP steps separate blobs, families of real baked geometry (boxes,
+// turned boxes, cylinders and cones, grids and waves, grid meshes and
+// tori) never collide, the low bits spread, the same input bakes the same
+// hash, and an empty blob takes the reserved value. A probe tells a true
+// collision (two different blobs, one digest) from a duplicate (the same
+// bytes baked twice), as the reference's does. The hull database's bucket
+// test waits for the database (#147).
+
+import std.string
+import aephysics.math
+import aephysics.basics
+import aephysics.hull
+import aephysics.mesh
+import aephysics.height_field
+
+extern calloc(count: int, size: int) -> ptr
+extern exit(code: int)
+extern free(p: ptr)
+extern memcmp(a: ptr, b: ptr, n: int) -> int
+extern memcpy(dst: ptr, src: ptr, n: int) -> ptr
+
+var failures = 0
+var checks = 0
+
+ensure(name: string, ok: bool) {
+    checks = checks + 1
+    if !ok {
+        println("hash: FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+// The digests seen, each with a copy of its blob when given one.
+struct Probe {
+    map: LongMap
+    blobs: ptr               // ptr[] of copies, by the order first seen
+    sizes: ptr               // int[]
+    count: int
+    capacity: int
+    duplicates: int
+    collisions: int
+    saw_zero: bool
+}
+
+probe_begin(capacity: int) -> Probe {
+    return Probe { map: basics.map_create(capacity), blobs: calloc(capacity, 8), sizes: calloc(capacity, 4), count: 0,
+                   capacity: capacity, duplicates: 0, collisions: 0, saw_zero: false }
+}
+
+probe_add(p: *Probe, hash: long, blob: ptr, size: int) {
+    if hash == (0 as long) { p.saw_zero = true }
+    blobs = p.blobs as ptr[]
+    sizes = p.sizes as int[]
+    seen = basics.map_get(&p.map, hash, 0 - 1)
+    if seen >= 0 {
+        if blob != null && sizes[seen] == size && memcmp(blobs[seen], blob, size) == 0 {
+            p.duplicates = p.duplicates + 1
+        } else {
+            p.collisions = p.collisions + 1
+        }
+        return
+    }
+    if p.count == p.capacity { return }
+    copy = null
+    if blob != null && size > 0 {
+        copy = calloc(size, 1)
+        memcpy(copy, blob, size)
+    }
+    blobs[p.count] = copy
+    sizes[p.count] = size
+    basics.map_set(&p.map, hash, p.count)
+    p.count = p.count + 1
+}
+
+// The family's verdict: no zero digest, no collision, and as many distinct
+// digests as expected (or any, for -1).
+probe_end(p: *Probe, name: string, expected: int) {
+    ensure("${name}: never zero", p.saw_zero == false)
+    ensure("${name}: no collision (${p.collisions})", p.collisions == 0)
+    if expected >= 0 { ensure("${name}: every blob its own digest (${p.count} of ${expected})", p.count == expected) }
+    else { ensure("${name}: digests (${p.count}, ${p.duplicates} duplicates)", p.count > 0) }
+    blobs = p.blobs as ptr[]
+    i = 0
+    while i < p.count {
+        if blobs[i] != null { free(blobs[i]) }
+        i = i + 1
+    }
+    free(p.blobs)
+    free(p.sizes)
+    basics.map_destroy(&p.map)
+}
+
+hash_of(block: ptr, size: int) -> long { return basics.hash_bytes(block, size) }
+
+// HashWordFamily: two bytes, each the top of its word, through all 65,536 pairs.
+test_word_family() {
+    blob = calloc(16, 1)
+    b = blob as byte[]
+    i = 0
+    while i < 16 {
+        b[i] = (0x5A + i) as byte
+        i = i + 1
+    }
+    p = probe_begin(256 * 256)
+    x = 0
+    while x < 256 {
+        y = 0
+        while y < 256 {
+            b[7] = x as byte
+            b[15] = y as byte
+            probe_add(&p, hash_of(blob, 16), null, 0)
+            y = y + 1
+        }
+        x = x + 1
+    }
+    probe_end(&p, "word family", 256 * 256)
+    free(blob)
+}
+
+// HashBitSweep: a 32-byte blob and each of its 256 bits flipped alone.
+test_bit_sweep() {
+    blob = calloc(32, 1)
+    b = blob as byte[]
+    i = 0
+    while i < 32 {
+        b[i] = (0xA5 ^ (i * 17)) as byte
+        i = i + 1
+    }
+    p = probe_begin(257)
+    probe_add(&p, hash_of(blob, 32), null, 0)
+    bit = 0
+    while bit < 256 {
+        mask = 1 << (bit & 7)
+        b[bit >> 3] = ((b[bit >> 3] as int) ^ mask) as byte
+        probe_add(&p, hash_of(blob, 32), null, 0)
+        b[bit >> 3] = ((b[bit >> 3] as int) ^ mask) as byte
+        bit = bit + 1
+    }
+    probe_end(&p, "bit sweep", 257)
+    free(blob)
+}
+
+// HashZeroLengths: all-zero blobs of every length from 0 to 4095.
+test_zero_lengths() {
+    zeros = calloc(4096, 1)
+    p = probe_begin(4096)
+    n = 0
+    while n < 4096 {
+        probe_add(&p, hash_of(zeros, n), null, 0)
+        n = n + 1
+    }
+    probe_end(&p, "zero lengths", 4096)
+    free(zeros)
+}
+
+// HashFloatSigns: twelve floats under every combination of sign flips.
+test_float_signs() {
+    values = calloc(12, 4)
+    v = values as f32[]
+    p = probe_begin(4096)
+    mask = 0
+    while mask < 4096 {
+        i = 0
+        while i < 12 {
+            magnitude = (1.0 + 0.25 * (i as float)) as f32
+            if (mask & (1 << i)) != 0 { v[i] = (0.0 as f32) - magnitude } else { v[i] = magnitude }
+            i = i + 1
+        }
+        probe_add(&p, hash_of(values, 48), null, 0)
+        mask = mask + 1
+    }
+    probe_end(&p, "float signs", 4096)
+    free(values)
+}
+
+// HashFloatUlp: sixty-four floats, each in turn one ULP up.
+test_float_ulp() {
+    values = calloc(64, 4)
+    v = values as f32[]
+    bits = values as int[]
+    i = 0
+    while i < 64 {
+        v[i] = (100.0 + (i as float)) as f32
+        i = i + 1
+    }
+    p = probe_begin(65)
+    probe_add(&p, hash_of(values, 256), null, 0)
+    i = 0
+    while i < 64 {
+        bits[i] = bits[i] + 1
+        probe_add(&p, hash_of(values, 256), null, 0)
+        bits[i] = bits[i] - 1
+        i = i + 1
+    }
+    probe_end(&p, "float ulp", 65)
+    free(values)
+}
+
+// HashBoxHulls: 16^3 boxes of different extents.
+test_box_hulls() {
+    p = probe_begin(16 * 16 * 16)
+    i = 0
+    while i < 16 {
+        j = 0
+        while j < 16 {
+            k = 0
+            while k < 16 {
+                h = hull.make_box_hull(0.5 + 0.25 * (i as float), 0.5 + 0.25 * (j as float), 0.5 + 0.25 * (k as float))
+                probe_add(&p, h.hash, h as ptr, h.byte_count)
+                hull.destroy_hull(h)
+                k = k + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    probe_end(&p, "box hulls", 16 * 16 * 16)
+}
+
+// HashTransformedBoxHulls: one box, moved and turned 144 ways.
+test_transformed_box_hulls() {
+    p = probe_begin(144)
+    i = 0
+    while i < 12 {
+        j = 0
+        while j < 12 {
+            axis = math.normalize(math.vec3(1.0, 0.5 + 0.1 * (j as float), 0.25))
+            t = Transform { p: math.vec3(0.125 * (i as float), 0.0 - 0.25 * (j as float), 0.5 * ((i + j) as float)),
+                            q: math.make_quat_from_axis_angle(axis, 0.05 * ((i * 12 + j) as float)) }
+            h = hull.make_transformed_box_hull(1.0, 2.0, 3.0, t)
+            probe_add(&p, h.hash, h as ptr, h.byte_count)
+            hull.destroy_hull(h)
+            j = j + 1
+        }
+        i = i + 1
+    }
+    probe_end(&p, "transformed box hulls", 144)
+}
+
+// HashProceduralHulls: cylinders and cones over sides, radii and heights.
+test_procedural_hulls() {
+    p = probe_begin(1024)
+    sides = 3
+    while sides <= 18 {
+        r = 1
+        while r <= 5 {
+            h = 1
+            while h <= 4 {
+                cylinder = hull.create_cylinder(0.5 * (h as float), 0.25 * (r as float), 0.0, sides)
+                if cylinder != null {
+                    probe_add(&p, cylinder.hash, cylinder as ptr, cylinder.byte_count)
+                    hull.destroy_hull(cylinder)
+                }
+                if sides >= 4 {
+                    cone = hull.create_cone(0.5 * (h as float), 0.25 * (r as float), 0.1 * (r as float), sides)
+                    if cone != null {
+                        probe_add(&p, cone.hash, cone as ptr, cone.byte_count)
+                        hull.destroy_hull(cone)
+                    }
+                }
+                h = h + 1
+            }
+            r = r + 1
+        }
+        sides = sides + 1
+    }
+    probe_end(&p, "procedural hulls", 0 - 1)
+}
+
+// HashHeightFields: grids and waves of nearby sizes.
+test_height_fields() {
+    p = probe_begin(512)
+    scale = math.vec3_one()
+    rows = 2
+    while rows <= 14 {
+        cols = 2
+        while cols <= 14 {
+            grid = height_field.create_grid(rows, cols, scale, false)
+            probe_add(&p, grid.hash, grid as ptr, grid.byte_count)
+            height_field.destroy_height_field(grid)
+            wave = height_field.create_wave(rows, cols, scale, 0.25 * (rows as float), 0.125 * (cols as float), false)
+            probe_add(&p, wave.hash, wave as ptr, wave.byte_count)
+            height_field.destroy_height_field(wave)
+            cols = cols + 1
+        }
+        rows = rows + 1
+    }
+    probe_end(&p, "height fields", 0 - 1)
+}
+
+// HashMeshes: grid meshes and tori.
+test_meshes() {
+    p = probe_begin(256)
+    x = 2
+    while x <= 10 {
+        z = 2
+        while z <= 10 {
+            grid = mesh.create_grid_mesh(x, z, 1.0, 1, false)
+            probe_add(&p, grid.hash, grid as ptr, grid.byte_count)
+            mesh.destroy_mesh(grid)
+            z = z + 1
+        }
+        x = x + 1
+    }
+    radial = 3
+    while radial <= 12 {
+        tubular = 3
+        while tubular <= 12 {
+            torus = mesh.create_torus_mesh(radial, tubular, 1.0, 0.25)
+            probe_add(&p, torus.hash, torus as ptr, torus.byte_count)
+            mesh.destroy_mesh(torus)
+            tubular = tubular + 1
+        }
+        radial = radial + 1
+    }
+    probe_end(&p, "meshes", 0 - 1)
+}
+
+// HashVoxelDispersion: 3,000 small boxes on a voxel grid; the low 13 bits
+// of their digests land in more than 1,500 of the 8,192 slots.
+test_voxel_dispersion() {
+    seen_block = calloc(8192, 1)
+    seen = seen_block as byte[]
+    distinct = 0
+    cell = 0.25
+    i = 0
+    while i < 3000 {
+        offset = math.vec3(((i % 15) as float) * cell, (((i / 15) % 20) as float) * cell, ((i / 300) as float) * cell)
+        h = hull.make_offset_box_hull(0.5 * cell, 0.5 * cell, 0.5 * cell, offset)
+        low = (h.hash & (8191 as long)) as int
+        if (seen[low] as int) == 0 {
+            seen[low] = 1 as byte
+            distinct = distinct + 1
+        }
+        hull.destroy_hull(h)
+        i = i + 1
+    }
+    ensure("voxel dispersion: the low bits spread (${distinct} of 8192 slots for 3000 hulls)", distinct > 1500)
+    free(seen_block)
+}
+
+// HashStability: the same input bakes the same hash and the same bytes; an
+// empty blob is the reserved 1.
+test_stability() {
+    box1 = hull.make_box_hull(1.0, 2.0, 3.0)
+    box2 = hull.make_box_hull(1.0, 2.0, 3.0)
+    ensure("stability: two equal boxes, one hash", box1.hash == box2.hash)
+    hull.destroy_hull(box1)
+    hull.destroy_hull(box2)
+    cylinder1 = hull.create_cylinder(1.0, 0.5, 0.0, 12)
+    cylinder2 = hull.create_cylinder(1.0, 0.5, 0.0, 12)
+    ensure("stability: two equal cylinders, one hash", cylinder1.hash == cylinder2.hash)
+    ensure("stability: and the same bytes", cylinder1.byte_count == cylinder2.byte_count &&
+           memcmp(cylinder1 as ptr, cylinder2 as ptr, cylinder1.byte_count) == 0)
+    hull.destroy_hull(cylinder1)
+    hull.destroy_hull(cylinder2)
+    ensure("stability: an empty blob is the reserved value", basics.hash_bytes(null, 0) == (1 as long))
+}
+
+main() {
+    before = basics.alloc_count()
+    test_word_family()
+    test_bit_sweep()
+    test_zero_lengths()
+    test_float_signs()
+    test_float_ulp()
+    test_box_hulls()
+    test_transformed_box_hulls()
+    test_procedural_hulls()
+    test_height_fields()
+    test_meshes()
+    test_voxel_dispersion()
+    test_stability()
+    // The mesh module's scratch, three blocks made on its first build and
+    // kept, is all that stays.
+    ensure("every other counted allocation was freed (${basics.alloc_count() - before})", basics.alloc_count() == before + 3)
+
+    println("hash: ${checks} checks")
+    if failures == 0 {
+        println("hash: all checks passed")
+    } else {
+        println("hash: ${failures} failure(s)")
+        exit(1)
+    }
+}

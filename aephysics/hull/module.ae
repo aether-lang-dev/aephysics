@@ -30,7 +30,7 @@ exports (
     hull_vertices, hull_points, hull_edges, hull_planes, hull_faces,
     create_hull, destroy_hull, clone_hull, clone_and_transform_hull, is_valid_hull,
     hash_hull_data, compare_hull_data,
-    create_cylinder, create_cone, create_rock,
+    create_cylinder, create_cone, create_rock, create_complex_hull,
     make_box_hull, make_cube_hull, make_offset_box_hull, make_transformed_box_hull,
     make_scaled_box_hull, scale_box,
     find_hull_support_vertex, find_hull_support_face,
@@ -1700,6 +1700,45 @@ create_rock(radius: float) -> *HullData {
         s0 = sine
         cosine = delta.cosine * c0 - delta.sine * s0
         sine = delta.sine * c0 + delta.cosine * s0
+        i = i + 1
+    }
+    h = create_hull(points, count, count)
+    basics.free_bytes(block, count * sizeof(Vec3))
+    return h
+}
+
+// PEEL's BasicRandom: a 32-bit linear congruential generator.
+struct PeelRandom {
+    state: long
+}
+
+// The next value in [-0.5, 0.5], in single precision as PEEL's.
+peel_random_float(g: *PeelRandom) -> f32 {
+    g.state = (g.state * (2147001325 as long) + (715136305 as long)) & (4294967295 as long)
+    return ((g.state & (65535 as long)) as f32) / (65535.0 as f32) - (0.5 as f32)
+}
+
+// PEEL's large convex (b3CreateComplexHull): the hull of 32 random
+// directions at the radius, from a fixed seed so it is the same hull every
+// run. The directions are drawn and normalised in single precision as the
+// reference draws them, so the points are the reference's points.
+create_complex_hull(radius: float) -> *HullData {
+    count = 32
+    block = basics.alloc(count * sizeof(Vec3))
+    points = block as Vec3[]
+    g = PeelRandom { state: 42 as long }
+    r = radius as f32
+    i = 0
+    while i < count {
+        // A point of the cube kept when it falls in the ball of radius one half.
+        p = math.vec3f_zero()
+        while true {
+            p.x = peel_random_float(&g)
+            p.y = peel_random_float(&g)
+            p.z = peel_random_float(&g)
+            if math.dotf(p, p) <= (0.25 as f32) { break }
+        }
+        points[i] = math.widen3(math.mul_svf(r, math.normalizef(p)))
         i = i + 1
     }
     h = create_hull(points, count, count)

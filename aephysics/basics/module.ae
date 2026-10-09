@@ -370,10 +370,14 @@ map_bytes(m: *LongMap) -> int { return m.capacity * sizeof(MapItem) }
 
 // --- a hash over a block --------------------------------------------------------
 
-// This engine's hash of a block of 8-byte words (the count rounded down);
-// never zero. The reference uses rapidhash for the same purpose: identity
-// of hull and mesh data.
+// This engine's hash of a block of bytes; never zero. The reference uses
+// rapidhash for the same purpose: identity of hull and mesh data. Every
+// byte and the length reach it (test_hash.c's properties, #145): the whole
+// words through four lanes, the tail of fewer than eight bytes as one more
+// word, the byte count folded in at the end.
 hash_bytes(block: ptr, byte_count: int) -> long {
+    // An empty block has nothing to mix: the reserved value, the reference's.
+    if byte_count <= 0 { return 1 as long }
     // Four lanes take every fourth word, so their mixes (each a chain of
     // multiplies) overlap instead of waiting on one another: a word at a
     // time through one chain was most of building a box hull.
@@ -400,8 +404,19 @@ hash_bytes(block: ptr, byte_count: int) -> long {
         a = mix32(mix32(a ^ (w & m32)) ^ lsr(w, 32))
         i = i + 1
     }
-    // The lanes and the length folded into two halves of the result.
-    low = mix32(mix32(a ^ (count as long)) ^ b)
+    // The bytes after the last whole word, little-endian into one word.
+    tail_count = byte_count - 8 * count
+    if tail_count > 0 {
+        w = 0 as long
+        k = tail_count - 1
+        while k >= 0 {
+            w = (w << 8) | (native.load_u8(block, (8 * count + k) as long) as long)
+            k = k - 1
+        }
+        b = mix32(mix32(b ^ (w & m32)) ^ lsr(w, 32))
+    }
+    // The lanes and the length in bytes folded into two halves of the result.
+    low = mix32(mix32(a ^ (byte_count as long)) ^ b)
     high = mix32(mix32(c ^ low) ^ d)
     // high kept to 31 bits: a shift into the sign bit is undefined in C, and
     // GCC compiled it differently where the hash was inlined.

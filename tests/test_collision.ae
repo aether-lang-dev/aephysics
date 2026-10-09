@@ -1,0 +1,186 @@
+// The reference's test_collision.c (e77352c), the four subtests: the box
+// validity, overlap and containment; the ray against a box in all its
+// cases (through, from and to inside, wholly inside, missing, parallel
+// within and outside the slab, a point inside and outside, pointing away,
+// through a corner, along a face); a hull manifold a ten million metres
+// out against the same one at the origin; and a hull's tight and fat
+// world bounds there still holding its extent and margin. The reference
+// asks the last two only of its double precision build; positions are
+// double here, so they always hold.
+
+import std.string
+import aephysics.math
+import aephysics.basics
+import aephysics.hull
+import aephysics.manifold
+import aephysics.shape
+
+extern calloc(count: int, size: int) -> ptr
+extern exit(code: int)
+extern free(p: ptr)
+
+const FLT_EPSILON = 0.00000011920928955078125
+
+var failures = 0
+var checks = 0
+
+ensure(name: string, ok: bool) {
+    checks = checks + 1
+    if !ok {
+        println("collision: FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+small(name: string, value: float, tolerance: float) {
+    ensure("${name} (${value})", math.abs_float(value) < tolerance)
+}
+
+box(lx: float, ly: float, lz: float, ux: float, uy: float, uz: float) -> AABB {
+    return math.aabb(math.vec3(lx, ly, lz), math.vec3(ux, uy, uz))
+}
+
+test_aabb() {
+    a = box(0.0 - 1.0, 0.0 - 1.0, 0.0 - 1.0, 0.0 - 2.0, 0.0 - 2.0, 0.0 - 2.0)
+    ensure("aabb: lower above upper is not valid", math.is_valid_aabb(a) == false)
+    // The reference's {1, 1} leaves z at 0, which keeps the box valid.
+    a.upper = math.vec3(1.0, 1.0, 0.0)
+    ensure("aabb: valid", math.is_valid_aabb(a))
+    b = box(2.0, 2.0, 0.0, 4.0, 4.0, 0.0)
+    ensure("aabb: apart, no overlap", math.aabb_overlaps(a, b) == false)
+    ensure("aabb: apart, not contained", math.aabb_contains(a, b) == false)
+}
+
+// One ray: whether it hits, and where it enters and leaves when it does.
+ray(name: string, a: AABB, p1: Vec3, p2: Vec3, hit: bool, enter: float, leave: float, exact: bool) {
+    block = calloc(2, 8)
+    f = block as float[]
+    got = math.ray_cast_aabb(a, p1, p2, f)
+    ensure("ray ${name}: hit ${got}", got == hit)
+    if hit && got {
+        if exact {
+            ensure("ray ${name}: enters at ${f[0]}", f[0] == enter)
+            ensure("ray ${name}: leaves at ${f[1]}", f[1] == leave)
+        } else {
+            small("ray ${name}: enters", f[0] - enter, 0.001)
+            small("ray ${name}: leaves", f[1] - leave, 0.001)
+        }
+    }
+    free(block)
+}
+
+test_ray_aabb() {
+    unit = box(0.0 - 1.0, 0.0 - 1.0, 0.0 - 1.0, 1.0, 1.0, 1.0)
+    cube = box(0.0, 0.0, 0.0, 1.0, 1.0, 1.0)
+    ray("through the centre", unit, math.vec3(0.0 - 2.0, 0.0, 0.0), math.vec3(2.0, 0.0, 0.0), true, 0.25, 0.75, false)
+    // From inside: entering at 0 exactly, leaving half way.
+    f = calloc(2, 8)
+    fr = f as float[]
+    got = math.ray_cast_aabb(unit, math.vec3_zero(), math.vec3(2.0, 0.0, 0.0), fr)
+    ensure("ray from inside: hit", got)
+    ensure("ray from inside: enters at 0", fr[0] == 0.0)
+    small("ray from inside: leaves half way", fr[1] - 0.5, 0.001)
+    // To inside: entering half way, leaving at 1 exactly.
+    got = math.ray_cast_aabb(unit, math.vec3(0.0 - 2.0, 0.0, 0.0), math.vec3_zero(), fr)
+    ensure("ray to inside: hit", got)
+    small("ray to inside: enters half way", fr[0] - 0.5, 0.001)
+    ensure("ray to inside: leaves at 1", fr[1] == 1.0)
+    free(f)
+    ray("wholly inside", box(0.0 - 2.0, 0.0 - 2.0, 0.0 - 2.0, 2.0, 2.0, 2.0), math.vec3(0.0 - 1.0, 0.0, 0.0), math.vec3(1.0, 0.0, 0.0), true, 0.0, 1.0, true)
+    ray("missing", cube, math.vec3(0.0 - 1.0, 2.0, 0.5), math.vec3(2.0, 2.0, 0.5), false, 0.0, 0.0, false)
+    ray("parallel to a face, outside", cube, math.vec3(0.0 - 1.0, 2.0, 0.5), math.vec3(2.0, 2.0, 0.5), false, 0.0, 0.0, false)
+    ray("parallel to a face, within", cube, math.vec3(0.0 - 1.0, 0.5, 0.5), math.vec3(2.0, 0.5, 0.5), true, 1.0 / 3.0, 2.0 / 3.0, false)
+    ray("a point inside", cube, math.vec3(0.5, 0.5, 0.5), math.vec3(0.5, 0.5, 0.5), true, 0.0, 0.0, true)
+    ray("a point outside", cube, math.vec3(2.0, 2.0, 2.0), math.vec3(2.0, 2.0, 2.0), false, 0.0, 0.0, false)
+    ray("pointing away", cube, math.vec3(0.0 - 1.0, 0.5, 0.5), math.vec3(0.0 - 2.0, 0.5, 0.5), false, 0.0, 0.0, false)
+    ray("through a corner", cube, math.vec3(0.0 - 1.0, 0.0 - 1.0, 0.0 - 1.0), math.vec3(2.0, 2.0, 2.0), true, 1.0 / 3.0, 2.0 / 3.0, false)
+    ray("along a face", cube, math.vec3(0.0 - 1.0, 0.0, 0.5), math.vec3(2.0, 0.0, 0.5), true, 1.0 / 3.0, 2.0 / 3.0, false)
+}
+
+// Two unit cubes overlapping by a tenth along x: four points a tenth deep,
+// and the same manifold a ten million metres out, the relative pose
+// taken in double from the two world transforms.
+test_large_world_manifold() {
+    a = hull.make_box_hull(0.5, 0.5, 0.5)
+    b = hull.make_box_hull(0.5, 0.5, 0.5)
+    sep = math.vec3(0.9, 0.0, 0.0)
+    origin_points = calloc(8, sizeof(LocalManifoldPoint))
+    origin = manifold.local_manifold(origin_points)
+    cache = manifold.empty_sat_cache()
+    xf_a = math.transform_identity()
+    xf_b = Transform { p: sep, q: math.quat_identity() }
+    manifold.collide_hulls(&origin, 8, a, b, math.inv_mul_transforms(xf_a, xf_b), &cache)
+    ensure("large world manifold: four points at the origin", origin.point_count == 4)
+    i = 0
+    while i < origin.point_count {
+        small("large world manifold: a tenth deep", manifold.manifold_point(&origin, i).separation + 0.1, 0.01)
+        i = i + 1
+    }
+    base = math.vec3(10000000.0, 10000000.0, 10000000.0)
+    far_points = calloc(8, sizeof(LocalManifoldPoint))
+    far = manifold.local_manifold(far_points)
+    far_cache = manifold.empty_sat_cache()
+    xf_a = Transform { p: base, q: math.quat_identity() }
+    xf_b = Transform { p: math.add(base, sep), q: math.quat_identity() }
+    manifold.collide_hulls(&far, 8, a, b, math.inv_mul_transforms(xf_a, xf_b), &far_cache)
+    ensure("large world manifold: as many points far out", far.point_count == origin.point_count)
+    small("large world manifold: the normal", math.length(math.sub(far.normal, origin.normal)), 0.0001)
+    i = 0
+    while i < far.point_count {
+        p = manifold.manifold_point(&far, i)
+        q = manifold.manifold_point(&origin, i)
+        small("large world manifold: the separation", p.separation - q.separation, 0.0001)
+        small("large world manifold: the point", math.length(math.sub(p.point, q.point)), 0.0001)
+        i = i + 1
+    }
+    free(origin_points)
+    free(far_points)
+    hull.destroy_hull(a)
+    hull.destroy_hull(b)
+}
+
+// A unit cube's world bounds: 0.5 each way at the origin, and still
+// holding the extent, and a margin smaller than a float's step there, a
+// ten million metres out.
+test_large_world_aabb() {
+    cube = hull.make_box_hull(0.5, 0.5, 0.5)
+    sh = shape.hull_shape(cube, 1.0)
+    at_origin = shape.compute_fat_shape_aabb(&sh, math.transform_identity(), 0.0)
+    small("large world aabb: lower x at the origin", at_origin.lower.x + 0.5, FLT_EPSILON)
+    small("large world aabb: lower y at the origin", at_origin.lower.y + 0.5, FLT_EPSILON)
+    small("large world aabb: lower z at the origin", at_origin.lower.z + 0.5, FLT_EPSILON)
+    small("large world aabb: upper x at the origin", at_origin.upper.x - 0.5, FLT_EPSILON)
+    small("large world aabb: upper y at the origin", at_origin.upper.y - 0.5, FLT_EPSILON)
+    small("large world aabb: upper z at the origin", at_origin.upper.z - 0.5, FLT_EPSILON)
+    d = 10000000.0
+    far = Transform { p: math.vec3(d, d, d), q: math.quat_identity() }
+    tight = shape.compute_fat_shape_aabb(&sh, far, 0.0)
+    ensure("large world aabb: the tight box holds the extent",
+           tight.lower.x <= d - 0.5 && tight.lower.y <= d - 0.5 && tight.lower.z <= d - 0.5 &&
+           tight.upper.x >= d + 0.5 && tight.upper.y >= d + 0.5 && tight.upper.z >= d + 0.5)
+    extra = 0.05
+    fat = shape.compute_fat_shape_aabb(&sh, far, extra)
+    ensure("large world aabb: the fat box holds the margin",
+           fat.lower.x <= d - 0.5 - extra && fat.lower.y <= d - 0.5 - extra && fat.lower.z <= d - 0.5 - extra &&
+           fat.upper.x >= d + 0.5 + extra && fat.upper.y >= d + 0.5 + extra && fat.upper.z >= d + 0.5 + extra)
+    hull.destroy_hull(cube)
+}
+
+main() {
+    before = basics.alloc_count()
+    test_aabb()
+    test_ray_aabb()
+    test_large_world_manifold()
+    test_large_world_aabb()
+    // The manifold module's scratch, four blocks made on its first use and
+    // kept, is all that stays.
+    ensure("every other counted allocation was freed (${basics.alloc_count() - before})", basics.alloc_count() == before + 4)
+
+    println("collision: ${checks} checks")
+    if failures == 0 {
+        println("collision: all checks passed")
+    } else {
+        println("collision: ${failures} failure(s)")
+        exit(1)
+    }
+}

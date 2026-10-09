@@ -5,6 +5,7 @@
 // the arena. Every allocation the module counts is freed by the end.
 
 import std.string
+import std.mem
 import aephysics.basics
 
 extern calloc(count: int, size: int) -> ptr
@@ -26,6 +27,10 @@ ensure(name: string, ok: bool) {
 
 const BIT_COUNT = 169
 const SET_SPAN = 317
+
+struct Holder {
+    values: Ints
+}
 
 struct Thing {
     id: int
@@ -197,6 +202,91 @@ main() {
     items = things.data as Thing[]
     ensure("remove-swap on a buffer moves the last in", items[3].id == 49 && basics.buffer_count(&things) == 49)
     basics.buffer_destroy(&things)
+
+    // test_container.c's TestArrayRemove: reserved to the count, then
+    // drained by remove-swaps from the front, summing as it goes.
+    draining = basics.ints_create(0)
+    basics.ints_reserve(&draining, 100)
+    ensure("reserve: the capacity and nothing in it", basics.ints_capacity(&draining) == 100 && basics.ints_count(&draining) == 0)
+    i = 0
+    while i < 100 {
+        basics.ints_push(&draining, i)
+        i = i + 1
+    }
+    drained = 0
+    while basics.ints_count(&draining) > 0 {
+        drained = drained + basics.ints_get(&draining, 0)
+        basics.ints_remove_swap(&draining, 0)
+    }
+    ensure("remove-swap from the front drains every value (${drained})", drained == 100 * 99 / 2)
+    basics.ints_destroy(&draining)
+    // TestArrayPop: popped to empty.
+    popping = basics.ints_create(10)
+    i = 0
+    while i < 10 {
+        basics.ints_push(&popping, i)
+        i = i + 1
+    }
+    popped = 0
+    while basics.ints_count(&popping) > 0 { popped = popped + basics.ints_pop(&popping) }
+    ensure("pop to empty gives every value (${popped})", popped == 10 * 9 / 2 && basics.ints_capacity(&popping) == 10)
+    basics.ints_destroy(&popping)
+    // TestStructWithArray: an array held in a struct.
+    holder = Holder { values: basics.ints_create(0) }
+    basics.ints_push(&holder.values, 1)
+    basics.ints_push(&holder.values, 2)
+    basics.ints_push(&holder.values, 3)
+    held = 0
+    i = 0
+    while i < basics.ints_count(&holder.values) {
+        held = held + basics.ints_get(&holder.values, i)
+        i = i + 1
+    }
+    ensure("an array in a struct holds what was pushed", held == 6)
+    basics.ints_destroy(&holder.values)
+
+    // test_allocator.c: two elements allocated, freed, the allocator
+    // destroyed (TestBlockAllocate, TestBlockClear); then, for elements of
+    // 12 bytes, a manifold and three, more than a block's worth, every one
+    // 16-byte aligned, freed, allocated again from the free list, still
+    // aligned (TestBlockAlignment).
+    blocks = basics.block_allocator_create(8)
+    first = basics.block_allocate(&blocks)
+    second = basics.block_allocate(&blocks)
+    ensure("block allocator: two elements", first != null && second != null && first != second)
+    basics.block_free(&blocks, first)
+    basics.block_free(&blocks, second)
+    ensure("block allocator: both freed", blocks.allocation_count == 0)
+    basics.block_allocator_destroy(&blocks)
+    sizes = [ 12, 268, 3 * 268 ]
+    element_count = basics.BLOCK_SIZE + 8
+    elements_block = calloc(element_count, 8)
+    elements = elements_block as ptr[]
+    k = 0
+    while k < 3 {
+        sized = basics.block_allocator_create(sizes[k])
+        round = 0
+        while round < 2 {
+            aligned = true
+            j = 0
+            while j < element_count {
+                elements[j] = basics.block_allocate(&sized)
+                if elements[j] == null || (mem.ptr_to_long(elements[j]) & (15 as long)) != (0 as long) { aligned = false }
+                j = j + 1
+            }
+            ensure("block allocator: ${element_count} elements of ${sizes[k]} bytes, 16-byte aligned (round ${round})", aligned)
+            j = 0
+            while j < element_count {
+                basics.block_free(&sized, elements[j])
+                j = j + 1
+            }
+            round = round + 1
+        }
+        ensure("block allocator: the second round reused the blocks (${sized.blocks.count})", sized.blocks.count == 2 && sized.allocation_count == 0)
+        basics.block_allocator_destroy(&sized)
+        k = k + 1
+    }
+    free(elements_block)
 
     // The stack: LIFO, with the heap past its capacity.
     stack = basics.stack_create(256)

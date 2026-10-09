@@ -1188,6 +1188,57 @@ at 9 m/s is a step's 15 cm in before its contact exists), the farthest
 body 6.8991 m against 6.8992, at rest 0.8-4.7 mm against our 0.6-5.0,
 every body asleep at the end in both.
 
+## suite (the reference's benchmark suite)
+
+The rest of the reference's `benchmark/main.c` (#141): its nine other
+scenes, built by its own functions (`shared/benchmarks.c`, `e77352c`, the
+release sizes) in `bench/suite_box3d.c` and by their port in
+`bench/suite.ae`, each run as the reference's runner runs it: the scene's
+own step before every step, the first step untimed. One thread, pinned to
+a core, the better of two runs, ms per step:
+
+| scene | aephysics | Box3D `e77352c`, AVX2 | | height sum, contacts (ours / reference) |
+|---|---|---|---|---|
+| convex_pile: 5,120 of PEEL's 32-point convexes | 11.89 | 9.84 | 1.21x | 37,935 / 37,950; 51,767 / 51,706 |
+| junkyard: 10,584 rocks swept by a kinematic cylinder | 22.69 | 21.80 | 1.04x | 85,925 / 90,716; 195,896 / 193,126 |
+| large_world: a million static boxes, 100 spheres dropped | 0.0109 | 0.009 | 1.21x | 76.189 / 76.189; 380 / 380 |
+| sleep: ten pyramids, one woken each step | 2.18 | 1.80 | 1.21x | 14,322.8 / 14,322.8; 5,890 / 5,890 |
+| spinner: 1,500 spheres churned in a cylinder mesh | 3.46 | 3.17 | 1.09x | 19,206 / 19,059; 7,496 / 7,564 |
+| trees25 | 1.45 | 1.25 | 1.16x | 43.99 / 44.48; 1,112 / 1,103 |
+| trees50 | 0.543 | 0.513 | 1.06x | 45.59 / 45.60; 1,106 / 1,100 |
+| trees100 | 0.310 | 0.299 | 1.04x | 45.20 / 45.33; 1,100 / 1,100 |
+| washer: 8,000 cubes in a kinematic drum | 16.87 | 15.14 | 1.11x | 91,422 / 85,532; 41,649 / 43,736 |
+
+Where nothing is chaotic the two agree: the large world and the sleep
+scene to the printed digit, the spinner's motor angle after 800 steps to
+five (-0.157365 against -0.157361). The piles that tumble (the junkyard,
+the washer, the spinner's spheres) part at the rounding of the first
+collisions and end in different heaps of the same size. The reference's
+trees25 warns that a mesh query filled its 256-triangle buffer; ours has
+no such cap, hence its nine more contacts.
+
+The SAT runs (`shared/sat_benchmark.c`): 1,000 pairs of each hull pairing
+placed half the speculative distance apart, the best of four runs of
+twenty repeats, microseconds a query, ours / the reference's:
+
+| pair | GJK cold | GJK warm | SAT | SAT, no inscribed-sphere bound |
+|---|---|---|---|---|
+| complex/complex | 0.654 / 0.618 | 0.212 / 0.196 | 1.78 / 0.954 | 16.3 / 6.08 |
+| complex/rock | 0.433 / 0.411 | 0.139 / 0.129 | 1.02 / 0.645 | 5.63 / 2.76 |
+| complex/cylinder | 1.13 / 1.09 | 0.380 / 0.361 | 2.78 / 1.07 | 14.9 / 6.00 |
+| rock/rock | 0.240 / 0.225 | 0.080 / 0.073 | 0.560 / 0.379 | 1.99 / 1.18 |
+| rock/cylinder | 0.944 / 0.842 | 0.296 / 0.273 | 1.58 / 0.738 | 5.18 / 3.02 |
+| cylinder/cylinder | 1.45 / 1.41 | 0.485 / 0.474 | 4.77 / 1.41 | 13.3 / 7.48 |
+
+GJK is within 3-12% of the reference's. The separating axis test is
+1.5-3.4x: the reference's is the wide one of `convex_manifold_wide.inl`
+(the hull's vertices as eight-lane rows, the edge candidates filtered and
+sorted before any is tested), ours the four-lane edge pass of an earlier
+reference. That is the convex pile's gap, and #150. Across the scenes the
+pairs phase is 1.4-1.6x the reference's (2.59 against 1.63 ms on the
+convex pile): the broad phase's boxes are double, where the reference
+keeps float boxes rounded outward even in its large-world build (#151).
+
 ## Build flags (inlining)
 
 The generated C of every Aether function is a plain `static` function,

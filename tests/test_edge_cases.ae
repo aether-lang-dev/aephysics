@@ -1122,6 +1122,54 @@ slab_at(world_id: WorldId, x: float, h: ptr) -> BodyId {
     return body
 }
 
+// test_joint.c's TestNonDynamicJointDisable: a weld between two dynamic
+// bodies made static and kinematic, the kinematic one disabled and enabled
+// (the joint survives), then made dynamic again (the joint wakes); and a
+// revolute made directly between a static and a kinematic body, disabled
+// and enabled, stays asleep (no dynamic body to wake it).
+test_non_dynamic_joint_disable() {
+    fixtures_ready()
+    wdef = dynamics.default_world_def()
+    wdef.gravity = math.vec3_zero()
+    world_id = dynamics.create_world(&wdef)
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    a = dynamics.create_body(world_id, &bdef)
+    bdef.position = math.vec3(2.0, 0.0, 0.0)
+    b = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    dynamics.create_hull_shape(a, &sdef, g_box as *HullData)
+    dynamics.create_hull_shape(b, &sdef, g_box as *HullData)
+    wjdef = dynamics.default_weld_joint_def()
+    wjdef.base.body_id_a = a
+    wjdef.base.body_id_b = b
+    weld = dynamics.create_weld_joint(world_id, &wjdef)
+    dynamics.body_set_type(a, dynamics.BODY_STATIC)
+    dynamics.body_set_type(b, dynamics.BODY_KINEMATIC)
+    steps(world_id, 1)
+    dynamics.body_disable(b)
+    steps(world_id, 1)
+    dynamics.body_enable(b)
+    steps(world_id, 1)
+    ensure("non-dynamic joint: the weld survives a disable and enable", dynamics.joint_is_valid(weld) && valid_world(world_id))
+    dynamics.body_set_type(b, dynamics.BODY_DYNAMIC)
+    steps(world_id, 1)
+    ensure("non-dynamic joint: dynamic again, the weld is awake", dynamics.joint_is_awake(weld))
+    bdef.kind = dynamics.BODY_KINEMATIC
+    bdef.position = math.vec3(4.0, 0.0, 0.0)
+    c = dynamics.create_body(world_id, &bdef)
+    dynamics.create_hull_shape(c, &sdef, g_box as *HullData)
+    rjdef = dynamics.default_revolute_joint_def()
+    rjdef.base.body_id_a = a
+    rjdef.base.body_id_b = c
+    revolute = dynamics.create_revolute_joint(world_id, &rjdef)
+    dynamics.body_disable(c)
+    dynamics.body_enable(c)
+    steps(world_id, 1)
+    ensure("non-dynamic joint: static to kinematic, disabled and enabled, asleep", dynamics.joint_is_awake(revolute) == false && valid_world(world_id))
+    dynamics.destroy_world(world_id)
+}
+
 test_encoded_sims() {
     fixtures_ready()
     slab = hull.make_box_hull(2.5, 0.5, 2.5)
@@ -1249,6 +1297,7 @@ main() {
     test_kinematic_softness()
     test_rocking_hull()
     test_encoded_sims()
+    test_non_dynamic_joint_disable()
     println("edge_cases: ${checks} checks")
     if failures == 0 {
         println("edge_cases: all checks passed")
