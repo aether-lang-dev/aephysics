@@ -90,8 +90,11 @@ exports (
     create_sphere_shape, create_capsule_shape, create_hull_shape, create_transformed_hull_shape, create_mesh_shape, create_height_field_shape,
     HullEntry, world_hull_count, add_hull_to_database, allocate_manifolds, OwnedGeometry, adopt_geometry, world_at, destroy_solver_set,
     Recording, RecordedGeometry, RECORDING_MAGIC, RECORDING_MAJOR_VERSION, RECORDING_MINOR_VERSION, RECORDING_HEADER_BYTES, recording_on, rec_begin, rec_end, rec_int, rec_long,
+    RecordedTag, recorded_tag_at, rec_lock, rec_unlock, rec_payload_create, rec_payload_destroy, rec_patch_int, query_tag_key,
+    intern_tag, clear_tags, intern_geometry, rec_commit_query, rec_aabb, rec_query_filter, rec_shape_proxy, rec_plane_result, rec_capsule_value,
     rec_float, rec_bool, rec_vec3, rec_quat, rec_transform, rec_id, rec_string, rec_raw, rec_geometry, finish_recording, recorded_geometry_at,
-    OP_STATE_HASH, OP_BOUNDS, OP_END, OP_CREATE_BODY, OP_DESTROY_BODY, OP_BODY_SET_TRANSFORM, OP_BODY_SET_LINEAR_VELOCITY, OP_BODY_SET_ANGULAR_VELOCITY, OP_BODY_SET_TARGET_TRANSFORM, OP_BODY_APPLY_FORCE, OP_BODY_APPLY_FORCE_TO_CENTER, OP_BODY_APPLY_TORQUE, OP_BODY_APPLY_LINEAR_IMPULSE, OP_BODY_APPLY_LINEAR_IMPULSE_TO_CENTER, OP_BODY_APPLY_ANGULAR_IMPULSE, OP_BODY_SET_BULLET, OP_BODY_SET_MASS_DATA, OP_BODY_APPLY_MASS_FROM_SHAPES, OP_BODY_SET_LINEAR_DAMPING, OP_BODY_SET_ANGULAR_DAMPING, OP_BODY_SET_GRAVITY_SCALE, OP_BODY_SET_AWAKE, OP_BODY_ENABLE_SLEEP, OP_BODY_SET_SLEEP_THRESHOLD, OP_BODY_SET_MOTION_LOCKS, OP_CREATE_SPHERE_SHAPE, OP_CREATE_CAPSULE_SHAPE, OP_CREATE_HULL_SHAPE, OP_CREATE_TRANSFORMED_HULL_SHAPE, OP_CREATE_MESH_SHAPE, OP_CREATE_HEIGHT_FIELD_SHAPE, OP_CREATE_COMPOUND_SHAPE, OP_DESTROY_SHAPE, OP_SHAPE_SET_DENSITY, OP_SHAPE_SET_FILTER, OP_SHAPE_SET_SURFACE_MATERIAL, OP_SHAPE_SET_SPHERE, OP_SHAPE_SET_CAPSULE, OP_SHAPE_SET_HULL, OP_SHAPE_SET_MESH, OP_SHAPE_SET_FRICTION, OP_SHAPE_SET_RESTITUTION, OP_SHAPE_SET_MESH_MATERIAL, OP_SHAPE_ENABLE_PRE_SOLVE_EVENTS, OP_BODY_ENABLE_HIT_EVENTS, OP_BODY_ALLOW_FAST_ROTATION, OP_BODY_ENABLE_CONTACT_RECYCLING, OP_BODY_SET_SAFETY_FACTOR, OP_SHAPE_APPLY_WIND, OP_BODY_SET_NAME, OP_SHAPE_SET_NAME, OP_CREATE_DISTANCE_JOINT, OP_CREATE_MOTOR_JOINT, OP_CREATE_FILTER_JOINT, OP_CREATE_PARALLEL_JOINT, OP_CREATE_PRISMATIC_JOINT, OP_CREATE_REVOLUTE_JOINT, OP_CREATE_SPHERICAL_JOINT, OP_CREATE_WELD_JOINT, OP_CREATE_WHEEL_JOINT, OP_DESTROY_JOINT, OP_JOINT_SET_LOCAL_FRAME_A, OP_JOINT_SET_LOCAL_FRAME_B, OP_JOINT_SET_COLLIDE_CONNECTED, OP_JOINT_WAKE_BODIES, OP_JOINT_SET_CONSTRAINT_TUNING, OP_JOINT_SET_FORCE_THRESHOLD, OP_JOINT_SET_TORQUE_THRESHOLD, OP_BODY_SET_TYPE, OP_BODY_DISABLE, OP_BODY_ENABLE, OP_SHAPE_ENABLE_SENSOR_EVENTS, OP_SHAPE_ENABLE_CONTACT_EVENTS, OP_SHAPE_ENABLE_HIT_EVENTS, OP_STEP, OP_ENABLE_SLEEPING, OP_ENABLE_WARM_STARTING, OP_ENABLE_CONTINUOUS, OP_ENABLE_SPECULATIVE, OP_SET_RESTITUTION_THRESHOLD, OP_SET_RESTITUTION_ITERATIONS, OP_ENABLE_RESTITUTION_PROPAGATION, OP_ENABLE_KINEMATIC_STATIC_SOFTNESS, OP_SET_HIT_EVENT_THRESHOLD, OP_SET_CONTACT_TUNING, OP_SET_CONTACT_RECYCLE_DISTANCE, OP_SET_MAXIMUM_LINEAR_SPEED, OP_SET_GRAVITY, OP_REBUILD_STATIC_TREE, OP_EXPLODE, OP_DISTANCE_JOINT_SET_LENGTH, OP_DISTANCE_JOINT_ENABLE_LIMIT, OP_DISTANCE_JOINT_SET_LENGTH_RANGE, OP_DISTANCE_JOINT_ENABLE_SPRING, OP_DISTANCE_JOINT_SET_SPRING_FORCE_RANGE, OP_DISTANCE_JOINT_SET_SPRING_HERTZ, OP_DISTANCE_JOINT_SET_SPRING_DAMPING_RATIO, OP_DISTANCE_JOINT_ENABLE_MOTOR, OP_DISTANCE_JOINT_SET_MOTOR_SPEED, OP_DISTANCE_JOINT_SET_MAX_MOTOR_FORCE, OP_MOTOR_JOINT_SET_LINEAR_VELOCITY, OP_MOTOR_JOINT_SET_ANGULAR_VELOCITY, OP_MOTOR_JOINT_SET_MAX_VELOCITY_TORQUE, OP_MOTOR_JOINT_SET_MAX_VELOCITY_FORCE, OP_MOTOR_JOINT_SET_LINEAR_HERTZ, OP_MOTOR_JOINT_SET_LINEAR_DAMPING_RATIO, OP_MOTOR_JOINT_SET_ANGULAR_HERTZ, OP_MOTOR_JOINT_SET_ANGULAR_DAMPING_RATIO, OP_MOTOR_JOINT_SET_MAX_SPRING_FORCE, OP_MOTOR_JOINT_SET_MAX_SPRING_TORQUE, OP_PARALLEL_JOINT_SET_SPRING_HERTZ, OP_PARALLEL_JOINT_SET_SPRING_DAMPING_RATIO, OP_PARALLEL_JOINT_SET_MAX_TORQUE, OP_PRISMATIC_JOINT_ENABLE_SPRING, OP_PRISMATIC_JOINT_SET_SPRING_HERTZ, OP_PRISMATIC_JOINT_SET_SPRING_DAMPING_RATIO, OP_PRISMATIC_JOINT_SET_TARGET_TRANSLATION, OP_PRISMATIC_JOINT_ENABLE_LIMIT, OP_PRISMATIC_JOINT_SET_LIMITS, OP_PRISMATIC_JOINT_ENABLE_MOTOR, OP_PRISMATIC_JOINT_SET_MOTOR_SPEED, OP_PRISMATIC_JOINT_SET_MAX_MOTOR_FORCE, OP_REVOLUTE_JOINT_ENABLE_LIMIT, OP_REVOLUTE_JOINT_SET_LIMITS, OP_REVOLUTE_JOINT_ENABLE_SPRING, OP_REVOLUTE_JOINT_SET_TARGET_ANGLE, OP_REVOLUTE_JOINT_SET_SPRING_HERTZ, OP_REVOLUTE_JOINT_SET_SPRING_DAMPING_RATIO, OP_REVOLUTE_JOINT_ENABLE_MOTOR, OP_REVOLUTE_JOINT_SET_MOTOR_SPEED, OP_REVOLUTE_JOINT_SET_MAX_MOTOR_TORQUE, OP_SPHERICAL_JOINT_ENABLE_CONE_LIMIT, OP_SPHERICAL_JOINT_SET_CONE_LIMIT, OP_SPHERICAL_JOINT_SET_CONE_AXIS, OP_SPHERICAL_JOINT_SET_CONE_ELLIPSE, OP_SPHERICAL_JOINT_ENABLE_TWIST_LIMIT, OP_SPHERICAL_JOINT_SET_TWIST_LIMITS, OP_SPHERICAL_JOINT_ENABLE_SPRING, OP_SPHERICAL_JOINT_SET_TARGET_ROTATION, OP_SPHERICAL_JOINT_SET_SPRING_HERTZ, OP_SPHERICAL_JOINT_SET_SPRING_DAMPING_RATIO, OP_SPHERICAL_JOINT_ENABLE_MOTOR, OP_SPHERICAL_JOINT_SET_MOTOR_VELOCITY, OP_SPHERICAL_JOINT_SET_MAX_MOTOR_TORQUE, OP_WELD_JOINT_SET_LINEAR_HERTZ, OP_WELD_JOINT_SET_LINEAR_DAMPING_RATIO, OP_WELD_JOINT_SET_ANGULAR_HERTZ, OP_WELD_JOINT_SET_ANGULAR_DAMPING_RATIO, OP_WHEEL_JOINT_ENABLE_SUSPENSION, OP_WHEEL_JOINT_SET_SUSPENSION_HERTZ, OP_WHEEL_JOINT_SET_SUSPENSION_DAMPING_RATIO, OP_WHEEL_JOINT_ENABLE_SUSPENSION_LIMIT, OP_WHEEL_JOINT_SET_SUSPENSION_LIMITS, OP_WHEEL_JOINT_ENABLE_SPIN_MOTOR, OP_WHEEL_JOINT_SET_SPIN_MOTOR_SPEED, OP_WHEEL_JOINT_SET_MAX_SPIN_TORQUE, OP_WHEEL_JOINT_ENABLE_STEERING, OP_WHEEL_JOINT_SET_STEERING_HERTZ, OP_WHEEL_JOINT_SET_STEERING_DAMPING_RATIO, OP_WHEEL_JOINT_SET_MAX_STEERING_TORQUE, OP_WHEEL_JOINT_ENABLE_STEERING_LIMIT, OP_WHEEL_JOINT_SET_STEERING_LIMITS, OP_WHEEL_JOINT_SET_TARGET_STEERING_ANGLE,
+    OP_STATE_HASH, OP_BOUNDS, OP_END, OP_QUERY_TAG, OP_QUERY_OVERLAP_AABB, OP_QUERY_OVERLAP_SHAPE, OP_QUERY_CAST_RAY,
+    OP_QUERY_CAST_SHAPE, OP_QUERY_CAST_RAY_CLOSEST, OP_QUERY_CAST_MOVER, OP_QUERY_COLLIDE_MOVER, OP_CREATE_BODY, OP_DESTROY_BODY, OP_BODY_SET_TRANSFORM, OP_BODY_SET_LINEAR_VELOCITY, OP_BODY_SET_ANGULAR_VELOCITY, OP_BODY_SET_TARGET_TRANSFORM, OP_BODY_APPLY_FORCE, OP_BODY_APPLY_FORCE_TO_CENTER, OP_BODY_APPLY_TORQUE, OP_BODY_APPLY_LINEAR_IMPULSE, OP_BODY_APPLY_LINEAR_IMPULSE_TO_CENTER, OP_BODY_APPLY_ANGULAR_IMPULSE, OP_BODY_SET_BULLET, OP_BODY_SET_MASS_DATA, OP_BODY_APPLY_MASS_FROM_SHAPES, OP_BODY_SET_LINEAR_DAMPING, OP_BODY_SET_ANGULAR_DAMPING, OP_BODY_SET_GRAVITY_SCALE, OP_BODY_SET_AWAKE, OP_BODY_ENABLE_SLEEP, OP_BODY_SET_SLEEP_THRESHOLD, OP_BODY_SET_MOTION_LOCKS, OP_CREATE_SPHERE_SHAPE, OP_CREATE_CAPSULE_SHAPE, OP_CREATE_HULL_SHAPE, OP_CREATE_TRANSFORMED_HULL_SHAPE, OP_CREATE_MESH_SHAPE, OP_CREATE_HEIGHT_FIELD_SHAPE, OP_CREATE_COMPOUND_SHAPE, OP_DESTROY_SHAPE, OP_SHAPE_SET_DENSITY, OP_SHAPE_SET_FILTER, OP_SHAPE_SET_SURFACE_MATERIAL, OP_SHAPE_SET_SPHERE, OP_SHAPE_SET_CAPSULE, OP_SHAPE_SET_HULL, OP_SHAPE_SET_MESH, OP_SHAPE_SET_FRICTION, OP_SHAPE_SET_RESTITUTION, OP_SHAPE_SET_MESH_MATERIAL, OP_SHAPE_ENABLE_PRE_SOLVE_EVENTS, OP_BODY_ENABLE_HIT_EVENTS, OP_BODY_ALLOW_FAST_ROTATION, OP_BODY_ENABLE_CONTACT_RECYCLING, OP_BODY_SET_SAFETY_FACTOR, OP_SHAPE_APPLY_WIND, OP_BODY_SET_NAME, OP_SHAPE_SET_NAME, OP_CREATE_DISTANCE_JOINT, OP_CREATE_MOTOR_JOINT, OP_CREATE_FILTER_JOINT, OP_CREATE_PARALLEL_JOINT, OP_CREATE_PRISMATIC_JOINT, OP_CREATE_REVOLUTE_JOINT, OP_CREATE_SPHERICAL_JOINT, OP_CREATE_WELD_JOINT, OP_CREATE_WHEEL_JOINT, OP_DESTROY_JOINT, OP_JOINT_SET_LOCAL_FRAME_A, OP_JOINT_SET_LOCAL_FRAME_B, OP_JOINT_SET_COLLIDE_CONNECTED, OP_JOINT_WAKE_BODIES, OP_JOINT_SET_CONSTRAINT_TUNING, OP_JOINT_SET_FORCE_THRESHOLD, OP_JOINT_SET_TORQUE_THRESHOLD, OP_BODY_SET_TYPE, OP_BODY_DISABLE, OP_BODY_ENABLE, OP_SHAPE_ENABLE_SENSOR_EVENTS, OP_SHAPE_ENABLE_CONTACT_EVENTS, OP_SHAPE_ENABLE_HIT_EVENTS, OP_STEP, OP_ENABLE_SLEEPING, OP_ENABLE_WARM_STARTING, OP_ENABLE_CONTINUOUS, OP_ENABLE_SPECULATIVE, OP_SET_RESTITUTION_THRESHOLD, OP_SET_RESTITUTION_ITERATIONS, OP_ENABLE_RESTITUTION_PROPAGATION, OP_ENABLE_KINEMATIC_STATIC_SOFTNESS, OP_SET_HIT_EVENT_THRESHOLD, OP_SET_CONTACT_TUNING, OP_SET_CONTACT_RECYCLE_DISTANCE, OP_SET_MAXIMUM_LINEAR_SPEED, OP_SET_GRAVITY, OP_REBUILD_STATIC_TREE, OP_EXPLODE, OP_DISTANCE_JOINT_SET_LENGTH, OP_DISTANCE_JOINT_ENABLE_LIMIT, OP_DISTANCE_JOINT_SET_LENGTH_RANGE, OP_DISTANCE_JOINT_ENABLE_SPRING, OP_DISTANCE_JOINT_SET_SPRING_FORCE_RANGE, OP_DISTANCE_JOINT_SET_SPRING_HERTZ, OP_DISTANCE_JOINT_SET_SPRING_DAMPING_RATIO, OP_DISTANCE_JOINT_ENABLE_MOTOR, OP_DISTANCE_JOINT_SET_MOTOR_SPEED, OP_DISTANCE_JOINT_SET_MAX_MOTOR_FORCE, OP_MOTOR_JOINT_SET_LINEAR_VELOCITY, OP_MOTOR_JOINT_SET_ANGULAR_VELOCITY, OP_MOTOR_JOINT_SET_MAX_VELOCITY_TORQUE, OP_MOTOR_JOINT_SET_MAX_VELOCITY_FORCE, OP_MOTOR_JOINT_SET_LINEAR_HERTZ, OP_MOTOR_JOINT_SET_LINEAR_DAMPING_RATIO, OP_MOTOR_JOINT_SET_ANGULAR_HERTZ, OP_MOTOR_JOINT_SET_ANGULAR_DAMPING_RATIO, OP_MOTOR_JOINT_SET_MAX_SPRING_FORCE, OP_MOTOR_JOINT_SET_MAX_SPRING_TORQUE, OP_PARALLEL_JOINT_SET_SPRING_HERTZ, OP_PARALLEL_JOINT_SET_SPRING_DAMPING_RATIO, OP_PARALLEL_JOINT_SET_MAX_TORQUE, OP_PRISMATIC_JOINT_ENABLE_SPRING, OP_PRISMATIC_JOINT_SET_SPRING_HERTZ, OP_PRISMATIC_JOINT_SET_SPRING_DAMPING_RATIO, OP_PRISMATIC_JOINT_SET_TARGET_TRANSLATION, OP_PRISMATIC_JOINT_ENABLE_LIMIT, OP_PRISMATIC_JOINT_SET_LIMITS, OP_PRISMATIC_JOINT_ENABLE_MOTOR, OP_PRISMATIC_JOINT_SET_MOTOR_SPEED, OP_PRISMATIC_JOINT_SET_MAX_MOTOR_FORCE, OP_REVOLUTE_JOINT_ENABLE_LIMIT, OP_REVOLUTE_JOINT_SET_LIMITS, OP_REVOLUTE_JOINT_ENABLE_SPRING, OP_REVOLUTE_JOINT_SET_TARGET_ANGLE, OP_REVOLUTE_JOINT_SET_SPRING_HERTZ, OP_REVOLUTE_JOINT_SET_SPRING_DAMPING_RATIO, OP_REVOLUTE_JOINT_ENABLE_MOTOR, OP_REVOLUTE_JOINT_SET_MOTOR_SPEED, OP_REVOLUTE_JOINT_SET_MAX_MOTOR_TORQUE, OP_SPHERICAL_JOINT_ENABLE_CONE_LIMIT, OP_SPHERICAL_JOINT_SET_CONE_LIMIT, OP_SPHERICAL_JOINT_SET_CONE_AXIS, OP_SPHERICAL_JOINT_SET_CONE_ELLIPSE, OP_SPHERICAL_JOINT_ENABLE_TWIST_LIMIT, OP_SPHERICAL_JOINT_SET_TWIST_LIMITS, OP_SPHERICAL_JOINT_ENABLE_SPRING, OP_SPHERICAL_JOINT_SET_TARGET_ROTATION, OP_SPHERICAL_JOINT_SET_SPRING_HERTZ, OP_SPHERICAL_JOINT_SET_SPRING_DAMPING_RATIO, OP_SPHERICAL_JOINT_ENABLE_MOTOR, OP_SPHERICAL_JOINT_SET_MOTOR_VELOCITY, OP_SPHERICAL_JOINT_SET_MAX_MOTOR_TORQUE, OP_WELD_JOINT_SET_LINEAR_HERTZ, OP_WELD_JOINT_SET_LINEAR_DAMPING_RATIO, OP_WELD_JOINT_SET_ANGULAR_HERTZ, OP_WELD_JOINT_SET_ANGULAR_DAMPING_RATIO, OP_WHEEL_JOINT_ENABLE_SUSPENSION, OP_WHEEL_JOINT_SET_SUSPENSION_HERTZ, OP_WHEEL_JOINT_SET_SUSPENSION_DAMPING_RATIO, OP_WHEEL_JOINT_ENABLE_SUSPENSION_LIMIT, OP_WHEEL_JOINT_SET_SUSPENSION_LIMITS, OP_WHEEL_JOINT_ENABLE_SPIN_MOTOR, OP_WHEEL_JOINT_SET_SPIN_MOTOR_SPEED, OP_WHEEL_JOINT_SET_MAX_SPIN_TORQUE, OP_WHEEL_JOINT_ENABLE_STEERING, OP_WHEEL_JOINT_SET_STEERING_HERTZ, OP_WHEEL_JOINT_SET_STEERING_DAMPING_RATIO, OP_WHEEL_JOINT_SET_MAX_STEERING_TORQUE, OP_WHEEL_JOINT_ENABLE_STEERING_LIMIT, OP_WHEEL_JOINT_SET_STEERING_LIMITS, OP_WHEEL_JOINT_SET_TARGET_STEERING_ANGLE,
     create_compound_shape, destroy_shape, shape_is_valid, get_shape_full_id, get_shape, shape_get_body,
     shape_get_aabb, shape_get_type, shape_get_density, shape_set_density, shape_get_filter, shape_set_filter,
     shape_get_surface_material, shape_set_surface_material, shape_get_material_count, shape_is_sensor,
@@ -425,7 +428,7 @@ struct Body {
     id: int
     generation: int
     user_data: ptr
-    name: ptr                      // a plain C copy the world owns (native.name_copy), or null
+    name_id: int                   // the name's id in the world's name cache, or NULL_NAME
 }
 
 // What the solver reads and writes for an awake body.
@@ -490,7 +493,7 @@ struct WorldShape {
     user_data: ptr
     generation: int
     flags: int
-    name: ptr                      // a plain C copy the world owns, or null
+    name_id: int                   // the name's id in the world's name cache, or NULL_NAME
 }
 
 struct ContactEdge {
@@ -1298,6 +1301,7 @@ struct World {
     in_use: bool
     user_data: ptr
     recording: ptr                 // *Recording while the world records (aephysics.recording), else null
+    names: NameCache               // the bodies' and shapes' names, each once
 }
 
 var g_worlds: ptr = null           // World[MAX_WORLDS]
@@ -1459,6 +1463,7 @@ init_world_contents(w: *World, def: *WorldDef) {
     w.compound_shape_count = 0
     w.inv_h = 0.0
     w.inv_dt = 0.0
+    w.names = basics.name_cache_create()
     w.contact_state = basics.bitset_create(64)
     w.contact_begin_events = basics.buffer_create(sizeof(ContactBeginTouchEvent), 4)
     w.contact_end_events0 = basics.buffer_create(sizeof(ContactEndTouchEvent), 4)
@@ -1562,21 +1567,9 @@ free_world_contents(w: *World) {
             basics.free_bytes(s.materials, s.material_count * sizeof(SurfaceMaterial))
             s.materials = null
         }
-        if s.id != NULL_INDEX {
-            native.name_free(s.name)
-            s.name = null
-        }
         i = i + 1
     }
-    i = 0
-    while i < w.bodies.count {
-        named = body_at(w, i)
-        if named.set_index != NULL_INDEX {
-            native.name_free(named.name)
-            named.name = null
-        }
-        i = i + 1
-    }
+    basics.name_cache_destroy(&w.names)
     i = 0
     while i < w.sensors.count {
         sensor = sensor_at(w, i)
@@ -1994,7 +1987,7 @@ create_body_internal(world_id: WorldId, def: *BodyDef) -> BodyId {
     body.inertia = math.mat3_zero()
     body.kind = def.kind
     body.flags = flags
-    body.name = native.name_copy(def.name)
+    body.name_id = basics.name_cache_add(&w.names, def.name)
     if set_id >= AWAKE_SET { create_island_for_body(w, set_id, body) }
     w.locked = false
     return BodyId { index1: body_id + 1, world0: w.world_id, generation: body.generation }
@@ -2043,15 +2036,13 @@ destroy_body(id: BodyId) {
             s.materials = null
             s.material_count = 0
         }
-        native.name_free(s.name)
-        s.name = null
+        s.name_id = basics.NULL_NAME
         basics.idpool_free(&w.shape_id_pool, shape_id)
         set_shape_fat_aabb(w, shape_id, AABBf { lower: math.vec3f_zero(), upper: math.vec3f_zero() })
         s.id = NULL_INDEX
         shape_id = s.next_shape_id
     }
-    native.name_free(body.name)
-    body.name = null
+    body.name_id = basics.NULL_NAME
     remove_body_from_island(w, body)
     set = solver_set_at(w, body.set_index)
     moved_index = basics.buffer_remove_swap(&set.body_sims, body.local_index)
@@ -2171,7 +2162,7 @@ create_shape(body_id: BodyId, def: *ShapeDef, geometry: Shape) -> ShapeId {
     set_shape_fat_aabb(w, shape_id, math.aabb_round_out(s.aabb))
     s.generation = s.generation + 1
     s.sensor_index = NULL_INDEX
-    s.name = native.name_copy(def.name)
+    s.name_id = basics.name_cache_add(&w.names, def.name)
     if kind == KIND_COMPOUND {
         w.compound_shape_count = w.compound_shape_count + 1
         // A copy of the compound's materials, so every shape frees its array the same way.
@@ -2284,6 +2275,9 @@ struct Recording {
     bounds: AABB               // every step's world bounds, joined
     have_bounds: bool
     owner: int                 // the recording world's index1 while it records, else 0
+    lock: int                  // taken while a record goes in (rec_lock)
+    tags: Buffer               // RecordedTag: the tagged queries' callers, each key once
+    tag_heads: LongMap         // a tag's key to its entry
 }
 
 // One geometry block the calls named: the recording's own pointer-free
@@ -2301,12 +2295,20 @@ struct RecordedGeometry {
 // which older players skip.
 const RECORDING_MAGIC = 0x43525041    // "APRC", little-endian
 const RECORDING_MAJOR_VERSION = 1
-const RECORDING_MINOR_VERSION = 0
+const RECORDING_MINOR_VERSION = 1
 const RECORDING_HEADER_BYTES = 32
 
 const OP_STATE_HASH = 2
 const OP_BOUNDS = 3
 const OP_END = 4
+const OP_QUERY_TAG = 5
+const OP_QUERY_OVERLAP_AABB = 6
+const OP_QUERY_OVERLAP_SHAPE = 7
+const OP_QUERY_CAST_RAY = 8
+const OP_QUERY_CAST_SHAPE = 9
+const OP_QUERY_CAST_RAY_CLOSEST = 10
+const OP_QUERY_CAST_MOVER = 11
+const OP_QUERY_COLLIDE_MOVER = 12
 const OP_CREATE_BODY = 16
 const OP_DESTROY_BODY = 17
 const OP_BODY_SET_TRANSFORM = 18
@@ -2495,9 +2497,11 @@ rec_raw(r: *Recording, src: ptr, n: int) {
     r.size = r.size + n
 }
 
-// A record begun: its opcode and a length filled in by rec_end.
+// A record begun: its opcode and a length filled in by rec_end, the
+// recording held between them.
 rec_begin(world0: int, op: int) -> *Recording {
     r = world_at(world0).recording as *Recording
+    rec_lock(r)
     rec_int(r, op)
     r.record_start = r.size
     rec_int(r, 0)
@@ -2507,6 +2511,7 @@ rec_begin(world0: int, op: int) -> *Recording {
 rec_end(r: *Recording) {
     length = r.size - r.record_start - 4
     memcpy(r.data + r.record_start, (&length) as ptr, 4)
+    rec_unlock(r)
 }
 
 rec_int(r: *Recording, v: int) {
@@ -2600,14 +2605,21 @@ rec_geometry(r: *Recording, kind: int, block: ptr) {
         c.tree.stack = null
         c.tree.stack_dist = null
     }
-    hash = basics.hash_bytes(copy, byte_count)
+    rec_int(r, intern_geometry(r, kind, basics.hash_bytes(copy, byte_count), copy, byte_count))
+}
+
+// The id of a block among the recording's (the reference's
+// b3InternGeometry): the one with the same kind and bytes, found by its
+// content hash and then every byte, so two blocks on one hash stay two;
+// else `copy` (alloc's, the recording's from now, freed when found)
+// becomes a new one.
+intern_geometry(r: *Recording, kind: int, hash: long, copy: ptr, byte_count: int) -> int {
     index = basics.map_get(&r.geometry_heads, hash, NULL_INDEX)
     while index != NULL_INDEX {
         entry = recorded_geometry_at(r, index)
         if entry.kind == kind && entry.byte_count == byte_count && memcmp(entry.block, copy, byte_count) == 0 {
             basics.free_bytes(copy, byte_count)
-            rec_int(r, index)
-            return
+            return index
         }
         index = entry.next
     }
@@ -2619,7 +2631,7 @@ rec_geometry(r: *Recording, kind: int, block: ptr) {
     entry.block = copy
     entry.next = basics.map_get(&r.geometry_heads, hash, NULL_INDEX)
     basics.map_set(&r.geometry_heads, hash, index)
-    rec_int(r, index)
+    return index
 }
 
 recorded_geometry_at(r: *Recording, index: int) -> *RecordedGeometry { return (r.geometry.data + index * sizeof(RecordedGeometry)) as *RecordedGeometry }
@@ -2632,13 +2644,15 @@ finish_recording(w: *World) {
     r = w.recording as *Recording
     w.recording = null
     r.owner = 0
+    rec_lock(r)
     rec_int(r, OP_BOUNDS)
     r.record_start = r.size
     rec_int(r, 0)
     rec_bool(r, r.have_bounds)
     rec_vec3(r, r.bounds.lower)
     rec_vec3(r, r.bounds.upper)
-    rec_end(r)
+    bounds_length = r.size - r.record_start - 4
+    memcpy(r.data + r.record_start, (&bounds_length) as ptr, 4)
     rec_int(r, OP_END)
     rec_int(r, 0)
     registry_offset = r.size
@@ -2651,9 +2665,168 @@ finish_recording(w: *World) {
         rec_raw(r, entry.block, entry.byte_count)
         i = i + 1
     }
+    // The tagged queries' callers: each key, its id and its name.
+    rec_int(r, r.tags.count)
+    i = 0
+    while i < r.tags.count {
+        tag = recorded_tag_at(r, i)
+        rec_long(r, tag.key)
+        rec_long(r, tag.id)
+        if tag.name == null { rec_int(r, NULL_INDEX) } else {
+            rec_int(r, tag.length)
+            rec_raw(r, tag.name, tag.length)
+        }
+        i = i + 1
+    }
     registry_bytes = r.size - registry_offset
     memcpy(r.data + 12, (&registry_offset) as ptr, 4)
     memcpy(r.data + 16, (&registry_bytes) as ptr, 4)
+    rec_unlock(r)
+}
+
+// --- recorded queries ---------------------------------------------------------------------------
+
+// A query's caller, as the recording knows it: the key (query_tag_key)
+// the viewer follows it by across frames, and the id and name it hashes,
+// kept once per key in the recording's tag table.
+struct RecordedTag {
+    key: long
+    id: long
+    name: ptr          // its bytes and a terminating zero (alloc's), or null
+    length: int
+}
+
+recorded_tag_at(r: *Recording, index: int) -> *RecordedTag { return (r.tags.data + index * sizeof(RecordedTag)) as *RecordedTag }
+
+// The recording's own, while records go in from several threads: queries
+// may run at once on a world that is not stepping.
+rec_lock(r: *Recording) {
+    while native.atomic_cas((&r.lock) as ptr, 0, 1) == false { native.pause() }
+}
+
+rec_unlock(r: *Recording) { native.atomic_store((&r.lock) as ptr, 0) }
+
+// A query's bytes, written while it runs (its hits come one visit at a
+// time) and committed whole after, so concurrent queries never interleave.
+rec_payload_create() -> *Recording { return basics.alloc(sizeof(Recording)) as *Recording }
+
+rec_payload_destroy(payload: *Recording) {
+    if payload.data != null { basics.free_bytes(payload.data, payload.capacity) }
+    basics.free_bytes(payload as ptr, sizeof(Recording))
+}
+
+// The int written `at` bytes into the payload replaced (a count reserved
+// before its items).
+rec_patch_int(payload: *Recording, at: int, v: int) {
+    holder = v
+    memcpy(payload.data + at, (&holder) as ptr, 4)
+}
+
+// A query's caller as one key: 64-bit FNV-1a over the id's eight bytes,
+// then the name's (the reference's b3HashQueryTag); never 0, so the key
+// says whether the query was tagged.
+query_tag_key(id: long, name: string) -> long {
+    // 14695981039346656037 and 1099511628211, the FNV-1a basis and prime.
+    hash = 0 - 3750763034362895579
+    prime = 1099511628211 as long
+    i = 0
+    while i < 8 {
+        hash = (hash ^ (basics.lsr(id, 8 * i) & (255 as long))) * prime
+        i = i + 1
+    }
+    if name != null {
+        bytes = string.aether_string_raw_ptr(name)
+        n = string.length(name)
+        i = 0
+        while i < n {
+            hash = (hash ^ (native.load_u8(bytes, i as long) as long)) * prime
+            i = i + 1
+        }
+    }
+    if hash == (0 as long) { return 1 as long }
+    return hash
+}
+
+// The key's id and name kept, the first ones for a key.
+intern_tag(r: *Recording, key: long, id: long, name: string) {
+    if basics.map_has(&r.tag_heads, key) { return }
+    index = basics.buffer_push(&r.tags)
+    tag = recorded_tag_at(r, index)
+    tag.key = key
+    tag.id = id
+    tag.name = null
+    tag.length = 0
+    if name != null && string.length(name) > 0 {
+        tag.length = string.length(name)
+        tag.name = basics.alloc(tag.length + 1)
+        memcpy(tag.name, string.aether_string_raw_ptr(name), tag.length)
+    }
+    basics.map_set(&r.tag_heads, key, index)
+}
+
+// The recording's tags forgotten, ready for a fresh session.
+clear_tags(r: *Recording) {
+    i = 0
+    while i < r.tags.count {
+        tag = recorded_tag_at(r, i)
+        if tag.name != null { basics.free_bytes(tag.name, tag.length + 1) }
+        i = i + 1
+    }
+    r.tags.count = 0
+    basics.map_clear(&r.tag_heads)
+}
+
+// A query's record committed into its world's recording, its tag record
+// first when the filter names its caller (both under the lock, so they
+// stay together whatever else records at once).
+rec_commit_query(world0: int, op: int, payload: *Recording, tag_id: long, tag_name: string) {
+    r = world_at(world0).recording as *Recording
+    if r == null { return }
+    rec_lock(r)
+    if tag_id != (0 as long) || (tag_name != null && string.length(tag_name) > 0) {
+        key = query_tag_key(tag_id, tag_name)
+        intern_tag(r, key, tag_id, tag_name)
+        rec_int(r, OP_QUERY_TAG)
+        rec_int(r, 8)
+        rec_long(r, key)
+    }
+    rec_int(r, op)
+    rec_int(r, payload.size)
+    rec_raw(r, payload.data, payload.size)
+    rec_unlock(r)
+}
+
+rec_aabb(r: *Recording, box: AABB) {
+    rec_vec3(r, box.lower)
+    rec_vec3(r, box.upper)
+}
+
+// A query's filter: its bits (its caller rides the tag record).
+rec_query_filter(r: *Recording, filter: QueryFilter) {
+    rec_long(r, filter.category_bits)
+    rec_long(r, filter.mask_bits)
+}
+
+// A convex proxy: its points, then its radius.
+rec_shape_proxy(r: *Recording, proxy: ShapeProxy) {
+    count = math.clamp_int(proxy.count, 0, distance.MAX_SHAPE_CAST_POINTS)
+    rec_int(r, count)
+    points = proxy.points as Vec3[]
+    i = 0
+    while i < count {
+        rec_vec3(r, points[i])
+        i = i + 1
+    }
+    rec_float(r, proxy.radius)
+}
+
+rec_plane_result(r: *Recording, plane: PlaneResult) {
+    rec_vec3(r, plane.plane.normal)
+    rec_float(r, plane.plane.offset)
+    rec_vec3(r, plane.point)
+    rec_int(r, plane.triangle_index)
+    rec_int(r, plane.child_index)
+    rec_int(r, plane.material_index)
 }
 
 rec_body_def(r: *Recording, v: *BodyDef) {
@@ -3167,8 +3340,7 @@ destroy_shape(id: ShapeId, update_body_mass: bool) {
         s.materials = null
         s.material_count = 0
     }
-    native.name_free(s.name)
-    s.name = null
+    s.name_id = basics.NULL_NAME
     basics.idpool_free(&w.shape_id_pool, s.id)
     set_shape_fat_aabb(w, s.id, AABBf { lower: math.vec3f_zero(), upper: math.vec3f_zero() })
     s.id = NULL_INDEX
@@ -3466,22 +3638,21 @@ shape_apply_wind(id: ShapeId, wind: Vec3, drag: float, lift: float, max_speed: f
     sim.torque = math.narrow3(math.add(math.widen3(sim.torque), torque))
 }
 
-// A label for debugging (b3Body_SetName and its siblings): copied, so the
-// caller's string may go; the old one freed; an empty name for none.
+// A label for debugging (b3Body_SetName and its siblings), kept in the
+// world's name cache, so the caller's string may go; an empty name for
+// none.
 body_set_name(id: BodyId, name: string) {
     if recording_on(id.world0) { recorder = rec_begin(id.world0, OP_BODY_SET_NAME); rec_id(recorder, id.index1, id.generation); rec_string(recorder, name); rec_end(recorder) }
-    body = get_body_full_id(world_at(id.world0), id)
-    native.name_free(body.name)
-    body.name = native.name_copy(name)
+    w = world_at(id.world0)
+    get_body_full_id(w, id).name_id = basics.name_cache_add(&w.names, name)
 }
-body_get_name(id: BodyId) -> string { return native.name_text(get_body_full_id(world_at(id.world0), id).name) }
+body_get_name(id: BodyId) -> string { w = world_at(id.world0); return basics.name_cache_text(&w.names, get_body_full_id(w, id).name_id) }
 shape_set_name(id: ShapeId, name: string) {
     if recording_on(id.world0) { recorder = rec_begin(id.world0, OP_SHAPE_SET_NAME); rec_id(recorder, id.index1, id.generation); rec_string(recorder, name); rec_end(recorder) }
-    s = get_shape_full_id(world_at(id.world0), id)
-    native.name_free(s.name)
-    s.name = native.name_copy(name)
+    w = world_at(id.world0)
+    get_shape_full_id(w, id).name_id = basics.name_cache_add(&w.names, name)
 }
-shape_get_name(id: ShapeId) -> string { return native.name_text(get_shape_full_id(world_at(id.world0), id).name) }
+shape_get_name(id: ShapeId) -> string { w = world_at(id.world0); return basics.name_cache_text(&w.names, get_shape_full_id(w, id).name_id) }
 
 // The world a body or shape belongs to, as an id (b3Body_GetWorld, b3Shape_GetWorld).
 body_get_world(id: BodyId) -> WorldId { return WorldId { index1: id.world0 + 1, generation: world_at(id.world0).generation } }

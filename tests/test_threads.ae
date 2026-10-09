@@ -24,6 +24,7 @@ import aephysics.compound
 import aephysics.shape
 import aephysics.dynamics
 import aephysics.physics_world
+import aephysics.recording
 
 extern exit(code: int)
 extern calloc(count: int, size: int) -> ptr
@@ -51,6 +52,7 @@ world_id() -> WorldId { return WorldId { index1: g_world_index1, generation: g_w
 var g_answers: ptr = null      // float[3 * QUERIES]: the ray's, the cast's and the overlap's answer
 var g_done = 0
 var g_mismatches = 0
+var g_rounds = ROUNDS
 
 query_point(i: int) -> Vec3 {
     t = (i as float) / (QUERIES as float)
@@ -102,7 +104,7 @@ thread_queries() {
     answers = g_answers as float[]
     bad = 0
     k = 0
-    while k < ROUNDS {
+    while k < g_rounds {
         i = 0
         while i < QUERIES {
             if ray_answer(i) != answers[3 * i] { bad = bad + 1 }
@@ -115,6 +117,26 @@ thread_queries() {
     free(block)
     native.atomic_add((&g_mismatches) as ptr, bad)
     native.atomic_add((&g_done) as ptr, 1)
+}
+
+// The query records of a recording, its framing walked to the end marker.
+recorded_queries(r: *Recording) -> int {
+    data = recording.recording_data(r)
+    at = 32 + header_int(data, 8)
+    end = header_int(data, 12)
+    count = 0
+    while at < end {
+        op = header_int(data, at)
+        if op >= dynamics.OP_QUERY_OVERLAP_AABB && op <= dynamics.OP_QUERY_COLLIDE_MOVER { count = count + 1 }
+        if op == dynamics.OP_END { return count }
+        at = at + 8 + header_int(data, at + 4)
+    }
+    return 0 - 1
+}
+
+header_int(data: ptr, at: int) -> int {
+    bytes = data as byte[]
+    return (bytes[at] as int) | ((bytes[at + 1] as int) << 8) | ((bytes[at + 2] as int) << 16) | ((bytes[at + 3] as int) << 24)
 }
 
 // One query on a fresh thread, which then exits.
@@ -280,6 +302,27 @@ main() {
     while native.atomic_load((&g_done) as ptr) < THREADS { native.yield_thread() }
     ensure("${THREADS} threads at once get the serial answers (${native.atomic_load((&g_mismatches) as ptr)} of ${THREADS * ROUNDS * QUERIES * 3} differ)",
            native.atomic_load((&g_mismatches) as ptr) == 0)
+
+    // The same queries from four threads while the world records: each
+    // query's record goes in whole under the recording's lock, none torn
+    // by another thread's, and the replay asks every one again alike.
+    r = recording.create_recording()
+    recording.start_recording(created, r)
+    g_rounds = 1
+    native.atomic_store((&g_done) as ptr, 0)
+    native.atomic_store((&g_mismatches) as ptr, 0)
+    t = 0
+    while t < THREADS {
+        worker.run_detached(| _c: ptr | { thread_queries() })
+        t = t + 1
+    }
+    while native.atomic_load((&g_done) as ptr) < THREADS { native.yield_thread() }
+    recording.stop_recording(created)
+    ensure("recorded: ${THREADS} threads still get the serial answers", native.atomic_load((&g_mismatches) as ptr) == 0)
+    ensure("recorded: every query's record whole (${recorded_queries(r)})", recorded_queries(r) == THREADS * QUERIES * 3)
+    ensure("recorded: the replay asks them all again alike", recording.validate_replay(recording.recording_data(r), recording.recording_size(r), 1))
+    recording.destroy_recording(r)
+    g_rounds = ROUNDS
 
     // Threads that come and go give their slots back: a hundred, one after
     // another, each holding a slot while it runs.

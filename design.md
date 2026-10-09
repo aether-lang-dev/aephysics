@@ -371,7 +371,16 @@ started until its tests pass.
    the call runs, so nothing the call does is recorded twice; the player
    restores its world in place (`dynamics.reset_world`, the reference's
    deserialize into a shell), so ids handed to a viewer stay valid through
-   a seek. Recording the world queries, and the name cache, are next. Two
+   a seek. The world queries and the name cache are in (#149's third
+   part): a query records each visit with the caller's answer, and the
+   replay asks it again through a trampoline that gives the recorded
+   answers back, so a visitor that stops or clips a query is replayed
+   exactly; its record goes in whole under the recording's lock, since
+   queries may run on several threads at once. Names are interned per
+   world under the reference's 32-bit hash, the bodies and shapes holding
+   ids, so their records copy whole and a snapshot carries each name once;
+   where the reference gives two names on one hash the first name, the
+   second here takes the next free id. Two
    functions no test called hid type errors (`body_apply_force`,
    `body_get_local_point_velocity`) until the replay dispatcher called
    every recorded one: `ae build` checks only what a program reaches

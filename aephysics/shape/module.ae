@@ -73,6 +73,12 @@ struct Filter {
 struct QueryFilter {
     category_bits: long
     mask_bits: long
+    // Who asked, for a recording (the reference's id and name): hashed
+    // together into the key a replay viewer follows the query by across
+    // frames. Neither need be unique alone; 0 and no name is untagged.
+    // Ignored when the world is not recording.
+    id: long
+    name: string
 }
 
 // --- construction ---------------------------------------------------------------------
@@ -138,7 +144,7 @@ compound_shape(c: *CompoundData) -> Shape {
 // --- filters ----------------------------------------------------------------------------
 
 default_filter() -> Filter { return Filter { category_bits: 1 as long, mask_bits: all_bits(), group_index: 0 } }
-default_query_filter() -> QueryFilter { return QueryFilter { category_bits: 1 as long, mask_bits: all_bits() } }
+default_query_filter() -> QueryFilter { return QueryFilter { category_bits: 1 as long, mask_bits: all_bits(), id: 0 as long, name: null } }
 
 all_bits() -> long { return (0 as long) - (1 as long) }
 

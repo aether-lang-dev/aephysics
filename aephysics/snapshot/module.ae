@@ -40,11 +40,9 @@ exports (
 
 extern memcpy(dst: ptr, src: ptr, size: int) -> ptr
 extern memset(block: ptr, value: int, size: int) -> ptr
-extern strlen(s: ptr) -> int
-extern malloc(size: int) -> ptr
 
 const SNAPSHOT_MAGIC = 0x4E535041    // "APSN", little-endian
-const SNAPSHOT_VERSION = 1
+const SNAPSHOT_VERSION = 2
 const NULL_INDEX = 0 - 1
 
 // --- the bytes written -------------------------------------------------------------------------------
@@ -121,15 +119,17 @@ w_idpool(wr: *SnapWriter, p: *IdPool) {
     w_ints(wr, &p.free_ids)
 }
 
-// A name: its length and its bytes, or -1 for none.
-w_name(wr: *SnapWriter, name: ptr) {
-    if name == null {
-        w_int(wr, NULL_INDEX)
-        return
+// The world's names, each once: its id, its length and its bytes.
+w_names(wr: *SnapWriter, c: *NameCache) {
+    count = basics.name_cache_count(c)
+    w_int(wr, count)
+    i = 0
+    while i < count {
+        w_int(wr, basics.name_cache_id_at(c, i))
+        w_int(wr, basics.name_cache_length_at(c, i))
+        w_bytes(wr, basics.name_cache_name_at(c, i), basics.name_cache_length_at(c, i))
+        i = i + 1
     }
-    n = strlen(name)
-    w_int(wr, n)
-    w_bytes(wr, name, n)
 }
 
 // --- the bytes read ----------------------------------------------------------------------------------
@@ -235,17 +235,24 @@ r_idpool(rd: *SnapReader) -> IdPool {
     return IdPool { free_ids: free_ids, next_index: next_index }
 }
 
-// A name as a C copy (name_free's), or null.
-r_name(rd: *SnapReader) -> ptr {
-    n = r_int(rd)
-    if rd.ok == false || n == NULL_INDEX { return null }
-    if r_need(rd, n) == false { return null }
-    block = malloc(n + 1)
-    memcpy(block, rd.data + rd.at, n)
-    memset(block + n, 0, 1)
-    rd.at = rd.at + n
-    return block
+// The world's names into its empty cache, each id once.
+r_names(rd: *SnapReader, c: *NameCache) {
+    count = r_count(rd, 8)
+    i = 0
+    while i < count && rd.ok {
+        id = r_int(rd)
+        n = r_int(rd)
+        if rd.ok == false || n <= 0 || r_need(rd, n) == false || basics.name_cache_load(c, id, rd.data + rd.at, n) == false {
+            rd.ok = false
+            return
+        }
+        rd.at = rd.at + n
+        i = i + 1
+    }
 }
+
+// A body's or shape's name id: none, or one the cache holds.
+name_known(c: *NameCache, id: int) -> bool { return id == basics.NULL_NAME || basics.name_cache_find(c, id) != null }
 
 // --- the layout --------------------------------------------------------------------------------------
 
@@ -391,7 +398,8 @@ save_world(world_id: WorldId) -> (ptr, int) {
         i = i + 1
     }
 
-    // The bodies, their pointers cleared in the copy, each name after.
+    // The names, then the bodies, their pointers cleared in the copy.
+    w_names(&wr, &w.names)
     w_int(&wr, w.bodies.count)
     i = 0
     while i < w.bodies.count {
@@ -399,9 +407,7 @@ save_world(world_id: WorldId) -> (ptr, int) {
         start = wr.size
         w_bytes(&wr, b as ptr, sizeof(Body))
         body_copy = (wr.data + start) as *Body
-        body_copy.name = null
         body_copy.user_data = null
-        w_name(&wr, b.name)
         i = i + 1
     }
 
@@ -436,7 +442,7 @@ save_world(world_id: WorldId) -> (ptr, int) {
     }
 
     // The shapes, their pointers cleared in the copy; then each one's
-    // geometry entry, its materials and its name.
+    // geometry entry and its materials.
     w_int(&wr, w.shapes.count)
     i = 0
     while i < w.shapes.count {
@@ -450,7 +456,6 @@ save_world(world_id: WorldId) -> (ptr, int) {
         shape_copy.geometry.compound = null
         shape_copy.materials = null
         shape_copy.user_data = null
-        shape_copy.name = null
         w_int(&wr, indices[i])
         if s.id != NULL_INDEX && s.materials != null {
             w_int(&wr, s.material_count)
@@ -458,7 +463,6 @@ save_world(world_id: WorldId) -> (ptr, int) {
         } else {
             w_int(&wr, 0)
         }
-        if s.id != NULL_INDEX { w_name(&wr, s.name) } else { w_name(&wr, null) }
         i = i + 1
     }
     basics.free_bytes(indices_block, math.max_int(w.shapes.count, 1) * 4)
@@ -688,7 +692,10 @@ fill_world(w: *World, rd: *SnapReader) -> bool {
     }
     if rd.ok == false || w.solver_sets.count < 3 { return false }
 
-    // The bodies: each record with its pointers cleared, then its name.
+    // The names, then the bodies, each record with its pointers cleared and
+    // its name one the names hold.
+    r_names(rd, &w.names)
+    if rd.ok == false { return false }
     body_count = r_count(rd, sizeof(Body))
     basics.buffer_destroy(&w.bodies)
     w.bodies = basics.buffer_create(sizeof(Body), math.max_int(body_count, 16))
@@ -697,9 +704,8 @@ fill_world(w: *World, rd: *SnapReader) -> bool {
         index = basics.buffer_push(&w.bodies)
         b = dynamics.body_at(w, index)
         r_bytes(rd, b as ptr, sizeof(Body))
-        b.name = null
         b.user_data = null
-        b.name = r_name(rd)
+        if b.set_index != NULL_INDEX && name_known(&w.names, b.name_id) == false { rd.ok = false }
         i = i + 1
     }
     if rd.ok == false { return false }
@@ -740,8 +746,8 @@ fill_world(w: *World, rd: *SnapReader) -> bool {
         loaded = loaded + 1
     }
 
-    // The shapes: each record with its pointers cleared, then its geometry,
-    // materials and name.
+    // The shapes: each record with its pointers cleared, then its geometry
+    // and materials; its name one the names hold.
     shape_count = r_count(rd, sizeof(WorldShape))
     if rd.ok {
         basics.buffer_destroy(&w.shapes)
@@ -758,7 +764,7 @@ fill_world(w: *World, rd: *SnapReader) -> bool {
         s.geometry.compound = null
         s.materials = null
         s.user_data = null
-        s.name = null
+        if s.id != NULL_INDEX && name_known(&w.names, s.name_id) == false { rd.ok = false }
         geometry_index = r_int(rd)
         material_count = r_count(rd, sizeof(SurfaceMaterial))
         if rd.ok == false { break }
@@ -781,7 +787,6 @@ fill_world(w: *World, rd: *SnapReader) -> bool {
                 r_bytes(rd, s.materials, material_count * sizeof(SurfaceMaterial))
             }
         }
-        s.name = r_name(rd)
         i = i + 1
     }
     // The hulls' copies were only for the database to take its own from.

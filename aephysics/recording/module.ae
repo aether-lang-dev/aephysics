@@ -25,14 +25,21 @@
 // differs marks the frame it was found at (the player has diverged) and the
 // replay goes on.
 //
+// The world queries are recorded too, each with every visit and the
+// caller's answer to it, and asked again on replay with the same answers;
+// a query whose filter names its caller (its id and name) carries a key a
+// viewer can follow it by. The player keeps the queries of the frame it
+// last played, with their hits.
+//
 // Not recorded: what the host wires in (user data, callbacks, filters, the
-// worker count), and the world queries (#149 leaves them for later).
+// worker count).
 
 import std.string
 import std.fs
 import aephysics.math
 import aephysics.native
 import aephysics.basics
+import aephysics.distance
 import aephysics.hull
 import aephysics.mesh
 import aephysics.height_field
@@ -46,7 +53,9 @@ import aephysics.physics_world
 import aephysics.snapshot
 
 exports (
-    Player, PlayerInfo, create_recording, destroy_recording, recording_data, recording_size, start_recording,
+    Player, PlayerInfo, QueryInfo, QueryHit, QUERY_OVERLAP_AABB, QUERY_OVERLAP_SHAPE, QUERY_CAST_RAY, QUERY_CAST_SHAPE,
+    QUERY_CAST_RAY_CLOSEST, QUERY_CAST_MOVER, QUERY_COLLIDE_MOVER, player_frame_query_count, player_frame_query,
+    player_frame_query_hit, create_recording, destroy_recording, recording_data, recording_size, start_recording,
     stop_recording, save_recording_to_file, load_recording_from_file, create_player, destroy_player, player_step_frame,
     player_sub_step_frame, player_restart, player_seek_frame, player_world, player_frame, player_frame_count,
     player_at_end, player_at_pre_step, player_has_diverged, player_diverge_frame, player_failed, player_info,
@@ -57,6 +66,7 @@ exports (
 
 extern memcpy(dst: ptr, src: ptr, size: int) -> ptr
 extern memset(block: ptr, value: int, size: int) -> ptr
+extern memchr(block: ptr, value: int, size: int) -> ptr
 
 const NULL_INDEX = 0 - 1
 const STRING_SLOTS = 4
@@ -77,11 +87,16 @@ create_recording() -> *Recording {
     r.geometry_heads = basics.map_create(16)
     r.have_bounds = false
     r.owner = 0
+    r.lock = 0
+    r.tags = basics.buffer_create(sizeof(RecordedTag), 0)
+    r.tag_heads = basics.map_create(16)
     return r
 }
 
-// The recording's geometry copies forgotten, ready for a fresh session.
-clear_geometry(r: *Recording) {
+// The recording's geometry copies and tags forgotten, ready for a fresh
+// session.
+clear_session(r: *Recording) {
+    dynamics.clear_tags(r)
     i = 0
     while i < r.geometry.count {
         entry = dynamics.recorded_geometry_at(r, i)
@@ -97,9 +112,11 @@ clear_geometry(r: *Recording) {
 destroy_recording(r: *Recording) {
     if r == null { return }
     if r.owner != 0 { dynamics.finish_recording(dynamics.get_world(r.owner - 1)) }
-    clear_geometry(r)
+    clear_session(r)
     basics.buffer_destroy(&r.geometry)
     basics.map_destroy(&r.geometry_heads)
+    basics.buffer_destroy(&r.tags)
+    basics.map_destroy(&r.tag_heads)
     if r.data != null { basics.free_bytes(r.data, r.capacity) }
     basics.free_bytes(r as ptr, sizeof(Recording))
 }
@@ -121,7 +138,7 @@ start_recording(world_id: WorldId, r: *Recording) -> bool {
     if snap == null { return false }
     r.size = 0
     r.have_bounds = false
-    clear_geometry(r)
+    clear_session(r)
     dynamics.rec_int(r, dynamics.RECORDING_MAGIC)
     dynamics.rec_int(r, dynamics.RECORDING_MAJOR_VERSION)
     dynamics.rec_int(r, snap_count)
@@ -239,6 +256,14 @@ struct Player {
     keyframe_budget: long
     keyframe_bytes: long
     last_keyframe_frame: int
+    tags: Buffer                   // PlayerTag: the tagged queries' callers
+    tag_index: LongMap             // a tag's key to its entry
+    proxy_points: ptr              // Vec3[MAX_SHAPE_CAST_POINTS]: a recorded proxy's points
+    replay_hits: Buffer            // RecordedHit: the visits of the query being asked again
+    replay_planes: Buffer          // PlaneResult: a mover's recorded planes
+    frame_queries: Buffer          // FrameQuery: the queries of the frame last played
+    frame_hits: Buffer             // QueryHit
+    pending_key: long              // the key of the tag record just read, for the query after it
 }
 
 player_geometry_at(p: *Player, index: int) -> *PlayerGeometry { return (p.geometry.data + index * sizeof(PlayerGeometry)) as *PlayerGeometry }
@@ -288,6 +313,13 @@ create_player(data: ptr, size: int, worker_count: int) -> *Player {
     p.bodies = basics.buffer_create(sizeof(BodyId), 0)
     p.frame0_bodies = basics.buffer_create(sizeof(BodyId), 0)
     p.keyframes = basics.buffer_create(sizeof(Keyframe), 0)
+    p.tags = basics.buffer_create(sizeof(PlayerTag), 0)
+    p.tag_index = basics.map_create(16)
+    p.proxy_points = basics.alloc(distance.MAX_SHAPE_CAST_POINTS * sizeof(Vec3))
+    p.replay_hits = basics.buffer_create(sizeof(RecordedHit), 0)
+    p.replay_planes = basics.buffer_create(sizeof(PlaneResult), 0)
+    p.frame_queries = basics.buffer_create(sizeof(FrameQuery), 0)
+    p.frame_hits = basics.buffer_create(sizeof(QueryHit), 0)
     p.keyframe_interval = DEFAULT_KEYFRAME_INTERVAL
     p.keyframe_min_interval = DEFAULT_KEYFRAME_INTERVAL
     p.keyframe_budget = DEFAULT_KEYFRAME_BUDGET as long
@@ -333,6 +365,12 @@ destroy_player(p: *Player) {
     basics.buffer_destroy(&p.keyframes)
     basics.buffer_destroy(&p.bodies)
     basics.buffer_destroy(&p.frame0_bodies)
+    free_tags(p)
+    basics.free_bytes(p.proxy_points, distance.MAX_SHAPE_CAST_POINTS * sizeof(Vec3))
+    basics.buffer_destroy(&p.replay_hits)
+    basics.buffer_destroy(&p.replay_planes)
+    basics.buffer_destroy(&p.frame_queries)
+    basics.buffer_destroy(&p.frame_hits)
     release_record(p)
     basics.free_bytes(p.strings, STRING_SLOTS * 8)
     basics.free_bytes(p.string_bytes, STRING_SLOTS * 4)
@@ -371,7 +409,7 @@ load_geometry(p: *Player, offset: int, byte_count: int) -> bool {
         if valid == false { return false }
         i = i + 1
     }
-    return at == end
+    return load_tags(p, at, end)
 }
 
 // The records walked once without running them: their framing checked up
@@ -639,6 +677,7 @@ keyframe_boundary(p: *Player) {
 player_step_frame(p: *Player) -> bool {
     p.at_pre_step = false
     if p.at_end { return false }
+    clear_frame_queries(p)
     stepped = false
     while true {
         if p.failed || p.cursor >= p.ops_end {
@@ -668,6 +707,7 @@ player_step_frame(p: *Player) -> bool {
 // can draw the new bodies where they were made; the next steps.
 player_sub_step_frame(p: *Player) {
     if p.at_end { return }
+    if p.at_pre_step == false { clear_frame_queries(p) }
     stepped = false
     made_a_body = false
     while true {
@@ -715,6 +755,7 @@ player_restart(p: *Player) {
     p.frame = 0
     p.at_end = false
     p.at_pre_step = false
+    clear_frame_queries(p)
     copy_bodies(&p.bodies, p.frame0_bodies.data, p.frame0_bodies.count)
 }
 
@@ -754,6 +795,7 @@ restore_keyframe(p: *Player, k: *Keyframe) {
     p.frame = k.frame
     p.at_end = false
     p.at_pre_step = false
+    clear_frame_queries(p)
     copy_bodies(&p.bodies, k.bodies, k.body_count)
 }
 
@@ -879,6 +921,580 @@ validate_replay(data: ptr, size: int, worker_count: int) -> bool {
     return result
 }
 
+// --- the queries replayed ---------------------------------------------------------------------------
+
+// A recorded query asked again in the player's world, through a
+// trampoline that compares each visit with the recorded one and gives the
+// caller's recorded answer back, so the query runs as it did; any
+// difference (a shape, a point, a count, the tree visits) marks the
+// player diverged. Then it is kept with its hits for the frame, for a
+// viewer to read (b3RecPlayer_GetFrameQuery).
+
+// The kinds of query a frame keeps (b3RecQueryType).
+const QUERY_OVERLAP_AABB = 0
+const QUERY_OVERLAP_SHAPE = 1
+const QUERY_CAST_RAY = 2
+const QUERY_CAST_SHAPE = 3
+const QUERY_CAST_RAY_CLOSEST = 4
+const QUERY_CAST_MOVER = 5
+const QUERY_COLLIDE_MOVER = 6
+
+// A query of the frame last played (b3RecQueryInfo).
+struct QueryInfo {
+    kind: int                      // QUERY_*
+    filter: QueryFilter            // its bits, and its caller's id and name
+    aabb: AABB                     // where it looked: the box, or the shape swept along the translation
+    origin: Vec3
+    translation: Vec3
+    fraction: float                // a cast mover's answer, the closest ray's hit; 1 otherwise
+    hit_count: int
+    key: long                      // its caller's key, 0 when untagged
+}
+
+// One result of a query of the frame last played (b3RecQueryHit): a
+// shape, and for a cast its point, normal and fraction; a mover's plane
+// gives its point and normal.
+struct QueryHit {
+    shape: ShapeId
+    point: Vec3
+    normal: Vec3
+    fraction: float
+}
+
+// A visit as recorded, to compare and answer with.
+struct RecordedHit {
+    shape: ShapeId
+    point: Vec3
+    normal: Vec3
+    fraction: float
+    user_material_id: long
+    triangle_index: int
+    child_index: int
+    answer_float: float
+    answer_bool: bool
+    plane_start: int               // a mover's planes in replay_planes
+    plane_count: int
+}
+
+struct FrameQuery {
+    kind: int
+    filter: QueryFilter
+    aabb: AABB
+    origin: Vec3
+    translation: Vec3
+    fraction: float
+    hit_start: int
+    hit_count: int
+    key: long
+}
+
+// A tagged query's caller, from the recording's tag table.
+struct PlayerTag {
+    key: long
+    id: long
+    name: ptr                      // its bytes and a zero (alloc's), or null
+    length: int
+}
+
+struct ReplayQuery {
+    p: *Player
+    cursor: int
+    count: int
+}
+
+recorded_hit_at(p: *Player, index: int) -> *RecordedHit { return (p.replay_hits.data + index * sizeof(RecordedHit)) as *RecordedHit }
+frame_query_at(p: *Player, index: int) -> *FrameQuery { return (p.frame_queries.data + index * sizeof(FrameQuery)) as *FrameQuery }
+frame_hit_at(p: *Player, index: int) -> *QueryHit { return (p.frame_hits.data + index * sizeof(QueryHit)) as *QueryHit }
+player_tag_at(p: *Player, index: int) -> *PlayerTag { return (p.tags.data + index * sizeof(PlayerTag)) as *PlayerTag }
+replay_plane_at(p: *Player, index: int) -> *PlaneResult { return (p.replay_planes.data + index * sizeof(PlaneResult)) as *PlaneResult }
+
+// The recording's tag table, after the geometry: each key, its id and its
+// name. A recording made before queries were recorded has none. Bytes
+// after it (a newer minor version's) are left alone.
+load_tags(p: *Player, at: int, end: int) -> bool {
+    if at == end { return true }
+    if at + 4 > end { return false }
+    count = read_header_int(p.data, at)
+    at = at + 4
+    if count < 0 || basics.section_fits(at, count, 20, end) == false { return false }
+    i = 0
+    while i < count {
+        if at + 20 > end { return false }
+        key = read_header_long(p.data, at)
+        id = read_header_long(p.data, at + 8)
+        n = read_header_int(p.data, at + 16)
+        at = at + 20
+        if key == (0 as long) || (n != NULL_INDEX && (n <= 0 || n > end - at)) || basics.map_has(&p.tag_index, key) { return false }
+        index = basics.buffer_push(&p.tags)
+        tag = player_tag_at(p, index)
+        tag.key = key
+        tag.id = id
+        tag.name = null
+        tag.length = 0
+        if n != NULL_INDEX {
+            if memchr(p.data + at, 0, n) != null { return false }
+            tag.name = basics.alloc(n + 1)
+            tag.length = n
+            memcpy(tag.name, p.data + at, n)
+            at = at + n
+        }
+        basics.map_set(&p.tag_index, key, index)
+        i = i + 1
+    }
+    return true
+}
+
+read_header_long(data: ptr, at: int) -> long {
+    holder = 0 as long
+    memcpy((&holder) as ptr, data + at, 8)
+    return holder
+}
+
+free_tags(p: *Player) {
+    i = 0
+    while i < p.tags.count {
+        tag = player_tag_at(p, i)
+        if tag.name != null { basics.free_bytes(tag.name, tag.length + 1) }
+        i = i + 1
+    }
+    basics.buffer_destroy(&p.tags)
+    basics.map_destroy(&p.tag_index)
+}
+
+// The frame's queries forgotten, before the next frame's come.
+clear_frame_queries(p: *Player) {
+    p.frame_queries.count = 0
+    p.frame_hits.count = 0
+    p.pending_key = 0 as long
+}
+
+read_aabb(p: *Player) -> AABB {
+    lower = read_vec3(p)
+    upper = read_vec3(p)
+    return AABB { lower: lower, upper: upper }
+}
+
+read_query_filter(p: *Player) -> QueryFilter {
+    filter = shape.default_query_filter()
+    filter.category_bits = read_long(p)
+    filter.mask_bits = read_long(p)
+    return filter
+}
+
+// A proxy's points into the player's own block.
+read_shape_proxy(p: *Player) -> ShapeProxy {
+    count = read_int(p)
+    if count < 0 || count > distance.MAX_SHAPE_CAST_POINTS {
+        p.ok = false
+        count = 0
+    }
+    points = p.proxy_points as Vec3[]
+    i = 0
+    while i < count {
+        points[i] = read_vec3(p)
+        i = i + 1
+    }
+    radius = read_float(p)
+    return distance.shape_proxy(p.proxy_points, count, radius)
+}
+
+read_plane_result(p: *Player) -> PlaneResult {
+    normal = read_vec3(p)
+    offset = read_float(p)
+    point = read_vec3(p)
+    triangle_index = read_int(p)
+    child_index = read_int(p)
+    material_index = read_int(p)
+    return PlaneResult { plane: Plane { normal: normal, offset: offset }, point: point, triangle_index: triangle_index,
+                         child_index: child_index, material_index: material_index }
+}
+
+// A count of items of at least `least` bytes each, which the record must
+// have room for: a count from the file never sizes an allocation it could
+// not fill.
+read_count(p: *Player, least: int) -> int {
+    n = read_int(p)
+    if p.ok == false { return 0 }
+    if n < 0 || n > (p.record_end - p.cursor) / least {
+        p.ok = false
+        return 0
+    }
+    return n
+}
+
+// The recorded visits made ready: `n` of them, each zeroed.
+ready_hits(p: *Player, n: int) {
+    p.replay_hits.count = 0
+    basics.buffer_reserve(&p.replay_hits, n)
+    if n > 0 { memset(p.replay_hits.data, 0, n * sizeof(RecordedHit)) }
+    p.replay_hits.count = n
+}
+
+// An overlap's visits: each shape and the caller's answer.
+read_overlap_hits(p: *Player) -> int {
+    n = read_count(p, 12)
+    ready_hits(p, n)
+    i = 0
+    while i < n {
+        h = recorded_hit_at(p, i)
+        h.shape = read_shape_id(p)
+        h.answer_bool = read_bool(p)
+        i = i + 1
+    }
+    return n
+}
+
+// A cast's hits: everything the visitor was given and its answer.
+read_cast_hits(p: *Player) -> int {
+    n = read_count(p, 88)
+    ready_hits(p, n)
+    i = 0
+    while i < n {
+        h = recorded_hit_at(p, i)
+        h.shape = read_shape_id(p)
+        h.point = read_vec3(p)
+        h.normal = read_vec3(p)
+        h.fraction = read_float(p)
+        h.user_material_id = read_long(p)
+        h.triangle_index = read_int(p)
+        h.child_index = read_int(p)
+        h.answer_float = read_float(p)
+        i = i + 1
+    }
+    return n
+}
+
+same_vec3(a: Vec3, b: Vec3) -> bool { return a.x == b.x && a.y == b.y && a.z == b.z }
+
+same_plane(a: PlaneResult, b: PlaneResult) -> bool {
+    return same_vec3(a.plane.normal, b.plane.normal) && a.plane.offset == b.plane.offset && same_vec3(a.point, b.point) &&
+           a.triangle_index == b.triangle_index && a.child_index == b.child_index && a.material_index == b.material_index
+}
+
+// The next recorded visit, or null when the query visits more than it did.
+next_hit(rq: *ReplayQuery) -> *RecordedHit {
+    if rq.cursor >= rq.count {
+        rq.p.diverged = true
+        return null
+    }
+    h = recorded_hit_at(rq.p, rq.cursor)
+    rq.cursor = rq.cursor + 1
+    return h
+}
+
+replay_overlap_visit(shape_id: ShapeId, context: ptr) -> bool {
+    rq = context as *ReplayQuery
+    h = next_hit(rq)
+    if h == null { return false }
+    if shape_id.index1 != h.shape.index1 || shape_id.generation != h.shape.generation { rq.p.diverged = true }
+    return h.answer_bool
+}
+
+replay_cast_visit(shape_id: ShapeId, point: Vec3, normal: Vec3, fraction: float, user_material_id: long, triangle_index: int, child_index: int, context: ptr) -> float {
+    rq = context as *ReplayQuery
+    h = next_hit(rq)
+    if h == null { return 0.0 }
+    if shape_id.index1 != h.shape.index1 || shape_id.generation != h.shape.generation || same_vec3(point, h.point) == false ||
+       same_vec3(normal, h.normal) == false || fraction != h.fraction || user_material_id != h.user_material_id ||
+       triangle_index != h.triangle_index || child_index != h.child_index {
+        rq.p.diverged = true
+    }
+    return h.answer_float
+}
+
+replay_plane_visit(shape_id: ShapeId, planes: PlaneResult[], count: int, context: ptr) -> bool {
+    rq = context as *ReplayQuery
+    h = next_hit(rq)
+    if h == null { return true }
+    if shape_id.index1 != h.shape.index1 || shape_id.generation != h.shape.generation || count != h.plane_count { rq.p.diverged = true }
+    recorded = rq.p.replay_planes.data as PlaneResult[]
+    i = 0
+    while i < count && i < h.plane_count {
+        if same_plane(planes[i], recorded[h.plane_start + i]) == false { rq.p.diverged = true }
+        i = i + 1
+    }
+    return h.answer_bool
+}
+
+// The visits compared to the end and the tree's work with the recorded.
+check_replayed(p: *Player, rq: *ReplayQuery, stats: TreeStats, nodes: int, leaves: int) {
+    if rq.cursor != rq.count || stats.node_visits != nodes || stats.leaf_visits != leaves { p.diverged = true }
+}
+
+// Where a query looked: its points (relative to the origin) at the origin
+// and at the end of the translation, fattened by the radius.
+query_bounds(origin: Vec3, translation: Vec3, points: ptr, count: int, radius: float) -> AABB {
+    local = points as Vec3[]
+    lower = origin
+    upper = origin
+    first = true
+    end = math.add(origin, translation)
+    i = 0
+    while i < math.max_int(count, 1) {
+        offset = math.vec3_zero()
+        if count > 0 { offset = local[i] }
+        a = math.add(origin, offset)
+        b = math.add(end, offset)
+        if first {
+            lower = math.min_vec3(a, b)
+            upper = math.max_vec3(a, b)
+            first = false
+        } else {
+            lower = math.min_vec3(lower, math.min_vec3(a, b))
+            upper = math.max_vec3(upper, math.max_vec3(a, b))
+        }
+        i = i + 1
+    }
+    r = math.vec3(radius, radius, radius)
+    return AABB { lower: math.sub(lower, r), upper: math.add(upper, r) }
+}
+
+// The query kept for the frame, with the caller's key from the tag
+// record before it, and its hits from the recorded visits.
+stash_query(p: *Player, kind: int, filter: QueryFilter, aabb: AABB, origin: Vec3, translation: Vec3, fraction: float, hit_count: int) -> *FrameQuery {
+    index = basics.buffer_push(&p.frame_queries)
+    q = frame_query_at(p, index)
+    q.kind = kind
+    q.filter = filter
+    q.aabb = aabb
+    q.origin = origin
+    q.translation = translation
+    q.fraction = fraction
+    q.key = p.pending_key
+    p.pending_key = 0 as long
+    q.hit_start = p.frame_hits.count
+    q.hit_count = hit_count
+    return q
+}
+
+stash_hit(p: *Player, shape_id: ShapeId, point: Vec3, normal: Vec3, fraction: float) {
+    index = basics.buffer_push(&p.frame_hits)
+    h = frame_hit_at(p, index)
+    h.shape = shape_id
+    h.point = point
+    h.normal = normal
+    h.fraction = fraction
+}
+
+stash_recorded_hits(p: *Player, n: int) {
+    i = 0
+    while i < n {
+        h = recorded_hit_at(p, i)
+        stash_hit(p, h.shape, h.point, h.normal, h.fraction)
+        i = i + 1
+    }
+}
+
+replay_overlap_aabb(p: *Player) {
+    box = read_aabb(p)
+    filter = read_query_filter(p)
+    n = read_overlap_hits(p)
+    nodes = read_int(p)
+    leaves = read_int(p)
+    if p.ok == false { return }
+    rq = ReplayQuery { p: p, cursor: 0, count: n }
+    stats = physics_world.overlap_aabb(p.world_id, box, filter, replay_overlap_visit, (&rq) as ptr)
+    check_replayed(p, &rq, stats, nodes, leaves)
+    stash_query(p, QUERY_OVERLAP_AABB, filter, box, math.vec3_zero(), math.vec3_zero(), 1.0, n)
+    stash_recorded_hits(p, n)
+}
+
+replay_overlap_shape(p: *Player) {
+    origin = read_vec3(p)
+    proxy = read_shape_proxy(p)
+    filter = read_query_filter(p)
+    n = read_overlap_hits(p)
+    nodes = read_int(p)
+    leaves = read_int(p)
+    if p.ok == false { return }
+    rq = ReplayQuery { p: p, cursor: 0, count: n }
+    stats = physics_world.overlap_shape(p.world_id, origin, proxy, filter, replay_overlap_visit, (&rq) as ptr)
+    check_replayed(p, &rq, stats, nodes, leaves)
+    box = query_bounds(origin, math.vec3_zero(), proxy.points, proxy.count, proxy.radius)
+    stash_query(p, QUERY_OVERLAP_SHAPE, filter, box, origin, math.vec3_zero(), 1.0, n)
+    stash_recorded_hits(p, n)
+}
+
+replay_cast_ray(p: *Player) {
+    origin = read_vec3(p)
+    translation = read_vec3(p)
+    filter = read_query_filter(p)
+    n = read_cast_hits(p)
+    nodes = read_int(p)
+    leaves = read_int(p)
+    if p.ok == false { return }
+    rq = ReplayQuery { p: p, cursor: 0, count: n }
+    stats = physics_world.cast_ray(p.world_id, origin, translation, filter, replay_cast_visit, (&rq) as ptr)
+    check_replayed(p, &rq, stats, nodes, leaves)
+    stash_query(p, QUERY_CAST_RAY, filter, query_bounds(origin, translation, null, 0, 0.0), origin, translation, 1.0, n)
+    stash_recorded_hits(p, n)
+}
+
+replay_cast_shape(p: *Player) {
+    origin = read_vec3(p)
+    proxy = read_shape_proxy(p)
+    translation = read_vec3(p)
+    filter = read_query_filter(p)
+    n = read_cast_hits(p)
+    nodes = read_int(p)
+    leaves = read_int(p)
+    if p.ok == false { return }
+    rq = ReplayQuery { p: p, cursor: 0, count: n }
+    stats = physics_world.cast_shape(p.world_id, origin, proxy, translation, filter, replay_cast_visit, (&rq) as ptr)
+    check_replayed(p, &rq, stats, nodes, leaves)
+    box = query_bounds(origin, translation, proxy.points, proxy.count, proxy.radius)
+    stash_query(p, QUERY_CAST_SHAPE, filter, box, origin, translation, 1.0, n)
+    stash_recorded_hits(p, n)
+}
+
+replay_cast_ray_closest(p: *Player) {
+    origin = read_vec3(p)
+    translation = read_vec3(p)
+    filter = read_query_filter(p)
+    hit = read_bool(p)
+    shape_id = read_shape_id(p)
+    point = read_vec3(p)
+    normal = read_vec3(p)
+    fraction = read_float(p)
+    user_material_id = read_long(p)
+    triangle_index = read_int(p)
+    child_index = read_int(p)
+    nodes = read_int(p)
+    leaves = read_int(p)
+    if p.ok == false { return }
+    got = physics_world.cast_ray_closest(p.world_id, origin, translation, filter)
+    if got.hit != hit || got.node_visits != nodes || got.leaf_visits != leaves { p.diverged = true }
+    else if hit {
+        if got.shape_id.index1 != shape_id.index1 || got.shape_id.generation != shape_id.generation || same_vec3(got.point, point) == false ||
+           same_vec3(got.normal, normal) == false || got.fraction != fraction || got.user_material_id != user_material_id ||
+           got.triangle_index != triangle_index || got.child_index != child_index {
+            p.diverged = true
+        }
+    }
+    hits = 0
+    if hit { hits = 1 }
+    result_fraction = 1.0
+    if hit { result_fraction = fraction }
+    stash_query(p, QUERY_CAST_RAY_CLOSEST, filter, query_bounds(origin, translation, null, 0, 0.0), origin, translation, result_fraction, hits)
+    if hit { stash_hit(p, shape_id, point, normal, fraction) }
+}
+
+replay_cast_mover(p: *Player) {
+    origin = read_vec3(p)
+    mover = read_capsule(p)
+    translation = read_vec3(p)
+    filter = read_query_filter(p)
+    n = read_overlap_hits(p)
+    fraction = read_float(p)
+    if p.ok == false { return }
+    rq = ReplayQuery { p: p, cursor: 0, count: n }
+    got = physics_world.cast_mover(p.world_id, origin, mover, translation, filter, true, replay_overlap_visit, (&rq) as ptr)
+    if rq.cursor != n || got != fraction { p.diverged = true }
+    centres = p.proxy_points as Vec3[]
+    centres[0] = mover.center1
+    centres[1] = mover.center2
+    box = query_bounds(origin, translation, p.proxy_points, 2, mover.radius)
+    stash_query(p, QUERY_CAST_MOVER, filter, box, origin, translation, fraction, 0)
+}
+
+replay_collide_mover(p: *Player) {
+    origin = read_vec3(p)
+    mover = read_capsule(p)
+    filter = read_query_filter(p)
+    groups = read_count(p, 16)
+    ready_hits(p, groups)
+    p.replay_planes.count = 0
+    i = 0
+    while i < groups && p.ok {
+        h = recorded_hit_at(p, i)
+        h.shape = read_shape_id(p)
+        count = read_count(p, 68)
+        h.plane_start = p.replay_planes.count
+        h.plane_count = count
+        k = 0
+        while k < count {
+            plane = read_plane_result(p)
+            index = basics.buffer_push(&p.replay_planes)
+            stored = p.replay_planes.data as PlaneResult[]
+            stored[index] = plane
+            k = k + 1
+        }
+        h.answer_bool = read_bool(p)
+        i = i + 1
+    }
+    if p.ok == false { return }
+    rq = ReplayQuery { p: p, cursor: 0, count: groups }
+    physics_world.collide_mover(p.world_id, origin, mover, filter, replay_plane_visit, (&rq) as ptr)
+    if rq.cursor != groups { p.diverged = true }
+    centres = p.proxy_points as Vec3[]
+    centres[0] = mover.center1
+    centres[1] = mover.center2
+    box = query_bounds(origin, math.vec3_zero(), p.proxy_points, 2, mover.radius)
+    stash_query(p, QUERY_COLLIDE_MOVER, filter, box, origin, math.vec3_zero(), 1.0, p.replay_planes.count)
+    i = 0
+    while i < groups {
+        h = recorded_hit_at(p, i)
+        k = 0
+        while k < h.plane_count {
+            kept_plane = replay_plane_at(p, h.plane_start + k)
+            stash_hit(p, h.shape, kept_plane.point, kept_plane.plane.normal, 0.0)
+            k = k + 1
+        }
+        i = i + 1
+    }
+}
+
+// A query record run; false for an opcode that is not one.
+dispatch_query(p: *Player, op: int) -> bool {
+    if op == dynamics.OP_QUERY_TAG {
+        p.pending_key = read_long(p)
+        return true
+    }
+    if op == dynamics.OP_QUERY_OVERLAP_AABB { replay_overlap_aabb(p) }
+    else if op == dynamics.OP_QUERY_OVERLAP_SHAPE { replay_overlap_shape(p) }
+    else if op == dynamics.OP_QUERY_CAST_RAY { replay_cast_ray(p) }
+    else if op == dynamics.OP_QUERY_CAST_SHAPE { replay_cast_shape(p) }
+    else if op == dynamics.OP_QUERY_CAST_RAY_CLOSEST { replay_cast_ray_closest(p) }
+    else if op == dynamics.OP_QUERY_CAST_MOVER { replay_cast_mover(p) }
+    else if op == dynamics.OP_QUERY_COLLIDE_MOVER { replay_collide_mover(p) }
+    else { return false }
+    return true
+}
+
+// The queries of the frame last played.
+player_frame_query_count(p: *Player) -> int { return p.frame_queries.count }
+
+// A query of the frame last played, its caller's id and name from the tag
+// table; an empty one for an index out of range.
+player_frame_query(p: *Player, index: int) -> QueryInfo {
+    if index < 0 || index >= p.frame_queries.count {
+        return QueryInfo { kind: NULL_INDEX, filter: shape.default_query_filter(), aabb: AABB { lower: math.vec3_zero(), upper: math.vec3_zero() },
+                           origin: math.vec3_zero(), translation: math.vec3_zero(), fraction: 1.0, hit_count: 0, key: 0 as long }
+    }
+    q = frame_query_at(p, index)
+    filter = q.filter
+    if q.key != (0 as long) {
+        tag_index = basics.map_get(&p.tag_index, q.key, NULL_INDEX)
+        if tag_index != NULL_INDEX {
+            tag = player_tag_at(p, tag_index)
+            filter.id = tag.id
+            if tag.name != null { filter.name = native.name_text(tag.name) }
+        }
+    }
+    return QueryInfo { kind: q.kind, filter: filter, aabb: q.aabb, origin: q.origin, translation: q.translation, fraction: q.fraction,
+                       hit_count: q.hit_count, key: q.key }
+}
+
+// One result of a query of the frame last played; an empty one out of range.
+player_frame_query_hit(p: *Player, query: int, hit: int) -> QueryHit {
+    no_hit = QueryHit { shape: dynamics.null_shape_id(), point: math.vec3_zero(), normal: math.vec3_zero(), fraction: 0.0 }
+    if query < 0 || query >= p.frame_queries.count { return no_hit }
+    q = frame_query_at(p, query)
+    if hit < 0 || hit >= q.hit_count { return no_hit }
+    hits = p.frame_hits.data as QueryHit[]
+    return hits[q.hit_start + hit]
+}
+
 // --- the records ------------------------------------------------------------------------------------
 
 // The record's call made in the player's world, or its check done; false
@@ -886,10 +1502,10 @@ validate_replay(data: ptr, size: int, worker_count: int) -> bool {
 dispatch(p: *Player, op: int) -> bool {
     if op == dynamics.OP_STATE_HASH {
         recorded = read_long(p)
-        if p.ok && dynamics.hash_world_state(dynamics.get_world(p.world_id.index1 - 1)) != recorded {
-            if p.diverged == false { p.diverge_frame = p.frame }
-            p.diverged = true
-        }
+        if p.ok && dynamics.hash_world_state(dynamics.get_world(p.world_id.index1 - 1)) != recorded { p.diverged = true }
+        // The first frame found parted: a query that answered differently
+        // before this frame's step is found here too.
+        if p.diverged && p.diverge_frame < 0 { p.diverge_frame = p.frame }
         return true
     }
     if op == dynamics.OP_BOUNDS {
@@ -899,6 +1515,7 @@ dispatch(p: *Player, op: int) -> bool {
         _upper = read_vec3(p)
         return true
     }
+    if dispatch_query(p, op) { return true }
     return dispatch_call(p, op)
 }
 

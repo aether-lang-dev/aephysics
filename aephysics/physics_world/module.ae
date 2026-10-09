@@ -511,9 +511,8 @@ aabb_query_visitor(proxy_id: int, user_data: long, context: ptr) -> bool {
     return visitor(dynamics.make_shape_id(w, s), qc.user_context)
 }
 
-// Every shape whose fat bounds overlap the box, through the visitor
-// until it returns false; the tree visits made.
-overlap_aabb(id: WorldId, box: AABB, filter: QueryFilter, visitor: fn(ShapeId, ptr) -> bool, context: ptr) -> TreeStats {
+// overlap_aabb's work, unrecorded.
+overlap_aabb_internal(id: WorldId, box: AABB, filter: QueryFilter, visitor: fn(ShapeId, ptr) -> bool, context: ptr) -> TreeStats {
     stats = TreeStats { node_visits: 0, leaf_visits: 0 }
     w = world_of(id)
     if w == null { return stats }
@@ -540,8 +539,8 @@ shape_overlap_visitor(proxy_id: int, user_data: long, context: ptr) -> bool {
     return visitor(dynamics.make_shape_id(w, s), qc.user_context)
 }
 
-// Every shape a convex proxy (given relative to the origin) overlaps.
-overlap_shape(id: WorldId, origin: Vec3, proxy: ShapeProxy, filter: QueryFilter, visitor: fn(ShapeId, ptr) -> bool, context: ptr) -> TreeStats {
+// overlap_shape's work, unrecorded.
+overlap_shape_internal(id: WorldId, origin: Vec3, proxy: ShapeProxy, filter: QueryFilter, visitor: fn(ShapeId, ptr) -> bool, context: ptr) -> TreeStats {
     stats = TreeStats { node_visits: 0, leaf_visits: 0 }
     w = world_of(id)
     if w == null { return stats }
@@ -584,10 +583,8 @@ mover_collide_visitor(proxy_id: int, user_data: long, context: ptr) -> bool {
     return true
 }
 
-// The planes of every shape the character mover's capsule (relative to
-// the origin) touches, a shape's planes at a time (up to 64), through
-// the visitor until it returns false.
-collide_mover(id: WorldId, origin: Vec3, mover: Capsule, filter: QueryFilter, visitor: fn(ShapeId, PlaneResult[], int, ptr) -> bool, context: ptr) {
+// collide_mover's work, unrecorded.
+collide_mover_internal(id: WorldId, origin: Vec3, mover: Capsule, filter: QueryFilter, visitor: fn(ShapeId, PlaneResult[], int, ptr) -> bool, context: ptr) {
     w = world_of(id)
     if w == null { return }
     if math.is_valid_position(origin) == false || valid_capsule(mover) == false { return }
@@ -636,10 +633,8 @@ ray_cast_visitor(input: *RayCastInput, proxy_id: int, user_data: long, context: 
     return input.max_fraction
 }
 
-// A ray from the origin along the translation: each hit through the
-// visitor, whose return clips the ray (0 stops it, 1 keeps everything,
-// -1 ignores that shape); the tree visits made.
-cast_ray(id: WorldId, origin: Vec3, translation: Vec3, filter: QueryFilter,
+// cast_ray's work, unrecorded.
+cast_ray_internal(id: WorldId, origin: Vec3, translation: Vec3, filter: QueryFilter,
          visitor: fn(ShapeId, Vec3, Vec3, float, long, int, int, ptr) -> float, context: ptr) -> TreeStats {
     stats = TreeStats { node_visits: 0, leaf_visits: 0 }
     w = world_of(id)
@@ -675,8 +670,8 @@ closest_ray_visitor(shape_id: ShapeId, point: Vec3, normal: Vec3, fraction: floa
     return fraction
 }
 
-// The closest hit of a ray, the common query of games.
-cast_ray_closest(id: WorldId, origin: Vec3, translation: Vec3, filter: QueryFilter) -> RayResult {
+// cast_ray_closest's work, unrecorded.
+cast_ray_closest_internal(id: WorldId, origin: Vec3, translation: Vec3, filter: QueryFilter) -> RayResult {
     result = RayResult { shape_id: dynamics.null_shape_id(), point: math.vec3_zero(), normal: math.vec3_zero(), user_material_id: 0 as long,
                          fraction: 0.0, triangle_index: 0, child_index: 0, node_visits: 0, leaf_visits: 0, hit: false }
     w = world_of(id)
@@ -714,9 +709,8 @@ shape_cast_visitor(input: *BoxCastInput, proxy_id: int, user_data: long, context
     return input.max_fraction
 }
 
-// A convex proxy (relative to the origin) swept along the translation,
-// each hit through the visitor as the ray cast's.
-cast_shape(id: WorldId, origin: Vec3, proxy: ShapeProxy, translation: Vec3, filter: QueryFilter,
+// cast_shape's work, unrecorded.
+cast_shape_internal(id: WorldId, origin: Vec3, proxy: ShapeProxy, translation: Vec3, filter: QueryFilter,
            visitor: fn(ShapeId, Vec3, Vec3, float, long, int, int, ptr) -> float, context: ptr) -> TreeStats {
     stats = TreeStats { node_visits: 0, leaf_visits: 0 }
     w = world_of(id)
@@ -773,9 +767,8 @@ mover_cast_visitor(input: *BoxCastInput, proxy_id: int, user_data: long, context
 var g_mover_points: ptr = null   // Vec3[2]
 mover_points() -> ptr { return native.scratch(g_mover_points, 2 * sizeof(Vec3)) }
 
-// The fraction of the translation the mover's capsule can travel before
-// touching a shape (its filter asked per shape when given).
-cast_mover(id: WorldId, origin: Vec3, mover: Capsule, translation: Vec3, filter: QueryFilter, has_filter: bool, filter_fn: fn(ShapeId, ptr) -> bool, context: ptr) -> float {
+// cast_mover's work, unrecorded.
+cast_mover_internal(id: WorldId, origin: Vec3, mover: Capsule, translation: Vec3, filter: QueryFilter, has_filter: bool, filter_fn: fn(ShapeId, ptr) -> bool, context: ptr) -> float {
     w = world_of(id)
     if w == null { return 1.0 }
     if math.is_valid_position(origin) == false || math.is_valid_vec3(translation) == false || valid_capsule(mover) == false { return 1.0 }
@@ -795,6 +788,240 @@ cast_mover(id: WorldId, origin: Vec3, mover: Capsule, translation: Vec3, filter:
         i = i + 1
     }
     return mc.fraction
+}
+
+// --- the queries recorded (#149) ------------------------------------------------------------------
+
+// A query while its world records (the reference's b3RecQueryWriter): its
+// own bytes, and the caller's visitor and context, which a trampoline
+// calls, writing each visit and the caller's answer so a replay can ask
+// the same query and give the same answers. Queries do not change the
+// world, so the record goes in after the query, whole.
+struct QueryRecorder {
+    payload: *Recording
+    overlap: fn(ShapeId, ptr) -> bool
+    cast: fn(ShapeId, Vec3, Vec3, float, long, int, int, ptr) -> float
+    planes: fn(ShapeId, PlaneResult[], int, ptr) -> bool
+    has_overlap: bool              // the caller gave an overlap visitor (a cast mover's filter is optional)
+    context: ptr
+    count: int                     // the visits written
+}
+
+accept_shape(shape_id: ShapeId, context: ptr) -> bool { return true }
+keep_cast(shape_id: ShapeId, point: Vec3, normal: Vec3, fraction: float, user_material_id: long, triangle_index: int, child_index: int, context: ptr) -> float { return 1.0 }
+accept_planes(shape_id: ShapeId, planes: PlaneResult[], count: int, context: ptr) -> bool { return true }
+
+query_recorder(context: ptr) -> QueryRecorder {
+    return QueryRecorder { payload: dynamics.rec_payload_create(), overlap: accept_shape, cast: keep_cast, planes: accept_planes,
+                           has_overlap: false, context: context, count: 0 }
+}
+
+// Whether the query asked of `id` is one to record: the world records and
+// is not stepping (a stepping world answers no query).
+recording_query(id: WorldId) -> bool { return world_of(id) != null && dynamics.recording_on(id.index1 - 1) }
+
+// The query's record committed with its caller's tag, its bytes freed.
+finish_query(id: WorldId, op: int, q: *QueryRecorder, filter: QueryFilter) {
+    dynamics.rec_commit_query(id.index1 - 1, op, q.payload, filter.id, filter.name)
+    dynamics.rec_payload_destroy(q.payload)
+}
+
+rec_tree_stats(payload: *Recording, stats: TreeStats) {
+    dynamics.rec_int(payload, stats.node_visits)
+    dynamics.rec_int(payload, stats.leaf_visits)
+}
+
+// A visit written: the shape and the caller's answer.
+record_overlap_visit(shape_id: ShapeId, context: ptr) -> bool {
+    q = context as *QueryRecorder
+    answer = true
+    if q.has_overlap {
+        visitor = q.overlap
+        answer = visitor(shape_id, q.context)
+    }
+    dynamics.rec_id(q.payload, shape_id.index1, shape_id.generation)
+    dynamics.rec_bool(q.payload, answer)
+    q.count = q.count + 1
+    return answer
+}
+
+// A hit written: everything the visitor was given and its answer.
+record_cast_visit(shape_id: ShapeId, point: Vec3, normal: Vec3, fraction: float, user_material_id: long, triangle_index: int, child_index: int, context: ptr) -> float {
+    q = context as *QueryRecorder
+    visitor = q.cast
+    answer = visitor(shape_id, point, normal, fraction, user_material_id, triangle_index, child_index, q.context)
+    dynamics.rec_id(q.payload, shape_id.index1, shape_id.generation)
+    dynamics.rec_vec3(q.payload, point)
+    dynamics.rec_vec3(q.payload, normal)
+    dynamics.rec_float(q.payload, fraction)
+    dynamics.rec_long(q.payload, user_material_id)
+    dynamics.rec_int(q.payload, triangle_index)
+    dynamics.rec_int(q.payload, child_index)
+    dynamics.rec_float(q.payload, answer)
+    q.count = q.count + 1
+    return answer
+}
+
+// A shape's planes written: the shape, its planes and the caller's answer.
+record_plane_visit(shape_id: ShapeId, planes: PlaneResult[], count: int, context: ptr) -> bool {
+    q = context as *QueryRecorder
+    visitor = q.planes
+    answer = visitor(shape_id, planes, count, q.context)
+    dynamics.rec_id(q.payload, shape_id.index1, shape_id.generation)
+    dynamics.rec_int(q.payload, count)
+    i = 0
+    while i < count {
+        dynamics.rec_plane_result(q.payload, planes[i])
+        i = i + 1
+    }
+    dynamics.rec_bool(q.payload, answer)
+    q.count = q.count + 1
+    return answer
+}
+
+// Every shape whose fat bounds overlap the box, through the visitor
+// until it returns false; the tree visits made.
+overlap_aabb(id: WorldId, box: AABB, filter: QueryFilter, visitor: fn(ShapeId, ptr) -> bool, context: ptr) -> TreeStats {
+    if recording_query(id) == false { return overlap_aabb_internal(id, box, filter, visitor, context) }
+    q = query_recorder(context)
+    q.overlap = visitor
+    q.has_overlap = true
+    dynamics.rec_aabb(q.payload, box)
+    dynamics.rec_query_filter(q.payload, filter)
+    count_at = q.payload.size
+    dynamics.rec_int(q.payload, 0)
+    stats = overlap_aabb_internal(id, box, filter, record_overlap_visit, (&q) as ptr)
+    dynamics.rec_patch_int(q.payload, count_at, q.count)
+    rec_tree_stats(q.payload, stats)
+    finish_query(id, dynamics.OP_QUERY_OVERLAP_AABB, &q, filter)
+    return stats
+}
+
+// Every shape a convex proxy (given relative to the origin) overlaps.
+overlap_shape(id: WorldId, origin: Vec3, proxy: ShapeProxy, filter: QueryFilter, visitor: fn(ShapeId, ptr) -> bool, context: ptr) -> TreeStats {
+    if recording_query(id) == false { return overlap_shape_internal(id, origin, proxy, filter, visitor, context) }
+    q = query_recorder(context)
+    q.overlap = visitor
+    q.has_overlap = true
+    dynamics.rec_vec3(q.payload, origin)
+    dynamics.rec_shape_proxy(q.payload, proxy)
+    dynamics.rec_query_filter(q.payload, filter)
+    count_at = q.payload.size
+    dynamics.rec_int(q.payload, 0)
+    stats = overlap_shape_internal(id, origin, proxy, filter, record_overlap_visit, (&q) as ptr)
+    dynamics.rec_patch_int(q.payload, count_at, q.count)
+    rec_tree_stats(q.payload, stats)
+    finish_query(id, dynamics.OP_QUERY_OVERLAP_SHAPE, &q, filter)
+    return stats
+}
+
+// The planes of every shape the character mover's capsule (relative to
+// the origin) touches, a shape's planes at a time (up to 64), through
+// the visitor until it returns false.
+collide_mover(id: WorldId, origin: Vec3, mover: Capsule, filter: QueryFilter, visitor: fn(ShapeId, PlaneResult[], int, ptr) -> bool, context: ptr) {
+    if recording_query(id) == false {
+        collide_mover_internal(id, origin, mover, filter, visitor, context)
+        return
+    }
+    q = query_recorder(context)
+    q.planes = visitor
+    dynamics.rec_vec3(q.payload, origin)
+    dynamics.rec_capsule_value(q.payload, mover)
+    dynamics.rec_query_filter(q.payload, filter)
+    count_at = q.payload.size
+    dynamics.rec_int(q.payload, 0)
+    collide_mover_internal(id, origin, mover, filter, record_plane_visit, (&q) as ptr)
+    dynamics.rec_patch_int(q.payload, count_at, q.count)
+    finish_query(id, dynamics.OP_QUERY_COLLIDE_MOVER, &q, filter)
+}
+
+// A ray from the origin along the translation: each hit through the
+// visitor, whose return clips the ray (0 stops it, 1 keeps everything,
+// -1 ignores that shape); the tree visits made.
+cast_ray(id: WorldId, origin: Vec3, translation: Vec3, filter: QueryFilter,
+         visitor: fn(ShapeId, Vec3, Vec3, float, long, int, int, ptr) -> float, context: ptr) -> TreeStats {
+    if recording_query(id) == false { return cast_ray_internal(id, origin, translation, filter, visitor, context) }
+    q = query_recorder(context)
+    q.cast = visitor
+    dynamics.rec_vec3(q.payload, origin)
+    dynamics.rec_vec3(q.payload, translation)
+    dynamics.rec_query_filter(q.payload, filter)
+    count_at = q.payload.size
+    dynamics.rec_int(q.payload, 0)
+    stats = cast_ray_internal(id, origin, translation, filter, record_cast_visit, (&q) as ptr)
+    dynamics.rec_patch_int(q.payload, count_at, q.count)
+    rec_tree_stats(q.payload, stats)
+    finish_query(id, dynamics.OP_QUERY_CAST_RAY, &q, filter)
+    return stats
+}
+
+// The closest hit of a ray, the common query of games.
+cast_ray_closest(id: WorldId, origin: Vec3, translation: Vec3, filter: QueryFilter) -> RayResult {
+    if recording_query(id) == false { return cast_ray_closest_internal(id, origin, translation, filter) }
+    payload = dynamics.rec_payload_create()
+    dynamics.rec_vec3(payload, origin)
+    dynamics.rec_vec3(payload, translation)
+    dynamics.rec_query_filter(payload, filter)
+    result = cast_ray_closest_internal(id, origin, translation, filter)
+    rec_ray_result(payload, result)
+    dynamics.rec_commit_query(id.index1 - 1, dynamics.OP_QUERY_CAST_RAY_CLOSEST, payload, filter.id, filter.name)
+    dynamics.rec_payload_destroy(payload)
+    return result
+}
+
+rec_ray_result(payload: *Recording, result: RayResult) {
+    dynamics.rec_bool(payload, result.hit)
+    dynamics.rec_id(payload, result.shape_id.index1, result.shape_id.generation)
+    dynamics.rec_vec3(payload, result.point)
+    dynamics.rec_vec3(payload, result.normal)
+    dynamics.rec_float(payload, result.fraction)
+    dynamics.rec_long(payload, result.user_material_id)
+    dynamics.rec_int(payload, result.triangle_index)
+    dynamics.rec_int(payload, result.child_index)
+    dynamics.rec_int(payload, result.node_visits)
+    dynamics.rec_int(payload, result.leaf_visits)
+}
+
+// A convex proxy (relative to the origin) swept along the translation,
+// each hit through the visitor as the ray cast's.
+cast_shape(id: WorldId, origin: Vec3, proxy: ShapeProxy, translation: Vec3, filter: QueryFilter,
+           visitor: fn(ShapeId, Vec3, Vec3, float, long, int, int, ptr) -> float, context: ptr) -> TreeStats {
+    if recording_query(id) == false { return cast_shape_internal(id, origin, proxy, translation, filter, visitor, context) }
+    q = query_recorder(context)
+    q.cast = visitor
+    dynamics.rec_vec3(q.payload, origin)
+    dynamics.rec_shape_proxy(q.payload, proxy)
+    dynamics.rec_vec3(q.payload, translation)
+    dynamics.rec_query_filter(q.payload, filter)
+    count_at = q.payload.size
+    dynamics.rec_int(q.payload, 0)
+    stats = cast_shape_internal(id, origin, proxy, translation, filter, record_cast_visit, (&q) as ptr)
+    dynamics.rec_patch_int(q.payload, count_at, q.count)
+    rec_tree_stats(q.payload, stats)
+    finish_query(id, dynamics.OP_QUERY_CAST_SHAPE, &q, filter)
+    return stats
+}
+
+// The fraction of the translation the mover's capsule can travel before
+// touching a shape (its filter asked per shape when given). Recorded, the
+// filter is asked through the recorder for every candidate, given or not,
+// so a replay sees the same decisions.
+cast_mover(id: WorldId, origin: Vec3, mover: Capsule, translation: Vec3, filter: QueryFilter, has_filter: bool, filter_fn: fn(ShapeId, ptr) -> bool, context: ptr) -> float {
+    if recording_query(id) == false { return cast_mover_internal(id, origin, mover, translation, filter, has_filter, filter_fn, context) }
+    q = query_recorder(context)
+    q.overlap = filter_fn
+    q.has_overlap = has_filter
+    dynamics.rec_vec3(q.payload, origin)
+    dynamics.rec_capsule_value(q.payload, mover)
+    dynamics.rec_vec3(q.payload, translation)
+    dynamics.rec_query_filter(q.payload, filter)
+    count_at = q.payload.size
+    dynamics.rec_int(q.payload, 0)
+    fraction = cast_mover_internal(id, origin, mover, translation, filter, true, record_overlap_visit, (&q) as ptr)
+    dynamics.rec_patch_int(q.payload, count_at, q.count)
+    dynamics.rec_float(q.payload, fraction)
+    finish_query(id, dynamics.OP_QUERY_CAST_MOVER, &q, filter)
+    return fraction
 }
 
 // --- the body queries ------------------------------------------------------------------------------------------------
