@@ -458,6 +458,7 @@ save_world(world_id: WorldId) -> (ptr, int) {
         shape_copy.geometry.compound = null
         shape_copy.materials = null
         shape_copy.user_data = null
+        shape_copy.user_shape = null
         w_int(&wr, indices[i])
         if s.id != NULL_INDEX && s.materials != null {
             w_int(&wr, s.material_count)
@@ -611,13 +612,52 @@ restore_world(world_id: WorldId, def: *WorldDef, data: ptr, size: int) -> bool {
     if data == null || size < 16 { return false }
     rd = SnapReader { data: data, size: size, at: 0, ok: true }
     if r_int(&rd) != SNAPSHOT_MAGIC || r_int(&rd) != SNAPSHOT_VERSION || r_long(&rd) != snapshot_layout() { return false }
-    if dynamics.reset_world(world_id, def) == false { return false }
+    if dynamics.world_is_valid(world_id) == false { return false }
     w = dynamics.get_world(world_id.index1 - 1)
-    if fill_world(w, &rd) == false || rd.at != rd.size || world_valid(w) == false {
-        dynamics.reset_world(world_id, def)
-        return false
+    if w.locked || w.recording != null { return false }
+    // The host's drawables are kept for the shapes still in their slot
+    // after the restore (the same generation: the same shape), as the
+    // reference keeps them, so a seek does not remake every one; the rest
+    // are given back.
+    kept_count = w.shapes.count
+    kept_block = basics.alloc(math.max_int(kept_count, 1) * 8)
+    kept = kept_block as ptr[]
+    generations_block = basics.alloc(math.max_int(kept_count, 1) * 4)
+    generations = generations_block as int[]
+    i = 0
+    while i < kept_count {
+        old = dynamics.world_shape_at(w, i)
+        kept[i] = null
+        generations[i] = old.generation
+        if old.id == i {
+            kept[i] = old.user_shape
+            old.user_shape = null
+        }
+        i = i + 1
     }
-    return true
+    restored = dynamics.reset_world(world_id, def)
+    if restored && (fill_world(w, &rd) == false || rd.at != rd.size || world_valid(w) == false) {
+        dynamics.reset_world(world_id, def)
+        restored = false
+    }
+    i = 0
+    while i < kept_count {
+        if restored && i < w.shapes.count && kept[i] != null {
+            now = dynamics.world_shape_at(w, i)
+            if now.id == i && now.generation == generations[i] {
+                now.user_shape = kept[i]
+                kept[i] = null
+            }
+        }
+        if kept[i] != null {
+            destroy = w.destroy_debug_shape
+            destroy(kept[i], w.debug_shape_context)
+        }
+        i = i + 1
+    }
+    basics.free_bytes(kept_block, math.max_int(kept_count, 1) * 8)
+    basics.free_bytes(generations_block, math.max_int(kept_count, 1) * 4)
+    return restored
 }
 
 // The world's own invariants over everything loaded.
@@ -767,6 +807,7 @@ fill_world(w: *World, rd: *SnapReader) -> bool {
         s.geometry.compound = null
         s.materials = null
         s.user_data = null
+        s.user_shape = null
         if s.id != NULL_INDEX && name_known(&w.names, s.name_id) == false { rd.ok = false }
         geometry_index = r_int(rd)
         material_count = r_count(rd, sizeof(SurfaceMaterial))

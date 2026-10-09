@@ -51,11 +51,12 @@ import aephysics.dynamics
 import aephysics.joint_solver
 import aephysics.physics_world
 import aephysics.snapshot
+import aephysics.debug_draw
 
 exports (
     Player, PlayerInfo, QueryInfo, QueryHit, QUERY_OVERLAP_AABB, QUERY_OVERLAP_SHAPE, QUERY_CAST_RAY, QUERY_CAST_SHAPE,
     QUERY_CAST_RAY_CLOSEST, QUERY_CAST_MOVER, QUERY_COLLIDE_MOVER, player_frame_query_count, player_frame_query,
-    player_frame_query_hit, create_recording, destroy_recording, recording_data, recording_size, start_recording,
+    player_frame_query_hit, player_draw_frame_queries, player_set_debug_shape_callbacks, create_recording, destroy_recording, recording_data, recording_size, start_recording,
     stop_recording, save_recording_to_file, load_recording_from_file, create_player, destroy_player, player_step_frame,
     player_sub_step_frame, player_restart, player_seek_frame, player_world, player_frame, player_frame_count,
     player_at_end, player_at_pre_step, player_has_diverged, player_diverge_frame, player_failed, player_info,
@@ -263,6 +264,7 @@ struct Player {
     replay_planes: Buffer          // PlaneResult: a mover's recorded planes
     frame_queries: Buffer          // FrameQuery: the queries of the frame last played
     frame_hits: Buffer             // QueryHit
+    frame_proxy_points: Buffer     // Vec3: the frame's proxy queries' points
     pending_key: long              // the key of the tag record just read, for the query after it
 }
 
@@ -320,6 +322,7 @@ create_player(data: ptr, size: int, worker_count: int) -> *Player {
     p.replay_planes = basics.buffer_create(sizeof(PlaneResult), 0)
     p.frame_queries = basics.buffer_create(sizeof(FrameQuery), 0)
     p.frame_hits = basics.buffer_create(sizeof(QueryHit), 0)
+    p.frame_proxy_points = basics.buffer_create(sizeof(Vec3), 0)
     p.keyframe_interval = DEFAULT_KEYFRAME_INTERVAL
     p.keyframe_min_interval = DEFAULT_KEYFRAME_INTERVAL
     p.keyframe_budget = DEFAULT_KEYFRAME_BUDGET as long
@@ -371,6 +374,7 @@ destroy_player(p: *Player) {
     basics.buffer_destroy(&p.replay_planes)
     basics.buffer_destroy(&p.frame_queries)
     basics.buffer_destroy(&p.frame_hits)
+    basics.buffer_destroy(&p.frame_proxy_points)
     release_record(p)
     basics.free_bytes(p.strings, STRING_SLOTS * 8)
     basics.free_bytes(p.string_bytes, STRING_SLOTS * 4)
@@ -986,6 +990,10 @@ struct FrameQuery {
     hit_start: int
     hit_count: int
     key: long
+    mover: Capsule                 // a mover query's capsule, relative to the origin
+    proxy_start: int               // a proxy query's points in frame_proxy_points, relative to the origin
+    proxy_count: int
+    proxy_radius: float
 }
 
 // A tagged query's caller, from the recording's tag table.
@@ -1065,7 +1073,23 @@ free_tags(p: *Player) {
 clear_frame_queries(p: *Player) {
     p.frame_queries.count = 0
     p.frame_hits.count = 0
+    p.frame_proxy_points.count = 0
     p.pending_key = 0 as long
+}
+
+// The proxy the query asked with, kept for drawing it.
+stash_proxy(p: *Player, q: *FrameQuery, proxy: ShapeProxy) {
+    q.proxy_start = p.frame_proxy_points.count
+    q.proxy_count = proxy.count
+    q.proxy_radius = proxy.radius
+    points = proxy.points as Vec3[]
+    i = 0
+    while i < proxy.count {
+        index = basics.buffer_push(&p.frame_proxy_points)
+        kept = p.frame_proxy_points.data as Vec3[]
+        kept[index] = points[i]
+        i = i + 1
+    }
 }
 
 read_aabb(p: *Player) -> AABB {
@@ -1264,6 +1288,10 @@ stash_query(p: *Player, kind: int, filter: QueryFilter, aabb: AABB, origin: Vec3
     p.pending_key = 0 as long
     q.hit_start = p.frame_hits.count
     q.hit_count = hit_count
+    q.mover = Capsule { center1: math.vec3_zero(), center2: math.vec3_zero(), radius: 0.0 }
+    q.proxy_start = 0
+    q.proxy_count = 0
+    q.proxy_radius = 0.0
     return q
 }
 
@@ -1311,7 +1339,8 @@ replay_overlap_shape(p: *Player) {
     stats = physics_world.overlap_shape(p.world_id, origin, proxy, filter, replay_overlap_visit, (&rq) as ptr)
     check_replayed(p, &rq, stats, nodes, leaves)
     box = query_bounds(origin, math.vec3_zero(), proxy.points, proxy.count, proxy.radius)
-    stash_query(p, QUERY_OVERLAP_SHAPE, filter, box, origin, math.vec3_zero(), 1.0, n)
+    kept_query = stash_query(p, QUERY_OVERLAP_SHAPE, filter, box, origin, math.vec3_zero(), 1.0, n)
+    stash_proxy(p, kept_query, proxy)
     stash_recorded_hits(p, n)
 }
 
@@ -1343,7 +1372,8 @@ replay_cast_shape(p: *Player) {
     stats = physics_world.cast_shape(p.world_id, origin, proxy, translation, filter, replay_cast_visit, (&rq) as ptr)
     check_replayed(p, &rq, stats, nodes, leaves)
     box = query_bounds(origin, translation, proxy.points, proxy.count, proxy.radius)
-    stash_query(p, QUERY_CAST_SHAPE, filter, box, origin, translation, 1.0, n)
+    kept_query = stash_query(p, QUERY_CAST_SHAPE, filter, box, origin, translation, 1.0, n)
+    stash_proxy(p, kept_query, proxy)
     stash_recorded_hits(p, n)
 }
 
@@ -1394,7 +1424,8 @@ replay_cast_mover(p: *Player) {
     centres[0] = mover.center1
     centres[1] = mover.center2
     box = query_bounds(origin, translation, p.proxy_points, 2, mover.radius)
-    stash_query(p, QUERY_CAST_MOVER, filter, box, origin, translation, fraction, 0)
+    kept_query = stash_query(p, QUERY_CAST_MOVER, filter, box, origin, translation, fraction, 0)
+    kept_query.mover = mover
 }
 
 replay_collide_mover(p: *Player) {
@@ -1430,14 +1461,15 @@ replay_collide_mover(p: *Player) {
     centres[0] = mover.center1
     centres[1] = mover.center2
     box = query_bounds(origin, math.vec3_zero(), p.proxy_points, 2, mover.radius)
-    stash_query(p, QUERY_COLLIDE_MOVER, filter, box, origin, math.vec3_zero(), 1.0, p.replay_planes.count)
+    kept_query = stash_query(p, QUERY_COLLIDE_MOVER, filter, box, origin, math.vec3_zero(), 1.0, p.replay_planes.count)
+    kept_query.mover = mover
     i = 0
     while i < groups {
         h = recorded_hit_at(p, i)
         k = 0
         while k < h.plane_count {
             kept_plane = replay_plane_at(p, h.plane_start + k)
-            stash_hit(p, h.shape, kept_plane.point, kept_plane.plane.normal, 0.0)
+            stash_hit(p, h.shape, math.add(origin, kept_plane.point), kept_plane.plane.normal, 0.0)
             k = k + 1
         }
         i = i + 1
@@ -1493,6 +1525,148 @@ player_frame_query_hit(p: *Player, query: int, hit: int) -> QueryHit {
     if hit < 0 || hit >= q.hit_count { return no_hit }
     hits = p.frame_hits.data as QueryHit[]
     return hits[q.hit_start + hit]
+}
+
+// --- drawing ----------------------------------------------------------------------------------------
+
+// The host's debug shape callbacks for the player's world, now and through
+// every restore (b3RecPlayer_SetDebugShapeCallbacks): what the old ones
+// made is given back to them, and the player rewinds to frame 0.
+player_set_debug_shape_callbacks(p: *Player, create: fn(*DebugShape, ptr) -> ptr, destroy: fn(ptr, ptr), context: ptr) {
+    p.def.create_debug_shape = create
+    p.def.destroy_debug_shape = destroy
+    p.def.user_debug_shape_context = context
+    if dynamics.world_is_valid(p.world_id) { dynamics.set_debug_shape_callbacks(dynamics.get_world(p.world_id.index1 - 1), create, destroy, context) }
+    player_restart(p)
+}
+
+// The colour of a query, or the one reserved for the selected query.
+query_color(selected: bool, base: int) -> int {
+    if selected { return debug_draw.COLOR_PLUM }
+    return base
+}
+
+// Each reported overlap's shape by its bounds; a shape destroyed since is
+// skipped.
+draw_hit_bounds(p: *Player, q: *FrameQuery, draw: *DebugDraw, color: int) {
+    bounds = draw.draw_bounds
+    hits = p.frame_hits.data as QueryHit[]
+    i = q.hit_start
+    while i < q.hit_start + q.hit_count {
+        if dynamics.shape_is_valid(hits[i].shape) { bounds(dynamics.shape_get_aabb(hits[i].shape), color, draw.context) }
+        i = i + 1
+    }
+}
+
+// A recorded proxy at `base`: a point without radius as a fat point, with
+// one as a sphere, two with a radius as a capsule, more as their points.
+draw_proxy(p: *Player, draw: *DebugDraw, base: Vec3, q: *FrameQuery, color: int) {
+    points = p.frame_proxy_points.data as Vec3[]
+    if q.proxy_count == 1 {
+        at = math.add(base, points[q.proxy_start])
+        if q.proxy_radius > 0.0 {
+            sphere = draw.draw_sphere
+            sphere(at, q.proxy_radius, color, 0.5, draw.context)
+        } else {
+            dot = draw.draw_point
+            dot(at, 10.0, color, draw.context)
+        }
+    } else if q.proxy_count == 2 && q.proxy_radius > 0.0 {
+        capsule = draw.draw_capsule
+        capsule(math.add(base, points[q.proxy_start]), math.add(base, points[q.proxy_start + 1]), q.proxy_radius, color, 0.5, draw.context)
+    } else if q.proxy_count >= 2 {
+        dot = draw.draw_point
+        i = 0
+        while i < q.proxy_count {
+            dot(math.add(base, points[q.proxy_start + i]), 6.0, color, draw.context)
+            i = i + 1
+        }
+    }
+}
+
+// The queries of the frame last played, drawn (b3RecPlayer_DrawFrameQueries):
+// every one when `query` is below zero, else that one; the `selected` one
+// in the reserved colour and labelled with its caller.
+player_draw_frame_queries(p: *Player, draw: *DebugDraw, query: int, selected: int) {
+    segment = draw.draw_segment
+    dot = draw.draw_point
+    capsule = draw.draw_capsule
+    hits = p.frame_hits.data as QueryHit[]
+    qi = 0
+    while qi < p.frame_queries.count {
+        if query < 0 || qi == query {
+            q = frame_query_at(p, qi)
+            chosen = qi == selected
+            if q.kind == QUERY_CAST_RAY || q.kind == QUERY_CAST_RAY_CLOSEST {
+                segment(q.origin, math.add(q.origin, q.translation), query_color(chosen, debug_draw.COLOR_YELLOW), draw.context)
+                i = q.hit_start
+                while i < q.hit_start + q.hit_count {
+                    dot(hits[i].point, 4.0, query_color(chosen, debug_draw.COLOR_YELLOW), draw.context)
+                    segment(hits[i].point, math.add(hits[i].point, math.mul_sv(0.2, hits[i].normal)), query_color(chosen, debug_draw.COLOR_YELLOW_GREEN), draw.context)
+                    i = i + 1
+                }
+            } else if q.kind == QUERY_CAST_SHAPE {
+                segment(q.origin, math.add(q.origin, q.translation), query_color(chosen, debug_draw.COLOR_SKY_BLUE), draw.context)
+                draw_proxy(p, draw, q.origin, q, query_color(chosen, debug_draw.COLOR_LIGHT_GREEN))
+                i = q.hit_start
+                while i < q.hit_start + q.hit_count {
+                    dot(hits[i].point, 4.0, query_color(chosen, debug_draw.COLOR_SKY_BLUE), draw.context)
+                    segment(hits[i].point, math.add(hits[i].point, math.mul_sv(0.2, hits[i].normal)), query_color(chosen, debug_draw.COLOR_LIGHT_SKY_BLUE), draw.context)
+                    draw_proxy(p, draw, math.add(q.origin, math.mul_sv(hits[i].fraction, q.translation)), q, query_color(chosen, debug_draw.COLOR_SKY_BLUE))
+                    i = i + 1
+                }
+            } else if q.kind == QUERY_CAST_MOVER {
+                c1 = math.add(q.origin, q.mover.center1)
+                c2 = math.add(q.origin, q.mover.center2)
+                capsule(c1, c2, q.mover.radius, query_color(chosen, debug_draw.COLOR_LIGHT_SKY_BLUE), 0.6, draw.context)
+                if q.fraction > 0.01 {
+                    moved = math.mul_sv(q.fraction, q.translation)
+                    capsule(math.add(c1, moved), math.add(c2, moved), q.mover.radius, debug_draw.COLOR_LIGHT_SKY_BLUE, 0.3, draw.context)
+                }
+            } else if q.kind == QUERY_COLLIDE_MOVER {
+                capsule(math.add(q.origin, q.mover.center1), math.add(q.origin, q.mover.center2), q.mover.radius, query_color(chosen, debug_draw.COLOR_TAN), 0.6, draw.context)
+                i = q.hit_start
+                while i < q.hit_start + q.hit_count {
+                    segment(hits[i].point, math.add(hits[i].point, math.mul_sv(0.2, hits[i].normal)), query_color(chosen, debug_draw.COLOR_ORANGE), draw.context)
+                    i = i + 1
+                }
+            } else if q.kind == QUERY_OVERLAP_AABB {
+                bounds = draw.draw_bounds
+                bounds(q.aabb, query_color(chosen, debug_draw.COLOR_LIME_GREEN), draw.context)
+                draw_hit_bounds(p, q, draw, query_color(chosen, debug_draw.COLOR_MAGENTA))
+            } else if q.kind == QUERY_OVERLAP_SHAPE {
+                draw_proxy(p, draw, q.origin, q, query_color(chosen, debug_draw.COLOR_LIME_GREEN))
+                draw_hit_bounds(p, q, draw, query_color(chosen, debug_draw.COLOR_MAGENTA))
+            }
+            if chosen && q.key != (0 as long) { draw_query_label(p, draw, q) }
+        }
+        qi = qi + 1
+    }
+}
+
+// The selected query's caller at its origin: its name and id, its name,
+// or its id; an overlap box's at its centre, a mover's past its top.
+draw_query_label(p: *Player, draw: *DebugDraw, q: *FrameQuery) {
+    name = ""
+    id = 0 as long
+    tag_index = basics.map_get(&p.tag_index, q.key, NULL_INDEX)
+    if tag_index != NULL_INDEX {
+        tag = player_tag_at(p, tag_index)
+        id = tag.id
+        if tag.name != null { name = native.name_text(tag.name) }
+    }
+    text = "#${id}"
+    if string.length(name) > 0 && id != (0 as long) { text = "${name} (${id})" }
+    else if string.length(name) > 0 { text = name }
+    at = q.origin
+    if q.kind == QUERY_OVERLAP_AABB { at = math.aabb_center(q.aabb) }
+    else if q.kind == QUERY_CAST_MOVER || q.kind == QUERY_COLLIDE_MOVER {
+        c1 = math.add(q.origin, q.mover.center1)
+        c2 = math.add(q.origin, q.mover.center2)
+        at = math.add(c2, math.mul_sv(1.25 * q.mover.radius, math.normalize(math.sub(c2, c1))))
+    }
+    label = draw.draw_string
+    label(at, text, debug_draw.COLOR_WHITE, draw.context)
 }
 
 // --- the records ------------------------------------------------------------------------------------

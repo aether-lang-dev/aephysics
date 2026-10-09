@@ -1,0 +1,322 @@
+// What a host draws a world with (the reference's b3DebugDraw): its
+// callbacks for a user shape, a segment, a transform, a point, a sphere, a
+// capsule, a box, an oriented box and a string, the options of what to
+// draw, and the named colours and material presets the reference's
+// drawing uses. physics_world.world_draw walks a world through it;
+// recording.player_draw_frame_queries a replayed frame's queries.
+//
+// A user shape is the host's own drawable for a shape, made when the shape
+// is first drawn by the world def's create_debug_shape (and given back by
+// destroy_debug_shape when the shape goes, its geometry changes, or the
+// world goes).
+
+import std.string
+import aephysics.math
+
+exports (
+    DebugDraw, default_debug_draw, make_debug_color, graph_color, fixed, hex,
+    DEBUG_MATERIAL_DEFAULT, DEBUG_MATERIAL_MATTE, DEBUG_MATERIAL_SOFT, DEBUG_MATERIAL_DEAD, DEBUG_MATERIAL_GLOSSY, DEBUG_MATERIAL_METALLIC,
+    COLOR_ALICE_BLUE, COLOR_ANTIQUE_WHITE, COLOR_AQUA, COLOR_AQUAMARINE, COLOR_AZURE, COLOR_BEIGE, COLOR_BISQUE,
+    COLOR_BLACK, COLOR_BLANCHED_ALMOND, COLOR_BLUE, COLOR_BLUE_VIOLET, COLOR_BROWN, COLOR_BURLYWOOD, COLOR_CADET_BLUE,
+    COLOR_CHARTREUSE, COLOR_CHOCOLATE, COLOR_CORAL, COLOR_CORNFLOWER_BLUE, COLOR_CORNSILK, COLOR_CRIMSON, COLOR_CYAN,
+    COLOR_DARK_BLUE, COLOR_DARK_CYAN, COLOR_DARK_GOLDEN_ROD, COLOR_DARK_GRAY, COLOR_DARK_GREEN, COLOR_DARK_KHAKI,
+    COLOR_DARK_MAGENTA, COLOR_DARK_OLIVE_GREEN, COLOR_DARK_ORANGE, COLOR_DARK_ORCHID, COLOR_DARK_RED,
+    COLOR_DARK_SALMON, COLOR_DARK_SEA_GREEN, COLOR_DARK_SLATE_BLUE, COLOR_DARK_SLATE_GRAY, COLOR_DARK_TURQUOISE,
+    COLOR_DARK_VIOLET, COLOR_DEEP_PINK, COLOR_DEEP_SKY_BLUE, COLOR_DIM_GRAY, COLOR_DODGER_BLUE, COLOR_FIRE_BRICK,
+    COLOR_FLORAL_WHITE, COLOR_FOREST_GREEN, COLOR_FUCHSIA, COLOR_GAINSBORO, COLOR_GHOST_WHITE, COLOR_GOLD,
+    COLOR_GOLDEN_ROD, COLOR_GRAY, COLOR_GREEN, COLOR_GREEN_YELLOW, COLOR_HONEY_DEW, COLOR_HOT_PINK, COLOR_INDIAN_RED,
+    COLOR_INDIGO, COLOR_IVORY, COLOR_KHAKI, COLOR_LAVENDER, COLOR_LAVENDER_BLUSH, COLOR_LAWN_GREEN,
+    COLOR_LEMON_CHIFFON, COLOR_LIGHT_BLUE, COLOR_LIGHT_CORAL, COLOR_LIGHT_CYAN, COLOR_LIGHT_GOLDEN_ROD_YELLOW,
+    COLOR_LIGHT_GRAY, COLOR_LIGHT_GREEN, COLOR_LIGHT_PINK, COLOR_LIGHT_SALMON, COLOR_LIGHT_SEA_GREEN,
+    COLOR_LIGHT_SKY_BLUE, COLOR_LIGHT_SLATE_GRAY, COLOR_LIGHT_STEEL_BLUE, COLOR_LIGHT_YELLOW, COLOR_LIME,
+    COLOR_LIME_GREEN, COLOR_LINEN, COLOR_MAGENTA, COLOR_MAROON, COLOR_MEDIUM_AQUA_MARINE, COLOR_MEDIUM_BLUE,
+    COLOR_MEDIUM_ORCHID, COLOR_MEDIUM_PURPLE, COLOR_MEDIUM_SEA_GREEN, COLOR_MEDIUM_SLATE_BLUE,
+    COLOR_MEDIUM_SPRING_GREEN, COLOR_MEDIUM_TURQUOISE, COLOR_MEDIUM_VIOLET_RED, COLOR_MIDNIGHT_BLUE, COLOR_MINT_CREAM,
+    COLOR_MISTY_ROSE, COLOR_MOCCASIN, COLOR_NAVAJO_WHITE, COLOR_NAVY, COLOR_OLD_LACE, COLOR_OLIVE, COLOR_OLIVE_DRAB,
+    COLOR_ORANGE, COLOR_ORANGE_RED, COLOR_ORCHID, COLOR_PALE_GOLDEN_ROD, COLOR_PALE_GREEN, COLOR_PALE_TURQUOISE,
+    COLOR_PALE_VIOLET_RED, COLOR_PAPAYA_WHIP, COLOR_PEACH_PUFF, COLOR_PERU, COLOR_PINK, COLOR_PLUM, COLOR_POWDER_BLUE,
+    COLOR_PURPLE, COLOR_REBECCA_PURPLE, COLOR_RED, COLOR_ROSY_BROWN, COLOR_ROYAL_BLUE, COLOR_SADDLE_BROWN,
+    COLOR_SALMON, COLOR_SANDY_BROWN, COLOR_SEA_GREEN, COLOR_SEA_SHELL, COLOR_SIENNA, COLOR_SILVER, COLOR_SKY_BLUE,
+    COLOR_SLATE_BLUE, COLOR_SLATE_GRAY, COLOR_SNOW, COLOR_SPRING_GREEN, COLOR_STEEL_BLUE, COLOR_TAN, COLOR_TEAL,
+    COLOR_THISTLE, COLOR_TOMATO, COLOR_TURQUOISE, COLOR_VIOLET, COLOR_WHEAT, COLOR_WHITE, COLOR_WHITE_SMOKE,
+    COLOR_YELLOW, COLOR_YELLOW_GREEN, COLOR_BOX2D_RED, COLOR_BOX2_D_BLUE, COLOR_BOX2_D_GREEN, COLOR_BOX2_D_YELLOW
+)
+
+struct DebugDraw {
+    draw_shape: fn(ptr, Transform, int, ptr)               // a user shape at a transform
+    draw_segment: fn(Vec3, Vec3, int, ptr)
+    draw_transform: fn(Transform, ptr)                     // axes of the host's own length
+    draw_point: fn(Vec3, float, int, ptr)                  // a point of a size in pixels
+    draw_sphere: fn(Vec3, float, int, float, ptr)          // centre, radius, colour, alpha
+    draw_capsule: fn(Vec3, Vec3, float, int, float, ptr)   // the two centres, radius, colour, alpha
+    draw_bounds: fn(AABB, int, ptr)
+    draw_box: fn(Vec3, Transform, int, ptr)                // half extents at a transform
+    draw_string: fn(Vec3, string, int, ptr)                // text at a world point
+    drawing_bounds: AABB           // what is drawn: the shapes whose bounds overlap it
+    force_scale: float             // a contact force's length per newton
+    joint_scale: float             // the joints' drawing, scaled
+    draw_shapes: bool
+    draw_joints: bool
+    draw_joint_extras: bool        // each joint's constraint force and torque
+    draw_bounds_option: bool       // each shape's fat bounds (the reference's drawBounds)
+    draw_mass: bool                // the centre of mass and the mass of dynamic bodies
+    draw_sleep: bool               // the sleep velocity against the threshold
+    draw_body_names: bool
+    draw_contacts: bool
+    draw_anchor_a: bool            // contact points at body A's anchors, else B's
+    draw_graph_colors: bool        // the constraint graph's colour of each contact and joint
+    draw_contact_features: bool
+    draw_contact_normals: bool
+    draw_contact_forces: bool
+    draw_islands: bool             // each island's bounds
+    context: ptr                   // given to every callback
+}
+
+no_shape(user_shape: ptr, transform: Transform, color: int, context: ptr) { }
+no_segment(p1: Vec3, p2: Vec3, color: int, context: ptr) { }
+no_transform(transform: Transform, context: ptr) { }
+no_point(p: Vec3, size: float, color: int, context: ptr) { }
+no_sphere(p: Vec3, radius: float, color: int, alpha: float, context: ptr) { }
+no_capsule(p1: Vec3, p2: Vec3, radius: float, color: int, alpha: float, context: ptr) { }
+no_bounds(box: AABB, color: int, context: ptr) { }
+no_box(extents: Vec3, transform: Transform, color: int, context: ptr) { }
+no_string(p: Vec3, text: string, color: int, context: ptr) { }
+
+// Callbacks that draw nothing (a host sets the ones it has), every option
+// off, bounds a hundred metres out every way, unit scales
+// (b3DefaultDebugDraw).
+default_debug_draw() -> DebugDraw {
+    h = 100.0
+    return DebugDraw { draw_shape: no_shape, draw_segment: no_segment, draw_transform: no_transform, draw_point: no_point,
+                       draw_sphere: no_sphere, draw_capsule: no_capsule, draw_bounds: no_bounds, draw_box: no_box, draw_string: no_string,
+                       drawing_bounds: AABB { lower: math.vec3(0.0 - h, 0.0 - h, 0.0 - h), upper: math.vec3(h, h, h) },
+                       force_scale: 1.0, joint_scale: 1.0, draw_shapes: false, draw_joints: false, draw_joint_extras: false,
+                       draw_bounds_option: false, draw_mass: false, draw_sleep: false, draw_body_names: false, draw_contacts: false,
+                       draw_anchor_a: false, draw_graph_colors: false, draw_contact_features: false, draw_contact_normals: false,
+                       draw_contact_forces: false, draw_islands: false, context: null }
+}
+
+// A preset of how a drawn colour should look, packed in a colour's high
+// byte (the reference's b3DebugMaterial); 0 keeps the host's own look.
+const DEBUG_MATERIAL_DEFAULT = 0
+const DEBUG_MATERIAL_MATTE = 1
+const DEBUG_MATERIAL_SOFT = 2
+const DEBUG_MATERIAL_DEAD = 3
+const DEBUG_MATERIAL_GLOSSY = 4
+const DEBUG_MATERIAL_METALLIC = 5
+
+// An RGB colour with a material preset in its high byte (b3MakeDebugColor).
+make_debug_color(rgb: int, material: int) -> int { return (rgb & 0x00FFFFFF) | (material << 24) }
+
+// The colour drawn for a constraint graph colour, the overflow last (b3GetGraphColor).
+graph_color(index: int) -> int {
+    if index == 0 { return COLOR_RED }
+    if index == 1 { return COLOR_ORANGE }
+    if index == 2 { return COLOR_YELLOW }
+    if index == 3 { return COLOR_GREEN }
+    if index == 4 { return COLOR_CYAN }
+    if index == 5 { return COLOR_BLUE }
+    if index == 6 { return COLOR_VIOLET }
+    if index == 7 { return COLOR_PINK }
+    if index == 8 { return COLOR_CHOCOLATE }
+    if index == 9 { return COLOR_GOLDEN_ROD }
+    if index == 10 { return COLOR_CORAL }
+    if index == 11 { return COLOR_ROSY_BROWN }
+    if index == 12 { return COLOR_AQUA }
+    if index == 13 { return COLOR_PERU }
+    if index == 14 { return COLOR_LIME }
+    if index == 15 { return COLOR_GOLD }
+    if index == 16 { return COLOR_PLUM }
+    if index == 17 { return COLOR_SNOW }
+    if index == 18 { return COLOR_TEAL }
+    if index == 19 { return COLOR_KHAKI }
+    if index == 20 { return COLOR_SALMON }
+    if index == 21 { return COLOR_PEACH_PUFF }
+    if index == 22 { return COLOR_HONEY_DEW }
+    return COLOR_BLACK
+}
+
+// A number with `digits` decimals, rounded half away from zero, for the
+// drawing's labels (the reference's "%.2f" and its siblings).
+fixed(value: float, digits: int) -> string {
+    scale = 1 as long
+    i = 0
+    while i < digits {
+        scale = scale * (10 as long)
+        i = i + 1
+    }
+    negative = value < 0.0
+    magnitude = value
+    if negative { magnitude = 0.0 - value }
+    units = (magnitude * (scale as float) + 0.5) as long
+    whole = units / scale
+    sign = ""
+    if negative && units != (0 as long) { sign = "-" }
+    if digits <= 0 { return "${sign}${whole}" }
+    rest = "${units % scale}"
+    while string.length(rest) < digits { rest = "0${rest}" }
+    return "${sign}${whole}.${rest}"
+}
+
+// A value in hexadecimal with the reference's "%#X" look: 0X and capitals,
+// 0 alone.
+hex(value: int) -> string {
+    if value == 0 { return "0" }
+    digits = "0123456789ABCDEF"
+    bits = value as long
+    if bits < (0 as long) { bits = bits + (1 as long << 32) }
+    text = ""
+    while bits > (0 as long) {
+        nibble = (bits % (16 as long)) as int
+        text = "${string.substring(digits, nibble, nibble + 1)}${text}"
+        bits = bits / (16 as long)
+    }
+    return "0X${text}"
+}
+
+// The reference's named colours (b3HexColor), as 0xRRGGBB.
+const COLOR_ALICE_BLUE = 0xF0F8FF
+const COLOR_ANTIQUE_WHITE = 0xFAEBD7
+const COLOR_AQUA = 0x00FFFF
+const COLOR_AQUAMARINE = 0x7FFFD4
+const COLOR_AZURE = 0xF0FFFF
+const COLOR_BEIGE = 0xF5F5DC
+const COLOR_BISQUE = 0xFFE4C4
+const COLOR_BLACK = 0x000000
+const COLOR_BLANCHED_ALMOND = 0xFFEBCD
+const COLOR_BLUE = 0x0000FF
+const COLOR_BLUE_VIOLET = 0x8A2BE2
+const COLOR_BROWN = 0xA52A2A
+const COLOR_BURLYWOOD = 0xDEB887
+const COLOR_CADET_BLUE = 0x5F9EA0
+const COLOR_CHARTREUSE = 0x7FFF00
+const COLOR_CHOCOLATE = 0xD2691E
+const COLOR_CORAL = 0xFF7F50
+const COLOR_CORNFLOWER_BLUE = 0x6495ED
+const COLOR_CORNSILK = 0xFFF8DC
+const COLOR_CRIMSON = 0xDC143C
+const COLOR_CYAN = 0x00FFFF
+const COLOR_DARK_BLUE = 0x00008B
+const COLOR_DARK_CYAN = 0x008B8B
+const COLOR_DARK_GOLDEN_ROD = 0xB8860B
+const COLOR_DARK_GRAY = 0xA9A9A9
+const COLOR_DARK_GREEN = 0x006400
+const COLOR_DARK_KHAKI = 0xBDB76B
+const COLOR_DARK_MAGENTA = 0x8B008B
+const COLOR_DARK_OLIVE_GREEN = 0x556B2F
+const COLOR_DARK_ORANGE = 0xFF8C00
+const COLOR_DARK_ORCHID = 0x9932CC
+const COLOR_DARK_RED = 0x8B0000
+const COLOR_DARK_SALMON = 0xE9967A
+const COLOR_DARK_SEA_GREEN = 0x8FBC8F
+const COLOR_DARK_SLATE_BLUE = 0x483D8B
+const COLOR_DARK_SLATE_GRAY = 0x2F4F4F
+const COLOR_DARK_TURQUOISE = 0x00CED1
+const COLOR_DARK_VIOLET = 0x9400D3
+const COLOR_DEEP_PINK = 0xFF1493
+const COLOR_DEEP_SKY_BLUE = 0x00BFFF
+const COLOR_DIM_GRAY = 0x696969
+const COLOR_DODGER_BLUE = 0x1E90FF
+const COLOR_FIRE_BRICK = 0xB22222
+const COLOR_FLORAL_WHITE = 0xFFFAF0
+const COLOR_FOREST_GREEN = 0x228B22
+const COLOR_FUCHSIA = 0xFF00FF
+const COLOR_GAINSBORO = 0xDCDCDC
+const COLOR_GHOST_WHITE = 0xF8F8FF
+const COLOR_GOLD = 0xFFD700
+const COLOR_GOLDEN_ROD = 0xDAA520
+const COLOR_GRAY = 0x808080
+const COLOR_GREEN = 0x008000
+const COLOR_GREEN_YELLOW = 0xADFF2F
+const COLOR_HONEY_DEW = 0xF0FFF0
+const COLOR_HOT_PINK = 0xFF69B4
+const COLOR_INDIAN_RED = 0xCD5C5C
+const COLOR_INDIGO = 0x4B0082
+const COLOR_IVORY = 0xFFFFF0
+const COLOR_KHAKI = 0xF0E68C
+const COLOR_LAVENDER = 0xE6E6FA
+const COLOR_LAVENDER_BLUSH = 0xFFF0F5
+const COLOR_LAWN_GREEN = 0x7CFC00
+const COLOR_LEMON_CHIFFON = 0xFFFACD
+const COLOR_LIGHT_BLUE = 0xADD8E6
+const COLOR_LIGHT_CORAL = 0xF08080
+const COLOR_LIGHT_CYAN = 0xE0FFFF
+const COLOR_LIGHT_GOLDEN_ROD_YELLOW = 0xFAFAD2
+const COLOR_LIGHT_GRAY = 0xD3D3D3
+const COLOR_LIGHT_GREEN = 0x90EE90
+const COLOR_LIGHT_PINK = 0xFFB6C1
+const COLOR_LIGHT_SALMON = 0xFFA07A
+const COLOR_LIGHT_SEA_GREEN = 0x20B2AA
+const COLOR_LIGHT_SKY_BLUE = 0x87CEFA
+const COLOR_LIGHT_SLATE_GRAY = 0x778899
+const COLOR_LIGHT_STEEL_BLUE = 0xB0C4DE
+const COLOR_LIGHT_YELLOW = 0xFFFFE0
+const COLOR_LIME = 0x00FF00
+const COLOR_LIME_GREEN = 0x32CD32
+const COLOR_LINEN = 0xFAF0E6
+const COLOR_MAGENTA = 0xFF00FF
+const COLOR_MAROON = 0x800000
+const COLOR_MEDIUM_AQUA_MARINE = 0x66CDAA
+const COLOR_MEDIUM_BLUE = 0x0000CD
+const COLOR_MEDIUM_ORCHID = 0xBA55D3
+const COLOR_MEDIUM_PURPLE = 0x9370DB
+const COLOR_MEDIUM_SEA_GREEN = 0x3CB371
+const COLOR_MEDIUM_SLATE_BLUE = 0x7B68EE
+const COLOR_MEDIUM_SPRING_GREEN = 0x00FA9A
+const COLOR_MEDIUM_TURQUOISE = 0x48D1CC
+const COLOR_MEDIUM_VIOLET_RED = 0xC71585
+const COLOR_MIDNIGHT_BLUE = 0x191970
+const COLOR_MINT_CREAM = 0xF5FFFA
+const COLOR_MISTY_ROSE = 0xFFE4E1
+const COLOR_MOCCASIN = 0xFFE4B5
+const COLOR_NAVAJO_WHITE = 0xFFDEAD
+const COLOR_NAVY = 0x000080
+const COLOR_OLD_LACE = 0xFDF5E6
+const COLOR_OLIVE = 0x808000
+const COLOR_OLIVE_DRAB = 0x6B8E23
+const COLOR_ORANGE = 0xFFA500
+const COLOR_ORANGE_RED = 0xFF4500
+const COLOR_ORCHID = 0xDA70D6
+const COLOR_PALE_GOLDEN_ROD = 0xEEE8AA
+const COLOR_PALE_GREEN = 0x98FB98
+const COLOR_PALE_TURQUOISE = 0xAFEEEE
+const COLOR_PALE_VIOLET_RED = 0xDB7093
+const COLOR_PAPAYA_WHIP = 0xFFEFD5
+const COLOR_PEACH_PUFF = 0xFFDAB9
+const COLOR_PERU = 0xCD853F
+const COLOR_PINK = 0xFFC0CB
+const COLOR_PLUM = 0xDDA0DD
+const COLOR_POWDER_BLUE = 0xB0E0E6
+const COLOR_PURPLE = 0x800080
+const COLOR_REBECCA_PURPLE = 0x663399
+const COLOR_RED = 0xFF0000
+const COLOR_ROSY_BROWN = 0xBC8F8F
+const COLOR_ROYAL_BLUE = 0x4169E1
+const COLOR_SADDLE_BROWN = 0x8B4513
+const COLOR_SALMON = 0xFA8072
+const COLOR_SANDY_BROWN = 0xF4A460
+const COLOR_SEA_GREEN = 0x2E8B57
+const COLOR_SEA_SHELL = 0xFFF5EE
+const COLOR_SIENNA = 0xA0522D
+const COLOR_SILVER = 0xC0C0C0
+const COLOR_SKY_BLUE = 0x87CEEB
+const COLOR_SLATE_BLUE = 0x6A5ACD
+const COLOR_SLATE_GRAY = 0x708090
+const COLOR_SNOW = 0xFFFAFA
+const COLOR_SPRING_GREEN = 0x00FF7F
+const COLOR_STEEL_BLUE = 0x4682B4
+const COLOR_TAN = 0xD2B48C
+const COLOR_TEAL = 0x008080
+const COLOR_THISTLE = 0xD8BFD8
+const COLOR_TOMATO = 0xFF6347
+const COLOR_TURQUOISE = 0x40E0D0
+const COLOR_VIOLET = 0xEE82EE
+const COLOR_WHEAT = 0xF5DEB3
+const COLOR_WHITE = 0xFFFFFF
+const COLOR_WHITE_SMOKE = 0xF5F5F5
+const COLOR_YELLOW = 0xFFFF00
+const COLOR_YELLOW_GREEN = 0x9ACD32
+const COLOR_BOX2D_RED = 0xDC3132
+const COLOR_BOX2D_BLUE = 0x30AEBF
+const COLOR_BOX2D_GREEN = 0x8CC924
+const COLOR_BOX2D_YELLOW = 0xFFEE8C

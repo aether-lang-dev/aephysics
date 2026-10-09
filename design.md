@@ -381,7 +381,11 @@ started until its tests pass.
    world under the reference's 32-bit hash, the bodies and shapes holding
    ids, so their records copy whole and a snapshot carries each name once;
    where the reference gives two names on one hash the first name, the
-   second here takes the next free id. Two
+   second here takes the next free id. Debug draw came after (#163), the
+   reference's b3World_Draw with its colours, its joints' drawings and the
+   host's debug shapes, whose lives here also end with a geometry change
+   or the world's end, where the reference keeps a stale one or leaves them
+   to the host. Two
    functions no test called hid type errors (`body_apply_force`,
    `body_get_local_point_velocity`) until the replay dispatcher called
    every recorded one: `ae build` checks only what a program reaches

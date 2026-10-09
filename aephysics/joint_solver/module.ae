@@ -21,6 +21,7 @@ import std.string
 import aephysics.math
 import aephysics.basics
 import aephysics.dynamics
+import aephysics.debug_draw
 import aephysics.contact_solver
 
 exports (
@@ -82,7 +83,8 @@ exports (
     wheel_joint_enable_steering_limit, wheel_joint_is_steering_limit_enabled, wheel_joint_get_lower_steering_limit,
     wheel_joint_get_upper_steering_limit, wheel_joint_set_steering_limits, wheel_joint_set_target_steering_angle,
     wheel_joint_get_target_steering_angle, wheel_joint_get_spin_speed, wheel_joint_get_spin_torque, wheel_joint_get_steering_angle,
-    wheel_joint_get_steering_torque
+    wheel_joint_get_steering_torque,
+    draw_joint
 )
 
 extern sqrt(x: float) -> float
@@ -2529,4 +2531,226 @@ joint_get_constraint_torque(id: JointId) -> Vec3 {
     if dynamics.joint_is_valid(id) == false { return math.vec3_zero() }
     w = dynamics.get_world(id.world0)
     return get_joint_constraint_torque(w, dynamics.get_joint_full_id(w, id))
+}
+
+// --- drawing (the reference's b3DrawJoint and each kind's) ---------------------------------------
+
+// A joint drawn through the host's callbacks: its frames and anchors, its
+// limits and what drives it; skipped when either body is disabled.
+draw_joint(draw: *DebugDraw, w: *World, j: *Joint) {
+    body_a = dynamics.body_at(w, j.edge_a.body_id)
+    body_b = dynamics.body_at(w, j.edge_b.body_id)
+    if body_a.set_index == dynamics.DISABLED_SET || body_b.set_index == dynamics.DISABLED_SET { return }
+    sim = dynamics.get_joint_sim(w, j)
+    transform_a = dynamics.get_body_transform(w, j.edge_a.body_id)
+    transform_b = dynamics.get_body_transform(w, j.edge_b.body_id)
+    p_a = math.transform_point(transform_a, sim.local_frame_a.p)
+    p_b = math.transform_point(transform_b, sim.local_frame_b.p)
+    segment = draw.draw_segment
+    point = draw.draw_point
+    scale = math.max_float(0.0001, draw.joint_scale * j.draw_scale)
+    if j.kind == dynamics.JOINT_PARALLEL { draw_parallel_joint(draw, sim, transform_a, transform_b, scale) }
+    else if j.kind == dynamics.JOINT_DISTANCE { draw_distance_joint(draw, sim, transform_a, transform_b) }
+    else if j.kind == dynamics.JOINT_FILTER { segment(p_a, p_b, debug_draw.COLOR_GOLD, draw.context) }
+    else if j.kind == dynamics.JOINT_MOTOR {
+        segment(p_a, p_b, debug_draw.COLOR_PLUM, draw.context)
+        point(p_a, 8.0, debug_draw.COLOR_YELLOW_GREEN, draw.context)
+        point(p_b, 8.0, debug_draw.COLOR_PLUM, draw.context)
+    }
+    else if j.kind == dynamics.JOINT_PRISMATIC { draw_prismatic_joint(draw, sim, transform_a, transform_b, scale) }
+    else if j.kind == dynamics.JOINT_REVOLUTE { draw_revolute_joint(draw, sim, transform_a, transform_b, scale) }
+    else if j.kind == dynamics.JOINT_SPHERICAL { draw_spherical_joint(draw, sim, transform_a, transform_b, scale) }
+    else if j.kind == dynamics.JOINT_WELD { draw_weld_joint(draw, sim, transform_a, transform_b, scale) }
+    else if j.kind == dynamics.JOINT_WHEEL { draw_wheel_joint(draw, sim, transform_a, transform_b, scale) }
+    else {
+        segment(transform_a.p, p_a, debug_draw.COLOR_DARK_SEA_GREEN, draw.context)
+        segment(p_a, p_b, debug_draw.COLOR_DARK_SEA_GREEN, draw.context)
+        segment(transform_b.p, p_b, debug_draw.COLOR_DARK_SEA_GREEN, draw.context)
+    }
+    if draw.draw_graph_colors && j.color_index != NULL_INDEX {
+        point(math.lerp(p_a, p_b, 0.5), 5.0, debug_draw.graph_color(j.color_index), draw.context)
+    }
+    if draw.draw_joint_extras {
+        force = get_joint_constraint_force(w, j)
+        torque = get_joint_constraint_torque(w, j)
+        middle = math.lerp(p_a, p_b, 0.5)
+        segment(middle, math.add(middle, math.mul_sv(0.001, force)), debug_draw.COLOR_AZURE, draw.context)
+        label = draw.draw_string
+        label(middle, "f = ${debug_draw.fixed(math.length(force), 3)}, t = ${debug_draw.fixed(math.length(torque), 3)}", debug_draw.COLOR_AZURE, draw.context)
+    }
+}
+
+// A segment from a frame's origin along one of its axes.
+draw_axis(draw: *DebugDraw, frame: Transform, axis: Vec3, length: float, color: int) {
+    segment = draw.draw_segment
+    segment(frame.p, math.add(frame.p, math.mul_sv(length, math.rotate_vector(frame.q, axis))), color, draw.context)
+}
+
+draw_frame_axes(draw: *DebugDraw, frame: Transform, length: float) {
+    draw_axis(draw, frame, math.vec3_axis_x(), length, debug_draw.COLOR_RED)
+    draw_axis(draw, frame, math.vec3_axis_y(), length, debug_draw.COLOR_GREEN)
+    draw_axis(draw, frame, math.vec3_axis_z(), length, debug_draw.COLOR_BLUE)
+}
+
+draw_parallel_joint(draw: *DebugDraw, sim: *JointSim, transform_a: Transform, transform_b: Transform, scale: float) {
+    length = 0.1 * scale
+    draw_axis(draw, math.mul_transforms(transform_a, sim.local_frame_a), math.vec3_axis_z(), length, debug_draw.COLOR_GREEN)
+    draw_axis(draw, math.mul_transforms(transform_b, sim.local_frame_b), math.vec3_axis_z(), length, debug_draw.COLOR_BLUE)
+}
+
+draw_distance_joint(draw: *DebugDraw, sim: *JointSim, transform_a: Transform, transform_b: Transform) {
+    joint = dynamics.distance_joint_of(sim)
+    segment = draw.draw_segment
+    point = draw.draw_point
+    p_a = math.transform_point(transform_a, sim.local_frame_a.p)
+    p_b = math.transform_point(transform_b, sim.local_frame_b.p)
+    axis = math.normalize(math.sub(p_b, p_a))
+    if joint.min_length < joint.max_length && joint.enable_limit {
+        p_min = math.add(p_a, math.mul_sv(joint.min_length, axis))
+        p_max = math.add(p_a, math.mul_sv(joint.max_length, axis))
+        if joint.min_length > math.LINEAR_SLOP { point(p_min, 6.0, debug_draw.COLOR_LIGHT_GREEN, draw.context) }
+        if joint.max_length < math.HUGE { point(p_max, 6.0, debug_draw.COLOR_RED, draw.context) }
+        if joint.min_length > math.LINEAR_SLOP && joint.max_length < math.HUGE { segment(p_min, p_max, debug_draw.COLOR_GRAY, draw.context) }
+    }
+    segment(p_a, p_b, debug_draw.COLOR_WHITE, draw.context)
+    point(p_a, 4.0, debug_draw.COLOR_WHITE, draw.context)
+    point(p_b, 4.0, debug_draw.COLOR_WHITE, draw.context)
+    if joint.hertz > 0.0 && joint.enable_spring {
+        point(math.add(p_a, math.mul_sv(joint.length, axis)), 4.0, debug_draw.COLOR_BLUE, draw.context)
+    }
+}
+
+draw_prismatic_joint(draw: *DebugDraw, sim: *JointSim, transform_a: Transform, transform_b: Transform, scale: float) {
+    frame_a = math.mul_transforms(transform_a, sim.local_frame_a)
+    frame_b = math.mul_transforms(transform_b, sim.local_frame_b)
+    r = math.make_matrix_from_quat(frame_a.q)
+    segment = draw.draw_segment
+    point = draw.draw_point
+    s = 0.2 * scale
+    segment(frame_a.p, math.add(frame_a.p, math.mul_sv(s, r.cy)), debug_draw.COLOR_GREEN, draw.context)
+    segment(frame_a.p, math.add(frame_a.p, math.mul_sv(s, r.cz)), debug_draw.COLOR_BLUE, draw.context)
+    joint = dynamics.prismatic_joint_of(sim)
+    if joint.enable_limit {
+        p1 = math.add(frame_a.p, math.mul_sv(joint.lower_translation, r.cx))
+        p2 = math.add(frame_a.p, math.mul_sv(joint.upper_translation, r.cx))
+        segment(p1, p2, debug_draw.COLOR_ORANGE, draw.context)
+        point(p1, 10.0, debug_draw.COLOR_GREEN, draw.context)
+        point(p2, 10.0, debug_draw.COLOR_RED, draw.context)
+    } else {
+        segment(math.add(frame_a.p, math.mul_sv(0.0 - 0.5 * scale, r.cx)), math.add(frame_a.p, math.mul_sv(0.5 * scale, r.cx)), debug_draw.COLOR_ORANGE, draw.context)
+    }
+    point(frame_b.p, 8.0, debug_draw.COLOR_VIOLET, draw.context)
+}
+
+// A wedge of the twist range about frame A's z, and the twist now in it.
+draw_twist(draw: *DebugDraw, frame_a: Transform, frame_b: Transform, lower: float, upper: float, radius: float) {
+    segment = draw.draw_segment
+    quat_b = frame_b.q
+    // This keeps the twist angle in [-pi, pi].
+    if math.dot_quat(frame_a.q, quat_b) < 0.0 { quat_b = math.negate_quat(quat_b) }
+    relative = math.inv_mul_quat(frame_a.q, quat_b)
+    slices = 16
+    index = 0
+    while index < slices {
+        t1 = (index as float) / (slices as float)
+        t2 = ((index + 1) as float) / (slices as float)
+        alpha1 = (1.0 - t1) * lower + t1 * upper
+        alpha2 = (1.0 - t2) * lower + t2 * upper
+        cs1 = math.compute_cos_sin(alpha1)
+        cs2 = math.compute_cos_sin(alpha2)
+        vertex1 = math.transform_point(frame_a, math.vec3(radius * cs1.cosine, radius * cs1.sine, 0.0))
+        vertex2 = math.transform_point(frame_a, math.vec3(radius * cs2.cosine, radius * cs2.sine, 0.0))
+        if index == 0 { segment(frame_a.p, vertex1, debug_draw.COLOR_CYAN, draw.context) }
+        if index == slices - 1 { segment(vertex2, frame_a.p, debug_draw.COLOR_CYAN, draw.context) }
+        segment(vertex1, vertex2, debug_draw.COLOR_CYAN, draw.context)
+        index = index + 1
+    }
+    twist = math.compute_cos_sin(math.get_twist_angle(relative))
+    segment(frame_a.p, math.transform_point(frame_a, math.vec3(radius * twist.cosine, radius * twist.sine, 0.0)), debug_draw.COLOR_YELLOW, draw.context)
+}
+
+draw_revolute_joint(draw: *DebugDraw, sim: *JointSim, transform_a: Transform, transform_b: Transform, scale: float) {
+    frame_a = math.mul_transforms(transform_a, sim.local_frame_a)
+    draw_frame_axes(draw, frame_a, 0.1 * scale)
+    frame_b = math.mul_transforms(transform_b, sim.local_frame_b)
+    joint = dynamics.revolute_joint_of(sim)
+    if joint.enable_limit { draw_twist(draw, frame_a, frame_b, joint.lower_angle, joint.upper_angle, 0.2 * scale) }
+}
+
+draw_spherical_joint(draw: *DebugDraw, sim: *JointSim, transform_a: Transform, transform_b: Transform, scale: float) {
+    frame_a = math.mul_transforms(transform_a, sim.local_frame_a)
+    draw_frame_axes(draw, frame_a, 0.1 * scale)
+    frame_b = math.mul_transforms(transform_b, sim.local_frame_b)
+    draw_axis(draw, frame_b, math.vec3_axis_z(), 0.2 * scale, debug_draw.COLOR_ORANGE)
+    joint = dynamics.spherical_joint_of(sim)
+    if joint.enable_twist_limit { draw_twist(draw, frame_a, frame_b, joint.lower_twist_angle, joint.upper_twist_angle, 0.1 * scale) }
+    if joint.enable_cone_limit {
+        segment = draw.draw_segment
+        radius = 0.1 * scale
+        cone = math.compute_cos_sin(joint.cone_angle)
+        cone_radius = radius * cone.sine
+        cone_height = radius * cone.cosine
+        slices = 16
+        index = 0
+        while index < slices {
+            phi1 = math.compute_cos_sin(2.0 * (index as float) / (slices as float) * math.PI)
+            phi2 = math.compute_cos_sin(2.0 * ((index + 1) as float) / (slices as float) * math.PI)
+            vertex1 = math.transform_point(frame_a, math.vec3(cone_radius * phi1.cosine, cone_radius * phi1.sine, cone_height))
+            vertex2 = math.transform_point(frame_a, math.vec3(cone_radius * phi2.cosine, cone_radius * phi2.sine, cone_height))
+            segment(frame_a.p, vertex1, debug_draw.COLOR_CYAN, draw.context)
+            segment(vertex1, vertex2, debug_draw.COLOR_CYAN, draw.context)
+            index = index + 1
+        }
+    }
+}
+
+draw_weld_joint(draw: *DebugDraw, sim: *JointSim, transform_a: Transform, transform_b: Transform, scale: float) {
+    box = draw.draw_box
+    extents = math.vec3(0.1 * scale, 0.05 * scale, 0.025 * scale)
+    box(extents, math.mul_transforms(transform_a, sim.local_frame_a), debug_draw.COLOR_DARK_ORANGE, draw.context)
+    box(extents, math.mul_transforms(transform_b, sim.local_frame_b), debug_draw.COLOR_DARK_CYAN, draw.context)
+}
+
+draw_wheel_joint(draw: *DebugDraw, sim: *JointSim, transform_a: Transform, transform_b: Transform, scale: float) {
+    joint = dynamics.wheel_joint_of(sim)
+    frame_a = math.mul_transforms(transform_a, sim.local_frame_a)
+    frame_b = math.mul_transforms(transform_b, sim.local_frame_b)
+    matrix_a = math.make_matrix_from_quat(frame_a.q)
+    matrix_b = math.make_matrix_from_quat(frame_b.q)
+    segment = draw.draw_segment
+    point = draw.draw_point
+    segment(frame_a.p, frame_b.p, debug_draw.COLOR_BLUE, draw.context)
+    if joint.enable_suspension_limit {
+        lower = math.add(frame_a.p, math.mul_sv(joint.lower_suspension_limit, matrix_a.cx))
+        upper = math.add(frame_a.p, math.mul_sv(joint.upper_suspension_limit, matrix_a.cx))
+        perp = matrix_a.cy
+        segment(lower, upper, debug_draw.COLOR_GRAY, draw.context)
+        segment(math.add(lower, math.mul_sv(0.0 - 0.1 * scale, perp)), math.add(lower, math.mul_sv(0.1 * scale, perp)), debug_draw.COLOR_GREEN, draw.context)
+        segment(math.add(upper, math.mul_sv(0.0 - 0.1 * scale, perp)), math.add(upper, math.mul_sv(0.1 * scale, perp)), debug_draw.COLOR_RED, draw.context)
+    } else {
+        segment(math.add(frame_a.p, math.mul_sv(0.0 - scale, matrix_a.cx)), math.add(frame_a.p, math.mul_sv(scale, matrix_a.cx)), debug_draw.COLOR_GRAY, draw.context)
+    }
+    if joint.enable_steering && joint.enable_steering_limit {
+        frame = Transform { p: frame_b.p, q: frame_a.q }
+        radius = 0.5 * scale
+        slices = 16
+        lower_limit = joint.lower_steering_limit
+        upper_limit = joint.upper_steering_limit
+        cs = math.compute_cos_sin(lower_limit)
+        vertex1 = math.transform_point(frame, math.vec3(0.0, 0.0 - radius * cs.sine, radius * cs.cosine))
+        index = 0
+        while index < slices {
+            t2 = ((index as float) + 1.0) / (slices as float)
+            cs2 = math.compute_cos_sin(math.lerp_float(lower_limit, upper_limit, t2))
+            vertex2 = math.transform_point(frame, math.vec3(0.0, 0.0 - radius * cs2.sine, radius * cs2.cosine))
+            if index == 0 { segment(frame.p, vertex1, debug_draw.COLOR_CYAN, draw.context) }
+            if index == slices - 1 { segment(vertex2, frame.p, debug_draw.COLOR_CYAN, draw.context) }
+            segment(vertex1, vertex2, debug_draw.COLOR_CYAN, draw.context)
+            vertex1 = vertex2
+            index = index + 1
+        }
+    }
+    segment(math.add(frame_b.p, math.mul_sv(0.0 - 0.5 * scale, matrix_b.cz)), math.add(frame_b.p, math.mul_sv(0.5 * scale, matrix_b.cz)), debug_draw.COLOR_MAGENTA, draw.context)
+    point(frame_a.p, 5.0, debug_draw.COLOR_GRAY, draw.context)
+    point(frame_b.p, 5.0, debug_draw.COLOR_DIM_GRAY, draw.context)
 }

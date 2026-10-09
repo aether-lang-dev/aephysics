@@ -1,0 +1,467 @@
+// Debug draw (#163, the reference's b3World_Draw and its debug shapes): a
+// world of every kind of thing drawn through counting callbacks. Every
+// shape is drawn once, with the colour the reference picks for its state
+// (or its material's own), its host drawable made the first time and kept
+// after; the options draw bounds, names, mass, sleep, joints (each once,
+// a weld as two boxes), contacts (a point per manifold point) and
+// islands; the drawing bounds and the mask cull. A host drawable goes
+// back to the host when its shape goes, when its geometry changes and when
+// the world goes; an in-place restore keeps the ones of the shapes still
+// there and gives back the rest. A player's world draws with the host's
+// callbacks and its frame's queries draw, the selected one labelled with
+// its caller. The labels' number formats as the reference's.
+
+import std.string
+import aephysics.math
+import aephysics.basics
+import aephysics.hull
+import aephysics.material
+import aephysics.shape
+import aephysics.manifold
+import aephysics.dynamics
+import aephysics.joint_solver
+import aephysics.physics_world
+import aephysics.snapshot
+import aephysics.recording
+import aephysics.debug_draw
+
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+extern exit(code: int)
+
+var failures = 0
+var checks = 0
+
+ensure(name: string, ok: bool) {
+    checks = checks + 1
+    if !ok {
+        println("debug draw: FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+// --- the host: drawables that know their shape, and counting callbacks -----------------------------
+
+struct Drawable {
+    index1: int                    // the shape's
+    kind: int
+}
+
+var g_made = 0
+var g_given_back = 0
+var g_live = 0
+var g_colors: ptr = null           // int[256] by shape index1: the colour last drawn
+
+make_drawable(debug_shape: *DebugShape, context: ptr) -> ptr {
+    d = calloc(1, sizeof(Drawable)) as *Drawable
+    d.index1 = debug_shape.shape_id.index1
+    d.kind = debug_shape.kind
+    // The pointer for its kind is the one set.
+    right = false
+    if d.kind == shape.SHAPE_SPHERE { right = debug_shape.sphere != null }
+    else if d.kind == shape.SHAPE_CAPSULE { right = debug_shape.capsule != null }
+    else if d.kind == shape.SHAPE_HULL { right = debug_shape.hull != null }
+    else if d.kind == shape.SHAPE_MESH { right = debug_shape.mesh != null }
+    else if d.kind == shape.SHAPE_HEIGHT_FIELD { right = debug_shape.height_field != null }
+    else if d.kind == shape.SHAPE_COMPOUND { right = debug_shape.compound != null }
+    if right == false { d.kind = 0 - 1 }
+    g_made = g_made + 1
+    g_live = g_live + 1
+    return d as ptr
+}
+
+give_back_drawable(user_shape: ptr, context: ptr) {
+    g_given_back = g_given_back + 1
+    g_live = g_live - 1
+    free(user_shape)
+}
+
+var g_shapes = 0
+var g_bad_kinds = 0
+var g_segments = 0
+var g_points = 0
+var g_transforms = 0
+var g_spheres = 0
+var g_capsules = 0
+var g_bounds = 0
+var g_boxes = 0
+var g_strings = 0
+var g_last_text = ""
+
+count_shape(user_shape: ptr, transform: Transform, color: int, context: ptr) {
+    g_shapes = g_shapes + 1
+    d = user_shape as *Drawable
+    if d.kind < 0 { g_bad_kinds = g_bad_kinds + 1 }
+    if d.index1 >= 0 && d.index1 < 256 {
+        colors = g_colors as int[]
+        colors[d.index1] = color
+    }
+}
+count_segment(p1: Vec3, p2: Vec3, color: int, context: ptr) { g_segments = g_segments + 1 }
+count_transform(transform: Transform, context: ptr) { g_transforms = g_transforms + 1 }
+count_point(p: Vec3, size: float, color: int, context: ptr) { g_points = g_points + 1 }
+count_sphere(p: Vec3, radius: float, color: int, alpha: float, context: ptr) { g_spheres = g_spheres + 1 }
+count_capsule(p1: Vec3, p2: Vec3, radius: float, color: int, alpha: float, context: ptr) { g_capsules = g_capsules + 1 }
+count_bounds(box: AABB, color: int, context: ptr) { g_bounds = g_bounds + 1 }
+count_box(extents: Vec3, transform: Transform, color: int, context: ptr) { g_boxes = g_boxes + 1 }
+count_string(p: Vec3, text: string, color: int, context: ptr) {
+    g_strings = g_strings + 1
+    g_last_text = string.copy(text)
+}
+
+reset_counts() {
+    g_shapes = 0
+    g_bad_kinds = 0
+    g_segments = 0
+    g_points = 0
+    g_transforms = 0
+    g_spheres = 0
+    g_capsules = 0
+    g_bounds = 0
+    g_boxes = 0
+    g_strings = 0
+}
+
+counting_draw() -> DebugDraw {
+    draw = debug_draw.default_debug_draw()
+    draw.draw_shape = count_shape
+    draw.draw_segment = count_segment
+    draw.draw_transform = count_transform
+    draw.draw_point = count_point
+    draw.draw_sphere = count_sphere
+    draw.draw_capsule = count_capsule
+    draw.draw_bounds = count_bounds
+    draw.draw_box = count_box
+    draw.draw_string = count_string
+    return draw
+}
+
+color_of(id: ShapeId) -> int {
+    colors = g_colors as int[]
+    return colors[id.index1]
+}
+
+// --- the scene --------------------------------------------------------------------------------------
+
+body_at(world_id: WorldId, kind: int, p: Vec3) -> BodyId {
+    bdef = dynamics.default_body_def()
+    bdef.kind = kind
+    bdef.position = p
+    return dynamics.create_body(world_id, &bdef)
+}
+
+joint_frames(base: *JointDef, a: BodyId, b: BodyId) {
+    base.body_id_a = a
+    base.body_id_b = b
+    base.local_frame_a = Transform { p: math.vec3(0.0, 0.0, 0.6), q: math.quat_identity() }
+    base.local_frame_b = Transform { p: math.vec3(0.0, 0.0, 0.0 - 0.6), q: math.quat_identity() }
+}
+
+var g_box: ptr = null
+
+pair(world_id: WorldId, x: float) -> (BodyId, BodyId) {
+    sdef = dynamics.default_shape_def()
+    a = body_at(world_id, dynamics.BODY_DYNAMIC, math.vec3(x, 6.0, 0.0 - 8.0))
+    dynamics.create_hull_shape(a, &sdef, g_box as *HullData)
+    b = body_at(world_id, dynamics.BODY_DYNAMIC, math.vec3(x, 6.0, 0.0 - 6.8))
+    dynamics.create_hull_shape(b, &sdef, g_box as *HullData)
+    return a, b
+}
+
+main() {
+    g_colors = calloc(256, 4)
+    g_box = hull.make_box_hull(0.4, 0.4, 0.4) as ptr
+    wdef = dynamics.default_world_def()
+    wdef.create_debug_shape = make_drawable
+    wdef.destroy_debug_shape = give_back_drawable
+    world_id = dynamics.create_world(&wdef)
+    w = dynamics.get_world(world_id.index1 - 1)
+    sdef = dynamics.default_shape_def()
+
+    ground = body_at(world_id, dynamics.BODY_STATIC, math.vec3(0.0, 0.0 - 1.0, 0.0))
+    floor_hull = hull.make_box_hull(20.0, 1.0, 20.0)
+    floor = dynamics.create_hull_shape(ground, &sdef, floor_hull)
+    hull.destroy_hull(floor_hull)
+    sensor_def = dynamics.default_shape_def()
+    sensor_def.is_sensor = true
+    sensor = dynamics.create_sphere_shape(body_at(world_id, dynamics.BODY_STATIC, math.vec3(10.0, 1.0, 10.0)), &sensor_def, manifold.sphere(math.vec3_zero(), 1.0))
+    tinted_def = dynamics.default_shape_def()
+    tinted_def.base_material.custom_color = debug_draw.COLOR_CRIMSON
+    tinted = dynamics.create_hull_shape(body_at(world_id, dynamics.BODY_DYNAMIC, math.vec3(5.0, 0.4, 5.0)), &tinted_def, g_box as *HullData)
+    boxes = 0
+    while boxes < 12 {
+        b = body_at(world_id, dynamics.BODY_DYNAMIC, math.vec3(0.9 * ((boxes % 4) as float), 0.4 + 0.85 * ((boxes / 4) as float), 0.0))
+        bdef_name = "box"
+        dynamics.body_set_name(b, bdef_name)
+        dynamics.create_hull_shape(b, &sdef, g_box as *HullData)
+        boxes = boxes + 1
+    }
+    kinematic = body_at(world_id, dynamics.BODY_KINEMATIC, math.vec3(0.0 - 5.0, 1.0, 0.0))
+    dynamics.body_set_linear_velocity(kinematic, math.vec3(1.0, 0.0, 0.0))
+    paddle = dynamics.create_hull_shape(kinematic, &sdef, g_box as *HullData)
+    off = body_at(world_id, dynamics.BODY_DYNAMIC, math.vec3(0.0 - 10.0, 3.0, 10.0))
+    off_shape = dynamics.create_capsule_shape(off, &sdef, Capsule { center1: math.vec3(0.0 - 0.3, 0.0, 0.0), center2: math.vec3(0.3, 0.0, 0.0), radius: 0.2 })
+    dynamics.body_disable(off)
+    ball_body = body_at(world_id, dynamics.BODY_DYNAMIC, math.vec3(3.0, 3.0, 3.0))
+    ball = dynamics.create_sphere_shape(ball_body, &sdef, manifold.sphere(math.vec3_zero(), 0.3))
+
+    // Joints of every kind, their limits on.
+    a, b = pair(world_id, 0.0 - 12.0)
+    distance_def = dynamics.default_distance_joint_def()
+    joint_frames(&distance_def.base, a, b)
+    distance_def.enable_limit = true
+    distance_def.min_length = 0.1
+    distance_def.max_length = 1.0
+    distance_def.enable_spring = true
+    distance_def.hertz = 2.0
+    dynamics.create_distance_joint(world_id, &distance_def)
+    a, b = pair(world_id, 0.0 - 9.0)
+    revolute_def = dynamics.default_revolute_joint_def()
+    joint_frames(&revolute_def.base, a, b)
+    revolute_def.enable_limit = true
+    revolute_def.lower_angle = 0.0 - 0.5
+    revolute_def.upper_angle = 0.5
+    dynamics.create_revolute_joint(world_id, &revolute_def)
+    a, b = pair(world_id, 0.0 - 6.0)
+    spherical_def = dynamics.default_spherical_joint_def()
+    joint_frames(&spherical_def.base, a, b)
+    spherical_def.enable_cone_limit = true
+    spherical_def.cone_angle = 0.5
+    spherical_def.enable_twist_limit = true
+    spherical_def.lower_twist_angle = 0.0 - 0.3
+    spherical_def.upper_twist_angle = 0.3
+    dynamics.create_spherical_joint(world_id, &spherical_def)
+    a, b = pair(world_id, 0.0 - 3.0)
+    weld_def = dynamics.default_weld_joint_def()
+    joint_frames(&weld_def.base, a, b)
+    dynamics.create_weld_joint(world_id, &weld_def)
+    a, b = pair(world_id, 3.0)
+    prismatic_def = dynamics.default_prismatic_joint_def()
+    joint_frames(&prismatic_def.base, a, b)
+    prismatic_def.enable_limit = true
+    prismatic_def.lower_translation = 0.0 - 0.2
+    prismatic_def.upper_translation = 0.2
+    dynamics.create_prismatic_joint(world_id, &prismatic_def)
+    a, b = pair(world_id, 6.0)
+    wheel_def = dynamics.default_wheel_joint_def()
+    joint_frames(&wheel_def.base, a, b)
+    wheel_def.enable_suspension_limit = true
+    wheel_def.lower_suspension_limit = 0.0 - 0.2
+    wheel_def.upper_suspension_limit = 0.2
+    wheel_def.enable_steering = true
+    wheel_def.enable_steering_limit = true
+    wheel_def.lower_steering_limit = 0.0 - 0.4
+    wheel_def.upper_steering_limit = 0.4
+    dynamics.create_wheel_joint(world_id, &wheel_def)
+    a, b = pair(world_id, 9.0)
+    motor_def = dynamics.default_motor_joint_def()
+    joint_frames(&motor_def.base, a, b)
+    dynamics.create_motor_joint(world_id, &motor_def)
+    a, b = pair(world_id, 12.0)
+    parallel_def = dynamics.default_parallel_joint_def()
+    joint_frames(&parallel_def.base, a, b)
+    dynamics.create_parallel_joint(world_id, &parallel_def)
+    a, b = pair(world_id, 15.0)
+    filter_def = dynamics.default_filter_joint_def()
+    joint_frames(&filter_def.base, a, b)
+    dynamics.create_filter_joint(world_id, &filter_def)
+    i = 0
+    while i < 20 {
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        i = i + 1
+    }
+    // A disabled body's shapes are out of the broad phase: not drawn, as in the reference.
+    shape_count = dynamics.world_shape_count(w) - 1
+
+    // Shapes: each once, a drawable made for each and kept.
+    draw = counting_draw()
+    draw.draw_shapes = true
+    physics_world.world_draw(world_id, &draw, shape.default_query_filter().mask_bits)
+    ensure("shapes: each drawn once (${g_shapes} of ${shape_count})", g_shapes == shape_count && g_bad_kinds == 0)
+    ensure("shapes: a drawable each (${g_made})", g_made == shape_count && g_live == shape_count)
+    reset_counts()
+    physics_world.world_draw(world_id, &draw, shape.default_query_filter().mask_bits)
+    ensure("shapes: drawn again, nothing made again", g_shapes == shape_count && g_made == shape_count)
+
+    // Colours as the reference picks them.
+    ensure("colour: static matte dark grey", color_of(floor) == debug_draw.make_debug_color(debug_draw.COLOR_DARK_GRAY, debug_draw.DEBUG_MATERIAL_MATTE))
+    ensure("colour: a sensor wheat", color_of(sensor) == debug_draw.COLOR_WHEAT)
+    ensure("colour: a material's own", color_of(tinted) == debug_draw.COLOR_CRIMSON)
+    ensure("colour: a driven kinematic metallic steel blue", color_of(paddle) == debug_draw.make_debug_color(debug_draw.COLOR_STEEL_BLUE, debug_draw.DEBUG_MATERIAL_METALLIC))
+    ensure("colour: a disabled body's shape not drawn", color_of(off_shape) == 0)
+    awake = debug_draw.make_debug_color(debug_draw.COLOR_TAN, debug_draw.DEBUG_MATERIAL_SOFT)
+    ensure("colour: an awake body soft tan", color_of(ball) == awake || color_of(ball) == debug_draw.make_debug_color(debug_draw.COLOR_ORANGE, debug_draw.DEBUG_MATERIAL_GLOSSY))
+
+    // The options.
+    draw = counting_draw()
+    draw.draw_bounds_option = true
+    reset_counts()
+    physics_world.world_draw(world_id, &draw, shape.default_query_filter().mask_bits)
+    ensure("bounds: one a shape (${g_bounds})", g_bounds == shape_count && g_shapes == 0)
+    draw = counting_draw()
+    draw.draw_body_names = true
+    reset_counts()
+    physics_world.world_draw(world_id, &draw, shape.default_query_filter().mask_bits)
+    ensure("names: one a named body (${g_strings})", g_strings == 12 && string.equals(g_last_text, "box") == 1)
+    draw = counting_draw()
+    draw.draw_mass = true
+    reset_counts()
+    physics_world.world_draw(world_id, &draw, shape.default_query_filter().mask_bits)
+
+    ensure("mass: a transform a body, the mass of each dynamic one (${g_transforms}, ${g_strings})", g_transforms > 20 && g_strings > 0 && g_strings < g_transforms)
+    draw = counting_draw()
+    draw.draw_joints = true
+    reset_counts()
+    physics_world.world_draw(world_id, &draw, shape.default_query_filter().mask_bits)
+    ensure("joints: the weld's two boxes, once", g_boxes == 2)
+    ensure("joints: frames, limits and anchors (${g_segments} segments, ${g_points} points)", g_segments > 80 && g_points > 10)
+    draw.draw_joint_extras = true
+    draw.draw_graph_colors = true
+    reset_counts()
+    physics_world.world_draw(world_id, &draw, shape.default_query_filter().mask_bits)
+    ensure("joints: a force and torque label each awake joint", g_strings == 9)
+    draw = counting_draw()
+    draw.draw_contacts = true
+    reset_counts()
+    physics_world.world_draw(world_id, &draw, shape.default_query_filter().mask_bits)
+    expected_points = 0
+    k = 0
+    while k < w.contacts.count {
+        c = dynamics.contact_at(w, k)
+        if c.contact_id == k && c.set_index == dynamics.AWAKE_SET && c.color_index != 0 - 1 {
+            m = 0
+            while m < c.manifold_count {
+                expected_points = expected_points + dynamics.manifold_at(c, m).point_count
+                m = m + 1
+            }
+        }
+        k = k + 1
+    }
+    ensure("contacts: a point each manifold point (${g_points} of ${expected_points})", g_points == expected_points && expected_points > 0)
+    draw.draw_contact_normals = true
+    reset_counts()
+    physics_world.world_draw(world_id, &draw, shape.default_query_filter().mask_bits)
+    ensure("contacts: a normal and its separation each", g_segments == expected_points && g_strings == expected_points)
+    draw = counting_draw()
+    draw.draw_islands = true
+    reset_counts()
+    physics_world.world_draw(world_id, &draw, shape.default_query_filter().mask_bits)
+    ensure("islands: bounds each (${g_bounds})", g_bounds >= 1)
+    draw = counting_draw()
+    draw.draw_sleep = true
+    reset_counts()
+    physics_world.world_draw(world_id, &draw, shape.default_query_filter().mask_bits)
+    ensure("sleep: a point and a value each moving body (${g_points})", g_points > 0 && g_points == g_strings)
+
+    // The drawing bounds and the mask cull.
+    draw = counting_draw()
+    draw.draw_shapes = true
+    draw.drawing_bounds = AABB { lower: math.vec3(9.9, 0.9, 9.9), upper: math.vec3(10.1, 1.1, 10.1) }
+    reset_counts()
+    physics_world.world_draw(world_id, &draw, shape.default_query_filter().mask_bits)
+    ensure("cull: the bounds hold the sensor alone (${g_shapes})", g_shapes == 1 && color_of(sensor) == debug_draw.COLOR_WHEAT)
+    draw.drawing_bounds = debug_draw.default_debug_draw().drawing_bounds
+    reset_counts()
+    physics_world.world_draw(world_id, &draw, 0 as long)
+    ensure("cull: a mask of nothing draws nothing", g_shapes == 0)
+
+    // The drawables' lives: a shape goes, a geometry changes.
+    given = g_given_back
+    dynamics.destroy_shape(tinted, true)
+    ensure("lives: a destroyed shape's drawable given back", g_given_back == given + 1)
+    dynamics.shape_set_sphere(ball, manifold.sphere(math.vec3_zero(), 0.4))
+    ensure("lives: a changed shape's drawable given back", g_given_back == given + 2)
+    made = g_made
+    draw = counting_draw()
+    draw.draw_shapes = true
+    physics_world.world_draw(world_id, &draw, shape.default_query_filter().mask_bits)
+    ensure("lives: the changed shape's next draw makes another", g_made == made + 1)
+
+    // An in-place restore keeps the drawables of the shapes still there.
+    block, byte_count = snapshot.save_world(world_id)
+    made = g_made
+    given = g_given_back
+    ensure("restore: in place", snapshot.restore_world(world_id, &wdef, block, byte_count))
+    ensure("restore: nothing given back, nothing made", g_given_back == given && g_made == made)
+    reset_counts()
+    physics_world.world_draw(world_id, &draw, shape.default_query_filter().mask_bits)
+    ensure("restore: drawn without remaking", g_made == made && g_shapes == dynamics.world_shape_count(w) - 1)
+    dynamics.destroy_shape(ball, true)
+    physics_world.world_draw(world_id, &draw, shape.default_query_filter().mask_bits)
+    given = g_given_back
+    ensure("restore: to before the ball went", snapshot.restore_world(world_id, &wdef, block, byte_count))
+    ensure("restore: no handle for the ball to give back, none lost", g_given_back == given)
+    snapshot.free_snapshot(block, byte_count)
+
+    // The world goes: every drawable given back.
+    dynamics.destroy_world(world_id)
+    ensure("lives: the world's going gives every drawable back (${g_live} left)", g_live == 0 && g_made == g_given_back)
+
+    // A player's world draws with the host's callbacks, and its queries draw.
+    world_id = dynamics.create_world(&wdef)
+    ground = body_at(world_id, dynamics.BODY_STATIC, math.vec3(0.0, 0.0 - 1.0, 0.0))
+    floor_hull = hull.make_box_hull(20.0, 1.0, 20.0)
+    dynamics.create_hull_shape(ground, &sdef, floor_hull)
+    hull.destroy_hull(floor_hull)
+    i = 0
+    while i < 4 {
+        dynamics.create_sphere_shape(body_at(world_id, dynamics.BODY_DYNAMIC, math.vec3((i as float) - 1.5, 3.0, 0.0)), &sdef, manifold.sphere(math.vec3_zero(), 0.5))
+        i = i + 1
+    }
+    r = recording.create_recording()
+    recording.start_recording(world_id, r)
+    i = 0
+    while i < 10 {
+        tagged = shape.default_query_filter()
+        tagged.id = 42 as long
+        tagged.name = "bullet"
+        physics_world.cast_ray_closest(world_id, math.vec3(0.0, 6.0, 0.0), math.vec3(0.0, 0.0 - 8.0, 0.0), tagged)
+        physics_world.collide_mover(world_id, math.vec3(0.0, 0.2, 0.0), Capsule { center1: math.vec3_zero(), center2: math.vec3(0.0, 1.0, 0.0), radius: 0.3 },
+                                    shape.default_query_filter(), accept_planes, null)
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        i = i + 1
+    }
+    recording.stop_recording(world_id)
+    dynamics.destroy_world(world_id)
+    p = recording.create_player(recording.recording_data(r), recording.recording_size(r), 1)
+    made = g_made
+    recording.player_set_debug_shape_callbacks(p, make_drawable, give_back_drawable, null)
+    recording.player_seek_frame(p, 5)
+    draw = counting_draw()
+    draw.draw_shapes = true
+    reset_counts()
+    physics_world.world_draw(recording.player_world(p), &draw, shape.default_query_filter().mask_bits)
+    ensure("player: its world drawn with the host's drawables", g_shapes == 5 && g_made == made + 5)
+    recording.player_seek_frame(p, 2)
+    recording.player_seek_frame(p, 7)
+    ensure("player: seeks keep the drawables", g_made == made + 5)
+    draw = counting_draw()
+    reset_counts()
+    recording.player_draw_frame_queries(p, &draw, 0 - 1, 0)
+    ensure("player: the ray, its hit and its normal; the mover and its planes", g_segments >= 3 && g_points >= 1 && g_capsules == 1)
+    ensure("player: the selected query labelled with its caller", g_strings == 1 && string.equals(g_last_text, "bullet (42)") == 1)
+    reset_counts()
+    recording.player_draw_frame_queries(p, &draw, 1, 0 - 1)
+    ensure("player: one query alone, unlabelled", g_capsules == 1 && g_strings == 0)
+    recording.destroy_player(p)
+    recording.destroy_recording(r)
+    ensure("player: its going gives every drawable back", g_live == 0)
+
+    // The labels' numbers, as the reference prints them.
+    ensure("format: two decimals", string.equals(debug_draw.fixed(3.14159, 2), "3.14") == 1 && string.equals(debug_draw.fixed(0.0 - 0.5, 2), "-0.50") == 1)
+    ensure("format: none and three", string.equals(debug_draw.fixed(41.6, 0), "42") == 1 && string.equals(debug_draw.fixed(0.0004, 3), "0.000") == 1)
+    ensure("format: a feature in hexadecimal", string.equals(debug_draw.hex(255), "0XFF") == 1 && string.equals(debug_draw.hex(0), "0") == 1)
+    ensure("colours: the graph's", debug_draw.graph_color(0) == debug_draw.COLOR_RED && debug_draw.graph_color(23) == debug_draw.COLOR_BLACK)
+    ensure("colours: a material in the high byte", debug_draw.make_debug_color(debug_draw.COLOR_WHITE, debug_draw.DEBUG_MATERIAL_METALLIC) == (0x05FFFFFF))
+
+    hull.destroy_hull(g_box as *HullData)
+    free(g_colors)
+    println("debug draw: ${checks} checks")
+    if failures > 0 {
+        println("debug draw: ${failures} failure(s)")
+        exit(1)
+    }
+    println("debug draw: all checks passed")
+}
+
+accept_planes(shape_id: ShapeId, planes: PlaneResult[], count: int, context: ptr) -> bool { return true }

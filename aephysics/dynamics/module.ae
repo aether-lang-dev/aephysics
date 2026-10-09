@@ -158,7 +158,8 @@ exports (
     TaskContext, task_context, task_context_at, task_sensor_hit_at, enter_world, leave_world,
     reset_world,
     get_world_count, get_max_world_count, track_capacity, contact_get_data, joint_get_constraint_tuning, shape_get_mesh_material_count,
-    MANIFOLD_COUNT_BUCKETS, hull_entry_at, HullEntry, OwnedGeometry
+    MANIFOLD_COUNT_BUCKETS, hull_entry_at, HullEntry, OwnedGeometry,
+    DebugShape, release_debug_shape, release_debug_shapes, set_debug_shape_callbacks
 )
 
 extern memset(block: ptr, value: int, size: int) -> ptr
@@ -278,7 +279,30 @@ struct WorldDef {
     worker_count: int              // the threads a step runs over: 1 is the calling thread alone
     scheduler: ptr                 // a *Scheduler of the host's to step on (its worker count then rules), or null for the world's own
     user_data: ptr
+    // The host's drawable for a shape, made when the shape is first drawn
+    // and given back when it goes, its geometry changes or the world goes
+    // (b3CreateDebugShapeCallback, b3DestroyDebugShapeCallback); null from
+    // create_debug_shape for none.
+    create_debug_shape: fn(*DebugShape, ptr) -> ptr
+    destroy_debug_shape: fn(ptr, ptr)
+    user_debug_shape_context: ptr
 }
+
+// A shape as the host's create_debug_shape sees it (b3DebugShape): its id,
+// its kind and its geometry, of which the pointer for its kind is set.
+struct DebugShape {
+    shape_id: ShapeId
+    kind: int                      // shape.SHAPE_*
+    sphere: *Sphere
+    capsule: *Capsule
+    hull: *HullData
+    mesh: *Mesh                    // the mesh with its scale
+    height_field: *HeightFieldData
+    compound: *CompoundData
+}
+
+no_debug_shape(debug_shape: *DebugShape, context: ptr) -> ptr { return null }
+drop_debug_shape(user_shape: ptr, context: ptr) { }
 
 struct MotionLocks {
     linear_x: bool
@@ -359,7 +383,8 @@ default_world_def() -> WorldDef {
                       contact_hertz: 30.0, contact_damping_ratio: 10.0, maximum_linear_speed: 400.0,
                       friction_callback: default_friction, restitution_callback: default_restitution,
                       enable_sleep: true, enable_continuous: true, static_body_count: 0, dynamic_body_count: 0,
-                      static_shape_count: 0, dynamic_shape_count: 0, contact_count: 0, worker_count: 1, scheduler: null, user_data: null }
+                      static_shape_count: 0, dynamic_shape_count: 0, contact_count: 0, worker_count: 1, scheduler: null, user_data: null,
+                      create_debug_shape: no_debug_shape, destroy_debug_shape: drop_debug_shape, user_debug_shape_context: null }
 }
 
 default_body_def() -> BodyDef {
@@ -493,6 +518,7 @@ struct WorldShape {
     materials: ptr                 // SurfaceMaterial[] when there are several
     filter: Filter
     user_data: ptr
+    user_shape: ptr                // the host's drawable (create_debug_shape's), or null
     generation: int
     flags: int
     name_id: int                   // the name's id in the world's name cache, or NULL_NAME
@@ -1309,6 +1335,13 @@ struct World {
     recording: ptr                 // *Recording while the world records (aephysics.recording), else null
     names: NameCache               // the bodies' and shapes' names, each once
     max_capacity: Capacity         // the most it has held at a step's start (b3World_GetMaxCapacity)
+    create_debug_shape: fn(*DebugShape, ptr) -> ptr    // the host's, kept through a reset
+    destroy_debug_shape: fn(ptr, ptr)
+    debug_shape_context: ptr
+    debug_body_set: BitSet         // world_draw's: the bodies, joints, contacts and islands drawn so far
+    debug_joint_set: BitSet
+    debug_contact_set: BitSet
+    debug_island_set: BitSet
     manifold_counts: int[8]        // the last collide pass's contacts by manifold count, every worker's
     task_count: int                // the tasks the last step ran on the scheduler
 }
@@ -1465,6 +1498,9 @@ create_world(def: *WorldDef) -> WorldId {
     w.friction_callback = def.friction_callback
     w.restitution_callback = def.restitution_callback
     w.user_data = def.user_data
+    w.create_debug_shape = def.create_debug_shape
+    w.destroy_debug_shape = def.destroy_debug_shape
+    w.debug_shape_context = def.user_debug_shape_context
     init_world_contents(w, def)
     g_max_world_count = math.max_int(g_max_world_count, get_world_count())
     return WorldId { index1: index + 1, generation: generation }
@@ -1513,6 +1549,10 @@ init_world_contents(w: *World, def: *WorldDef) {
     w.inv_h = 0.0
     w.inv_dt = 0.0
     w.names = basics.name_cache_create()
+    w.debug_body_set = basics.bitset_create(64)
+    w.debug_joint_set = basics.bitset_create(64)
+    w.debug_contact_set = basics.bitset_create(64)
+    w.debug_island_set = basics.bitset_create(64)
     w.contact_state = basics.bitset_create(64)
     w.contact_begin_events = basics.buffer_create(sizeof(ContactBeginTouchEvent), 4)
     w.contact_end_events0 = basics.buffer_create(sizeof(ContactEndTouchEvent), 4)
@@ -1609,6 +1649,8 @@ reset_world(id: WorldId, def: *WorldDef) -> bool {
 
 // What init_world_contents made, freed.
 free_world_contents(w: *World) {
+    // The host's drawables, given back (the reference leaves them to the host).
+    release_debug_shapes(w)
     // The shapes' materials and names, the bodies' names, the sensors'
     // lists and the contacts' caches.
     i = 0
@@ -1621,6 +1663,10 @@ free_world_contents(w: *World) {
         i = i + 1
     }
     basics.name_cache_destroy(&w.names)
+    basics.bitset_destroy(&w.debug_body_set)
+    basics.bitset_destroy(&w.debug_joint_set)
+    basics.bitset_destroy(&w.debug_contact_set)
+    basics.bitset_destroy(&w.debug_island_set)
     i = 0
     while i < w.sensors.count {
         sensor = sensor_at(w, i)
@@ -2077,6 +2123,7 @@ destroy_body(id: BodyId) {
         s = world_shape_at(w, shape_id)
         if s.geometry.kind == KIND_COMPOUND { w.compound_shape_count = w.compound_shape_count - 1 }
         if s.geometry.kind == KIND_HULL { remove_hull_from_database(w, s.geometry.hull) }
+        release_debug_shape(w, s)
         if s.sensor_index != NULL_INDEX { destroy_sensor(w, s) }
         if s.proxy_key != NULL_INDEX {
             broad_phase.broad_phase_destroy_proxy(&w.broad_phase, s.proxy_key)
@@ -2213,6 +2260,7 @@ create_shape(body_id: BodyId, def: *ShapeDef, geometry: Shape) -> ShapeId {
     set_shape_fat_aabb(w, shape_id, math.aabb_round_out(s.aabb))
     s.generation = s.generation + 1
     s.sensor_index = NULL_INDEX
+    s.user_shape = null
     s.name_id = basics.name_cache_add(&w.names, def.name)
     if kind == KIND_COMPOUND {
         w.compound_shape_count = w.compound_shape_count + 1
@@ -3381,6 +3429,7 @@ destroy_shape(id: ShapeId, update_body_mass: bool) {
     body.shape_count = body.shape_count - 1
     if s.geometry.kind == KIND_COMPOUND { w.compound_shape_count = w.compound_shape_count - 1 }
     if s.geometry.kind == KIND_HULL { remove_hull_from_database(w, s.geometry.hull) }
+    release_debug_shape(w, s)
     if s.sensor_index != NULL_INDEX { destroy_sensor(w, s) }
     if s.proxy_key != NULL_INDEX {
         broad_phase.broad_phase_destroy_proxy(&w.broad_phase, s.proxy_key)
@@ -3541,6 +3590,7 @@ change_shape_geometry(id: ShapeId, geometry: Shape) {
     if s.geometry.kind == KIND_COMPOUND || s.geometry.kind == KIND_HEIGHT_FIELD { return }
     // A hull the shape held goes back to the database.
     if s.geometry.kind == KIND_HULL { remove_hull_from_database(w, s.geometry.hull) }
+    release_debug_shape(w, s)
     density = s.geometry.density
     s.geometry = geometry
     s.geometry.density = density
@@ -4486,6 +4536,34 @@ contact_is_valid(id: ContactId) -> bool {
     if id.index1 < 1 || id.index1 > w.contacts.count { return false }
     c = contact_at(w, id.index1 - 1)
     return c.contact_id == id.index1 - 1 && c.generation == id.generation
+}
+
+// The host's drawable for the shape given back, if it has one: the shape
+// goes, or its geometry changed and the next draw makes another.
+release_debug_shape(w: *World, s: *WorldShape) {
+    if s.user_shape == null { return }
+    destroy = w.destroy_debug_shape
+    destroy(s.user_shape, w.debug_shape_context)
+    s.user_shape = null
+}
+
+// Every drawable the world's shapes hold given back to the host.
+release_debug_shapes(w: *World) {
+    i = 0
+    while i < w.shapes.count {
+        s = world_shape_at(w, i)
+        if s.id != NULL_INDEX { release_debug_shape(w, s) }
+        i = i + 1
+    }
+}
+
+// The host's debug shape callbacks changed: what the old ones made is
+// given back to them first, and the next draw makes new ones.
+set_debug_shape_callbacks(w: *World, create: fn(*DebugShape, ptr) -> ptr, destroy: fn(ptr, ptr), context: ptr) {
+    release_debug_shapes(w)
+    w.create_debug_shape = create
+    w.destroy_debug_shape = destroy
+    w.debug_shape_context = context
 }
 
 // One contact's shapes and manifolds by its id (b3Contact_GetData): the
