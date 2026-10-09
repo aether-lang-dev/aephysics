@@ -1119,6 +1119,48 @@ test_serialize() {
     mesh.destroy_mesh(md)
 }
 
+// #158: a compound of big hulls (a 40-sided cylinder has 120 edges, 240
+// half-edges, near the builder's 128-edge limit)
+// goes through its bytes and back, its hulls checked whole: the half-edge
+// bound is twice the edge limit, as the builder's is.
+test_serialize_big_hulls() {
+    cylinder = hull.create_cylinder(2.0, 1.0, 0.0, 40)
+    complex = hull.create_complex_hull(1.0)
+    ensure("big hulls: made", cylinder != null && complex != null)
+    if cylinder == null || complex == null {
+        if cylinder != null { hull.destroy_hull(cylinder) }
+        if complex != null { hull.destroy_hull(complex) }
+        return
+    }
+    ensure("big hulls: past 128 half-edges (${cylinder.edge_count}, ${complex.edge_count})", cylinder.edge_count > 128 && complex.edge_count > 128)
+    ensure("big hulls: each valid as bytes", hull.hull_bytes_valid(cylinder, cylinder.byte_count) && hull.hull_bytes_valid(complex, complex.byte_count))
+    mat = material.default_surface_material()
+    hulls_block = calloc(2, sizeof(CompoundHullDef))
+    defs = hulls_block as CompoundHullDef[]
+    defs[0] = compound.compound_hull_def(cylinder, Transform { p: math.vec3(0.0 - 3.0, 0.0, 0.0), q: math.quat_identity() }, mat)
+    defs[1] = compound.compound_hull_def(complex, Transform { p: math.vec3(3.0, 0.0, 0.0), q: math.quat_identity() }, mat)
+    def = compound.compound_def()
+    def.hulls = hulls_block
+    def.hull_count = 2
+    c = compound.create_compound(&def)
+    ensure("big hulls: the compound is made", c != null)
+    if c != null {
+        byte_count = c.byte_count
+        buffer = bytes_of(c)
+        compound.destroy_compound(c)
+        back = compound.convert_bytes_to_compound(buffer, byte_count)
+        ensure("big hulls: their compound's bytes turn back into it", back != null && back.hull_count == 2)
+        if back != null {
+            ray = compound.ray_cast_compound(back, math.vec3(0.0 - 10.0, 0.0, 0.0), math.vec3(20.0, 0.0, 0.0), 1.0)
+            ensure("big hulls: a ray finds the cylinder first", ray.hit && ray.child_index == 0)
+        }
+        free(buffer)
+    }
+    free(hulls_block)
+    hull.destroy_hull(cylinder)
+    hull.destroy_hull(complex)
+}
+
 // A copy of the good bytes with one thing broken, refused.
 corrupt_refused(good: ptr, byte_count: int, what: int) -> bool {
     copy = calloc(1, byte_count)
@@ -1180,6 +1222,7 @@ main() {
     test_field()
     test_brute_force_rays()
     test_serialize()
+    test_serialize_big_hulls()
     // The scratch stays allocated: compound's five blocks (its baked trees' per-worker stacks among them), mesh's three, sphere's two, shape's one.
     ensure("every other counted allocation was freed (${basics.alloc_count() - before})", basics.alloc_count() == before + 11)
 

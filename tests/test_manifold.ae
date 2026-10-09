@@ -996,9 +996,10 @@ main() {
     test_sphere_hull_seam()
     test_rounded_pairs()
     // The module's scratch stays allocated: the two clip polygons, the
-    // unreduced points, and the edge axes the separating-axis test
-    // gathers A's edges into.
-    ensure("every other counted allocation was freed", basics.alloc_count() == before + 4)
+    // unreduced points, the edge axes the separating-axis test gathers A's
+    // edges into, its two hulls' candidate edge lists, and the support
+    // search's lanes.
+    ensure("every other counted allocation was freed (${basics.alloc_count() - before})", basics.alloc_count() == before + 6)
 
     println("manifold: ${checks} checks")
     if failures == 0 {
