@@ -103,6 +103,8 @@ exports (
     validate_solver_sets, get_solver_set, get_island, world_island_count, world_solver_set_count,
     body_sim_at, body_state_at, island_sim_at, world_shape_at, island_at, solver_set_at, body_at,
     encode_body_sim_index, decode_awake_index, is_static_sim_index, shape_fat_aabb, set_shape_fat_aabb,
+    get_max_manifold_points, store_world_id, load_world_id, store_body_id, load_body_id, store_shape_id, load_shape_id,
+    store_joint_id, load_joint_id, set_worker_count,
     Manifold, ManifoldPoint, ContactSpec, ContactId, ContactBeginTouchEvent, ContactEndTouchEvent, JointSim, GraphColor, ConstraintGraph,
     GRAPH_COLOR_COUNT, OVERFLOW_INDEX, DYNAMIC_COLOR_COUNT, MAX_MANIFOLD_POINTS,
     CONTACT_TOUCHING, CONTACT_ENABLE_CONTACT_EVENTS, CONTACT_STATIC, CONTACT_RECYCLE, SIM_TOUCHING, SIM_MESH_CONTACT,
@@ -285,6 +287,7 @@ struct BodyDef {
     gravity_scale: float
     sleep_threshold: float
     safety_factor: float
+    name: string                   // copied for debugging; null for none
     user_data: ptr
     motion_locks: MotionLocks
     enable_sleep: bool
@@ -296,6 +299,7 @@ struct BodyDef {
 }
 
 struct ShapeDef {
+    name: string                   // copied for debugging; null for none
     user_data: ptr
     materials: ptr                 // SurfaceMaterial[], per triangle material of a mesh, or null
     material_count: int
@@ -348,17 +352,38 @@ default_world_def() -> WorldDef {
 default_body_def() -> BodyDef {
     return BodyDef { kind: BODY_STATIC, position: math.vec3_zero(), rotation: math.quat_identity(), linear_velocity: math.vec3_zero(),
                      angular_velocity: math.vec3_zero(), linear_damping: 0.0, angular_damping: 0.0, gravity_scale: 1.0,
-                     sleep_threshold: 0.05, safety_factor: 0.5, user_data: null,
+                     sleep_threshold: 0.05, safety_factor: 0.5, name: null, user_data: null,
                      motion_locks: MotionLocks { linear_x: false, linear_y: false, linear_z: false, angular_x: false, angular_y: false, angular_z: false },
                      enable_sleep: true, is_awake: true, is_bullet: false, is_enabled: true, allow_fast_rotation: false, enable_contact_recycling: true }
 }
 
 default_shape_def() -> ShapeDef {
-    return ShapeDef { user_data: null, materials: null, material_count: 0, base_material: material.default_surface_material(),
+    return ShapeDef { name: null, user_data: null, materials: null, material_count: 0, base_material: material.default_surface_material(),
                       density: 1000.0, explosion_scale: 1.0, filter: shape.default_filter(), enable_custom_filtering: false,
                       is_sensor: false, enable_sensor_events: false, enable_contact_events: false, enable_hit_events: false,
                       enable_pre_solve_events: false, invoke_contact_creation: true, update_body_mass: true, enable_speculative_contact: true }
 }
+
+// The most points a manifold holds (b3GetMaxManifoldPoints).
+get_max_manifold_points() -> int { return MAX_MANIFOLD_POINTS }
+
+// Ids into 64-bit values and back (b3StoreBodyId and its siblings, id.h):
+// the index in the high half, the world and the generation 16 bits each
+// below it; a world id into 32 bits.
+store_world_id(id: WorldId) -> int { return ((id.index1 & 65535) << 16) | (id.generation & 65535) }
+load_world_id(x: int) -> WorldId { return WorldId { index1: (x >> 16) & 65535, generation: x & 65535 } }
+store_id(index1: int, world0: int, generation: int) -> long {
+    return ((index1 as long) << 32) | (((world0 & 65535) as long) << 16) | ((generation & 65535) as long)
+}
+stored_index(x: long) -> int { return ((x >> 32) & (4294967295 as long)) as int }
+stored_world(x: long) -> int { return ((x >> 16) & (65535 as long)) as int }
+stored_generation(x: long) -> int { return (x & (65535 as long)) as int }
+store_body_id(id: BodyId) -> long { return store_id(id.index1, id.world0, id.generation) }
+load_body_id(x: long) -> BodyId { return BodyId { index1: stored_index(x), world0: stored_world(x), generation: stored_generation(x) } }
+store_shape_id(id: ShapeId) -> long { return store_id(id.index1, id.world0, id.generation) }
+load_shape_id(x: long) -> ShapeId { return ShapeId { index1: stored_index(x), world0: stored_world(x), generation: stored_generation(x) } }
+store_joint_id(id: JointId) -> long { return store_id(id.index1, id.world0, id.generation) }
+load_joint_id(x: long) -> JointId { return JointId { index1: stored_index(x), world0: stored_world(x), generation: stored_generation(x) } }
 
 null_body_id() -> BodyId { return BodyId { index1: 0, world0: 0, generation: 0 } }
 null_shape_id() -> ShapeId { return ShapeId { index1: 0, world0: 0, generation: 0 } }
@@ -1397,40 +1422,8 @@ create_world(def: *WorldDef) -> WorldId {
     w.stack = basics.stack_create(2048)
     w.manifold_allocators = basics.buffer_create(sizeof(BlockAllocator), 0)
     w.manifold_lock = 0
-    // The threads: the host's scheduler when it lends one (the reference's
-    // task callbacks: a game runs its physics on its own job system), else
-    // the world's own, destroyed with it.
-    if def.scheduler != null {
-        w.scheduler = def.scheduler
-        w.owns_scheduler = false
-        w.worker_count = parallel.scheduler_worker_count(def.scheduler as *Scheduler)
-    } else {
-        w.worker_count = def.worker_count
-        if w.worker_count < 1 { w.worker_count = 1 }
-        if w.worker_count > native.MAX_WORKERS { w.worker_count = native.MAX_WORKERS }
-        w.scheduler = parallel.create_scheduler(w.worker_count) as ptr
-        w.owns_scheduler = true
-    }
     reserve_scratch()
-    // The world's steps run as worker slots of its own, so worlds stepped
-    // at once on different threads use different scratch; with none free,
-    // slot 0 on, shared, as before (such worlds step one at a time).
-    w.worker_base = claim_worker_slots(w.worker_count)
-    w.owns_worker_slots = w.worker_base >= 0
-    if w.worker_base < 0 { w.worker_base = 0 }
-    w.task_contexts = basics.alloc(w.worker_count * sizeof(TaskContext))
-    i = 0
-    while i < w.worker_count {
-        tc = task_context_at(w, i)
-        tc.arena = basics.arena_create(1 << 20)
-        tc.contact_state = basics.bitset_create(64)
-        tc.joint_state_bits = basics.bitset_create(64)
-        tc.hit_event_bits = basics.bitset_create(64)
-        tc.awake_island_bits = basics.bitset_create(64)
-        tc.split_island_id = NULL_INDEX
-        tc.sensor_hits = basics.buffer_create(sizeof(SensorHit), 4)
-        i = i + 1
-    }
+    create_workers(w, def.scheduler, def.worker_count)
     w.contact_state = basics.bitset_create(64)
     w.contact_begin_events = basics.buffer_create(sizeof(ContactBeginTouchEvent), 4)
     w.contact_end_events0 = basics.buffer_create(sizeof(ContactEndTouchEvent), 4)
@@ -1590,20 +1583,7 @@ destroy_world(id: WorldId) {
     basics.idpool_destroy(&w.island_id_pool)
     broad_phase.destroy_broad_phase(&w.broad_phase)
     destroy_graph(&w.constraint_graph)
-    i = 0
-    while i < w.worker_count {
-        tc = task_context_at(w, i)
-        basics.arena_destroy(&tc.arena)
-        basics.bitset_destroy(&tc.contact_state)
-        basics.bitset_destroy(&tc.joint_state_bits)
-        basics.bitset_destroy(&tc.hit_event_bits)
-        basics.bitset_destroy(&tc.awake_island_bits)
-        basics.buffer_destroy(&tc.sensor_hits)
-        i = i + 1
-    }
-    basics.free_bytes(w.task_contexts, w.worker_count * sizeof(TaskContext))
-    if w.owns_worker_slots { release_worker_slots(w.worker_base, w.worker_count) }
-    if w.owns_scheduler { parallel.destroy_scheduler(w.scheduler as *Scheduler) }
+    destroy_workers(w)
     basics.bitset_destroy(&w.contact_state)
     basics.buffer_destroy(&w.contact_begin_events)
     basics.buffer_destroy(&w.contact_end_events0)
@@ -1895,7 +1875,7 @@ create_body(world_id: WorldId, def: *BodyDef) -> BodyId {
     body.inertia = math.mat3_zero()
     body.kind = def.kind
     body.flags = flags
-    body.name = null
+    body.name = native.name_copy(def.name)
     if set_id >= AWAKE_SET { create_island_for_body(w, set_id, body) }
     w.locked = false
     return BodyId { index1: body_id + 1, world0: w.world_id, generation: body.generation }
@@ -2070,7 +2050,7 @@ create_shape(body_id: BodyId, def: *ShapeDef, geometry: Shape) -> ShapeId {
     set_shape_fat_aabb(w, shape_id, s.aabb)
     s.generation = s.generation + 1
     s.sensor_index = NULL_INDEX
-    s.name = null
+    s.name = native.name_copy(def.name)
     if kind == KIND_COMPOUND {
         w.compound_shape_count = w.compound_shape_count + 1
         // A copy of the compound's materials, so every shape frees its array the same way.
@@ -4792,6 +4772,71 @@ task_context(w: *World) -> *TaskContext {
 // theirs from (aephysics.native): a world's workers and the program's
 // other threads never share scratch, whichever threads they run on.
 claim_worker_slots(count: int) -> int { return native.claim_slots(count) }
+
+// A world's workers: the threads (the host's scheduler when it lends one,
+// the reference's task callbacks: a game runs its physics on its own job
+// system; else the world's own, destroyed with it), the worker slots its
+// steps run as, and a task context each.
+create_workers(w: *World, scheduler: ptr, count: int) {
+    if scheduler != null {
+        w.scheduler = scheduler
+        w.owns_scheduler = false
+        w.worker_count = parallel.scheduler_worker_count(scheduler as *Scheduler)
+    } else {
+        w.worker_count = math.clamp_int(count, 1, native.MAX_WORKERS)
+        w.scheduler = parallel.create_scheduler(w.worker_count) as ptr
+        w.owns_scheduler = true
+    }
+    // The world's steps run as worker slots of its own, so worlds stepped
+    // at once on different threads use different scratch; with none free,
+    // slot 0 on, shared, as before (such worlds step one at a time).
+    w.worker_base = claim_worker_slots(w.worker_count)
+    w.owns_worker_slots = w.worker_base >= 0
+    if w.worker_base < 0 { w.worker_base = 0 }
+    w.task_contexts = basics.alloc(w.worker_count * sizeof(TaskContext))
+    i = 0
+    while i < w.worker_count {
+        tc = task_context_at(w, i)
+        tc.arena = basics.arena_create(1 << 20)
+        tc.contact_state = basics.bitset_create(64)
+        tc.joint_state_bits = basics.bitset_create(64)
+        tc.hit_event_bits = basics.bitset_create(64)
+        tc.awake_island_bits = basics.bitset_create(64)
+        tc.split_island_id = NULL_INDEX
+        tc.sensor_hits = basics.buffer_create(sizeof(SensorHit), 4)
+        i = i + 1
+    }
+}
+
+destroy_workers(w: *World) {
+    i = 0
+    while i < w.worker_count {
+        tc = task_context_at(w, i)
+        basics.arena_destroy(&tc.arena)
+        basics.bitset_destroy(&tc.contact_state)
+        basics.bitset_destroy(&tc.joint_state_bits)
+        basics.bitset_destroy(&tc.hit_event_bits)
+        basics.bitset_destroy(&tc.awake_island_bits)
+        basics.buffer_destroy(&tc.sensor_hits)
+        i = i + 1
+    }
+    basics.free_bytes(w.task_contexts, w.worker_count * sizeof(TaskContext))
+    if w.owns_worker_slots { release_worker_slots(w.worker_base, w.worker_count) }
+    if w.owns_scheduler { parallel.destroy_scheduler(w.scheduler as *Scheduler) }
+    w.task_contexts = null
+}
+
+// The worker count between steps (b3World_SetWorkerCount), clamped to
+// [1, MAX_WORKERS]: the world's own threads, slots and task contexts made
+// again for it. A world on a host's scheduler steps on that scheduler's
+// workers, so its count is the host's to set, and this leaves it.
+set_worker_count(w: *World, count: int) {
+    if w.locked || w.owns_scheduler == false { return }
+    clamped = math.clamp_int(count, 1, native.MAX_WORKERS)
+    if clamped == w.worker_count { return }
+    destroy_workers(w)
+    create_workers(w, null, clamped)
+}
 release_worker_slots(start: int, count: int) { native.release_slots(start, count) }
 
 // The calling thread made the world's first worker for a pass over it (a

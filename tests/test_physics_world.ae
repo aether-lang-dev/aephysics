@@ -15,6 +15,7 @@ import aephysics.dynamic_tree
 import aephysics.hull
 import aephysics.manifold
 import aephysics.mesh
+import aephysics.height_field
 import aephysics.compound
 import aephysics.material
 import aephysics.shape
@@ -28,6 +29,9 @@ import aephysics.joint_solver
 extern exit(code: int)
 extern calloc(count: int, size: int) -> ptr
 extern free(p: ptr)
+extern cos(x: float) -> float
+extern sin(x: float) -> float
+extern sqrt(x: float) -> float
 
 var failures = 0
 var checks = 0
@@ -564,6 +568,616 @@ test_enlarged_proxy_destroyed() {
     ensure("enlarged proxy: nothing marked after the next step", moved_node_count(tree) == 0)
     ensure("enlarged proxy: depth-first order after the next step", tree.dfs_ordered)
     dynamics.destroy_world(world_id)
+}
+
+// test_id.c's IdTest: a 64-bit value through a body, shape and joint id
+// and back, and a world id through its 32 bits.
+test_ids() {
+    x = (0x01234567 as long) << 32 | (0x89ABCDEF as long)
+    ensure("ids: a body id stores what it loaded", dynamics.store_body_id(dynamics.load_body_id(x)) == x)
+    ensure("ids: a shape id stores what it loaded", dynamics.store_shape_id(dynamics.load_shape_id(x)) == x)
+    ensure("ids: a joint id stores what it loaded", dynamics.store_joint_id(dynamics.load_joint_id(x)) == x)
+    b = dynamics.load_body_id(x)
+    ensure("ids: the index high, the world and generation below", b.index1 == 0x01234567 && b.world0 == 0x89AB && b.generation == 0xCDEF)
+    wid = WorldId { index1: 3, generation: 517 }
+    back = dynamics.load_world_id(dynamics.store_world_id(wid))
+    ensure("ids: a world id through 32 bits", back.index1 == 3 && back.generation == 517)
+    // test_manifold.c's MaxPointCountTest.
+    ensure("the most points a manifold holds", dynamics.get_max_manifold_points() == dynamics.MAX_MANIFOLD_POINTS && dynamics.MAX_MANIFOLD_POINTS == 4)
+}
+
+// test_world.c's TestOverflowColorPile (shared/overflow_color.c): 25 boxes
+// in five rings about a tall heavy hub, each touching it from the first
+// step, more dynamic contacts on one body than the dynamic colours hold, so
+// some go to the overflow colour; ten steps through the overflow's solve.
+// The awake contact count is the reference's: the graph's contacts and
+// the awake non-touching ones.
+test_overflow_color_pile() {
+    wdef = dynamics.default_world_def()
+    wdef.worker_count = 1
+    world_id = dynamics.create_world(&wdef)
+    gdef = dynamics.default_body_def()
+    gdef.position = math.vec3(0.0, 0.0 - 1.0, 0.0)
+    ground = dynamics.create_body(world_id, &gdef)
+    slab = hull.make_box_hull(20.0, 1.0, 20.0)
+    sdef = dynamics.default_shape_def()
+    dynamics.create_hull_shape(ground, &sdef, slab)
+    hub_half_x = 0.5
+    hub_half_y = 2.5
+    hdef = dynamics.default_body_def()
+    hdef.kind = dynamics.BODY_DYNAMIC
+    hdef.position = math.vec3(0.0, hub_half_y, 0.0)
+    hub = dynamics.create_body(world_id, &hdef)
+    hub_box = hull.make_box_hull(hub_half_x, hub_half_y, 0.5)
+    hsdef = dynamics.default_shape_def()
+    hsdef.density = 50.0
+    dynamics.create_hull_shape(hub, &hsdef, hub_box)
+    neighbor_half = 0.2
+    ring_radius = hub_half_x + neighbor_half - 0.03
+    neighbor_box = hull.make_box_hull(neighbor_half, neighbor_half, neighbor_half)
+    ndef = dynamics.default_shape_def()
+    ring = 0
+    while ring < 5 {
+        y = neighbor_half + 0.05 + 0.5 * (ring as float)
+        offset = 0.0
+        if (ring & 1) != 0 { offset = math.PI / 5.0 }
+        slot = 0
+        while slot < 5 {
+            theta = offset + (2.0 * math.PI * (slot as float)) / 5.0
+            bdef = dynamics.default_body_def()
+            bdef.kind = dynamics.BODY_DYNAMIC
+            bdef.position = math.vec3(ring_radius * cos(theta), y, ring_radius * sin(theta))
+            body = dynamics.create_body(world_id, &bdef)
+            dynamics.create_hull_shape(body, &ndef, neighbor_box)
+            slot = slot + 1
+        }
+        ring = ring + 1
+    }
+    i = 0
+    while i < 10 {
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        i = i + 1
+    }
+    counters = physics_world.get_counters(world_id)
+    overflow = counters.color_counts[dynamics.GRAPH_COLOR_COUNT - 1]
+    ensure("overflow pile: some contacts in the overflow colour (${overflow})", overflow > 0)
+    in_colors = 0
+    k = 0
+    while k < dynamics.GRAPH_COLOR_COUNT {
+        in_colors = in_colors + counters.color_counts[k]
+        k = k + 1
+    }
+    w = dynamics.get_world(world_id.index1 - 1)
+    non_touching = dynamics.get_solver_set(w, dynamics.AWAKE_SET).contact_indices.count
+    ensure("overflow pile: the colours hold every touching contact (${in_colors} of ${counters.contact_count}, ${non_touching} not touching)",
+           in_colors + non_touching == counters.contact_count)
+    ensure("overflow pile: the awake contacts are the graph's and the non-touching (${counters.awake_contact_count})",
+           counters.awake_contact_count == counters.contact_count)
+    dynamics.destroy_world(world_id)
+    hull.destroy_hull(slab)
+    hull.destroy_hull(hub_box)
+    hull.destroy_hull(neighbor_box)
+}
+
+// test_world.c's TestSetWorkerCount: the count set between steps, 1 to 4,
+// 4 again, then 0 and -5 (each becomes 1) and past the cap (becomes it),
+// clamped as the reference clamps it. The reference moves its junkyard's
+// pusher between the changes; here a pile steps between them, and the
+// steps of every count give the run of one worker throughout, bit for bit.
+pile_world(worker_count: int, slab: *HullData, cube: *HullData) -> WorldId {
+    wdef = dynamics.default_world_def()
+    wdef.worker_count = worker_count
+    world_id = dynamics.create_world(&wdef)
+    gdef = dynamics.default_body_def()
+    gdef.position = math.vec3(0.0, 0.0 - 0.5, 0.0)
+    ground = dynamics.create_body(world_id, &gdef)
+    sdef = dynamics.default_shape_def()
+    dynamics.create_hull_shape(ground, &sdef, slab)
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    i = 0
+    while i < 64 {
+        bdef.position = math.vec3(((i % 4) as float) * 1.1 - 1.6, 0.5 + 1.05 * ((i / 16) as float), (((i / 4) % 4) as float) * 1.1 - 1.6)
+        body = dynamics.create_body(world_id, &bdef)
+        dynamics.create_hull_shape(body, &sdef, cube)
+        i = i + 1
+    }
+    return world_id
+}
+
+pile_sum(world_id: WorldId) -> float {
+    w = dynamics.get_world(world_id.index1 - 1)
+    sum = 0.0
+    i = 0
+    while i < w.bodies.count {
+        body = dynamics.body_at(w, i)
+        if body.set_index != dynamics.NULL_INDEX && body.kind == dynamics.BODY_DYNAMIC {
+            p = dynamics.get_body_sim(w, body).transform.p
+            sum = sum + p.x * 3.0 + p.y * 5.0 + p.z * 7.0
+        }
+        i = i + 1
+    }
+    return sum
+}
+
+test_set_worker_count() {
+    slab = hull.make_box_hull(10.0, 0.5, 10.0)
+    cube = hull.make_cube_hull(0.5)
+    world_id = pile_world(1, slab, cube)
+    ensure("worker count: one", physics_world.get_worker_count(world_id) == 1)
+    steps_block = calloc(6, 4)
+    counts = steps_block as int[]
+    counts[0] = 4
+    counts[1] = 4
+    counts[2] = 0
+    counts[3] = 0 - 5
+    counts[4] = native.MAX_WORKERS + 10
+    counts[5] = 2
+    expected = [ 4, 4, 1, 1, native.MAX_WORKERS, 2 ]
+    physics_world.step(world_id, 1.0 / 60.0, 4)
+    i = 0
+    while i < 6 {
+        physics_world.set_worker_count(world_id, counts[i])
+        got = physics_world.get_worker_count(world_id)
+        ensure("worker count: set ${counts[i]}, gets ${got}", got == expected[i])
+        j = 0
+        while j < 5 {
+            physics_world.step(world_id, 1.0 / 60.0, 4)
+            j = j + 1
+        }
+        ensure("worker count: valid stepping at ${got}", dynamics.validate_solver_sets(dynamics.get_world(world_id.index1 - 1)))
+        i = i + 1
+    }
+    changed = pile_sum(world_id)
+    dynamics.destroy_world(world_id)
+    // The same pile on one worker throughout.
+    single = pile_world(1, slab, cube)
+    k = 0
+    while k < 31 {
+        physics_world.step(single, 1.0 / 60.0, 4)
+        k = k + 1
+    }
+    ensure("worker count: changing it between steps changes nothing (${changed} against ${pile_sum(single)})", changed == pile_sum(single))
+    dynamics.destroy_world(single)
+    free(steps_block)
+    hull.destroy_hull(slab)
+    hull.destroy_hull(cube)
+}
+
+// test_world.c's TestCompoundHitEvents: a sphere driven down onto either
+// hull child of a static compound; its hit event carries the sphere's
+// material id on one side and the struck child's (11 or 22) on the other,
+// never the first child's for both.
+test_compound_hit_events() {
+    side = 0
+    while side < 2 {
+        expected = 11 as long
+        spawn_x = 0.0 - 3.0
+        if side == 1 {
+            expected = 22 as long
+            spawn_x = 3.0
+        }
+        wdef = dynamics.default_world_def()
+        wdef.hit_event_threshold = 1.0
+        world_id = dynamics.create_world(&wdef)
+        box_a = hull.make_box_hull(1.0, 1.0, 1.0)
+        box_b = hull.make_box_hull(1.0, 1.0, 1.0)
+        mat_a = material.default_surface_material()
+        mat_a.user_material_id = 11 as long
+        mat_b = material.default_surface_material()
+        mat_b.user_material_id = 22 as long
+        hulls_block = calloc(2, sizeof(CompoundHullDef))
+        hulls = hulls_block as CompoundHullDef[]
+        hulls[0] = compound.compound_hull_def(box_a, Transform { p: math.vec3(0.0 - 3.0, 0.0, 0.0), q: math.quat_identity() }, mat_a)
+        hulls[1] = compound.compound_hull_def(box_b, Transform { p: math.vec3(3.0, 0.0, 0.0), q: math.quat_identity() }, mat_b)
+        cdef = compound.compound_def()
+        cdef.hulls = hulls_block
+        cdef.hull_count = 2
+        c = compound.create_compound(&cdef)
+        ensure("compound hit events: the compound made", c != null)
+        sbdef = dynamics.default_body_def()
+        holder = dynamics.create_body(world_id, &sbdef)
+        csdef = dynamics.default_shape_def()
+        dynamics.create_compound_shape(holder, &csdef, c)
+        bdef = dynamics.default_body_def()
+        bdef.kind = dynamics.BODY_DYNAMIC
+        bdef.gravity_scale = 0.0
+        bdef.position = math.vec3(spawn_x, 3.0, 0.0)
+        bdef.linear_velocity = math.vec3(0.0, 0.0 - 30.0, 0.0)
+        ball = dynamics.create_body(world_id, &bdef)
+        bsdef = dynamics.default_shape_def()
+        bsdef.density = 1.0
+        bsdef.enable_hit_events = true
+        bsdef.base_material.user_material_id = 99 as long
+        dynamics.create_sphere_shape(ball, &bsdef, manifold.sphere(math.vec3_zero(), 0.5))
+        hits = 0
+        got_a = 0 as long
+        got_b = 0 as long
+        i = 0
+        while i < 30 {
+            physics_world.step(world_id, 1.0 / 60.0, 4)
+            count = physics_world.contact_hit_event_count(world_id)
+            if count > 0 && hits == 0 {
+                hit = physics_world.contact_hit_event(world_id, 0)
+                got_a = hit.user_material_id_a
+                got_b = hit.user_material_id_b
+            }
+            hits = hits + count
+            i = i + 1
+        }
+        dynamics.destroy_world(world_id)
+        compound.destroy_compound(c)
+        hull.destroy_hull(box_a)
+        hull.destroy_hull(box_b)
+        free(hulls_block)
+        ensure("compound hit events (side ${side}): a hit (${hits})", hits >= 1)
+        ensure("compound hit events (side ${side}): the sphere's material (${got_a} ${got_b})", got_a == (99 as long) || got_b == (99 as long))
+        ensure("compound hit events (side ${side}): the struck child's material", got_a == expected || got_b == expected)
+        side = side + 1
+    }
+}
+
+var g_friction_calls = 0
+var g_saw_child0 = false
+var g_saw_child1 = false
+var g_mixed_friction = 0.0
+
+capture_friction(friction_a: float, id_a: long, friction_b: float, id_b: long) -> float {
+    g_friction_calls = g_friction_calls + 1
+    if id_a == (101 as long) || id_b == (101 as long) { g_saw_child0 = true }
+    if id_a == (202 as long) || id_b == (202 as long) {
+        g_saw_child1 = true
+        g_mixed_friction = sqrt(friction_a * friction_b)
+    }
+    return sqrt(friction_a * friction_b)
+}
+
+// TestCompoundContactMaterials: a unit-friction sphere struck down onto
+// child 1 of a compound whose child 0 has friction 0.04 and child 1 0.81,
+// for sphere, capsule and hull children: the friction callback sees child
+// 1's material, never child 0's, and mixes to sqrt(0.81) = 0.9.
+test_compound_contact_materials() {
+    mat0 = material.default_surface_material()
+    mat0.friction = 0.04
+    mat0.user_material_id = 101 as long
+    mat1 = material.default_surface_material()
+    mat1.friction = 0.81
+    mat1.user_material_id = 202 as long
+    box = hull.make_box_hull(0.5, 0.5, 0.5)
+    spheres_block = calloc(2, sizeof(CompoundSphereDef))
+    spheres = spheres_block as CompoundSphereDef[]
+    spheres[0] = compound.compound_sphere_def(manifold.sphere(math.vec3(0.0 - 3.0, 0.0, 0.0), 0.5), mat0)
+    spheres[1] = compound.compound_sphere_def(manifold.sphere(math.vec3(3.0, 0.0, 0.0), 0.5), mat1)
+    capsules_block = calloc(2, sizeof(CompoundCapsuleDef))
+    capsules = capsules_block as CompoundCapsuleDef[]
+    capsules[0] = compound.compound_capsule_def(manifold.capsule(math.vec3(0.0 - 3.0, 0.0, 0.0 - 0.5), math.vec3(0.0 - 3.0, 0.0, 0.5), 0.5), mat0)
+    capsules[1] = compound.compound_capsule_def(manifold.capsule(math.vec3(3.0, 0.0, 0.0 - 0.5), math.vec3(3.0, 0.0, 0.5), 0.5), mat1)
+    hulls_block = calloc(2, sizeof(CompoundHullDef))
+    hulls = hulls_block as CompoundHullDef[]
+    hulls[0] = compound.compound_hull_def(box, Transform { p: math.vec3(0.0 - 3.0, 0.0, 0.0), q: math.quat_identity() }, mat0)
+    hulls[1] = compound.compound_hull_def(box, Transform { p: math.vec3(3.0, 0.0, 0.0), q: math.quat_identity() }, mat1)
+    kind = 0
+    while kind < 3 {
+        cdef = compound.compound_def()
+        if kind == 0 {
+            cdef.spheres = spheres_block
+            cdef.sphere_count = 2
+        } else if kind == 1 {
+            cdef.capsules = capsules_block
+            cdef.capsule_count = 2
+        } else {
+            cdef.hulls = hulls_block
+            cdef.hull_count = 2
+        }
+        c = compound.create_compound(&cdef)
+        ensure("compound materials (kind ${kind}): the compound made", c != null)
+        g_friction_calls = 0
+        g_saw_child0 = false
+        g_saw_child1 = false
+        g_mixed_friction = 0.0
+        wdef = dynamics.default_world_def()
+        wdef.friction_callback = capture_friction
+        world_id = dynamics.create_world(&wdef)
+        sbdef = dynamics.default_body_def()
+        holder = dynamics.create_body(world_id, &sbdef)
+        csdef = dynamics.default_shape_def()
+        dynamics.create_compound_shape(holder, &csdef, c)
+        bdef = dynamics.default_body_def()
+        bdef.kind = dynamics.BODY_DYNAMIC
+        bdef.gravity_scale = 0.0
+        bdef.position = math.vec3(3.0, 3.0, 0.0)
+        bdef.linear_velocity = math.vec3(0.0, 0.0 - 30.0, 0.0)
+        ball = dynamics.create_body(world_id, &bdef)
+        bsdef = dynamics.default_shape_def()
+        bsdef.density = 1.0
+        bsdef.base_material.friction = 1.0
+        bsdef.base_material.user_material_id = 999 as long
+        dynamics.create_sphere_shape(ball, &bsdef, manifold.sphere(math.vec3_zero(), 0.5))
+        i = 0
+        while i < 30 {
+            physics_world.step(world_id, 1.0 / 60.0, 4)
+            i = i + 1
+        }
+        dynamics.destroy_world(world_id)
+        compound.destroy_compound(c)
+        ensure("compound materials (kind ${kind}): the callback called (${g_friction_calls})", g_friction_calls > 0)
+        ensure("compound materials (kind ${kind}): never child 0's material", g_saw_child0 == false)
+        ensure("compound materials (kind ${kind}): child 1's material", g_saw_child1)
+        small("compound materials (kind ${kind}): mixed to 0.9", g_mixed_friction - 0.9, 0.00001)
+        kind = kind + 1
+    }
+    hull.destroy_hull(box)
+    free(spheres_block)
+    free(capsules_block)
+    free(hulls_block)
+}
+
+// test_broad_phase.c's BroadPhaseStressTest: a swarm of up to 64 bodies
+// churning through every proxy change the world offers (made and destroyed,
+// teleported, sped up, disabled and enabled, bullet on and off, its type
+// changed, welded with collision off and toggled, the static clutter moved,
+// the static tree rebuilt) among 60 static boxes and height fields, over
+// kilometre height-field tiles two kilometres from the origin; after every
+// step a zero step finds the pairs, and the pair set is checked against
+// every live shape pair by brute force. Three seeds, at one worker, at four,
+// and at three with sleep on (where only a missing pair is a bug: a sleeping
+// contact is not refreshed, so a stale one may outlive its overlap).
+var g_stress_seed: long = 0
+
+stress_next() -> long {
+    x = g_stress_seed
+    x = (x ^ (x << 13)) & (4294967295 as long)
+    x = x ^ (x >> 17)
+    x = (x ^ (x << 5)) & (4294967295 as long)
+    g_stress_seed = x
+    return x
+}
+
+stress_float(lower: float, upper: float) -> float {
+    u = ((stress_next() & (16777215 as long)) as float) / 16777216.0
+    return lower + (upper - lower) * u
+}
+
+stress_int(count: int) -> int { return (stress_next() % (count as long)) as int }
+
+stress_origin() -> Vec3 { return math.vec3(0.0 - 1900.0, 0.0, 1330.0) }
+
+stress_position() -> Vec3 {
+    e = 12.0
+    x = stress_float(0.0 - e, e)
+    y = stress_float(0.0 - e, e)
+    z = stress_float(0.0 - e, e)
+    return math.add(stress_origin(), math.vec3(x, y, z))
+}
+
+stress_velocity() -> Vec3 {
+    s = 12.0
+    if stress_int(4) == 0 { s = 40.0 }
+    x = stress_float(0.0 - s, s)
+    y = stress_float(0.0 - s, s)
+    z = stress_float(0.0 - s, s)
+    return math.vec3(x, y, z)
+}
+
+stress_body(world_id: WorldId, box: *HullData) -> BodyId {
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    if stress_int(10) == 0 { bdef.kind = dynamics.BODY_KINEMATIC }
+    bdef.position = stress_position()
+    bdef.linear_velocity = stress_velocity()
+    bdef.is_bullet = stress_int(3) == 0
+    bdef.gravity_scale = 0.0
+    body = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    sdef.filter.category_bits = (1 as long) << stress_int(3)
+    if stress_int(4) == 0 { sdef.filter.mask_bits = 5 as long }
+    count = 1 + stress_int(2)
+    i = 0
+    while i < count {
+        if stress_int(2) == 0 {
+            cx = stress_float(0.0 - 1.0, 1.0)
+            r = stress_float(0.2, 1.5)
+            dynamics.create_sphere_shape(body, &sdef, manifold.sphere(math.vec3(cx, 0.0, 0.0), r))
+        } else {
+            dynamics.create_hull_shape(body, &sdef, box)
+        }
+        i = i + 1
+    }
+    return body
+}
+
+// The pair set against every live, filtered, overlapping pair of shapes.
+stress_pairs_hold(world_id: WorldId, sleeping: bool) -> bool {
+    w = dynamics.get_world(world_id.index1 - 1)
+    count = w.shapes.count
+    i = 0
+    while i < count {
+        a = dynamics.world_shape_at(w, i)
+        if a.id != dynamics.NULL_INDEX && a.proxy_key != dynamics.NULL_INDEX && a.sensor_index == dynamics.NULL_INDEX {
+            body_a = dynamics.body_at(w, a.body_id)
+            j = i + 1
+            while j < count {
+                b = dynamics.world_shape_at(w, j)
+                if b.id != dynamics.NULL_INDEX && b.proxy_key != dynamics.NULL_INDEX && b.sensor_index == dynamics.NULL_INDEX && a.body_id != b.body_id {
+                    body_b = dynamics.body_at(w, b.body_id)
+                    expected = shape.should_shapes_collide(a.filter, b.filter) && dynamics.should_bodies_collide(w, body_a, body_b) &&
+                               math.aabb_overlaps(dynamics.shape_fat_aabb(w, i), dynamics.shape_fat_aabb(w, j))
+                    actual = broad_phase.has_pair(&w.broad_phase, basics.shape_pair_key(i, j, 0))
+                    if (sleeping && actual && expected == false) == false && expected != actual { return false }
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    return true
+}
+
+broad_phase_stress(workers: int, seed: long, sleeping: bool) -> bool {
+    wdef = dynamics.default_world_def()
+    wdef.worker_count = workers
+    wdef.enable_sleep = sleeping
+    wdef.gravity = math.vec3_zero()
+    world_id = dynamics.create_world(&wdef)
+    g_stress_seed = seed
+    box = hull.make_box_hull(0.95, 0.6, 2.2)
+    // Kilometre tiles far from the origin under the swarm, as a streamed terrain.
+    tile = height_field.create_grid(65, 65, math.vec3(16.0, 1.0, 16.0), false)
+    i = 0
+    while i < 9 {
+        tdef = dynamics.default_body_def()
+        tdef.position = math.vec3(0.0 - 3072.0 + 1024.0 * ((i % 3) as float), 0.0 - 30.0, 1024.0 * ((i / 3) as float))
+        tile_body = dynamics.create_body(world_id, &tdef)
+        tsdef = dynamics.default_shape_def()
+        tsdef.enable_speculative_contact = false
+        dynamics.create_height_field_shape(tile_body, &tsdef, tile)
+        i = i + 1
+    }
+    // Static clutter in the swarm; some asks for its contacts when made.
+    statics_block = calloc(60, sizeof(BodyId))
+    statics = statics_block as BodyId[]
+    grid = height_field.create_grid(5, 5, math.vec3(2.0, 1.0, 2.0), false)
+    static_box = hull.make_box_hull(3.0, 0.5, 3.0)
+    i = 0
+    while i < 60 {
+        sbdef = dynamics.default_body_def()
+        sbdef.position = stress_position()
+        statics[i] = dynamics.create_body(world_id, &sbdef)
+        ssdef = dynamics.default_shape_def()
+        ssdef.invoke_contact_creation = (i % 4) == 0
+        ssdef.enable_speculative_contact = (i % 2) == 0
+        if i % 3 == 0 { dynamics.create_height_field_shape(statics[i], &ssdef, grid) }
+        else { dynamics.create_hull_shape(statics[i], &ssdef, static_box) }
+        i = i + 1
+    }
+    slots_block = calloc(64, sizeof(BodyId))
+    slots = slots_block as BodyId[]
+    active_block = calloc(64, 4)
+    active = active_block as int[]
+    i = 0
+    while i < 64 {
+        if stress_int(4) != 0 {
+            slots[i] = stress_body(world_id, box)
+            active[i] = 1
+        }
+        i = i + 1
+    }
+    joints_block = calloc(4, sizeof(JointId))
+    joints = joints_block as JointId[]
+    joint_count = 0
+    ok = true
+    step = 0
+    while step < 400 && ok {
+        mutations = stress_int(4)
+        m = 0
+        while m < mutations {
+            slot = stress_int(64)
+            action = stress_int(12)
+            if active[slot] == 0 {
+                if action < 6 {
+                    slots[slot] = stress_body(world_id, box)
+                    active[slot] = 1
+                }
+            } else if action == 0 {
+                dynamics.destroy_body(slots[slot])
+                active[slot] = 0
+            } else if action == 1 || action == 2 {
+                dynamics.body_set_transform(slots[slot], stress_position(), math.quat_identity())
+            } else if action == 3 {
+                dynamics.body_set_linear_velocity(slots[slot], stress_velocity())
+            } else if action == 4 {
+                dynamics.body_disable(slots[slot])
+            } else if action == 5 {
+                dynamics.body_enable(slots[slot])
+            } else if action == 6 {
+                dynamics.body_set_bullet(slots[slot], stress_int(2) == 0)
+            } else if action == 7 {
+                kind = stress_int(3)
+                if kind == 0 { dynamics.body_set_type(slots[slot], dynamics.BODY_STATIC) }
+                else if kind == 1 { dynamics.body_set_type(slots[slot], dynamics.BODY_KINEMATIC) }
+                else { dynamics.body_set_type(slots[slot], dynamics.BODY_DYNAMIC) }
+                if dynamics.body_get_type(slots[slot]) != dynamics.BODY_STATIC { dynamics.body_set_linear_velocity(slots[slot], stress_velocity()) }
+            } else if action == 8 {
+                // A weld that stops collision, or one toggled.
+                if joint_count < 4 {
+                    other = stress_int(64)
+                    if other != slot && active[other] != 0 && dynamics.body_get_type(slots[slot]) == dynamics.BODY_DYNAMIC &&
+                       dynamics.body_get_type(slots[other]) == dynamics.BODY_DYNAMIC {
+                        jdef = dynamics.default_weld_joint_def()
+                        jdef.base.body_id_a = slots[slot]
+                        jdef.base.body_id_b = slots[other]
+                        jdef.base.collide_connected = false
+                        joints[joint_count] = dynamics.create_weld_joint(world_id, &jdef)
+                        joint_count = joint_count + 1
+                    }
+                } else {
+                    joint = joints[stress_int(joint_count)]
+                    if dynamics.joint_is_valid(joint) { dynamics.joint_set_collide_connected(joint, stress_int(2) == 0) }
+                }
+            } else if action == 9 {
+                dynamics.body_set_transform(statics[stress_int(60)], stress_position(), math.quat_identity())
+            } else if action == 10 {
+                physics_world.rebuild_static_tree(world_id)
+            }
+            m = m + 1
+        }
+        // Joints whose bodies were destroyed went with them.
+        j = 0
+        while j < joint_count {
+            if dynamics.joint_is_valid(joints[j]) == false {
+                joints[j] = joints[joint_count - 1]
+                joint_count = joint_count - 1
+            } else {
+                j = j + 1
+            }
+        }
+        // The swarm kept in the clutter.
+        i = 0
+        while i < 64 {
+            if active[i] != 0 && dynamics.body_is_enabled(slots[i]) {
+                d = math.sub(dynamics.body_get_position(slots[i]), stress_origin())
+                if math.abs_float(d.x) > 24.0 || math.abs_float(d.y) > 24.0 || math.abs_float(d.z) > 24.0 {
+                    dynamics.body_set_transform(slots[i], stress_position(), math.quat_identity())
+                    dynamics.body_set_linear_velocity(slots[i], stress_velocity())
+                }
+            }
+            i = i + 1
+        }
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        // A zero step finds the pairs and purges disjoint contacts, moving nothing.
+        physics_world.step(world_id, 0.0, 1)
+        if stress_pairs_hold(world_id, sleeping) == false {
+            println("physics_world: broad phase stress: pairs wrong at workers ${workers} seed ${seed} sleep ${sleeping} step ${step}")
+            ok = false
+        }
+        step = step + 1
+    }
+    dynamics.destroy_world(world_id)
+    height_field.destroy_height_field(grid)
+    height_field.destroy_height_field(tile)
+    hull.destroy_hull(box)
+    hull.destroy_hull(static_box)
+    free(statics_block)
+    free(slots_block)
+    free(active_block)
+    free(joints_block)
+    return ok
+}
+
+test_broad_phase_stress() {
+    seeds_block = calloc(3, 8)
+    seeds = seeds_block as long[]
+    seeds[0] = 12345 as long
+    seeds[1] = 12648430 as long
+    seeds[2] = 777 as long
+    i = 0
+    while i < 3 {
+        ensure("broad phase stress, seed ${seeds[i]}: one worker", broad_phase_stress(1, seeds[i], false))
+        ensure("broad phase stress, seed ${seeds[i]}: four workers", broad_phase_stress(4, seeds[i], false))
+        ensure("broad phase stress, seed ${seeds[i]}: three workers with sleep", broad_phase_stress(3, seeds[i], true))
+        i = i + 1
+    }
+    free(seeds_block)
 }
 
 // test_broad_phase.c's StaticRebuildKeepsMarks: the broad phase keeps a
@@ -1187,6 +1801,241 @@ test_body_queries() {
     free(ids_block)
 }
 
+// test_body_query.c, the rest (#143): the hull-proxy overlaps, the
+// compound on a turned body through both overlaps, and the mover's time
+// of impact against one body in every case the reference asks.
+hull_proxy(h: *HullData) -> ShapeProxy { return distance.shape_proxy(hull.hull_points(h) as ptr, h.vertex_count, 0.0) }
+
+overlap_count(world_id: WorldId, origin: Vec3, proxy: ShapeProxy) -> int {
+    counter = calloc(1, 4)
+    physics_world.overlap_shape(world_id, origin, proxy, shape.default_query_filter(), count_overlap, counter)
+    n = (counter as int[])[0]
+    free(counter)
+    return n
+}
+
+test_overlap_proxies() {
+    // OverlapHullProxyEquivalence: a box baked about the target with a zero
+    // origin finds what the same box at the local origin finds with the
+    // target as origin; both miss far away.
+    wdef = dynamics.default_world_def()
+    world_id = dynamics.create_world(&wdef)
+    bdef = dynamics.default_body_def()
+    bdef.position = math.vec3(10.0, 0.0, 0.0)
+    body = dynamics.create_body(world_id, &bdef)
+    box = hull.make_box_hull(1.0, 1.0, 1.0)
+    sdef = dynamics.default_shape_def()
+    dynamics.create_hull_shape(body, &sdef, box)
+    physics_world.step(world_id, 1.0 / 60.0, 1)
+    local = hull.make_box_hull(5.0, 5.0, 5.0)
+    baked = hull.make_transformed_box_hull(5.0, 5.0, 5.0, identity_at(10.0, 0.0, 0.0))
+    baked_hits = overlap_count(world_id, math.vec3_zero(), hull_proxy(baked))
+    local_hits = overlap_count(world_id, math.vec3(10.0, 0.0, 0.0), hull_proxy(local))
+    ensure("hull proxy: baked about the target, a hit (${baked_hits})", baked_hits == 1)
+    ensure("hull proxy: the local box at the target's origin agrees (${local_hits})", local_hits == baked_hits)
+    far = hull.make_transformed_box_hull(5.0, 5.0, 5.0, identity_at(100.0, 0.0, 0.0))
+    baked_hits = overlap_count(world_id, math.vec3_zero(), hull_proxy(far))
+    local_hits = overlap_count(world_id, math.vec3(100.0, 0.0, 0.0), hull_proxy(local))
+    ensure("hull proxy: both miss far away", baked_hits == 0 && local_hits == 0)
+    dynamics.destroy_world(world_id)
+    hull.destroy_hull(box)
+    hull.destroy_hull(local)
+    hull.destroy_hull(baked)
+    hull.destroy_hull(far)
+    // OverlapHullProxyRotation: a 4 m bar along x reaches a box at x = 3;
+    // turned a quarter about y it lies along z and misses.
+    world_id = dynamics.create_world(&wdef)
+    bdef.position = math.vec3(3.0, 0.0, 0.0)
+    body = dynamics.create_body(world_id, &bdef)
+    cube = hull.make_box_hull(0.5, 0.5, 0.5)
+    dynamics.create_hull_shape(body, &sdef, cube)
+    physics_world.step(world_id, 1.0 / 60.0, 1)
+    aligned = hull.make_transformed_box_hull(4.0, 0.3, 0.3, math.transform_identity())
+    turned = hull.make_transformed_box_hull(4.0, 0.3, 0.3, Transform { p: math.vec3_zero(), q: math.make_quat_from_axis_angle(math.vec3_axis_y(), 0.5 * math.PI) })
+    ensure("hull proxy: the bar along x reaches the box", overlap_count(world_id, math.vec3_zero(), hull_proxy(aligned)) == 1)
+    ensure("hull proxy: turned along z it misses", overlap_count(world_id, math.vec3_zero(), hull_proxy(turned)) == 0)
+    dynamics.destroy_world(world_id)
+    hull.destroy_hull(cube)
+    hull.destroy_hull(aligned)
+    hull.destroy_hull(turned)
+    // OverlapCompoundRotatedBody: two sphere children at x = -3 and 3 on a
+    // body turned a quarter about z at (10, 20, 30); a point on the second
+    // child (swung to +y) overlaps, through the world and the body, and the
+    // gap between them stays empty.
+    world_id = dynamics.create_world(&wdef)
+    mat = material.default_surface_material()
+    spheres_block = calloc(2, sizeof(CompoundSphereDef))
+    spheres = spheres_block as CompoundSphereDef[]
+    spheres[0] = compound.compound_sphere_def(manifold.sphere(math.vec3(0.0 - 3.0, 0.0, 0.0), 0.5), mat)
+    spheres[1] = compound.compound_sphere_def(manifold.sphere(math.vec3(3.0, 0.0, 0.0), 0.5), mat)
+    cdef = compound.compound_def()
+    cdef.spheres = spheres_block
+    cdef.sphere_count = 2
+    c = compound.create_compound(&cdef)
+    pose = Transform { p: math.vec3(10.0, 20.0, 30.0), q: math.make_quat_from_axis_angle(math.vec3_axis_z(), 0.5 * math.PI) }
+    cbdef = dynamics.default_body_def()
+    cbdef.position = pose.p
+    cbdef.rotation = pose.q
+    holder = dynamics.create_body(world_id, &cbdef)
+    dynamics.create_compound_shape(holder, &sdef, c)
+    filter = shape.default_query_filter()
+    on_child = math.transform_point(pose, math.vec3(3.0, 0.0, 0.0))
+    ensure("compound on a turned body: the world overlap finds the second child", overlap_count(world_id, math.vec3_zero(), point_proxy(on_child, 0.1)) == 1)
+    ensure("compound on a turned body: the body overlap too", physics_world.body_overlap_shape(holder, math.vec3_zero(), point_proxy(on_child, 0.1), filter, pose))
+    in_gap = math.transform_point(pose, math.vec3_zero())
+    ensure("compound on a turned body: the gap is empty to the world", overlap_count(world_id, math.vec3_zero(), point_proxy(in_gap, 0.25)) == 0)
+    ensure("compound on a turned body: and to the body", physics_world.body_overlap_shape(holder, math.vec3_zero(), point_proxy(in_gap, 0.25), filter, pose) == false)
+    dynamics.destroy_world(world_id)
+    compound.destroy_compound(c)
+    free(spheres_block)
+}
+
+var g_toi_seed: long = 0
+
+// The reference test's XorShift32: 24 bits over [lower, upper].
+toi_random(lower: float, upper: float) -> float {
+    x = g_toi_seed
+    x = (x ^ (x << 13)) & (4294967295 as long)
+    x = x ^ (x >> 17)
+    x = (x ^ (x << 5)) & (4294967295 as long)
+    g_toi_seed = x
+    unit = ((x >> 8) as float) / 16777216.0
+    return lower + (upper - lower) * unit
+}
+
+toi_random_vector(lower: float, upper: float) -> Vec3 {
+    x = toi_random(lower, upper)
+    y = toi_random(lower, upper)
+    z = toi_random(lower, upper)
+    return math.vec3(x, y, z)
+}
+
+toi_random_direction() -> Vec3 {
+    while true {
+        v = toi_random_vector(0.0 - 1.0, 1.0)
+        len = math.length(v)
+        if 0.1 < len && len < 1.0 { return math.mul_sv(1.0 / len, v) }
+    }
+    return math.vec3_axis_x()
+}
+
+test_mover_time_of_impact() {
+    ids_block = calloc(2, sizeof(BodyId))
+    ids = ids_block as BodyId[]
+    filter = shape.default_query_filter()
+    sdef = dynamics.default_shape_def()
+    standing = Capsule { center1: math.vec3_zero(), center2: math.vec3(0.0, 1.0, 0.0), radius: 0.25 }
+    sweep = math.vec3(10.0, 0.0, 0.0)
+    // MoverTOIKeepsHitAfterMiss: an off-path sphere listed last does not
+    // erase the on-path hit.
+    world_id = query_world(ids)
+    dynamics.create_sphere_shape(ids[0], &sdef, manifold.sphere(math.vec3(5.0, 0.0, 20.0), 0.5))
+    on_path = dynamics.create_sphere_shape(ids[0], &sdef, manifold.sphere(math.vec3(5.0, 0.0, 0.0), 0.5))
+    toi = physics_world.body_time_of_impact_mover(ids[0], math.vec3_zero(), standing, sweep, filter, identity_at(0.0, 0.0, 0.0), identity_at(0.0, 0.0, 0.0))
+    small("mover toi, a miss after the hit: the fraction", toi.fraction - 0.425, 0.01)
+    ensure("mover toi, a miss after the hit: the on-path sphere", same_shape(toi.shape_id, on_path))
+    dynamics.destroy_world(world_id)
+    // MoverTOIMoverOffset: the mover and the body slid 2 m together.
+    world_id = query_world(ids)
+    box = hull.make_box_hull(0.5, 0.5, 0.5)
+    dynamics.create_hull_shape(ids[0], &sdef, box)
+    a = physics_world.body_time_of_impact_mover(ids[0], math.vec3_zero(), standing, sweep, filter, identity_at(5.0, 0.0, 0.0), identity_at(5.0, 0.0, 0.0))
+    shifted = Capsule { center1: math.vec3(2.0, 0.0, 0.0), center2: math.vec3(2.0, 1.0, 0.0), radius: 0.25 }
+    b = physics_world.body_time_of_impact_mover(ids[0], math.vec3_zero(), shifted, sweep, filter, identity_at(7.0, 0.0, 0.0), identity_at(7.0, 0.0, 0.0))
+    small("mover toi, both moved: the same fraction", b.fraction - a.fraction, 0.0001)
+    small("mover toi, both moved: the point moved by 2", b.point.x - a.point.x - 2.0, 0.001)
+    // MoverTOIFarFromOrigin: a million metres out, the same fraction and
+    // the point in the origin's frame.
+    origin = math.vec3(1000000.0, 0.0 - 2000000.0, 500000.0)
+    body_far = Transform { p: math.add(origin, math.vec3(5.0, 0.0, 0.0)), q: math.quat_identity() }
+    toi = physics_world.body_time_of_impact_mover(ids[0], origin, standing, sweep, filter, body_far, body_far)
+    small("mover toi, far out: the fraction", toi.fraction - 0.425, 0.01)
+    small("mover toi, far out: the normal", toi.normal.x + 1.0, 0.001)
+    small("mover toi, far out: the point in the origin's frame", (toi.point.x - origin.x) - 4.4, 0.5)
+    // MoverTOIFilter: a zero mask rejects every category.
+    no_mask = shape.default_query_filter()
+    no_mask.mask_bits = 0 as long
+    toi = physics_world.body_time_of_impact_mover(ids[0], math.vec3_zero(), standing, sweep, no_mask, identity_at(5.0, 0.0, 0.0), identity_at(5.0, 0.0, 0.0))
+    small("mover toi, filtered: no hit", toi.fraction - 1.0, 0.000001)
+    dynamics.destroy_world(world_id)
+    // MoverTOIOverlapSkipsShape: the shape the mover starts in is skipped,
+    // the one on its path still hit.
+    world_id = query_world(ids)
+    dynamics.create_hull_shape(ids[0], &sdef, box)
+    offset_box = hull.make_offset_box_hull(0.5, 0.5, 0.5, math.vec3(5.0, 0.0, 0.0))
+    on_box = dynamics.create_hull_shape(ids[0], &sdef, offset_box)
+    toi = physics_world.body_time_of_impact_mover(ids[0], math.vec3_zero(), standing, sweep, filter, identity_at(0.0, 0.0, 0.0), identity_at(0.0, 0.0, 0.0))
+    small("mover toi, started inside one: the other's fraction", toi.fraction - 0.425, 0.01)
+    ensure("mover toi, started inside one: the other shape", same_shape(toi.shape_id, on_box))
+    small("mover toi, started inside one: the normal", toi.normal.x + 1.0, 0.001)
+    dynamics.destroy_world(world_id)
+    // MoverTOIRotatingBody: a bar turning a quarter about y between the two
+    // transforms reaches a mover its start pose clears.
+    world_id = query_world(ids)
+    bar = hull.make_box_hull(2.0, 0.25, 0.25)
+    bar_shape = dynamics.create_hull_shape(ids[0], &sdef, bar)
+    at = math.vec3(0.0, 0.0, 2.1)
+    turned = Transform { p: math.vec3_zero(), q: math.make_quat_from_axis_angle(math.vec3_axis_y(), 0.5 * math.PI) }
+    spinning = physics_world.body_time_of_impact_mover(ids[0], at, standing, math.vec3_zero(), filter, identity_at(0.0, 0.0, 0.0), turned)
+    ensure("mover toi, a turning bar: a hit inside the sweep (${spinning.fraction})", 0.0 < spinning.fraction && spinning.fraction < 1.0)
+    still = physics_world.body_time_of_impact_mover(ids[0], at, standing, math.vec3_zero(), filter, identity_at(0.0, 0.0, 0.0), identity_at(0.0, 0.0, 0.0))
+    ensure("mover toi, the bar held still: clear", math.abs_float(still.fraction - 1.0) < 0.000001 && still.shape_id.index1 == 0)
+    // MoverTOIMatchesSweep: 2,000 random movers, origins, translations and
+    // body turns; the query agrees with the raw time of impact it builds,
+    // any root strictly inside the sweep counting as a hit.
+    g_toi_seed = 2654435769 as long
+    points_block = calloc(2, sizeof(Vec3))
+    points = points_block as Vec3[]
+    hits = 0
+    agree = true
+    k = 0
+    while k < 2000 {
+        c1 = toi_random_vector(0.0 - 0.2, 0.2)
+        length = toi_random(0.05, 1.5)
+        c2 = math.mul_add(c1, length, toi_random_direction())
+        radius = toi_random(0.05, 0.5)
+        mover = Capsule { center1: c1, center2: c2, radius: radius }
+        points[0] = c1
+        points[1] = c2
+        o = toi_random_vector(0.0 - 3.5, 3.5)
+        travel = toi_random(0.0, 3.0)
+        translation = math.mul_sv(travel, toi_random_direction())
+        axis1 = toi_random_direction()
+        angle1 = toi_random(0.0, math.PI)
+        t1 = Transform { p: math.vec3_zero(), q: math.make_quat_from_axis_angle(axis1, angle1) }
+        axis2 = toi_random_direction()
+        angle2 = toi_random(0.001, math.PI)
+        spin = math.make_quat_from_axis_angle(axis2, angle2)
+        shift = toi_random_vector(0.0 - 1.0, 1.0)
+        t2 = Transform { p: shift, q: math.mul_quat(spin, t1.q) }
+        result = physics_world.body_time_of_impact_mover(ids[0], o, mover, translation, filter, t1, t2)
+        xf1 = math.to_relative_transform(t1, o)
+        xf2 = math.to_relative_transform(t2, o)
+        input = TOIInput { proxy_a: hull_proxy(bar), proxy_b: distance.shape_proxy(points_block, 2, radius),
+                           sweep_a: Sweep { local_center: math.vec3_zero(), c1: xf1.p, c2: xf2.p, q1: t1.q, q2: t2.q },
+                           sweep_b: Sweep { local_center: math.vec3_zero(), c1: math.vec3_zero(), c2: translation, q1: math.quat_identity(), q2: math.quat_identity() },
+                           max_fraction: 1.0 }
+        raw = distance.time_of_impact(&input)
+        if 0.0 < raw.fraction && raw.fraction < 1.0 {
+            same = math.abs_float(result.fraction - raw.fraction) < 0.000001 && same_shape(result.shape_id, bar_shape) &&
+                   math.is_normalized(result.normal) && math.length(math.sub(math.sub(result.point, o), raw.point)) < 0.0001
+            if same == false { agree = false }
+            hits = hits + 1
+        } else {
+            if math.abs_float(result.fraction - 1.0) >= 0.000001 || result.shape_id.index1 != 0 { agree = false }
+        }
+        k = k + 1
+    }
+    ensure("mover toi against the raw sweep: every case agrees (${hits} hits of 2000)", agree)
+    ensure("mover toi against the raw sweep: some hits", hits > 0)
+    dynamics.destroy_world(world_id)
+    hull.destroy_hull(box)
+    hull.destroy_hull(offset_box)
+    hull.destroy_hull(bar)
+    free(points_block)
+    free(ids_block)
+}
+
 // --- the world queries ----------------------------------------------------------------------------------------------
 
 count_overlap(id: ShapeId, context: ptr) -> bool {
@@ -1358,6 +2207,12 @@ main() {
     test_def_flags()
     test_compound_shape_count()
     test_enlarged_proxy_destroyed()
+    test_ids()
+    test_overflow_color_pile()
+    test_set_worker_count()
+    test_compound_hit_events()
+    test_compound_contact_materials()
+    test_broad_phase_stress()
     test_restitution()
     test_joint_springs_and_locks()
     test_parallel_bookkeeping()
@@ -1366,6 +2221,8 @@ main() {
     test_sensor_stepped()
     test_explosion()
     test_body_queries()
+    test_overlap_proxies()
+    test_mover_time_of_impact()
     test_world_queries()
     test_determinism()
     // The scratch stays allocated: the worlds, the masses, the sweep and query buffers, the solvers' dummies (the modules' scratch is reserved before the count). The mover's planes are each query's own now, freed with it.

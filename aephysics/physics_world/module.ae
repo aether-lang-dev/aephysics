@@ -42,6 +42,7 @@ exports (
     set_contact_tuning, set_contact_recycle_distance, get_contact_recycle_distance, set_maximum_linear_speed, get_maximum_linear_speed,
     set_gravity, get_gravity, set_user_data, get_user_data, set_friction_callback, set_restitution_callback,
     set_custom_filter_callback, set_pre_solve_callback, get_awake_body_count, get_counters, get_bounds, rebuild_static_tree,
+    set_worker_count, get_worker_count,
     overlap_aabb, overlap_shape, collide_mover, cast_ray, cast_ray_closest, cast_shape, cast_mover,
     body_cast_ray, body_cast_shape, body_overlap_shape, body_collide_mover, body_time_of_impact_mover, shape_ray_cast,
     default_explosion_def, explode
@@ -108,8 +109,9 @@ struct Counters {
     tree_height: int
     sat_call_count: int
     sat_cache_hit_count: int
-    awake_contact_count: int
+    awake_contact_count: int       // the contacts the collide pass touches: the graph's and the awake non-touching
     recycled_contact_count: int
+    color_counts: int[24]          // each colour's contacts and joints, the overflow last
 }
 
 // The world of an id, or null when the id is stale or the world is locked.
@@ -386,11 +388,38 @@ get_counters(id: WorldId) -> Counters {
     stack_used = basics.stack_max_allocation(&w.stack)
     static_height = dynamic_tree.tree_get_height(broad_phase.broad_phase_tree(&w.broad_phase, dynamics.BODY_STATIC))
     dynamic_height = dynamic_tree.tree_get_height(broad_phase.broad_phase_tree(&w.broad_phase, dynamics.BODY_DYNAMIC))
+    // As the reference counts them (b3World_GetCounters): every colour's
+    // convex and scalar contacts and joints, and the awake contacts are
+    // those plus the awake set's non-touching ones.
+    c = Counters { body_count: bodies, shape_count: shapes, contact_count: contacts, joint_count: joints, island_count: islands,
+                   stack_used: stack_used, static_tree_height: static_height, tree_height: dynamic_height,
+                   sat_call_count: w.sat_call_count, sat_cache_hit_count: w.sat_cache_hit_count,
+                   awake_contact_count: 0, recycled_contact_count: w.recycled_contact_count }
     awake_contacts = dynamics.get_solver_set(w, dynamics.AWAKE_SET).contact_indices.count
-    return Counters { body_count: bodies, shape_count: shapes, contact_count: contacts, joint_count: joints, island_count: islands,
-                      stack_used: stack_used, static_tree_height: static_height, tree_height: dynamic_height,
-                      sat_call_count: w.sat_call_count, sat_cache_hit_count: w.sat_cache_hit_count,
-                      awake_contact_count: awake_contacts, recycled_contact_count: w.recycled_contact_count }
+    i = 0
+    while i < dynamics.GRAPH_COLOR_COUNT {
+        color = dynamics.graph_color(w, i)
+        color_contacts = color.convex_contacts.count + color.contacts.count
+        c.color_counts[i] = color_contacts + color.joint_sims.count
+        awake_contacts = awake_contacts + color_contacts
+        i = i + 1
+    }
+    c.awake_contact_count = awake_contacts
+    return c
+}
+
+// The worker count, set between steps and clamped to [1, MAX_WORKERS]
+// (b3World_SetWorkerCount); a world on a host's scheduler keeps the
+// scheduler's count.
+set_worker_count(id: WorldId, count: int) {
+    w = world_of(id)
+    if w == null { return }
+    dynamics.set_worker_count(w, count)
+}
+
+get_worker_count(id: WorldId) -> int {
+    if dynamics.world_is_valid(id) == false { return 0 }
+    return dynamics.get_world(id.index1 - 1).worker_count
 }
 
 // The bounds of everything in the trees.

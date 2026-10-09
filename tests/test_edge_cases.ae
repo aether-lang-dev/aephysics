@@ -1170,6 +1170,252 @@ test_non_dynamic_joint_disable() {
     dynamics.destroy_world(world_id)
 }
 
+// test_world.c's BodySimLocatorTest: the reference's five scenes that
+// drive each place a contact's sim indices can go stale, every step
+// validated, each run at one worker and at four with the final states
+// compared bit for bit; and LocatorFastFlagTest.
+var g_locator_failed = false
+var g_locator_boxes: ptr = null   // the box hulls a scene's bodies hold, freed with it
+var g_locator_box_count = 0
+
+locator_world(workers: int) -> WorldId {
+    wdef = dynamics.default_world_def()
+    wdef.worker_count = workers
+    g_locator_box_count = 0
+    return dynamics.create_world(&wdef)
+}
+
+locator_body(world_id: WorldId, kind: int, p: Vec3, hx: float, hy: float, hz: float) -> BodyId {
+    bdef = dynamics.default_body_def()
+    bdef.kind = kind
+    bdef.position = p
+    body = dynamics.create_body(world_id, &bdef)
+    box = hull.make_box_hull(hx, hy, hz)
+    boxes = g_locator_boxes as ptr[]
+    boxes[g_locator_box_count] = box as ptr
+    g_locator_box_count = g_locator_box_count + 1
+    sdef = dynamics.default_shape_def()
+    dynamics.create_hull_shape(body, &sdef, box)
+    return body
+}
+
+locator_steps(world_id: WorldId, count: int) {
+    if checked_steps(world_id, count) == false { g_locator_failed = true }
+}
+
+// Steps until the body sleeps or the budget runs out; the steps taken.
+until_asleep(world_id: WorldId, body: BodyId, budget: int) -> int {
+    i = 0
+    while i < budget {
+        locator_steps(world_id, 1)
+        if dynamics.body_is_awake(body) == false { return i + 1 }
+        i = i + 1
+    }
+    return budget
+}
+
+// A world's state as one number: every live body's transform and
+// velocities, weighted by its id, so equal runs give equal sums.
+locator_hash(world_id: WorldId) -> float {
+    w = dynamics.get_world(world_id.index1 - 1)
+    sum = 0.0
+    i = 0
+    while i < w.bodies.count {
+        body = dynamics.body_at(w, i)
+        if body.set_index != dynamics.NULL_INDEX {
+            t = dynamics.get_body_sim(w, body).transform
+            weight = (i + 1) as float
+            sum = sum + weight * (t.p.x + 3.0 * t.p.y + 5.0 * t.p.z + 7.0 * t.q.x + 11.0 * t.q.y + 13.0 * t.q.z + 17.0 * t.q.w)
+        }
+        i = i + 1
+    }
+    return sum
+}
+
+locator_end(world_id: WorldId) -> float {
+    h = locator_hash(world_id)
+    dynamics.destroy_world(world_id)
+    boxes = g_locator_boxes as ptr[]
+    i = 0
+    while i < g_locator_box_count {
+        hull.destroy_hull(boxes[i] as *HullData)
+        i = i + 1
+    }
+    g_locator_box_count = 0
+    return h
+}
+
+// Sleep and wake: the plate beside the stack holds a non-touching contact
+// through the cycle, the one the wake path must fix up itself.
+locator_sleep_wake(workers: int) -> float {
+    world_id = locator_world(workers)
+    locator_body(world_id, dynamics.BODY_STATIC, math.vec3(0.0, 0.0 - 1.0, 0.0), 5.0, 1.0, 5.0)
+    stack0 = locator_body(world_id, dynamics.BODY_DYNAMIC, math.vec3(0.0, 0.5, 0.0), 0.5, 0.5, 0.5)
+    locator_body(world_id, dynamics.BODY_DYNAMIC, math.vec3(0.0, 1.5, 0.0), 0.5, 0.5, 0.5)
+    stack2 = locator_body(world_id, dynamics.BODY_DYNAMIC, math.vec3(0.0, 2.5, 0.0), 0.5, 0.5, 0.5)
+    plate = locator_body(world_id, dynamics.BODY_KINEMATIC, math.vec3(1.04, 2.5, 0.0), 0.5, 0.5, 0.5)
+    dynamics.body_enable_sleep(plate, false)
+    if until_asleep(world_id, stack0, 300) == 300 || dynamics.body_is_awake(stack2) { g_locator_failed = true }
+    dynamics.body_set_awake(stack0, true)
+    locator_steps(world_id, 5)
+    if dynamics.body_is_awake(stack2) == false { g_locator_failed = true }
+    if until_asleep(world_id, stack0, 300) == 300 { g_locator_failed = true }
+    locator_body(world_id, dynamics.BODY_DYNAMIC, math.vec3(0.0, 8.0, 0.0), 0.5, 0.5, 0.5)
+    woke = false
+    i = 0
+    while i < 180 {
+        locator_steps(world_id, 1)
+        if dynamics.body_is_awake(stack0) { woke = true }
+        i = i + 1
+    }
+    if woke == false { g_locator_failed = true }
+    return locator_end(world_id)
+}
+
+// An island falling asleep and a body leaving the awake set swap the last
+// awake sim into the hole.
+locator_awake_neighbor(workers: int) -> float {
+    world_id = locator_world(workers)
+    locator_body(world_id, dynamics.BODY_STATIC, math.vec3(0.0, 0.0 - 1.0, 0.0), 30.0, 1.0, 5.0)
+    sleeper0 = locator_body(world_id, dynamics.BODY_DYNAMIC, math.vec3(0.0 - 10.0, 0.5, 0.0), 0.5, 0.5, 0.5)
+    locator_body(world_id, dynamics.BODY_DYNAMIC, math.vec3(0.0 - 10.0, 1.5, 0.0), 0.5, 0.5, 0.5)
+    spare = locator_body(world_id, dynamics.BODY_DYNAMIC, math.vec3(20.0, 0.5, 0.0), 0.5, 0.5, 0.5)
+    dynamics.body_enable_sleep(spare, false)
+    awake0 = locator_body(world_id, dynamics.BODY_DYNAMIC, math.vec3(10.0, 0.5, 0.0), 0.5, 0.5, 0.5)
+    dynamics.body_enable_sleep(awake0, false)
+    i = 1
+    while i < 3 {
+        a = locator_body(world_id, dynamics.BODY_DYNAMIC, math.vec3(10.0, 0.5 + (i as float), 0.0), 0.5, 0.5, 0.5)
+        dynamics.body_enable_sleep(a, false)
+        i = i + 1
+    }
+    if until_asleep(world_id, sleeper0, 300) == 300 || dynamics.body_is_awake(awake0) == false { g_locator_failed = true }
+    locator_steps(world_id, 10)
+    dynamics.body_disable(spare)
+    locator_steps(world_id, 10)
+    dynamics.body_enable(spare)
+    locator_steps(world_id, 10)
+    return locator_end(world_id)
+}
+
+// Destroying a body swaps the last sim of its set into the hole, awake and static.
+locator_destroy(workers: int) -> float {
+    world_id = locator_world(workers)
+    locator_body(world_id, dynamics.BODY_STATIC, math.vec3(0.0, 0.0 - 1.0, 0.0), 5.0, 1.0, 5.0)
+    first = locator_body(world_id, dynamics.BODY_DYNAMIC, math.vec3(0.0, 0.5, 0.0), 0.5, 0.5, 0.5)
+    i = 1
+    while i < 4 {
+        locator_body(world_id, dynamics.BODY_DYNAMIC, math.vec3(0.0, 0.5 + (i as float), 0.0), 0.5, 0.5, 0.5)
+        i = i + 1
+    }
+    locator_steps(world_id, 30)
+    dynamics.destroy_body(first)
+    locator_steps(world_id, 30)
+    first_static = locator_body(world_id, dynamics.BODY_STATIC, math.vec3(10.0, 0.0 - 1.0, 0.0), 1.0, 1.0, 1.0)
+    locator_body(world_id, dynamics.BODY_DYNAMIC, math.vec3(10.0, 0.5, 0.0), 0.5, 0.5, 0.5)
+    i = 1
+    while i < 3 {
+        x = 10.0 + 4.0 * (i as float)
+        locator_body(world_id, dynamics.BODY_STATIC, math.vec3(x, 0.0 - 1.0, 0.0), 1.0, 1.0, 1.0)
+        locator_body(world_id, dynamics.BODY_DYNAMIC, math.vec3(x, 0.5, 0.0), 0.5, 0.5, 0.5)
+        i = i + 1
+    }
+    locator_steps(world_id, 30)
+    dynamics.destroy_body(first_static)
+    locator_steps(world_id, 30)
+    return locator_end(world_id)
+}
+
+// A kinematic plate parked a hair above a box keeps a non-touching contact
+// to it as it sleeps, the one case found through the body; driven down,
+// it wakes the box.
+locator_kinematic(workers: int) -> float {
+    world_id = locator_world(workers)
+    locator_body(world_id, dynamics.BODY_STATIC, math.vec3(0.0, 0.0 - 1.0, 0.0), 5.0, 1.0, 5.0)
+    box = locator_body(world_id, dynamics.BODY_DYNAMIC, math.vec3(0.0, 0.5, 0.0), 0.5, 0.5, 0.5)
+    plate = locator_body(world_id, dynamics.BODY_KINEMATIC, math.vec3(0.0, 1.52, 0.0), 1.0, 0.5, 1.0)
+    if until_asleep(world_id, box, 300) == 300 { g_locator_failed = true }
+    dynamics.body_set_linear_velocity(plate, math.vec3(0.0, 0.0 - 1.0, 0.0))
+    locator_steps(world_id, 60)
+    if dynamics.body_is_awake(box) == false { g_locator_failed = true }
+    return locator_end(world_id)
+}
+
+// The type changed and the body disabled move it between sets; a joint
+// across two sleeping sets merges them.
+locator_transfer(workers: int) -> float {
+    world_id = locator_world(workers)
+    locator_body(world_id, dynamics.BODY_STATIC, math.vec3(0.0, 0.0 - 1.0, 0.0), 20.0, 1.0, 5.0)
+    box = locator_body(world_id, dynamics.BODY_DYNAMIC, math.vec3(0.0, 0.5, 0.0), 0.5, 0.5, 0.5)
+    locator_steps(world_id, 30)
+    dynamics.body_set_type(box, dynamics.BODY_STATIC)
+    locator_steps(world_id, 5)
+    dynamics.body_set_type(box, dynamics.BODY_DYNAMIC)
+    locator_steps(world_id, 5)
+    dynamics.body_disable(box)
+    locator_steps(world_id, 5)
+    dynamics.body_enable(box)
+    locator_steps(world_id, 30)
+    sleeper0 = locator_body(world_id, dynamics.BODY_DYNAMIC, math.vec3(0.0 - 12.0, 0.5, 0.0), 0.5, 0.5, 0.5)
+    sleeper1 = locator_body(world_id, dynamics.BODY_DYNAMIC, math.vec3(12.0, 0.5, 0.0), 0.5, 0.5, 0.5)
+    if until_asleep(world_id, sleeper0, 300) == 300 || dynamics.body_is_awake(sleeper1) { g_locator_failed = true }
+    jdef = dynamics.default_spherical_joint_def()
+    jdef.base.body_id_a = sleeper0
+    jdef.base.body_id_b = sleeper1
+    dynamics.create_spherical_joint(world_id, &jdef)
+    locator_steps(world_id, 30)
+    return locator_end(world_id)
+}
+
+locator_scene(index: int, workers: int) -> float {
+    if index == 0 { return locator_sleep_wake(workers) }
+    if index == 1 { return locator_awake_neighbor(workers) }
+    if index == 2 { return locator_destroy(workers) }
+    if index == 3 { return locator_kinematic(workers) }
+    return locator_transfer(workers)
+}
+
+test_body_sim_locators() {
+    g_locator_boxes = calloc(64, 8)
+    names = [ "sleep and wake", "awake neighbour", "destroy", "kinematic", "transfer" ]
+    i = 0
+    while i < 5 {
+        g_locator_failed = false
+        one = locator_scene(i, 1)
+        four = locator_scene(i, 4)
+        ensure("locators, ${names[i]}: valid every step, each event as the scene expects", g_locator_failed == false)
+        ensure("locators, ${names[i]}: one worker and four alike (${one} against ${four})", one == four)
+        i = i + 1
+    }
+    free(g_locator_boxes)
+    // LocatorFastFlagTest: the fast flag a real fast step set survives a
+    // setter that syncs the body's flags to its sim.
+    wdef = dynamics.default_world_def()
+    world_id = dynamics.create_world(&wdef)
+    g_locator_boxes = calloc(4, 8)
+    g_locator_box_count = 0
+    locator_body(world_id, dynamics.BODY_STATIC, math.vec3(0.0, 0.0 - 1.0, 0.0), 5.0, 1.0, 5.0)
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.position = math.vec3(0.0 - 20.0, 2.0, 0.0)
+    bdef.linear_velocity = math.vec3(400.0, 0.0, 0.0)
+    bullet = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    dynamics.create_sphere_shape(bullet, &sdef, manifold.sphere(math.vec3_zero(), 0.1))
+    steps(world_id, 1)
+    w = dynamics.get_world(world_id.index1 - 1)
+    flags = dynamics.get_body_sim(w, dynamics.get_body_full_id(w, bullet)).flags
+    ensure("fast flag: set by a fast step", (flags & dynamics.IS_FAST) != 0)
+    locks = MotionLocks { linear_x: false, linear_y: false, linear_z: false, angular_x: true, angular_y: false, angular_z: false }
+    dynamics.body_set_motion_locks(bullet, locks)
+    flags = dynamics.get_body_sim(w, dynamics.get_body_full_id(w, bullet)).flags
+    ensure("fast flag: kept through the motion locks' flag sync", (flags & dynamics.IS_FAST) != 0)
+    steps(world_id, 1)
+    ensure("fast flag: valid after", valid_world(world_id))
+    locator_end(world_id)
+    free(g_locator_boxes)
+}
+
 test_encoded_sims() {
     fixtures_ready()
     slab = hull.make_box_hull(2.5, 0.5, 2.5)
@@ -1298,6 +1544,7 @@ main() {
     test_rocking_hull()
     test_encoded_sims()
     test_non_dynamic_joint_disable()
+    test_body_sim_locators()
     println("edge_cases: ${checks} checks")
     if failures == 0 {
         println("edge_cases: all checks passed")
