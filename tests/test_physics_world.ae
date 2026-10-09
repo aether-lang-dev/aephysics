@@ -1002,7 +1002,7 @@ stress_pairs_hold(world_id: WorldId, sleeping: bool) -> bool {
                 if b.id != dynamics.NULL_INDEX && b.proxy_key != dynamics.NULL_INDEX && b.sensor_index == dynamics.NULL_INDEX && a.body_id != b.body_id {
                     body_b = dynamics.body_at(w, b.body_id)
                     expected = shape.should_shapes_collide(a.filter, b.filter) && dynamics.should_bodies_collide(w, body_a, body_b) &&
-                               math.aabb_overlaps(dynamics.shape_fat_aabb(w, i), dynamics.shape_fat_aabb(w, j))
+                               math.aabbf_overlaps(dynamics.shape_fat_aabb(w, i), dynamics.shape_fat_aabb(w, j))
                     actual = broad_phase.has_pair(&w.broad_phase, basics.shape_pair_key(i, j, 0))
                     if (sleeping && actual && expected == false) == false && expected != actual { return false }
                 }

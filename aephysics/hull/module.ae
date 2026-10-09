@@ -28,6 +28,7 @@ exports (
     HullData, HalfEdge, MassData, ShapeExtent, Point2D,
     MAX_HULL_VERTICES, MAX_HULL_FACES, MAX_HULL_EDGES, HULL_VERSION, NULL_INDEX,
     hull_vertices, hull_points, hull_edges, hull_planes, hull_faces,
+    HULL_SOA_PADDING, hull_soa_stride, hull_soa_vertices, hull_soa_normals, hull_edge_cosines,
     create_hull, destroy_hull, clone_hull, clone_and_transform_hull, is_valid_hull, hull_bytes_valid,
     hash_hull_data, compare_hull_data,
     create_cylinder, create_cone, create_rock, create_complex_hull,
@@ -52,7 +53,12 @@ const MAX_HULL_FACES = 128
 const MAX_HULL_EDGES = 128
 // The final hull's counts are capped at 256 as in the reference, whose indices are bytes.
 const HULL_MAX_COUNT = 256
-const HULL_VERSION = 0x4A4C9587
+// The layout's tag: the single-precision rows the wide separating axis
+// test reads (#150) came with 0x4A4C9588.
+const HULL_VERSION = 0x4A4C9588
+// The rows' lanes: a row of vertices or normals is padded to a multiple of
+// this, so eight lanes read whole blocks (the reference's B3_HULL_SOA_PADDING).
+const HULL_SOA_PADDING = 8
 
 const MARK_VISIBLE = 0
 const MARK_DELETE = 1
@@ -87,6 +93,9 @@ struct HullData {
     face_count: int
     plane_offset: int
     face_offset: int
+    soa_vertex_offset: int     // f32 rows x, y, z of the vertices, each hull_soa_stride(vertex_count) long, padded with vertex 0
+    soa_normal_offset: int     // f32 rows x, y, z of the face normals, each hull_soa_stride(face_count) long, padded with zeros
+    edge_cosine_offset: int    // f32 per full edge: the cosine between its two faces' normals
     byte_count: int
 }
 
@@ -116,6 +125,14 @@ hull_points(h: *HullData) -> Vec3[] { return ((h as ptr) + h.point_offset) as Ve
 hull_edges(h: *HullData) -> HalfEdge[] { return ((h as ptr) + h.edge_offset) as HalfEdge[] }
 hull_planes(h: *HullData) -> Plane[] { return ((h as ptr) + h.plane_offset) as Plane[] }
 hull_faces(h: *HullData) -> int[] { return ((h as ptr) + h.face_offset) as int[] }
+
+// The single-precision rows (#150, the reference's b3GetHullSoaVertices,
+// b3GetHullSoaNormals and b3GetHullEdgeCosines): what the wide separating
+// axis test reads eight lanes at a time, made with the hull.
+hull_soa_stride(count: int) -> int { return (count + HULL_SOA_PADDING - 1) & (0 - HULL_SOA_PADDING) }
+hull_soa_vertices(h: *HullData) -> ptr { return (h as ptr) + h.soa_vertex_offset }
+hull_soa_normals(h: *HullData) -> ptr { return (h as ptr) + h.soa_normal_offset }
+hull_edge_cosines(h: *HullData) -> f32[] { return ((h as ptr) + h.edge_cosine_offset) as f32[] }
 
 align8(x: int) -> int { return (x + 7) & (0 - 8) }
 
@@ -1370,9 +1387,50 @@ update_hull_bulk_properties(h: *HullData) -> bool {
     return mass > 0.0 && volume > 0.0 && area > 0.0 && radius > 0.0
 }
 
+// The hull finished: its single-precision rows from its points and planes,
+// then its hash over every byte. Every builder ends here.
 stamp_hash(h: *HullData) {
+    refresh_hull_soa(h)
     h.hash = 0 as long
     h.hash = basics.hash_bytes(h as ptr, h.byte_count)
+}
+
+// The rows of the vertices and normals and the edges' cosines, from the
+// hull's points and planes (narrowed from double at the store). A row's
+// padding repeats vertex 0, so it never wins a support search that keeps
+// the lowest index on a tie, and the normals' padding is zero.
+refresh_hull_soa(h: *HullData) {
+    points = hull_points(h)
+    planes = hull_planes(h)
+    edges = hull_edges(h)
+    stride = hull_soa_stride(h.vertex_count)
+    v = hull_soa_vertices(h) as f32[]
+    i = 0
+    while i < stride {
+        p = points[0]
+        if i < h.vertex_count { p = points[i] }
+        v[i] = p.x as f32
+        v[stride + i] = p.y as f32
+        v[2 * stride + i] = p.z as f32
+        i = i + 1
+    }
+    face_stride = hull_soa_stride(h.face_count)
+    n = hull_soa_normals(h) as f32[]
+    i = 0
+    while i < face_stride {
+        normal = math.vec3_zero()
+        if i < h.face_count { normal = planes[i].normal }
+        n[i] = normal.x as f32
+        n[face_stride + i] = normal.y as f32
+        n[2 * face_stride + i] = normal.z as f32
+        i = i + 1
+    }
+    cosines = hull_edge_cosines(h)
+    i = 0
+    while i < h.edge_count / 2 {
+        cosines[i] = math.dot(planes[edges[2 * i].face].normal, planes[edges[2 * i + 1].face].normal) as f32
+        i = i + 1
+    }
 }
 
 hash_hull_data(h: *HullData) -> long { return h.hash }
@@ -1395,12 +1453,16 @@ hull_bytes_valid(h: *HullData, available: int) -> bool {
     if n < sizeof(HullData) || n > available { return false }
     if h.vertex_count < 4 || h.vertex_count > MAX_HULL_VERTICES { return false }
     if h.face_count < 4 || h.face_count > MAX_HULL_FACES { return false }
-    if h.edge_count < 12 || h.edge_count > MAX_HULL_EDGES || (h.edge_count & 1) != 0 { return false }
+    // edge_count counts half-edges; the builder allows MAX_HULL_EDGES full ones (#158).
+    if h.edge_count < 12 || h.edge_count > 2 * MAX_HULL_EDGES || (h.edge_count & 1) != 0 { return false }
     if basics.section_fits(h.vertex_offset, h.vertex_count, 4, n) == false { return false }
     if basics.section_fits(h.point_offset, h.vertex_count, sizeof(Vec3), n) == false { return false }
     if basics.section_fits(h.edge_offset, h.edge_count, sizeof(HalfEdge), n) == false { return false }
     if basics.section_fits(h.plane_offset, h.face_count, sizeof(Plane), n) == false { return false }
     if basics.section_fits(h.face_offset, h.face_count, 4, n) == false { return false }
+    if basics.section_fits(h.soa_vertex_offset, 3 * hull_soa_stride(h.vertex_count), 4, n) == false { return false }
+    if basics.section_fits(h.soa_normal_offset, 3 * hull_soa_stride(h.face_count), 4, n) == false { return false }
+    if basics.section_fits(h.edge_cosine_offset, h.edge_count / 2, 4, n) == false { return false }
     vertices = hull_vertices(h)
     edges = hull_edges(h)
     faces = hull_faces(h)
@@ -1437,6 +1499,12 @@ allocate_hull(vertex_count: int, edge_count: int, face_count: int) -> *HullData 
     byte_count = byte_count + align8(face_count * sizeof(Plane))
     face_offset = byte_count
     byte_count = byte_count + align8(face_count * 4)
+    soa_vertex_offset = byte_count
+    byte_count = byte_count + align8(3 * hull_soa_stride(vertex_count) * 4)
+    soa_normal_offset = byte_count
+    byte_count = byte_count + align8(3 * hull_soa_stride(face_count) * 4)
+    edge_cosine_offset = byte_count
+    byte_count = byte_count + align8((edge_count / 2) * 4)
     h = basics.alloc(byte_count) as *HullData
     h.version = HULL_VERSION
     h.vertex_offset = vertex_offset
@@ -1444,6 +1512,9 @@ allocate_hull(vertex_count: int, edge_count: int, face_count: int) -> *HullData 
     h.edge_offset = edge_offset
     h.plane_offset = plane_offset
     h.face_offset = face_offset
+    h.soa_vertex_offset = soa_vertex_offset
+    h.soa_normal_offset = soa_normal_offset
+    h.edge_cosine_offset = edge_cosine_offset
     h.vertex_count = vertex_count
     h.edge_count = edge_count
     h.face_count = face_count

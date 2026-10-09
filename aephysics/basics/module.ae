@@ -31,7 +31,7 @@ exports (
     idpool_create, idpool_destroy, idpool_alloc, idpool_free, idpool_count, idpool_capacity,
     key_hash, shape_pair_key, SHAPE_POWER, CHILD_POWER, MAX_SHAPES, MAX_CHILD_SHAPES,
     set_create, set_destroy, set_clear, set_add, set_remove, set_contains, set_contains_hashed,
-    set_count, set_bytes,
+    set_count, set_bytes, set_prefetch,
     LongMap, map_create, map_destroy, map_clear, map_set, map_get, map_has, map_remove, map_count, map_bytes,
     hash_bytes, section_fits,
     ints_create, ints_destroy, ints_reserve, ints_push, ints_pop, ints_get, ints_set, ints_clear,
@@ -838,6 +838,12 @@ set_contains(s: *HashSet, key: long) -> bool {
     index = find_slot(s, key, key_hash(key))
     items = s.items as SetItem[]
     return items[index].key == key
+}
+
+// The cache line of a hash's home slot, fetched ahead: a batch prefetches
+// every key's slot before it probes any (the reference's b3PrefetchHash).
+set_prefetch(s: *HashSet, hash: int) {
+    native.prefetch(s.items + (hash & (s.capacity - 1)) * sizeof(SetItem))
 }
 
 // With the hash already in hand, for a batch that prefetches slots.

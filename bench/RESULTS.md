@@ -1246,6 +1246,65 @@ reference. That is the convex pile's gap, and #150. Across the scenes the
 pairs phase is 1.4-1.6x the reference's (2.59 against 1.63 ms on the
 convex pile): the broad phase's boxes are double, where the reference
 keeps float boxes rounded outward even in its large-world build (#151).
+Both are taken up below.
+
+### The pairs phase and the wide separating axis test (2026-10-09, #151, #150)
+
+The tree's boxes are single precision now, rounded outward from double
+as the reference's large-world build rounds them: 32-byte nodes, the
+world's fat boxes in float, the insertion costs and the rays measured on
+the widened boxes. Measured alone, that did not move the pairs phase
+(main 1.64-1.82 ms on the convex pile, the float boxes 1.68-1.77). The
+profile said why: two thirds of the walk's samples were the pair set's
+probe, a cache miss on every candidate in a table larger than the
+caches. The reference batches its candidates and prefetches every slot
+before it probes any (b3FlushCandidatePairs); so do we now, 32 at a
+time, and the walk reads a leaf's shape index from the node instead of
+the proxy array. The pairs phase, ms per step, the better of two pinned
+runs, Box3D `e77352c` AVX2 and ours AVX2 alternating, one session:
+
+| scene | Box3D | before | after |
+|---|---|---|---|
+| convex_pile | 1.24 | 1.82 | 1.44 |
+| junkyard | 2.00 | 2.88 | 2.21 |
+| washer | 1.83 | 2.65 | 2.21 |
+| spinner | 0.284 | 0.403 | 0.353 |
+
+The separating axis test reads the hulls' new single-precision rows:
+support searches eight vertices a pass (a hull of 16 vertices or fewer
+is searched one vertex at a time in double, where the lanes' reduction
+cost more than it saved), edge candidates culled with the stored
+cosines and again by the best faces' probe points, edge pairs eight a
+pass with the axis and separation in lanes. Every winner is measured
+again in double, so the golden trace did not change. The SAT runs,
+microseconds a query, before / after / the reference:
+
+| pair | SAT | SAT, no inscribed-sphere bound |
+|---|---|---|
+| complex/complex | 1.76 / 1.60 / 0.95 | 16.2 / 12.9 / 6.01 |
+| complex/rock | 1.00 / 1.04 / 0.63 | 5.57 / 5.11 / 2.73 |
+| complex/cylinder | 2.77 / 2.02 / 1.06 | 14.8 / 12.8 / 5.98 |
+| rock/rock | 0.545 / 0.600 / 0.375 | 1.91 / 1.93 / 1.17 |
+| rock/cylinder | 1.51 / 1.34 / 0.74 | 4.88 / 4.80 / 3.01 |
+| cylinder/cylinder | 4.73 / 2.58 / 1.41 | 13.0 / 10.2 / 7.42 |
+
+(The rock rows were measured before the small-hull search went back to
+double; the rocks have ten vertices and take that path now.) The rest of
+the gap is the work around the lanes that the reference does in lanes
+too: the face dots, B taken into A's frame, A's edges gathered, and the
+reduction of a support search's lanes, which std.lanes cannot do in one
+step yet (aether#2603, aether#2550). #150 stays open for it.
+
+The whole step with all of it, ms per step, the better of two runs, ours
+before and after (that session was noisier for both engines, so the
+ratio to the reference is from the table above): convex_pile 11.84 to
+11.26, junkyard 28.3 to 25.0, washer 17.6 to 16.7, spinner 4.31 to 4.08,
+sleep 2.40 to 2.33, large_world 0.0114 to 0.0111, trees25 1.589 to 1.587,
+trees50 0.573 to 0.590, trees100 0.334 to 0.334. The trees scenes pay for
+the outward rounding: their fast shapes leave their fat boxes every
+step, and each new box is rounded (the inline, branch-free bit step of
+nextafterf); a tree query no longer rounds at all, the double box
+compared against the widened nodes.
 
 ## Build flags (inlining)
 

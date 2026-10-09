@@ -13,6 +13,7 @@ extern sin(x: float) -> float
 extern calloc(count: int, size: int) -> ptr
 extern exit(code: int)
 extern free(p: ptr)
+extern nextafterf(x: f32, y: f32) -> f32
 
 var failures = 0
 var checks = 0
@@ -33,6 +34,67 @@ ensure_small(name: string, value: float, tolerance: float) {
 // the double's, written once at a float's width, so a result converted
 // from one is the other to what a float can hold (#42). The tolerance is
 // a float's epsilon, scaled by the size of what is being compared.
+// The boxes the tree keeps in single precision (#151): a coordinate rounded
+// down is the nearest float at or below it and rounded up the nearest at
+// or above, the two the same float when it is one and adjacent floats when
+// not, at the origin, at 1e7, past a float's range and at the infinities;
+// a box rounded outward holds the double box; the float box operations.
+var g_zero_m = 0.0
+
+outward_rounding() {
+    values_block = calloc(12, 8)
+    values = values_block as float[]
+    values[0] = 0.0
+    values[1] = 0.1
+    values[2] = 0.0 - 0.1
+    values[3] = 10000000.1
+    values[4] = 0.0 - 10000000.3
+    values[5] = 1.0 / 3.0
+    values[6] = 0.5
+    values[7] = 1.0e-42
+    values[8] = 3.5e38
+    values[9] = 0.0 - 3.5e38
+    values[10] = 16777217.0
+    values[11] = 123456.789
+    held = true
+    tight = true
+    i = 0
+    while i < 12 {
+        x = values[i]
+        down = math.round_down_f32(x)
+        up = math.round_up_f32(x)
+        if (down as float) > x || (up as float) < x { held = false }
+        exact = ((x as f32) as float) == x
+        if exact && (down != up || (down as float) != x) { tight = false }
+        if exact == false && nextafterf(down, math.infinity_f32()) != up { tight = false }
+        i = i + 1
+    }
+    ensure("rounding: down at or below, up at or above, every value", held)
+    ensure("rounding: one float when exact, adjacent floats when not (libm's nextafterf the judge)", tight)
+    // The inline step against libm's at zero, at the largest float and at
+    // the smallest denormals: the same float every time.
+    tiny = 1.0e-46
+    ensure("rounding: just under zero is the smallest negative denormal", math.round_down_f32(0.0 - tiny) == nextafterf(0.0, 0.0 - math.infinity_f32()))
+    ensure("rounding: just over zero is the smallest positive denormal", math.round_up_f32(tiny) == nextafterf(0.0, math.infinity_f32()))
+    big = 3.40282347e38 * 1.0000001
+    ensure("rounding: past the largest float, down is the largest float and up infinity",
+           math.round_down_f32(big) == nextafterf(math.infinity_f32(), 0.0) && (math.round_up_f32(big) as float) == 1.0 / g_zero_m)
+    inf = 1.0 / g_zero_m
+    ensure("rounding: the infinities stay infinite", (math.round_down_f32(inf) as float) == inf && (math.round_up_f32(0.0 - inf) as float) == 0.0 - inf)
+    far = math.aabb(math.vec3(10000000.01, 0.0 - 0.3, 5.7), math.vec3(10000000.02, 0.4, 5.71))
+    out = math.aabb_round_out(far)
+    ensure("rounding: a centimetre box at 1e7 is held by its float box", math.aabb_contains(math.aabb_widen(out), far) && math.aabbf_holds(out, far))
+    ensure("rounding: and the float box is a float step wider at most", (out.upper.x as float) - (out.lower.x as float) <= 0.01 + 2.0)
+    a = math.aabb_round_out(math.aabb(math.vec3(0.0, 0.0, 0.0), math.vec3(1.0, 1.0, 1.0)))
+    b = math.aabb_round_out(math.aabb(math.vec3(0.5, 0.5, 0.5), math.vec3(2.0, 2.0, 2.0)))
+    c = math.aabb_round_out(math.aabb(math.vec3(1.5, 0.0, 0.0), math.vec3(2.0, 1.0, 1.0)))
+    ensure("float boxes: overlap and not", math.aabbf_overlaps(a, b) && math.aabbf_overlaps(a, c) == false)
+    u = math.aabbf_union(a, c)
+    ensure("float boxes: the union contains both", math.aabbf_contains(u, a) && math.aabbf_contains(u, c) && math.aabbf_contains(a, u) == false)
+    ensure("float boxes: the empty box overlaps nothing", math.aabbf_overlaps(math.aabbf_empty(), u) == false && math.is_valid_aabbf(u) && math.is_valid_aabbf(math.aabbf_empty()) == false)
+    free(values_block)
+}
+
 single_precision() {
     a = math.vec3(0.35, 0.0 - 1.25, 2.5)
     b = math.vec3(0.0 - 0.75, 0.5, 1.5)
@@ -355,6 +417,7 @@ main() {
     ensure("safe scale keeps a scale off zero", math.safe_scale(math.vec3(0.0, 0.0 - 0.001, 2.0)).y == 0.0 - math.MIN_SCALE)
 
     single_precision()
+    outward_rounding()
     println("math: ${checks} checks, ${pairs} direction pairs; cos/sin off libm by at most ${worst_cs}, atan2 by ${worst_atan}")
     if failures == 0 {
         println("math: all checks passed")

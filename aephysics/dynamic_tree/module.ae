@@ -34,7 +34,7 @@ exports (
     tree_query, tree_query_closest, tree_ray_cast, tree_box_cast,
     tree_get_height, tree_get_area_ratio, tree_get_root_bounds, tree_get_proxy_count,
     tree_rebuild, tree_get_byte_count, tree_validate, tree_validate_no_moved,
-    tree_get_user_data, tree_get_aabb,
+    tree_get_user_data, tree_get_aabb, tree_get_aabbf, tree_enlarge_proxy_internal,
     tree_create_proxy_internal, tree_move_proxy_internal, tree_mark_proxy_moved_serial,
     tree_mark_proxy_moved, tree_clear_moved, tree_gather_moved_proxies, tree_refit,
     tree_has_moved, tree_needs_rebuild, test_category, test_bounds_ray_overlap,
@@ -68,7 +68,7 @@ const COPY_ITEM_INTS = 2
 // A node. Siblings sit together at an even index. For a leaf, `height`
 // holds the shape index, truncated from the proxy's user data.
 struct DynamicTreeNode {
-    aabb: AABB
+    aabb: AABBf         // in single precision, rounded outward (#151): 32 bytes a node, the reference's
     flag_index: int
     height: int
 }
@@ -140,10 +140,12 @@ node_height(n: DynamicTreeNode) -> int {
 // float limits were not enough: a query box out to them overlapped, and the
 // empty node's proxy index read far past the proxies.
 make_empty_node() -> DynamicTreeNode {
-    inf = math.infinity()
-    return DynamicTreeNode { aabb: AABB { lower: Vec3 { x: inf, y: inf, z: inf }, upper: Vec3 { x: 0.0 - inf, y: 0.0 - inf, z: 0.0 - inf } },
-                             flag_index: EMPTY_NODE, height: 0 }
+    return DynamicTreeNode { aabb: math.aabbf_empty(), flag_index: EMPTY_NODE, height: 0 }
 }
+
+// A node's box in double, exactly: the insertion's costs and the rays are
+// measured on it, so only the storage is single precision.
+wide(n: DynamicTreeNode) -> AABB { return math.aabb_widen(n.aabb) }
 
 // The pair below the root, or the root itself when it is a leaf.
 root_pair(nodes: DynamicTreeNode[]) -> int {
@@ -158,13 +160,13 @@ make_internal_node(nodes: DynamicTreeNode[], pair: int) -> DynamicTreeNode {
     c1 = nodes[pair]
     c2 = nodes[pair + 1]
     return DynamicTreeNode {
-        aabb: math.aabb_union(c1.aabb, c2.aabb),
+        aabb: math.aabbf_union(c1.aabb, c2.aabb),
         flag_index: pair | ((c1.flag_index | c2.flag_index) & MOVED_NODE),
         height: 1 + math.max_int(node_height(c1), node_height(c2))
     }
 }
 
-make_leaf_node(box: AABB, proxy_id: int, user_data: long, moved: bool) -> DynamicTreeNode {
+make_leaf_node(box: AABBf, proxy_id: int, user_data: long, moved: bool) -> DynamicTreeNode {
     flags = proxy_id | LEAF_NODE
     if moved { flags = flags | MOVED_NODE }
     return DynamicTreeNode { aabb: box, flag_index: flags, height: user_data as int }
@@ -361,14 +363,15 @@ free_proxy(t: *DynamicTree, proxy_id: int) {
 // or D beside or below B, or beside or below C. The cost of a sibling is
 // the area of its union with D plus the growth of its ancestors; for an
 // internal child the lower bound of going below it prunes the descent.
-find_best_sibling(t: *DynamicTree, box_d: AABB) -> int {
+find_best_sibling(t: *DynamicTree, leaf_box: AABBf) -> int {
+    box_d = math.aabb_widen(leaf_box)
     center_d = math.aabb_center(box_d)
     area_d = math.aabb_area(box_d)
     nodes = t.nodes as DynamicTreeNode[]
     node_index = ROOT_NODE
     if is_leaf(nodes[node_index].flag_index) { return node_index }
 
-    root_box = nodes[node_index].aabb
+    root_box = wide(nodes[node_index])
     area_base = math.aabb_area(root_box)
     direct_cost = math.aabb_area(math.aabb_union(root_box, box_d))
     inherited_cost = 0.0
@@ -391,7 +394,7 @@ find_best_sibling(t: *DynamicTree, box_d: AABB) -> int {
         leaf2 = is_leaf(nodes[child2].flag_index)
 
         lower_cost1 = math.MAX_FLOAT
-        box1 = nodes[child1].aabb
+        box1 = wide(nodes[child1])
         direct_cost1 = math.aabb_area(math.aabb_union(box1, box_d))
         area1 = 0.0
         if leaf1 {
@@ -408,7 +411,7 @@ find_best_sibling(t: *DynamicTree, box_d: AABB) -> int {
         }
 
         lower_cost2 = math.MAX_FLOAT
-        box2 = nodes[child2].aabb
+        box2 = wide(nodes[child2])
         direct_cost2 = math.aabb_area(math.aabb_union(box2, box_d))
         area2 = 0.0
         if leaf2 {
@@ -483,14 +486,14 @@ rotate_nodes(t: *DynamicTree, i_a: int) {
         // Swap B with F or G.
         i_f = left_child(c.flag_index)
         i_g = i_f + 1
-        area_c = math.aabb_area(c.aabb)
-        delta_bf = math.aabb_area(math.aabb_union(b.aabb, nodes[i_g].aabb)) - area_c
+        area_c = math.aabb_area(wide(c))
+        delta_bf = math.aabb_area(math.aabb_union(wide(b), wide(nodes[i_g]))) - area_c
         if delta_bf < best_delta {
             best_down = i_b
             best_up = i_f
             best_delta = delta_bf
         }
-        delta_bg = math.aabb_area(math.aabb_union(b.aabb, nodes[i_f].aabb)) - area_c
+        delta_bg = math.aabb_area(math.aabb_union(wide(b), wide(nodes[i_f]))) - area_c
         if delta_bg < best_delta {
             best_down = i_b
             best_up = i_g
@@ -502,14 +505,14 @@ rotate_nodes(t: *DynamicTree, i_a: int) {
         // Swap C with D or E.
         i_d = left_child(b.flag_index)
         i_e = i_d + 1
-        area_b = math.aabb_area(b.aabb)
-        delta_cd = math.aabb_area(math.aabb_union(c.aabb, nodes[i_e].aabb)) - area_b
+        area_b = math.aabb_area(wide(b))
+        delta_cd = math.aabb_area(math.aabb_union(wide(c), wide(nodes[i_e]))) - area_b
         if delta_cd < best_delta {
             best_down = i_c
             best_up = i_d
             best_delta = delta_cd
         }
-        delta_ce = math.aabb_area(math.aabb_union(c.aabb, nodes[i_d].aabb)) - area_b
+        delta_ce = math.aabb_area(math.aabb_union(wide(c), wide(nodes[i_d]))) - area_b
         if delta_ce < best_delta {
             best_down = i_c
             best_up = i_e
@@ -520,7 +523,7 @@ rotate_nodes(t: *DynamicTree, i_a: int) {
     if best_down != NULL_INDEX { swap_nodes(t, best_down, best_up) }
 }
 
-insert_leaf(t: *DynamicTree, box: AABB, proxy_id: int, moved: bool, should_rotate: bool) {
+insert_leaf(t: *DynamicTree, box: AABBf, proxy_id: int, moved: bool, should_rotate: bool) {
     proxies = t.proxies as TreeProxy[]
     leaf = make_leaf_node(box, proxy_id, proxies[proxy_id].user_data, moved)
     nodes = t.nodes as DynamicTreeNode[]
@@ -585,7 +588,7 @@ remove_leaf(t: *DynamicTree, proxy_id: int) {
 
 // --- proxies -------------------------------------------------------------------
 
-tree_create_proxy_internal(t: *DynamicTree, box: AABB, category_bits: long, user_data: long, mark_moved: bool) -> int {
+tree_create_proxy_internal(t: *DynamicTree, box: AABBf, category_bits: long, user_data: long, mark_moved: bool) -> int {
     proxy_id = allocate_proxy(t)
     proxies = t.proxies as TreeProxy[]
     proxies[proxy_id].category_bits = category_bits
@@ -594,8 +597,10 @@ tree_create_proxy_internal(t: *DynamicTree, box: AABB, category_bits: long, user
     return proxy_id
 }
 
+// The box is narrowed outward to the node's single precision: the leaf
+// holds it whatever its distance from the origin.
 tree_create_proxy(t: *DynamicTree, box: AABB, category_bits: long, user_data: long) -> int {
-    return tree_create_proxy_internal(t, box, category_bits, user_data, false)
+    return tree_create_proxy_internal(t, math.aabb_round_out(box), category_bits, user_data, false)
 }
 
 tree_destroy_proxy(t: *DynamicTree, proxy_id: int) {
@@ -606,18 +611,22 @@ tree_destroy_proxy(t: *DynamicTree, proxy_id: int) {
 tree_get_proxy_count(t: *DynamicTree) -> int { return t.proxy_count }
 
 // Remove and reinsert, without rotations.
-tree_move_proxy_internal(t: *DynamicTree, proxy_id: int, box: AABB, mark_moved: bool) {
+tree_move_proxy_internal(t: *DynamicTree, proxy_id: int, box: AABBf, mark_moved: bool) {
     remove_leaf(t, proxy_id)
     insert_leaf(t, box, proxy_id, mark_moved, false)
 }
 
 tree_move_proxy(t: *DynamicTree, proxy_id: int, box: AABB) {
-    tree_move_proxy_internal(t, proxy_id, box, false)
+    tree_move_proxy_internal(t, proxy_id, math.aabb_round_out(box), false)
 }
 
 // Grow a leaf in place and every ancestor that has to grow with it; mark
 // the whole path moved. The caller ensures the box is not already contained.
 tree_enlarge_proxy(t: *DynamicTree, proxy_id: int, box: AABB) {
+    tree_enlarge_proxy_internal(t, proxy_id, math.aabb_round_out(box))
+}
+
+tree_enlarge_proxy_internal(t: *DynamicTree, proxy_id: int, box: AABBf) {
     nodes = t.nodes as DynamicTreeNode[]
     parents = t.parents as int[]
     proxies = t.proxies as TreeProxy[]
@@ -642,7 +651,7 @@ tree_enlarge_proxy(t: *DynamicTree, proxy_id: int, box: AABB) {
 }
 
 // Enlarge a node's box to contain b; true if it grew.
-enlarge_node(nodes: DynamicTreeNode[], index: int, b: AABB) -> bool {
+enlarge_node(nodes: DynamicTreeNode[], index: int, b: AABBf) -> bool {
     a = nodes[index].aabb
     changed = false
     if b.lower.x < a.lower.x { a.lower.x = b.lower.x
@@ -676,7 +685,15 @@ tree_get_user_data(t: *DynamicTree, proxy_id: int) -> long {
     return proxies[proxy_id].user_data
 }
 
+// The leaf's box, in double (exactly the float box it stores).
 tree_get_aabb(t: *DynamicTree, proxy_id: int) -> AABB {
+    proxies = t.proxies as TreeProxy[]
+    nodes = t.nodes as DynamicTreeNode[]
+    return math.aabb_widen(nodes[proxies[proxy_id].node].aabb)
+}
+
+// The leaf's box as it is stored.
+tree_get_aabbf(t: *DynamicTree, proxy_id: int) -> AABBf {
     proxies = t.proxies as TreeProxy[]
     nodes = t.nodes as DynamicTreeNode[]
     return nodes[proxies[proxy_id].node].aabb
@@ -692,13 +709,13 @@ tree_get_height(t: *DynamicTree) -> int {
 tree_get_area_ratio(t: *DynamicTree) -> float {
     if t.proxy_count == 0 { return 0.0 }
     nodes = t.nodes as DynamicTreeNode[]
-    root_area = math.aabb_area(nodes[ROOT_NODE].aabb)
+    root_area = math.aabb_area(wide(nodes[ROOT_NODE]))
     if root_area <= 0.0 { return 0.0 }
     // Free nodes and the empty node are leaf tagged.
     internal_area = 0.0
     i = 2
     while i < t.node_end {
-        if is_leaf(nodes[i].flag_index) == false { internal_area = internal_area + math.aabb_area(nodes[i].aabb) }
+        if is_leaf(nodes[i].flag_index) == false { internal_area = internal_area + math.aabb_area(wide(nodes[i])) }
         i = i + 1
     }
     return internal_area / root_area
@@ -707,7 +724,7 @@ tree_get_area_ratio(t: *DynamicTree) -> float {
 tree_get_root_bounds(t: *DynamicTree) -> AABB {
     if t.proxy_count == 0 { return AABB { lower: math.vec3_zero(), upper: math.vec3_zero() } }
     nodes = t.nodes as DynamicTreeNode[]
-    return nodes[ROOT_NODE].aabb
+    return wide(nodes[ROOT_NODE])
 }
 
 tree_get_byte_count(t: *DynamicTree) -> int {
@@ -732,7 +749,7 @@ validate_subtree(t: *DynamicTree, node_index: int, leaf_count: int[]) -> int {
     proxies = t.proxies as TreeProxy[]
     n = nodes[node_index]
     if is_empty_node(n.flag_index) { return 0 - 1 }
-    if math.is_valid_aabb(n.aabb) == false { return 0 - 1 }
+    if math.is_valid_aabbf(n.aabb) == false { return 0 - 1 }
 
     if is_leaf(n.flag_index) {
         proxy_id = proxy_id_of(n.flag_index)
@@ -750,7 +767,7 @@ validate_subtree(t: *DynamicTree, node_index: int, leaf_count: int[]) -> int {
     if t.dfs_ordered && node_index >= pair { return 0 - 1 }
     c1 = nodes[pair]
     c2 = nodes[pair + 1]
-    if math.aabb_contains(n.aabb, c1.aabb) == false || math.aabb_contains(n.aabb, c2.aabb) == false { return 0 - 1 }
+    if math.aabbf_contains(n.aabb, c1.aabb) == false || math.aabbf_contains(n.aabb, c2.aabb) == false { return 0 - 1 }
     if is_node_moved(n.flag_index) != (is_node_moved(c1.flag_index) || is_node_moved(c2.flag_index)) { return 0 - 1 }
 
     height1 = validate_subtree(t, pair, leaf_count)
@@ -836,9 +853,10 @@ struct TreeSaveHeader {
     padding: int
 }
 
-// The reference's B3_DYNAMIC_TREE_VERSION with this port's boxes (in
-// double) folded in, so neither engine takes the other's bytes.
-tree_save_version() -> long { return (0x1D6F4C2A73B80E91 as long) ^ (0x00000000D0B1E64 as long) }
+// The reference's B3_DYNAMIC_TREE_VERSION with this port's layout folded
+// in (single-precision boxes, its own node and header), so neither engine
+// takes the other's bytes.
+tree_save_version() -> long { return (0x1D6F4C2A73B80E91 as long) ^ (0x00000000F10A7151 as long) }
 
 // The tree as one block of bytes and its length, the block the caller's
 // to free (basics.free_bytes). A tree without parents (a compound's baked
@@ -924,13 +942,14 @@ tree_load_bytes(block: ptr, byte_count: int, scale: float) -> DynamicTree {
         tree_destroy(&t)
         return empty_tree()
     }
-    // A positive scale keeps every containment: rounding is monotonic.
+    // Scaled in double and narrowed outward again: a positive scale and the
+    // outward rounding are both monotonic, so every containment holds.
     nodes = t.nodes as DynamicTreeNode[]
     i = 0
     while i < t.node_end {
         if is_empty_node(nodes[i].flag_index) == false {
-            nodes[i].aabb.lower = math.mul_sv(scale, nodes[i].aabb.lower)
-            nodes[i].aabb.upper = math.mul_sv(scale, nodes[i].aabb.upper)
+            box = wide(nodes[i])
+            nodes[i].aabb = math.aabb_round_out(AABB { lower: math.mul_sv(scale, box.lower), upper: math.mul_sv(scale, box.upper) })
         }
         i = i + 1
     }
@@ -982,6 +1001,9 @@ tree_query_on(t: *DynamicTree, stack_block: ptr, box: AABB, mask_bits: long, req
     nodes = t.nodes as DynamicTreeNode[]
     proxies = t.proxies as TreeProxy[]
     stack = stack_block as int[]
+    // The double query box against each node's float box widened (exact):
+    // a node's box holds every double box stored under it, so nothing the
+    // query touches is missed, and no rounding is paid for per query.
     stack_count = 0
     stack[stack_count] = root_pair(nodes)
     stack_count = stack_count + 1
@@ -996,9 +1018,9 @@ tree_query_on(t: *DynamicTree, stack_block: ptr, box: AABB, mask_bits: long, req
             i = i + 1
             lo = nodes[index].aabb.lower
             up = nodes[index].aabb.upper
-            if up.x < box.lower.x || lo.x > box.upper.x { continue }
-            if up.y < box.lower.y || lo.y > box.upper.y { continue }
-            if up.z < box.lower.z || lo.z > box.upper.z { continue }
+            if (up.x as float) < box.lower.x || (lo.x as float) > box.upper.x { continue }
+            if (up.y as float) < box.lower.y || (lo.y as float) > box.upper.y { continue }
+            if (up.z as float) < box.lower.z || (lo.z as float) > box.upper.z { continue }
             flags = nodes[index].flag_index
             if is_leaf(flags) {
                 proxy_id = proxy_id_of(flags)
@@ -1018,7 +1040,8 @@ tree_query_on(t: *DynamicTree, stack_block: ptr, box: AABB, mask_bits: long, req
     return result
 }
 
-distance_to_node_sqr(point: Vec3, box: AABB) -> float {
+distance_to_node_sqr(point: Vec3, node_box: AABBf) -> float {
+    box = math.aabb_widen(node_box)
     r = math.sub(point, math.clamp_vec3(point, box.lower, box.upper))
     return math.dot(r, r)
 }
@@ -1170,14 +1193,14 @@ tree_ray_cast_on(t: *DynamicTree, stack_block: ptr, input: *RayCastInput, mask_b
         while i < 2 {
             index = pair + i
             i = i + 1
-            if math.slab_overlap(nodes[index].aabb.lower, nodes[index].aabb.upper, p1, inv, max_fraction) == false { continue }
+            if math.slab_overlap(math.widen3(nodes[index].aabb.lower), math.widen3(nodes[index].aabb.upper), p1, inv, max_fraction) == false { continue }
             if hit_count == 0 { hit0 = index } else { hit1 = index }
             hit_count = hit_count + 1
         }
 
         if hit_count == 2 && is_leaf(nodes[hit0].flag_index) == false && is_leaf(nodes[hit1].flag_index) == false {
-            d1 = math.distance_squared(math.aabb_center(nodes[hit0].aabb), p1)
-            d2 = math.distance_squared(math.aabb_center(nodes[hit1].aabb), p1)
+            d1 = math.distance_squared(math.aabb_center(wide(nodes[hit0])), p1)
+            d2 = math.distance_squared(math.aabb_center(wide(nodes[hit1])), p1)
             // The closest is pushed last.
             if d1 < d2 {
                 swap = hit0
@@ -1253,14 +1276,14 @@ tree_box_cast_on(t: *DynamicTree, stack_block: ptr, input: *BoxCastInput, mask_b
         while i < 2 {
             index = pair + i
             i = i + 1
-            if math.slab_overlap(math.sub(nodes[index].aabb.lower, extension), math.add(nodes[index].aabb.upper, extension), p1, inv, max_fraction) == false { continue }
+            if math.slab_overlap(math.sub(math.widen3(nodes[index].aabb.lower), extension), math.add(math.widen3(nodes[index].aabb.upper), extension), p1, inv, max_fraction) == false { continue }
             if hit_count == 0 { hit0 = index } else { hit1 = index }
             hit_count = hit_count + 1
         }
 
         if hit_count == 2 && is_leaf(nodes[hit0].flag_index) == false && is_leaf(nodes[hit1].flag_index) == false {
-            d1 = math.distance_squared(math.aabb_center(nodes[hit0].aabb), p1)
-            d2 = math.distance_squared(math.aabb_center(nodes[hit1].aabb), p1)
+            d1 = math.distance_squared(math.aabb_center(wide(nodes[hit0])), p1)
+            d2 = math.distance_squared(math.aabb_center(wide(nodes[hit1])), p1)
             if d1 < d2 {
                 swap = hit0
                 hit0 = hit1
@@ -1543,7 +1566,7 @@ tree_rebuild(t: *DynamicTree, full_build: bool) -> int {
         if full_build == false { node.flag_index = node.flag_index & (0 - 1 - MOVED_NODE) }
         leaf_indices[0] = 0
         leaves[0] = node
-        leaf_centers[0] = math.aabb_center(node.aabb)
+        leaf_centers[0] = math.aabb_center(wide(node))
         leaf_count = 1
     }
 
@@ -1564,7 +1587,7 @@ tree_rebuild(t: *DynamicTree, full_build: bool) -> int {
             if full_build == false { node.flag_index = node.flag_index & (0 - 1 - MOVED_NODE) }
             leaf_indices[leaf_count] = leaf_count
             leaves[leaf_count] = node
-            leaf_centers[leaf_count] = math.aabb_center(node.aabb)
+            leaf_centers[leaf_count] = math.aabb_center(wide(node))
             leaf_count = leaf_count + 1
         }
     }
@@ -1601,7 +1624,7 @@ tree_mark_proxy_moved_serial(t: *DynamicTree, proxy_id: int) {
 // body's own, unraced): a plain read first to skip the fetch-or where
 // the flag is already set, then the fetch-or, and the previous flags
 // say whether another worker got there first.
-tree_mark_proxy_moved(t: *DynamicTree, proxy_id: int, box: AABB) {
+tree_mark_proxy_moved(t: *DynamicTree, proxy_id: int, box: AABBf) {
     nodes = t.nodes as DynamicTreeNode[]
     parents = t.parents as int[]
     proxies = t.proxies as TreeProxy[]
@@ -1693,7 +1716,7 @@ refit_subtree(t: *DynamicTree, root_index: int) {
         if item < 0 {
             index = 0 - 1 - item
             pair = left_child(nodes[index].flag_index)
-            nodes[index].aabb = math.aabb_union(nodes[pair].aabb, nodes[pair + 1].aabb)
+            nodes[index].aabb = math.aabbf_union(nodes[pair].aabb, nodes[pair + 1].aabb)
             continue
         }
         n = nodes[item]
@@ -1724,11 +1747,11 @@ tree_refit(t: *DynamicTree) {
         if ((flags1 | flags2) & MOVED_NODE) != 0 {
             if (flags1 & (LEAF_NODE | MOVED_NODE)) == MOVED_NODE {
                 children = flags1 & NODE_INDEX_MASK
-                nodes[pair].aabb = math.aabb_union(nodes[children].aabb, nodes[children + 1].aabb)
+                nodes[pair].aabb = math.aabbf_union(nodes[children].aabb, nodes[children + 1].aabb)
             }
             if (flags2 & (LEAF_NODE | MOVED_NODE)) == MOVED_NODE {
                 children = flags2 & NODE_INDEX_MASK
-                nodes[pair + 1].aabb = math.aabb_union(nodes[children].aabb, nodes[children + 1].aabb)
+                nodes[pair + 1].aabb = math.aabbf_union(nodes[children].aabb, nodes[children + 1].aabb)
             }
         }
         pair = pair - 2

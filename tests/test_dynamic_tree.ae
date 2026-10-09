@@ -48,10 +48,12 @@ random_float(lo: float, hi: float) -> float {
     return lo + t * (hi - lo)
 }
 
+// Boxes a float holds exactly, so the tree's single-precision nodes keep
+// them as they are and the scans agree with the tree by construction.
 random_box(extent: float, largest: float) -> AABB {
     center = math.vec3(random_float(0.0 - extent, extent), random_float(0.0 - extent, extent), random_float(0.0 - extent, extent))
     half = math.vec3(random_float(0.1, largest), random_float(0.1, largest), random_float(0.1, largest))
-    return math.aabb(math.sub(center, half), math.add(center, half))
+    return math.aabb_widen(math.aabb_round_out(math.aabb(math.sub(center, half), math.add(center, half))))
 }
 
 // A set of hits keyed on user data (the box index): proxy ids recycle,
@@ -814,6 +816,62 @@ corrupted(block: ptr, byte_count: int, what: int) -> bool {
     return result
 }
 
+// Single-precision nodes far out (#151): 300 centimetre boxes at 1e7,
+// each held by its leaf, the root holding them all; every proxy a double
+// query box touches is found (the tree may find more, a float being a
+// metre there), and exactly the ones whose stored (rounded-out) boxes the
+// query box touches, compared in double.
+test_far_boxes() {
+    seed = 777
+    tree = dynamic_tree.tree_create(16)
+    boxes_block = calloc(PROXY_COUNT, sizeof(AABB))
+    boxes = boxes_block as AABB[]
+    origin = math.vec3(10000000.0, 0.0 - 2000.0, 3000000.0)
+    held = true
+    i = 0
+    while i < PROXY_COUNT {
+        center = math.add(origin, math.vec3(random_float(0.0 - 20.0, 20.0), random_float(0.0 - 20.0, 20.0), random_float(0.0 - 20.0, 20.0)))
+        half = random_float(0.005, 0.05)
+        boxes[i] = math.aabb(math.sub(center, math.vec3(half, half, half)), math.add(center, math.vec3(half, half, half)))
+        id = dynamic_tree.tree_create_proxy(&tree, boxes[i], dynamic_tree.default_category_bits(), i as long)
+        if math.aabb_contains(dynamic_tree.tree_get_aabb(&tree, id), boxes[i]) == false { held = false }
+        i = i + 1
+    }
+    ensure("far: every leaf holds its box", held)
+    ensure("far: valid", dynamic_tree.tree_validate(&tree))
+    root = dynamic_tree.tree_get_root_bounds(&tree)
+    all_held = true
+    i = 0
+    while i < PROXY_COUNT {
+        if math.aabb_contains(root, boxes[i]) == false { all_held = false }
+        i = i + 1
+    }
+    ensure("far: the root holds them all", all_held)
+    superset = true
+    exact = true
+    round = 0
+    while round < 200 {
+        center = math.add(origin, math.vec3(random_float(0.0 - 20.0, 20.0), random_float(0.0 - 20.0, 20.0), random_float(0.0 - 20.0, 20.0)))
+        r = random_float(0.01, 3.0)
+        query = math.aabb(math.sub(center, math.vec3(r, r, r)), math.add(center, math.vec3(r, r, r)))
+        tree_hits = hitset_create()
+        dynamic_tree.tree_query(&tree, query, dynamic_tree.default_mask_bits(), false, collect, (&tree_hits) as ptr)
+        i = 0
+        while i < PROXY_COUNT {
+            found = hitset_has(&tree_hits, i)
+            if math.aabb_overlaps(boxes[i], query) && found == false { superset = false }
+            if math.aabb_overlaps(math.aabb_widen(math.aabb_round_out(boxes[i])), query) != found { exact = false }
+            i = i + 1
+        }
+        hitset_destroy(&tree_hits)
+        round = round + 1
+    }
+    ensure("far: every box a query touches in double is found", superset)
+    ensure("far: and exactly the stored boxes it touches", exact)
+    free(boxes_block)
+    dynamic_tree.tree_destroy(&tree)
+}
+
 main() {
     // The compound module's query stacks live as long as the program; the
     // save test makes a compound, so they are taken before the count.
@@ -829,6 +887,7 @@ main() {
     test_query_closest()
     test_ray_cast_aabb()
     test_save_load()
+    test_far_boxes()
     ensure("every counted allocation was freed (${basics.alloc_count() - before} left, ${basics.bytes_in_use() - bytes_before} bytes)", basics.alloc_count() == before && basics.bytes_in_use() == bytes_before)
 
     println("dynamic_tree: ${checks} checks")
