@@ -558,6 +558,95 @@ test_concurrent_worlds() {
     hull.destroy_hull(box)
     hull.destroy_hull(slab)
 }
+// test_determinism.c's rolling mix (SingleRollingMixTest, the scene of its
+// SIMDWidthTest): 64 spheres, capsules and boxes thrown spinning onto a
+// slab, a few with rolling resistance, 120 steps; every step's checksum
+// folds each body's transform and its manifolds' rolling, friction, twist
+// and normal impulses, the state the wide solver keeps. The reference runs
+// it at width 4 and 8 in one process; here the width is the build's, and
+// CI checks this trace bit for bit on the four-lane build and the AVX2 one.
+rolling_mix(workers: int) -> Outcome {
+    wdef = dynamics.default_world_def()
+    wdef.worker_count = workers
+    world_id = dynamics.create_world(&wdef)
+    gdef = dynamics.default_body_def()
+    ground = dynamics.create_body(world_id, &gdef)
+    slab = hull.make_box_hull(40.0, 1.0, 40.0)
+    gsdef = dynamics.default_shape_def()
+    dynamics.create_hull_shape(ground, &gsdef, slab)
+    box = hull.make_box_hull(0.4, 0.4, 0.4)
+    ball = manifold.sphere(math.vec3_zero(), 0.4)
+    rod = manifold.capsule(math.vec3(0.0 - 0.3, 0.0, 0.0), math.vec3(0.3, 0.0, 0.0), 0.25)
+    count = 64
+    bodies_block = calloc(count, sizeof(BodyId))
+    bodies = bodies_block as BodyId[]
+    seed = 271828 as long
+    i = 0
+    while i < count {
+        row = i / 8
+        column = i % 8
+        bdef = dynamics.default_body_def()
+        bdef.kind = dynamics.BODY_DYNAMIC
+        bdef.position = math.vec3(2.0 * (column as float) - 7.0, 1.45, 2.0 * (row as float) - 7.0)
+        bodies[i] = dynamics.create_body(world_id, &bdef)
+        seed = (seed * (1664525 as long) + (1013904223 as long)) & (4294967295 as long)
+        sdef = dynamics.default_shape_def()
+        sdef.density = 1.0
+        sdef.base_material.rolling_resistance = 0.0
+        if (seed >> 28) < (5 as long) { sdef.base_material.rolling_resistance = 0.2 }
+        kind = i % 3
+        if kind == 0 { dynamics.create_sphere_shape(bodies[i], &sdef, ball) }
+        else if kind == 1 { dynamics.create_capsule_shape(bodies[i], &sdef, rod) }
+        else { dynamics.create_hull_shape(bodies[i], &sdef, box) }
+        sign = 1.0
+        if (i & 1) != 0 { sign = 0.0 - 1.0 }
+        dynamics.body_set_linear_velocity(bodies[i], math.vec3(0.0, 0.0 - 0.5, sign * 0.5))
+        dynamics.body_set_angular_velocity(bodies[i], math.vec3(sign * 3.0, 0.0, 0.0 - 2.0 * sign))
+        i = i + 1
+    }
+    data_block = calloc(4, sizeof(ContactData))
+    data = data_block as ContactData[]
+    total = 0.0
+    step = 0
+    while step < 120 {
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        hash = 0.0
+        i = 0
+        while i < count {
+            hash = fold_transform(hash, dynamics.body_get_transform(bodies[i]))
+            contacts = dynamics.body_get_contact_data(bodies[i], data, 4)
+            c = 0
+            while c < contacts {
+                m = 0
+                while m < data[c].manifold_count {
+                    mf = ((data[c].manifolds + m * sizeof(Manifold)) as ptr) as *Manifold
+                    hash = hash + (mf.rolling_impulse.x as float) * 3.0 + (mf.rolling_impulse.y as float) * 0.3 + (mf.rolling_impulse.z as float) * 30.0
+                    hash = hash + (mf.friction_impulse.x as float) * 5.0 + (mf.friction_impulse.y as float) * 0.5 + (mf.friction_impulse.z as float) * 50.0
+                    hash = hash + (mf.twist_impulse as float) * 11.0
+                    p = 0
+                    while p < mf.point_count {
+                        mp = dynamics.manifold_point_at(mf, p)
+                        hash = hash + (mp.normal_impulse as float) * 13.0 + (mp.total_normal_impulse as float) * 0.013
+                        p = p + 1
+                    }
+                    m = m + 1
+                }
+                c = c + 1
+            }
+            i = i + 1
+        }
+        step = step + 1
+        if g_trace && g_trace_run { println("trace rolling_mix ${step} ${hash} ${bits_of(hash)}") }
+        total = total + hash
+    }
+    free(data_block)
+    free(bodies_block)
+    dynamics.destroy_world(world_id)
+    hull.destroy_hull(slab)
+    hull.destroy_hull(box)
+    return Outcome { sleep_step: 120, hash: total, query_hits: 0, query_hash: 0.0 }
+}
+
 main() {
     test_concurrent_worlds()
     value = os.getenv("AEPHYSICS_TRACE")
@@ -608,6 +697,15 @@ main() {
     ensure("mesh drop: it slept", first.sleep_step > 0)
     ensure("mesh drop: the same scene twice, bit for bit", same_outcome(first, second))
     ensure("mesh drop: the same over four workers, bit for bit", same_outcome(first, four))
+
+    g_trace_run = true
+    first = rolling_mix(1)
+    g_trace_run = false
+    second = rolling_mix(1)
+    four = rolling_mix(4)
+    println("determinism: rolling mix checksum ${first.hash}")
+    ensure("rolling mix: the same scene twice, bit for bit", same_outcome(first, second))
+    ensure("rolling mix: the same over four workers, bit for bit", same_outcome(first, four))
 
     println("determinism: ${checks} checks")
     if failures == 0 {

@@ -1248,6 +1248,32 @@ test_shape_flags() {
     dynamics.destroy_world(world_id)
 }
 
+// test_shape.c's ShapeNameTest: no name from a default def, the def's name
+// carried, the setter overwriting, a long name kept whole (the reference's
+// name cache keeps it so), null clearing it; a body's name from its def.
+test_shape_names() {
+    world_id = new_world()
+    bdef = dynamic_body_def()
+    bdef.name = "carrier"
+    body = dynamics.create_body(world_id, &bdef)
+    ensure("names: the body def's name", string.equals(dynamics.body_get_name(body), "carrier") == 1)
+    sdef = dynamics.default_shape_def()
+    sdef.density = 1.0
+    ball = manifold.sphere(math.vec3_zero(), 0.5)
+    plain = dynamics.create_sphere_shape(body, &sdef, ball)
+    ensure("names: none from a default def", string.length(dynamics.shape_get_name(plain)) == 0)
+    sdef.name = "box"
+    named = dynamics.create_sphere_shape(body, &sdef, ball)
+    ensure("names: the def's name", string.equals(dynamics.shape_get_name(named), "box") == 1)
+    dynamics.shape_set_name(plain, "wheel")
+    ensure("names: the setter", string.equals(dynamics.shape_get_name(plain), "wheel") == 1)
+    dynamics.shape_set_name(plain, "abcdefghijklmnopqrstuvwxyz")
+    ensure("names: a long name whole", string.equals(dynamics.shape_get_name(plain), "abcdefghijklmnopqrstuvwxyz") == 1)
+    dynamics.shape_set_name(plain, null)
+    ensure("names: null clears it", string.length(dynamics.shape_get_name(plain)) == 0)
+    dynamics.destroy_world(world_id)
+}
+
 test_shape_api() {
     world_id = slab_world()
     w = dynamics.get_world(world_id.index1 - 1)
@@ -1730,6 +1756,7 @@ main() {
     test_shape_filter()
     test_shape_api()
     test_shape_flags()
+    test_shape_names()
     test_sensors()
     hull.destroy_hull(g_cube as *HullData)
     hull.destroy_hull(g_slab as *HullData)
