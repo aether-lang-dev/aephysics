@@ -28,9 +28,10 @@ import aephysics.dynamics
 import aephysics.contact_solver
 import aephysics.joint_solver
 import aephysics.solver
+import aephysics.parallel
 
 exports (
-    get_profile,
+    get_profile, get_max_capacity, world_byte_count, dump_memory_stats, Version, get_version, is_double_precision, is_avx2_available, get_world_count, get_max_world_count,
     RayResult, BodyCastResult, BodyPlaneResult, BodyTOIResult, ExplosionDef, Counters,
     step, world_of, is_valid,
     body_event_count, body_event, contact_begin_event_count, contact_begin_event, contact_end_event_count, contact_end_event,
@@ -98,6 +99,37 @@ struct ExplosionDef {
     impulse_per_area: float
 }
 
+// A version (b3Version).
+struct Version {
+    major: int
+    minor: int
+    revision: int
+}
+
+// The reference version this engine follows, in its API and its results:
+// e77352c, which calls itself 0.2.0 (b3GetVersion).
+get_version() -> Version { return Version { major: 0, minor: 2, revision: 0 } }
+
+// World positions are double, as in the reference's large-world build
+// (b3IsDoublePrecision); the rest single where the reference has it.
+is_double_precision() -> bool { return true }
+
+// Whether this CPU runs AVX2 (b3IsAVX2Available). The wide contact solver's
+// width is still the build's (-mavx2), #156.
+is_avx2_available() -> bool { return native.has_avx2() }
+
+// The worlds there are, and the most there have been at once.
+get_world_count() -> int { return dynamics.get_world_count() }
+get_max_world_count() -> int { return dynamics.get_max_world_count() }
+
+// The most the world has held at a step's start (b3World_GetMaxCapacity):
+// sized from it, the next world's def grows nothing while it steps.
+get_max_capacity(id: WorldId) -> Capacity {
+    w = world_of(id)
+    if w == null { return Capacity { static_shape_count: 0, dynamic_shape_count: 0, contact_count: 0, static_body_count: 0, dynamic_body_count: 0 } }
+    return w.max_capacity
+}
+
 struct Counters {
     body_count: int
     shape_count: int
@@ -112,6 +144,13 @@ struct Counters {
     awake_contact_count: int       // the contacts the collide pass touches: the graph's and the awake non-touching
     recycled_contact_count: int
     color_counts: int[24]          // each colour's contacts and joints, the overflow last
+    byte_count: long               // what the world holds, as world_byte_count adds it up
+    arena_capacity: int            // the most any worker's arena was asked for at once
+    task_count: int                // the tasks the last step spread over the workers
+    manifold_counts: int[8]        // the last collide pass's contacts with 1, 2, ... 7 or more manifolds
+    distance_iterations: int       // the most a time of impact's outer loop took, over the world's life
+    push_back_iterations: int      // the most push backs
+    root_iterations: int           // the most root solver iterations
 }
 
 // The world of an id, or null when the id is stale or the world is locked.
@@ -145,6 +184,8 @@ step(id: WorldId, time_step: float, sub_step_count: int) {
     // pool; the index is given back at the end.
     caller_index = dynamics.enter_world(w)
     solver.stage_step()
+    dynamics.track_capacity(w)
+    tasks_before = parallel.scheduler_task_count(w.scheduler as *Scheduler)
     w.locked = true
     basics.buffer_clear(&w.body_move_events)
     basics.buffer_clear(&w.sensor_begin_events)
@@ -192,6 +233,9 @@ step(id: WorldId, time_step: float, sub_step_count: int) {
     basics.stack_grow(&w.stack)
     dynamics.swap_end_events(w)
     w.profile.step = ms(os.now_monotonic_ns() - t0)
+    // The step's tasks: exact on the world's own scheduler; on one a host
+    // shares between worlds stepping at once, theirs are counted too.
+    w.task_count = parallel.scheduler_task_count(w.scheduler as *Scheduler) - tasks_before
     w.locked = false
     dynamics.leave_world(caller_index)
     if dynamics.recording_on(id.index1 - 1) { record_step_result(id, w) }
@@ -435,7 +479,228 @@ get_counters(id: WorldId) -> Counters {
         i = i + 1
     }
     c.awake_contact_count = awake_contacts
+    c.byte_count = world_byte_count(w, false)
+    c.task_count = w.task_count
+    k = 0
+    while k < dynamics.MANIFOLD_COUNT_BUCKETS {
+        c.manifold_counts[k] = w.manifold_counts[k]
+        k = k + 1
+    }
+    i = 0
+    while i < w.worker_count {
+        tc = dynamics.task_context_at(w, i)
+        c.arena_capacity = math.max_int(c.arena_capacity, basics.arena_peak(&tc.arena))
+        c.distance_iterations = math.max_int(c.distance_iterations, tc.distance_iterations)
+        c.push_back_iterations = math.max_int(c.push_back_iterations, tc.push_back_iterations)
+        c.root_iterations = math.max_int(c.root_iterations, tc.root_iterations)
+        i = i + 1
+    }
     return c
+}
+
+// The bytes a world holds, part by part as the reference adds them up
+// (b3GetWorldByteCount), and logged part by part when asked; ours adds the
+// fat boxes, the geometry it owns and the names.
+world_byte_count(w: *World, logged: bool) -> long {
+    total = 0 as long
+    body_ids = id_bytes(&w.body_id_pool)
+    set_ids = id_bytes(&w.solver_set_id_pool)
+    joint_ids = id_bytes(&w.joint_id_pool)
+    contact_ids = id_bytes(&w.contact_id_pool)
+    island_ids = id_bytes(&w.island_id_pool)
+    shape_ids = id_bytes(&w.shape_id_pool)
+    total = total + ((body_ids + set_ids + joint_ids + contact_ids + island_ids + shape_ids) as long)
+    if logged {
+        basics.log("id pools")
+        basics.log("body ids: ${body_ids}")
+        basics.log("solver set ids: ${set_ids}")
+        basics.log("joint ids: ${joint_ids}")
+        basics.log("contact ids: ${contact_ids}")
+        basics.log("island ids: ${island_ids}")
+        basics.log("shape ids: ${shape_ids}")
+    }
+
+    island_links = 0
+    i = 0
+    while i < w.islands.count {
+        island = dynamics.island_at(w, i)
+        if island.island_id != NULL_INDEX {
+            island_links = island_links + basics.ints_bytes(&island.bodies) + basics.buffer_bytes(&island.contacts) + basics.buffer_bytes(&island.joints)
+        }
+        i = i + 1
+    }
+    bodies = basics.buffer_bytes(&w.bodies)
+    sets = basics.buffer_bytes(&w.solver_sets)
+    joints = basics.buffer_bytes(&w.joints)
+    contacts = basics.buffer_bytes(&w.contacts)
+    islands = basics.buffer_bytes(&w.islands)
+    shapes = basics.buffer_bytes(&w.shapes)
+    sensors = basics.buffer_bytes(&w.sensors)
+    fat_boxes = basics.buffer_bytes(&w.fat_aabbs)
+    total = total + ((bodies + sets + joints + contacts + islands + island_links + shapes + sensors + fat_boxes) as long)
+    if logged {
+        basics.log("world arrays")
+        basics.log("bodies: ${bodies}")
+        basics.log("solver sets: ${sets}")
+        basics.log("joints: ${joints}")
+        basics.log("contacts: ${contacts}")
+        basics.log("islands: ${islands}")
+        basics.log("island links: ${island_links}")
+        basics.log("shapes: ${shapes}")
+        basics.log("sensors: ${sensors}")
+        basics.log("fat bounds: ${fat_boxes}")
+    }
+
+    overlaps = 0
+    i = 0
+    while i < w.sensors.count {
+        sensor = dynamics.sensor_at(w, i)
+        overlaps = overlaps + basics.buffer_bytes(&sensor.hits) + basics.buffer_bytes(&sensor.overlaps1) + basics.buffer_bytes(&sensor.overlaps2)
+        i = i + 1
+    }
+    total = total + (overlaps as long)
+    if logged {
+        basics.log("owned arrays")
+        basics.log("sensor overlaps: ${overlaps}")
+    }
+
+    hull_map = basics.buffer_bytes(&w.hull_entries) + basics.map_bytes(&w.hull_heads)
+    hull_data = 0
+    i = 0
+    while i < w.hull_entries.count {
+        entry = dynamics.hull_entry_at(w, i)
+        if entry.hull != null { hull_data = hull_data + (entry.hull as *HullData).byte_count }
+        i = i + 1
+    }
+    owned = basics.buffer_bytes(&w.owned_geometry)
+    i = 0
+    while i < w.owned_geometry.count {
+        owned = owned + ((w.owned_geometry.data + i * sizeof(OwnedGeometry)) as *OwnedGeometry).byte_count
+        i = i + 1
+    }
+    total = total + ((hull_map + hull_data + owned) as long)
+    if logged {
+        basics.log("hulls")
+        basics.log("database: ${hull_map} (${w.hull_count}, ${w.hull_entries.count})")
+        basics.log("hull data: ${hull_data}")
+        basics.log("owned geometry: ${owned}")
+    }
+
+    static_tree = dynamic_tree.tree_get_byte_count(broad_phase.broad_phase_tree(&w.broad_phase, dynamics.BODY_STATIC))
+    kinematic_tree = dynamic_tree.tree_get_byte_count(broad_phase.broad_phase_tree(&w.broad_phase, dynamics.BODY_KINEMATIC))
+    dynamic_tree_bytes = dynamic_tree.tree_get_byte_count(broad_phase.broad_phase_tree(&w.broad_phase, dynamics.BODY_DYNAMIC))
+    pair_set = basics.set_bytes(&w.broad_phase.pair_set)
+    total = total + ((static_tree + kinematic_tree + dynamic_tree_bytes + pair_set) as long)
+    if logged {
+        basics.log("broad-phase")
+        basics.log("static tree: ${static_tree}")
+        basics.log("kinematic tree: ${kinematic_tree}")
+        basics.log("dynamic tree: ${dynamic_tree_bytes}")
+        basics.log("pairSet: ${pair_set} (${basics.set_count(&w.broad_phase.pair_set)}, ${w.broad_phase.pair_set.capacity})")
+    }
+
+    allocator_array = basics.buffer_bytes(&w.manifold_allocators)
+    allocator_blocks = 0
+    allocators = w.manifold_allocators.data as BlockAllocator[]
+    i = 0
+    while i < w.manifold_allocators.count {
+        allocator_blocks = allocator_blocks + basics.buffer_bytes(&allocators[i].blocks) + allocators[i].blocks.count * basics.BLOCK_SIZE * allocators[i].element_size
+        i = i + 1
+    }
+    total = total + ((allocator_array + allocator_blocks) as long)
+    if logged {
+        basics.log("manifold allocators")
+        basics.log("allocator array: ${allocator_array}")
+        basics.log("blocks: ${allocator_blocks}")
+    }
+
+    body_sims = 0
+    body_states = 0
+    joint_sims = 0
+    contact_sims = 0
+    island_sims = 0
+    i = 0
+    while i < w.solver_sets.count {
+        set = dynamics.solver_set_at(w, i)
+        if set.set_index != NULL_INDEX {
+            body_sims = body_sims + basics.buffer_bytes(&set.body_sims)
+            body_states = body_states + basics.buffer_bytes(&set.body_states)
+            joint_sims = joint_sims + basics.buffer_bytes(&set.joint_sims)
+            contact_sims = contact_sims + basics.ints_bytes(&set.contact_indices)
+            island_sims = island_sims + basics.buffer_bytes(&set.island_sims)
+        }
+        i = i + 1
+    }
+    total = total + ((body_sims + body_states + joint_sims + contact_sims + island_sims) as long)
+    if logged {
+        basics.log("solver sets")
+        basics.log("body sim: ${body_sims}")
+        basics.log("body state: ${body_states}")
+        basics.log("joint sim: ${joint_sims}")
+        basics.log("contact sim: ${contact_sims}")
+        basics.log("island sim: ${island_sims}")
+    }
+
+    body_bits = 0
+    graph_contacts = 0
+    graph_joints = 0
+    i = 0
+    while i < dynamics.GRAPH_COLOR_COUNT {
+        color = dynamics.graph_color(w, i)
+        body_bits = body_bits + basics.bitset_bytes(&color.body_set)
+        graph_contacts = graph_contacts + basics.ints_bytes(&color.convex_contacts) + basics.buffer_bytes(&color.contacts)
+        graph_joints = graph_joints + basics.buffer_bytes(&color.joint_sims)
+        i = i + 1
+    }
+    total = total + ((body_bits + graph_joints + graph_contacts) as long)
+    if logged {
+        basics.log("constraint graph")
+        basics.log("body bit sets: ${body_bits}")
+        basics.log("joint sim: ${graph_joints}")
+        basics.log("contact sim: ${graph_contacts}")
+    }
+
+    task_contexts = w.worker_count * sizeof(TaskContext)
+    i = 0
+    while i < w.worker_count {
+        tc = dynamics.task_context_at(w, i)
+        task_contexts = task_contexts + basics.buffer_bytes(&tc.sensor_hits) + basics.bitset_bytes(&tc.contact_state) + basics.bitset_bytes(&tc.joint_state_bits) +
+                        basics.bitset_bytes(&tc.hit_event_bits) + basics.bitset_bytes(&tc.awake_island_bits) + basics.arena_capacity(&tc.arena)
+        i = i + 1
+    }
+    total = total + (task_contexts as long)
+    if logged {
+        basics.log("task contexts")
+        basics.log("worker: ${task_contexts}")
+    }
+
+    events = basics.buffer_bytes(&w.body_move_events) + basics.buffer_bytes(&w.sensor_begin_events) + basics.buffer_bytes(&w.contact_begin_events) +
+             basics.buffer_bytes(&w.sensor_end_events0) + basics.buffer_bytes(&w.sensor_end_events1) + basics.buffer_bytes(&w.contact_end_events0) +
+             basics.buffer_bytes(&w.contact_end_events1) + basics.buffer_bytes(&w.contact_hit_events) + basics.buffer_bytes(&w.joint_events)
+    names = basics.name_cache_bytes(&w.names)
+    total = total + ((events + names) as long)
+    if logged {
+        basics.log("events: ${events}")
+        basics.log("names: ${names}")
+    }
+
+    stack = basics.stack_capacity(&w.stack)
+    total = total + (stack as long)
+    if logged {
+        basics.log("stack allocator: ${stack}")
+        basics.log("total: ${total / (1024 as long)} KB")
+    }
+    return total
+}
+
+// An id pool's free list, in bytes (the reference's b3GetIdBytes).
+id_bytes(p: *IdPool) -> int { return basics.ints_bytes(&p.free_ids) }
+
+// The world's memory, part by part, to the host's log (b3World_DumpMemoryStats).
+dump_memory_stats(id: WorldId) {
+    w = world_of(id)
+    if w == null { return }
+    world_byte_count(w, true)
 }
 
 // The worker count, set between steps and clamped to [1, MAX_WORKERS]

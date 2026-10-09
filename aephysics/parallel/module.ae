@@ -27,14 +27,14 @@
 // worker, so the slots never run out.
 import std.worker
 import aephysics.native
+import aephysics.basics
 
 exports (
     MAX_WORKERS, MAX_TASKS, Task, Scheduler,
-    create_scheduler, destroy_scheduler, reset_scheduler, begin_round, enqueue, finish, parallel_for, scheduler_worker_count
+    create_scheduler, destroy_scheduler, reset_scheduler, begin_round, enqueue, finish, parallel_for, scheduler_worker_count,
+    scheduler_task_count
 )
 
-extern calloc(count: int, size: int) -> ptr
-extern free(p: ptr)
 extern abort()
 
 const MAX_WORKERS = 64   // native.MAX_WORKERS, which a const cannot name
@@ -69,6 +69,7 @@ struct Scheduler {
     live: int                      // atomic
     for_tasks: ptr                 // ForTask[MAX_WORKERS], parallel_for's, the scheduler's own
     for_handles: ptr               // *Task[MAX_WORKERS]
+    task_count: int                // atomic: the tasks parallel_for has spread
 }
 
 task_at(s: *Scheduler, index: int) -> *Task { return (s.tasks + index * sizeof(Task)) as *Task }
@@ -111,12 +112,13 @@ create_scheduler(worker_count: int) -> *Scheduler {
     count = worker_count
     if count < 1 { count = 1 }
     if count > MAX_WORKERS { count = MAX_WORKERS }
-    s = calloc(1, sizeof(Scheduler)) as *Scheduler
+    s = basics.alloc(sizeof(Scheduler)) as *Scheduler
     s.worker_count = count
-    s.tasks = calloc(MAX_TASKS, sizeof(Task))
-    s.for_tasks = calloc(MAX_WORKERS, sizeof(ForTask))
-    s.for_handles = calloc(MAX_WORKERS, 8)
-    s.semaphore = native.semaphore_new(0)
+    s.tasks = basics.alloc(MAX_TASKS * sizeof(Task))
+    s.for_tasks = basics.alloc(MAX_WORKERS * sizeof(ForTask))
+    s.for_handles = basics.alloc(MAX_WORKERS * 8)
+    s.semaphore = basics.alloc(native.semaphore_bytes())
+    native.semaphore_init(s.semaphore, 0)
     i = 1
     while i < count {
         if worker.run_detached(| _c: ptr | { worker_main(s) }) {
@@ -135,14 +137,20 @@ destroy_scheduler(s: *Scheduler) {
     while native.atomic_load((&s.live) as ptr) != 0 {
         native.yield_thread()
     }
-    native.semaphore_free(s.semaphore)
-    free(s.tasks)
-    free(s.for_tasks)
-    free(s.for_handles)
-    free(s as ptr)
+    native.semaphore_destroy(s.semaphore)
+    basics.free_bytes(s.semaphore, native.semaphore_bytes())
+    basics.free_bytes(s.tasks, MAX_TASKS * sizeof(Task))
+    basics.free_bytes(s.for_tasks, MAX_WORKERS * sizeof(ForTask))
+    basics.free_bytes(s.for_handles, MAX_WORKERS * 8)
+    basics.free_bytes(s as ptr, sizeof(Scheduler))
 }
 
 scheduler_worker_count(s: *Scheduler) -> int { return s.worker_count }
+
+// The tasks parallel_for has spread over the workers since the scheduler was
+// made, a range counting as many tasks as workers took part (the
+// reference's world task count).
+scheduler_task_count(s: *Scheduler) -> int { return native.atomic_load((&s.task_count) as ptr) }
 
 // The slots taken back, once every task of the last round is complete.
 reset_scheduler(s: *Scheduler) {
@@ -187,7 +195,8 @@ enqueue(s: *Scheduler, body: fn(ptr) -> void, context: ptr, worker_index: int) -
     slot = native.atomic_add((&s.next_slot) as ptr, 1)
     if slot >= MAX_TASKS {
         // Rounds begin with begin_round and hold at most MAX_WORKERS - 1 tasks, so this cannot be reached.
-        println("aephysics.parallel: more than ${MAX_TASKS} tasks in flight")
+        // (Aether has no line macro: the place is named instead.)
+        basics.report_failure("more than ${MAX_TASKS} tasks in flight", "aephysics.parallel.enqueue", 0)
         abort()
     }
     t = task_at(s, slot)
@@ -255,6 +264,7 @@ parallel_for(s: *Scheduler, body: fn(int, int, int, ptr) -> void, item_count: in
     // given the worker's index within the range.
     caller_index = native.worker_index()
     if worker_count <= 1 {
+        native.atomic_add((&s.task_count) as ptr, 1)
         body(0, item_count, 0, context)
         return 1
     }
@@ -264,6 +274,7 @@ parallel_for(s: *Scheduler, body: fn(int, int, int, ptr) -> void, item_count: in
     block_count = (item_count + block_size - 1) / block_size
     task_count = worker_count
     if block_count < task_count { task_count = block_count }
+    native.atomic_add((&s.task_count) as ptr, task_count)
     shared = ForShared { next_block: 0, block_count: block_count, block_size: block_size, item_count: item_count,
                          body: body, context: context }
     begin_round(s)

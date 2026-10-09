@@ -42,7 +42,7 @@ extern memcpy(dst: ptr, src: ptr, size: int) -> ptr
 extern memset(block: ptr, value: int, size: int) -> ptr
 
 const SNAPSHOT_MAGIC = 0x4E535041    // "APSN", little-endian
-const SNAPSHOT_VERSION = 2
+const SNAPSHOT_VERSION = 3
 const NULL_INDEX = 0 - 1
 
 // --- the bytes written -------------------------------------------------------------------------------
@@ -262,7 +262,7 @@ name_known(c: *NameCache, id: int) -> bool { return id == basics.NULL_NAME || ba
 snapshot_layout() -> long {
     hash = 0 - 3750763034362895579
     prime = 1099511628211 as long
-    sizes_block = basics.alloc(24 * 8)
+    sizes_block = basics.alloc(25 * 8)
     sizes = sizes_block as long[]
     sizes[0] = sizeof(Body) as long
     sizes[1] = sizeof(WorldShape) as long
@@ -288,12 +288,13 @@ snapshot_layout() -> long {
     sizes[21] = compound.COMPOUND_VERSION as long
     sizes[22] = dynamic_tree.tree_save_version()
     sizes[23] = dynamics.GRAPH_COLOR_COUNT as long
+    sizes[24] = sizeof(Capacity) as long
     i = 0
-    while i < 24 {
+    while i < 25 {
         hash = (hash ^ sizes[i]) * prime
         i = i + 1
     }
-    basics.free_bytes(sizes_block, 24 * 8)
+    basics.free_bytes(sizes_block, 25 * 8)
     return hash
 }
 
@@ -374,6 +375,7 @@ save_world(world_id: WorldId) -> (ptr, int) {
     w_int(&wr, w.compound_shape_count)
     w_float(&wr, w.inv_h)
     w_float(&wr, w.inv_dt)
+    w_bytes(&wr, (&w.max_capacity) as ptr, sizeof(Capacity))
 
     w_idpool(&wr, &w.body_id_pool)
     w_idpool(&wr, &w.solver_set_id_pool)
@@ -652,6 +654,7 @@ fill_world(w: *World, rd: *SnapReader) -> bool {
     w.compound_shape_count = r_int(rd)
     w.inv_h = r_float(rd)
     w.inv_dt = r_float(rd)
+    r_bytes(rd, (&w.max_capacity) as ptr, sizeof(Capacity))
     if rd.ok == false { return false }
     if w.restitution_iterations < 0 || w.restitution_iterations > dynamics.MAX_RESTITUTION_ITERATIONS { return false }
 

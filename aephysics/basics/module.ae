@@ -23,7 +23,8 @@ import aephysics.native
 exports (
     BitSet, IdPool, HashSet, Ints, Buffer, Stack, Arena, BlockAllocator, BLOCK_SIZE,
     block_allocator_create, block_allocator_destroy, block_allocate, block_free,
-    alloc, free_bytes, alloc_count, bytes_in_use, sort_ints,
+    alloc, free_bytes, alloc_count, bytes_in_use, sort_ints, set_allocator, clear_allocator, set_log_fn, set_assert_fn, log,
+    report_failure, HOST_ALIGNMENT,
     is_power_of_2, bounding_power_of_2, round_up_power_of_2, lower_power_of_2_exponent,
     clz32, ctz32, ctz64, pop_count64, lsr, lsr32,
     bitset_create, bitset_destroy, bitset_set_count_and_clear, bitset_grow, bitset_union,
@@ -33,7 +34,7 @@ exports (
     set_create, set_destroy, set_clear, set_add, set_remove, set_contains, set_contains_hashed,
     set_count, set_bytes, set_prefetch, SetItem,
     LongMap, map_create, map_destroy, map_clear, map_set, map_get, map_has, map_remove, map_count, map_bytes,
-    hash_bytes, section_fits,
+    hash_bytes, section_fits, HASH_INIT, djb2_hash,
     NameCache, NULL_NAME, name_cache_create, name_cache_destroy, name_hash32, name_cache_add, name_cache_find,
     name_cache_text, name_cache_load, name_cache_count, name_cache_id_at, name_cache_name_at, name_cache_length_at,
     name_cache_bytes,
@@ -62,8 +63,98 @@ extern memchr(block: ptr, value: int, size: int) -> ptr
 var g_alloc_count = 0
 var g_bytes_in_use = 0
 
-// Box3D's b3Alloc: zeroed, 16-byte aligned by the C runtime's own promise,
-// and counted, so a leak is a number a test reads.
+// What a host wires into the engine (b3SetAllocator, b3SetLogFcn,
+// b3SetAssertFcn), made when the first is set: until then the C runtime
+// allocates, println logs and a failure prints. The reference keeps them as
+// function pointers it checks for null; here the record is what is null.
+struct HostHooks {
+    has_allocator: bool
+    allocate: fn(int, int) -> ptr  // a block of `size` bytes aligned to `alignment`
+    release: fn(ptr, int)          // a block and the size it was asked for
+    log: fn(string)
+    failed: fn(string, string, int) -> int
+}
+
+var g_hooks: ptr = null            // *HostHooks, or null for none
+
+// The alignment a host's allocator is asked for: the widest lanes' (the
+// reference's B3_ALIGNMENT).
+const HOST_ALIGNMENT = 32
+
+system_allocate(size: int, alignment: int) -> ptr { return calloc(1, size) }
+system_release(block: ptr, size: int) { free(block) }
+system_log(text: string) { println(text) }
+system_failed(condition: string, file: string, line: int) -> int {
+    println("aephysics: ${condition} failed at ${file}:${line}")
+    return 0
+}
+
+hooks() -> *HostHooks {
+    if g_hooks == null {
+        made = calloc(1, sizeof(HostHooks)) as *HostHooks
+        made.has_allocator = false
+        made.allocate = system_allocate
+        made.release = system_release
+        made.log = system_log
+        made.failed = system_failed
+        g_hooks = made as ptr
+    }
+    return g_hooks as *HostHooks
+}
+
+// Every block the engine allocates from now on comes from `allocate` and
+// goes back through `release` with the size it was asked for (the
+// reference's b3SetAllocator). Set at startup: false, and nothing changed,
+// while blocks made by the allocator before are still out, since they must
+// go back to the allocator that made them.
+set_allocator(allocate: fn(int, int) -> ptr, release: fn(ptr, int)) -> bool {
+    if alloc_count() != 0 { return false }
+    h = hooks()
+    h.allocate = allocate
+    h.release = release
+    h.has_allocator = true
+    return true
+}
+
+// The C runtime allocates again, on the same terms as set_allocator.
+clear_allocator() -> bool {
+    if alloc_count() != 0 { return false }
+    if g_hooks != null { hooks().has_allocator = false }
+    return true
+}
+
+// The engine's messages go to `log` (the reference's b3SetLogFcn).
+set_log_fn(log: fn(string)) { hooks().log = log }
+
+// A failure the engine cannot go on from goes to `failed` with its
+// condition, file and line before the engine aborts (the reference's
+// b3SetAssertFcn). The engine checks what it is given and returns instead
+// of asserting; the one such failure is the scheduler's tasks overflowing.
+set_assert_fn(failed: fn(string, string, int) -> int) { hooks().failed = failed }
+
+// A message for the host.
+log(text: string) {
+    if g_hooks == null {
+        println(text)
+        return
+    }
+    sink = hooks().log
+    sink(text)
+}
+
+// A failure reported to the host, before the caller aborts.
+report_failure(condition: string, file: string, line: int) {
+    if g_hooks == null {
+        system_failed(condition, file, line)
+        return
+    }
+    sink = hooks().failed
+    sink(condition, file, line)
+}
+
+// Box3D's b3Alloc: zeroed and counted, so a leak is a number a test reads;
+// from the host's allocator when one is set (aligned to HOST_ALIGNMENT and
+// zeroed here), else the C runtime's (16-byte aligned by its own promise).
 // The counters move atomically: the collide pass and finalize allocate from
 // several workers at once (a mesh contact's triangle cache, an arena's
 // overflow, the continuous pass's sensor hits).
@@ -71,6 +162,12 @@ alloc(size: int) -> ptr {
     if size <= 0 { return null }
     native.atomic_add((&g_alloc_count) as ptr, 1)
     native.atomic_add((&g_bytes_in_use) as ptr, size)
+    if g_hooks != null && hooks().has_allocator {
+        allocate = hooks().allocate
+        block = allocate(size, HOST_ALIGNMENT)
+        if block != null { memset(block, 0, size) }
+        return block
+    }
     return calloc(1, size)
 }
 
@@ -78,6 +175,11 @@ free_bytes(block: ptr, size: int) {
     if block == null { return }
     native.atomic_add((&g_alloc_count) as ptr, 0 - 1)
     native.atomic_add((&g_bytes_in_use) as ptr, 0 - size)
+    if g_hooks != null && hooks().has_allocator {
+        release = hooks().release
+        release(block, size)
+        return
+    }
     free(block)
 }
 
@@ -398,6 +500,30 @@ map_remove(m: *LongMap, key: long) -> bool {
 map_count(m: *LongMap) -> int { return m.count }
 map_bytes(m: *LongMap) -> int { return m.capacity * sizeof(MapItem) }
 
+// --- the reference's determinism hash ----------------------------------------
+
+// The reference's b3Hash: djb2 over the bytes, eight at a time as two
+// little-endian words, then the rest one by one; unsigned 32-bit, started
+// from HASH_INIT. For checking that two runs made the same bytes.
+const HASH_INIT = 5381
+
+djb2_hash(hash: long, data: ptr, count: int) -> long {
+    mask = (1 as long << 32) - (1 as long)
+    result = hash & mask
+    i = 0
+    while i + 8 <= count {
+        word = native.load_word(data + i, 0 as long)
+        result = (result * (33 as long) + (word & mask)) & mask
+        result = (result * (33 as long) + lsr(word, 32)) & mask
+        i = i + 8
+    }
+    while i < count {
+        result = (result * (33 as long) + (native.load_u8(data, i as long) as long)) & mask
+        i = i + 1
+    }
+    return result
+}
+
 // --- the name cache ------------------------------------------------------------
 
 // The names a world's bodies and shapes go by, each kept once (the
@@ -465,13 +591,10 @@ name_entry_of(c: *NameCache, id: int) -> int {
 
 // The id of `name`, interned when it is new; NULL_NAME for none.
 name_cache_add(c: *NameCache, name: string) -> int {
-    text = native.name_copy(name)
-    if text == null { return NULL_NAME }
-    length = strlen(text)
-    id = NULL_NAME
-    if length > 0 { id = name_cache_add_bytes(c, text, length) }
-    native.name_free(text)
-    return id
+    if name == null { return NULL_NAME }
+    length = string.length(name)
+    if length == 0 { return NULL_NAME }
+    return name_cache_add_bytes(c, string.aether_string_raw_ptr(name), length)
 }
 
 // The id of the `length` bytes at `text`, interned when they are new.

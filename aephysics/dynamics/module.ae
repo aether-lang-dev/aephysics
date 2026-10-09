@@ -156,7 +156,9 @@ exports (
     world_joint_event_count, world_joint_event, world_set_pre_solve, world_clear_pre_solve,
     shape_user_material_id, make_relative_sweep, body_move_event_at,
     TaskContext, task_context, task_context_at, task_sensor_hit_at, enter_world, leave_world,
-    reset_world
+    reset_world,
+    get_world_count, get_max_world_count, track_capacity, contact_get_data, joint_get_constraint_tuning, shape_get_mesh_material_count,
+    MANIFOLD_COUNT_BUCKETS, hull_entry_at, HullEntry, OwnedGeometry
 )
 
 extern memset(block: ptr, value: int, size: int) -> ptr
@@ -1174,6 +1176,10 @@ struct TaskContext {
     split_island_id: int
     split_sleep_time: float
     sensor_hits: Buffer            // SensorHit, from the continuous pass
+    manifold_counts: int[8]        // the collide pass's contacts by manifold count (1 to 7, the last 7 or more)
+    distance_iterations: int       // the most any time of impact took, over the world's life
+    push_back_iterations: int
+    root_iterations: int
 }
 
 // Where a step's time went, in milliseconds (b3Profile): the broad
@@ -1302,9 +1308,23 @@ struct World {
     user_data: ptr
     recording: ptr                 // *Recording while the world records (aephysics.recording), else null
     names: NameCache               // the bodies' and shapes' names, each once
+    max_capacity: Capacity         // the most it has held at a step's start (b3World_GetMaxCapacity)
+    manifold_counts: int[8]        // the last collide pass's contacts by manifold count, every worker's
+    task_count: int                // the tasks the last step ran on the scheduler
+}
+
+// The buckets of the contacts' manifold counts (the reference's
+// B3_CONTACT_MANIFOLD_COUNT_BUCKETS): a contact with n manifolds counts in
+// bucket n - 1, the last holding seven or more.
+const MANIFOLD_COUNT_BUCKETS = 8
+
+count_manifolds(tc: *TaskContext, manifold_count: int) {
+    bucket = math.min_int(manifold_count, MANIFOLD_COUNT_BUCKETS - 1)
+    if bucket > 0 { tc.manifold_counts[bucket - 1] = tc.manifold_counts[bucket - 1] + 1 }
 }
 
 var g_worlds: ptr = null           // World[MAX_WORLDS]
+var g_max_world_count = 0          // the most worlds there have been at once
 
 worlds_ready() {
     if g_worlds == null { g_worlds = basics.alloc(MAX_WORLDS * sizeof(World)) }
@@ -1446,7 +1466,36 @@ create_world(def: *WorldDef) -> WorldId {
     w.restitution_callback = def.restitution_callback
     w.user_data = def.user_data
     init_world_contents(w, def)
+    g_max_world_count = math.max_int(g_max_world_count, get_world_count())
     return WorldId { index1: index + 1, generation: generation }
+}
+
+// The worlds there are (b3GetWorldCount), and the most there have been at
+// once (b3GetMaxWorldCount).
+get_world_count() -> int {
+    if g_worlds == null { return 0 }
+    count = 0
+    i = 0
+    while i < MAX_WORLDS {
+        if world_at(i).in_use { count = count + 1 }
+        i = i + 1
+    }
+    return count
+}
+
+get_max_world_count() -> int { return g_max_world_count }
+
+// The world's maximum capacity brought up to what it holds now, at the
+// start of a step (as the reference keeps it): a host sizes the next
+// world's def from it to grow nothing while stepping.
+track_capacity(w: *World) {
+    c = &w.max_capacity
+    c.static_shape_count = math.max_int(c.static_shape_count, dynamic_tree.tree_get_proxy_count(broad_phase.broad_phase_tree(&w.broad_phase, BODY_STATIC)))
+    c.dynamic_shape_count = math.max_int(c.dynamic_shape_count, dynamic_tree.tree_get_proxy_count(broad_phase.broad_phase_tree(&w.broad_phase, BODY_DYNAMIC)))
+    static_bodies = solver_set_at(w, STATIC_SET).body_sims.count
+    c.static_body_count = math.max_int(c.static_body_count, static_bodies)
+    c.dynamic_body_count = math.max_int(c.dynamic_body_count, world_body_count(w) - static_bodies)
+    c.contact_count = math.max_int(c.contact_count, basics.idpool_count(&w.contact_id_pool))
 }
 
 // Everything a world holds (its bodies, shapes, joints, contacts, sets,
@@ -1470,7 +1519,9 @@ init_world_contents(w: *World, def: *WorldDef) {
     w.contact_end_events1 = basics.buffer_create(sizeof(ContactEndTouchEvent), 4)
     w.end_event_index = 0
     create_graph(&w.constraint_graph, 16)
-    broad_phase.create_broad_phase(&w.broad_phase, Capacity { static_shape_count: def.static_shape_count, dynamic_shape_count: def.dynamic_shape_count, contact_count: def.contact_count })
+    broad_phase.create_broad_phase(&w.broad_phase, Capacity { static_shape_count: def.static_shape_count, dynamic_shape_count: def.dynamic_shape_count, contact_count: def.contact_count,
+                                                              static_body_count: def.static_body_count, dynamic_body_count: def.dynamic_body_count })
+    w.max_capacity = Capacity { static_shape_count: 0, dynamic_shape_count: 0, contact_count: 0, static_body_count: 0, dynamic_body_count: 0 }
     w.body_id_pool = basics.idpool_create()
     w.bodies = basics.buffer_create(sizeof(Body), math.max_int(16, def.static_body_count + def.dynamic_body_count))
     w.solver_set_id_pool = basics.idpool_create()
@@ -3410,6 +3461,8 @@ reset_shape_proxy(w: *World, s: *WorldShape, wake_bodies: bool, remake: bool) {
     w.locked = false
 }
 shape_get_surface_material(id: ShapeId) -> SurfaceMaterial { return get_shape_full_id(world_at(id.world0), id).material }
+// The materials a shape has: a mesh's or a compound's table, else one (b3Shape_GetMeshMaterialCount).
+shape_get_mesh_material_count(id: ShapeId) -> int { return get_shape_full_id(world_at(id.world0), id).material_count }
 shape_set_surface_material(id: ShapeId, m: SurfaceMaterial) {
     if recording_on(id.world0) { recorder = rec_begin(id.world0, OP_SHAPE_SET_SURFACE_MATERIAL); rec_id(recorder, id.index1, id.generation); rec_surface_material_value(recorder, m); rec_end(recorder) }
     set_surface_material(id, m)
@@ -4433,6 +4486,25 @@ contact_is_valid(id: ContactId) -> bool {
     if id.index1 < 1 || id.index1 > w.contacts.count { return false }
     c = contact_at(w, id.index1 - 1)
     return c.contact_id == id.index1 - 1 && c.generation == id.generation
+}
+
+// One contact's shapes and manifolds by its id (b3Contact_GetData): the
+// manifolds are the contact's own, read until the next step; an id that is
+// not a contact's gives none.
+contact_get_data(id: ContactId) -> ContactData {
+    if contact_is_valid(id) == false {
+        return ContactData { contact_id: id, shape_id_a: null_shape_id(), shape_id_b: null_shape_id(), manifolds: null, manifold_count: 0 }
+    }
+    w = world_at(id.world0)
+    c = contact_at(w, id.index1 - 1)
+    manifolds = null
+    count = 0
+    if c.manifold_count > 0 {
+        manifolds = c.manifolds
+        count = c.manifold_count
+    }
+    return ContactData { contact_id: id, shape_id_a: make_shape_id(w, world_shape_at(w, c.shape_id_a)), shape_id_b: make_shape_id(w, world_shape_at(w, c.shape_id_b)),
+                         manifolds: manifolds, manifold_count: count }
 }
 
 make_contact_id(w: *World, c: *Contact) -> ContactId { return ContactId { index1: c.contact_id + 1, world0: w.world_id, generation: c.generation } }
@@ -5860,6 +5932,7 @@ try_recycle_contact(w: *World, c: *Contact, sim_a: *BodySim, sim_b: *BodySim, st
     }
     tc = task_context(w)
     tc.recycled_contact_count = tc.recycled_contact_count + 1
+    count_manifolds(tc, c.manifold_count)
     return true
 }
 
@@ -5898,6 +5971,7 @@ collide_contact(w: *World, contact_id: int) {
     c.cached_relative_q = math.narrow_quat(relative.q)
     c.flags = c.flags | RELATIVE_TRANSFORM_VALID
     touching = update_contact(w, c, shape_a, math.widen3(sim_a.local_center), sim_a.transform, shape_b, math.widen3(sim_b.local_center), sim_b.transform, is_fast)
+    count_manifolds(task_context(w), c.manifold_count)
     if touching && was_touching && (c.flags & SIM_MESH_CONTACT) != 0 {
         contact_spec_at(graph_color(w, c.color_index), c.local_index).manifold_count = c.manifold_count
     }
@@ -6126,6 +6200,7 @@ collide_pass(w: *World) -> int {
         tc.sat_call_count = 0
         tc.sat_cache_hit_count = 0
         tc.recycled_contact_count = 0
+        memset((&tc.manifold_counts) as ptr, 0, MANIFOLD_COUNT_BUCKETS * 4)
         i = i + 1
     }
     // The contacts in blocks over the workers; each writes its own context.
@@ -6137,6 +6212,7 @@ collide_pass(w: *World) -> int {
     w.sat_call_count = 0
     w.sat_cache_hit_count = 0
     w.recycled_contact_count = 0
+    memset((&w.manifold_counts) as ptr, 0, MANIFOLD_COUNT_BUCKETS * 4)
     i = 0
     while i < w.worker_count {
         tc = task_context_at(w, i)
@@ -6144,6 +6220,11 @@ collide_pass(w: *World) -> int {
         w.sat_call_count = w.sat_call_count + tc.sat_call_count
         w.sat_cache_hit_count = w.sat_cache_hit_count + tc.sat_cache_hit_count
         w.recycled_contact_count = w.recycled_contact_count + tc.recycled_contact_count
+        b = 0
+        while b < MANIFOLD_COUNT_BUCKETS {
+            w.manifold_counts[b] = w.manifold_counts[b] + tc.manifold_counts[b]
+            b = b + 1
+        }
         basics.arena_sync(&tc.arena)
         i = i + 1
     }
@@ -7065,6 +7146,12 @@ joint_set_constraint_tuning(id: JointId, hertz: float, damping_ratio: float) {
     sim = get_joint_sim(w, get_joint_full_id(w, id))
     sim.constraint_hertz = hertz
     sim.constraint_damping_ratio = damping_ratio
+}
+// The joint's constraint stiffness and damping (b3Joint_GetConstraintTuning).
+joint_get_constraint_tuning(id: JointId) -> (float, float) {
+    w = world_at(id.world0)
+    sim = get_joint_sim(w, get_joint_full_id(w, id))
+    return sim.constraint_hertz, sim.constraint_damping_ratio
 }
 joint_get_constraint_hertz(id: JointId) -> float {
     w = world_at(id.world0)
