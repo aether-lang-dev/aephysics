@@ -8,10 +8,10 @@
 @source("aephysics_native.c")
 @c_include("aephysics_inline.h")
 exports (
-    MAX_WORKERS, worker_index, set_worker_index, claim_slots, release_slots, enter_traversal, leave_traversal, yield_thread, pause, processor_count, scratch,
+    MAX_WORKERS, worker_index, set_worker_index, claim_slots, release_slots, enter_traversal, leave_traversal, yield_thread, pause, processor_count, has_avx2, scratch,
     atomic_load, atomic_store, atomic_add, atomic_or, atomic_cas,
-    semaphore_new, semaphore_free, semaphore_wait, semaphore_signal,
-    name_copy, name_text, name_free, prefetch, load_word, load_u8, load_u16, f32_bits, f64_bits,
+    semaphore_bytes, semaphore_init, semaphore_destroy, semaphore_wait, semaphore_signal,
+    name_text, prefetch, load_word, load_u8, load_u16, f32_bits, f64_bits,
     round_down_f32, round_up_f32
 )
 
@@ -27,14 +27,16 @@ extern aephysics_enter_traversal(depths: ptr) -> int
 extern aephysics_leave_traversal(depths: ptr)
 extern aephysics_yield()
 extern aephysics_processor_count() -> int
+extern aephysics_has_avx2() -> int
 extern aephysics_pause() @c_import
 extern aephysics_atomic_load(p: ptr) -> int @c_import
 extern aephysics_atomic_store(p: ptr, value: int) @c_import
 extern aephysics_atomic_add(p: ptr, value: int) -> int @c_import
 extern aephysics_atomic_or(p: ptr, value: int) -> int @c_import
 extern aephysics_atomic_cas(p: ptr, expected: int, desired: int) -> int @c_import
-extern aephysics_semaphore_new(initial: int) -> ptr
-extern aephysics_semaphore_free(s: ptr)
+extern aephysics_semaphore_bytes() -> int
+extern aephysics_semaphore_init(block: ptr, initial: int) -> int
+extern aephysics_semaphore_destroy(block: ptr)
 extern aephysics_semaphore_wait(s: ptr)
 extern aephysics_semaphore_signal(s: ptr, count: int)
 extern aephysics_prefetch(p: ptr) @c_import
@@ -45,9 +47,7 @@ extern aephysics_f32_bits(value: f32) -> long @c_import
 extern aephysics_f64_bits(value: float) -> long @c_import
 extern aephysics_round_down_f32(x: float) -> f32 @c_import
 extern aephysics_round_up_f32(x: float) -> f32 @c_import
-extern aephysics_name_copy(s: string) -> ptr
 extern aephysics_name_text(name: ptr) -> string
-extern free(p: ptr)
 
 // The cache line at `p` fetched ahead of its use; harmless on any pointer.
 prefetch(p: ptr) { aephysics_prefetch(p) }
@@ -71,11 +71,8 @@ f64_bits(value: float) -> long { return aephysics_f64_bits(value) }
 round_down_f32(x: float) -> f32 { return aephysics_round_down_f32(x) }
 round_up_f32(x: float) -> f32 { return aephysics_round_up_f32(x) }
 
-// A name the world keeps: a plain copy of `s` (null for none), its text
-// (empty for none), and its release.
-name_copy(s: string) -> ptr { return aephysics_name_copy(s) }
+// A plain zero-ended name the engine keeps, as a string; empty for none.
 name_text(name: ptr) -> string { return aephysics_name_text(name) }
-name_free(name: ptr) { if name != null { free(name) } }
 
 // The worker slot the calling thread is running as: the task's inside a
 // world's step, else the slot the thread claimed the first time it asked
@@ -99,6 +96,9 @@ yield_thread() { aephysics_yield() }
 pause() { aephysics_pause() }
 processor_count() -> int { return aephysics_processor_count() }
 
+// Whether this CPU runs AVX2 instructions.
+has_avx2() -> bool { return aephysics_has_avx2() != 0 }
+
 // Atomics on an int where it sits (`(&s.field) as ptr`), sequentially
 // consistent: the solver's block claims and completion counts, its sync
 // bits, the bullets' count and the tree's moved flags, which workers
@@ -112,8 +112,11 @@ atomic_or(p: ptr, value: int) -> int { return aephysics_atomic_or(p, value) }
 atomic_cas(p: ptr, expected: int, desired: int) -> bool { return aephysics_atomic_cas(p, expected, desired) != 0 }
 
 // A counting semaphore: the scheduler's threads wait on it for work.
-semaphore_new(initial: int) -> ptr { return aephysics_semaphore_new(initial) }
-semaphore_free(s: ptr) { aephysics_semaphore_free(s) }
+// Its block is the caller's: semaphore_bytes of it, made by init (false
+// when the system refuses), undone by destroy.
+semaphore_bytes() -> int { return aephysics_semaphore_bytes() }
+semaphore_init(block: ptr, initial: int) -> bool { return aephysics_semaphore_init(block, initial) != 0 }
+semaphore_destroy(block: ptr) { aephysics_semaphore_destroy(block) }
 semaphore_wait(s: ptr) { aephysics_semaphore_wait(s) }
 semaphore_signal(s: ptr, count: int) { aephysics_semaphore_signal(s, count) }
 

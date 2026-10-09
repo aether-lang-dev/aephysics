@@ -203,7 +203,7 @@ test_align_spring() {
     shape = human.human_reference_shape()
     human.human_tight_limits(shape)
     human.create_human_shaped(&h, world_id, Transform { p: math.vec3(0.0, 0.05, 0.0), q: math.quat_identity() }, shape, 5.0, 1.0, 0.7, 1, null)
-    free(shape)
+    human.destroy_shape(shape)
     human.human_align_spring(&h, world_id, ground_of(world_id), 25.0, 1.0)
     pelvis = human.bone_at(&h, human.BONE_PELVIS)
     ensure("align: the pelvis got its joint", dynamics.joint_is_valid(pelvis.joint_id))
@@ -353,8 +353,8 @@ test_fit_identity() {
     }
     ensure("fit: the reference fitted to its own landmarks is the reference", same)
     free(block)
-    free(shape)
-    free(reference)
+    human.destroy_shape(shape)
+    human.destroy_shape(reference)
 }
 
 // A rig of the reference's size with the spine curved as MPFB's is (the
@@ -447,8 +447,8 @@ test_fit_curved() {
     human.destroy_human(&h)
     dynamics.destroy_world(world_id)
     free(block)
-    free(shape)
-    free(reference)
+    human.destroy_shape(shape)
+    human.destroy_shape(reference)
 }
 
 // The same figure dropped in two worlds lands bit for bit alike.
@@ -575,7 +575,7 @@ reach(prone: bool, tight: bool, kind: int, degrees: float) -> float {
     free(aims)
     human.destroy_human(&h)
     dynamics.destroy_world(world_id)
-    free(shape)
+    human.destroy_shape(shape)
     return worst
 }
 
@@ -625,7 +625,7 @@ test_reach() {
     arm = human.spec_at(shape, human.BONE_UPPER_ARM_L)
     knee = human.spec_at(shape, human.BONE_CALF_R)
     ensure("tight: the reference's cone and hinge", arm.swing_degrees == 45.0 && arm.cone_axis.z == 1.0 && knee.lower_degrees == 0.0 - 30.0 && knee.upper_degrees == 30.0)
-    free(shape)
+    human.destroy_shape(shape)
 }
 
 // A thigh sprung toward `degrees` from hanging down, ahead or out to its
@@ -673,7 +673,7 @@ thigh_reach(index: int, out_side: bool, degrees: float) -> ThighReach {
                           abduction: math.atan2_approx(math.dot(have, out_w), math.dot(have, down)) * math.RAD_TO_DEG }
     human.destroy_human(&h)
     dynamics.destroy_world(world_id)
-    free(shape)
+    human.destroy_shape(shape)
     return result
 }
 
@@ -727,7 +727,7 @@ test_hips() {
     }
     human.destroy_human(&h)
     dynamics.destroy_world(world_id)
-    free(shape)
+    human.destroy_shape(shape)
     // Moved by springs: flexion reaches, and a thigh pushed out sideways
     // slides along the edge toward its widest, short of a split.
     ahead = thigh_reach(human.BONE_THIGH_L, false, 120.0)
@@ -772,7 +772,7 @@ hinge_driven(index: int, toward: Vec3, past_upper: bool) -> float {
     if math.dot(math.sub(shin, math.mul_sv(math.dot(shin, math.normalize(thigh)), math.normalize(thigh))), way) < 0.0 { bend = 0.0 - bend }
     human.destroy_human(&h)
     dynamics.destroy_world(world_id)
-    free(shape)
+    human.destroy_shape(shape)
     return bend
 }
 
@@ -780,7 +780,7 @@ hinge_driven(index: int, toward: Vec3, past_upper: bool) -> float {
 test_hinges() {
     shape = human.human_reference_shape()
     axes = figure_axes(shape)
-    free(shape)
+    human.destroy_shape(shape)
     back = math.neg(axes.forward)
     // Which end is straight depends on the way the hinge's axis runs (the
     // left knee's and the right's are mirrored): each is driven past both.

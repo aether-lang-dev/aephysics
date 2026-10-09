@@ -167,7 +167,7 @@ test_keys() {
 test_grid() {
     bp_block = calloc(1, sizeof(BroadPhase))
     bp = bp_block as *BroadPhase
-    broad_phase.create_broad_phase(bp, Capacity { static_shape_count: 4, dynamic_shape_count: 64, contact_count: 64 })
+    broad_phase.create_broad_phase(bp, Capacity { static_shape_count: 4, dynamic_shape_count: 64, contact_count: 64, static_body_count: 0, dynamic_body_count: 0 })
     // A 6 x 6 grid of dynamic unit boxes at 1.5 spacing (no overlaps yet),
     // a static ground under them, and a kinematic platform through the
     // first row.
@@ -316,7 +316,7 @@ test_compound_pairs() {
 
     bp_block = calloc(1, sizeof(BroadPhase))
     bp = bp_block as *BroadPhase
-    broad_phase.create_broad_phase(bp, Capacity { static_shape_count: 4, dynamic_shape_count: 4, contact_count: 4 })
+    broad_phase.create_broad_phase(bp, Capacity { static_shape_count: 4, dynamic_shape_count: 4, contact_count: 4, static_body_count: 0, dynamic_body_count: 0 })
     scene_block = calloc(1, sizeof(Scene))
     scene = scene_block as *Scene
     scene.boxes = calloc(2, sizeof(AABB))

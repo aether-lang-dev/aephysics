@@ -36,16 +36,14 @@ exports (
     BONE_UPPER_ARM_L, BONE_LOWER_ARM_L, BONE_UPPER_ARM_R, BONE_LOWER_ARM_R, BONE_COUNT, FILTER_JOINT_COUNT,
     BONE_FOOT_L, BONE_FOOT_R, MAX_BONE_COUNT, ANKLE_PLANTAR_DEGREES, ANKLE_DORSAL_DEGREES, ANKLE_SIDE_DEGREES, ANKLE_ROLL_DEGREES,
     HumanBone, Human, BoneSpec, bone_at, filter_joint_at, spec_at,
-    human_reference_shape, human_anatomical_limits, human_tight_limits, human_chain_child, human_shape_head, human_shape_tail, human_shape_toe, human_fit_shape, create_human_shaped,
+    human_reference_shape, human_anatomical_limits, human_tight_limits, human_chain_child, human_shape_head, human_shape_tail, human_shape_toe, human_fit_shape, destroy_shape, create_human_shaped,
     create_human, destroy_human, human_set_velocity, human_apply_angular_impulse, human_set_joint_friction_torque,
     human_set_joint_spring_hertz, human_set_joint_damping_ratio, human_align_spring, human_release_align_spring, human_create_motor_anchors,
     human_create_parallel_anchors, human_destroy_anchors, human_has_anchors, human_set_anchor_target, human_set_bullet
 )
 
-extern calloc(count: int, size: int) -> ptr
 extern sin(x: float) -> float
 extern cos(x: float) -> float
-extern free(p: ptr)
 
 const BONE_PELVIS = 0
 const BONE_SPINE_01 = 1
@@ -152,10 +150,10 @@ struct BoneSpec {
     cone_major_axis: Vec3
 }
 
-// A figure's shape is BONE_COUNT BoneSpecs in one heap block: the
-// reference's from human_reference_shape, a rig's once human_fit_shape
-// has fitted it, and create_human_shaped builds either. The caller frees
-// it with free().
+// A figure's shape is BONE_COUNT BoneSpecs in one block from the engine's
+// allocator: the reference's from human_reference_shape, a rig's once
+// human_fit_shape has fitted it, and create_human_shaped builds either.
+// The caller frees it with destroy_shape.
 spec_at(shape: ptr, index: int) -> *BoneSpec { return (shape + index * sizeof(BoneSpec)) as *BoneSpec }
 set_spec(shape: ptr, index: int, spec: BoneSpec) { (shape as BoneSpec[])[index] = spec }
 
@@ -180,7 +178,7 @@ const FOOT_FRICTION = 0.9
 // The reference's figure, bone by bone (its frames measured from the rig,
 // its limits the reference's: cones about the rest, hinges either side of it).
 reference_tight_shape() -> ptr {
-    shape = calloc(BONE_COUNT, sizeof(BoneSpec))
+    shape = basics.alloc(BONE_COUNT * sizeof(BoneSpec))
     no_joint = math.transform_identity()
     on_axis = math.vec3_axis_z()
     set_spec(shape, BONE_PELVIS, BoneSpec {
@@ -346,15 +344,15 @@ const LINE_MIN = 0.005
 human_fit_shape(shape: ptr, heads: ptr, tails: ptr, toes: ptr) {
     head_at = heads as Vec3[]
     tail_at = tails as Vec3[]
-    turns = calloc(BONE_COUNT, sizeof(Quat))
+    turns = basics.alloc(BONE_COUNT * sizeof(Quat))
     turn = turns as Quat[]
-    olds = calloc(BONE_COUNT, sizeof(Quat))
+    olds = basics.alloc(BONE_COUNT * sizeof(Quat))
     old = olds as Quat[]
-    units = calloc(BONE_COUNT, sizeof(Vec3))
+    units = basics.alloc(BONE_COUNT * sizeof(Vec3))
     unit = units as Vec3[]
-    scales = calloc(BONE_COUNT, 8)
+    scales = basics.alloc(BONE_COUNT * 8)
     scale = scales as float[]
-    bends = calloc(BONE_COUNT, 8)
+    bends = basics.alloc(BONE_COUNT * 8)
     bend = bends as float[]
     reference_total = 0.0
     fitted_total = 0.0
@@ -430,12 +428,15 @@ human_fit_shape(shape: ptr, heads: ptr, tails: ptr, toes: ptr) {
         }
         i = i + 1
     }
-    free(turns)
-    free(olds)
-    free(units)
-    free(scales)
-    free(bends)
+    basics.free_bytes(turns, BONE_COUNT * sizeof(Quat))
+    basics.free_bytes(olds, BONE_COUNT * sizeof(Quat))
+    basics.free_bytes(units, BONE_COUNT * sizeof(Vec3))
+    basics.free_bytes(scales, BONE_COUNT * 8)
+    basics.free_bytes(bends, BONE_COUNT * 8)
 }
+
+// A figure's shape given back (human_reference_shape's block).
+destroy_shape(shape: ptr) { basics.free_bytes(shape, BONE_COUNT * sizeof(BoneSpec)) }
 
 cone_off_axis(axis: Vec3) -> bool { return axis.x != 0.0 || axis.y != 0.0 || axis.z <= 0.0 }
 
@@ -503,7 +504,7 @@ human_tight_limits(shape: ptr) {
         spec.cone_major_axis = t.cone_major_axis
         i = i + 1
     }
-    free(tight)
+    destroy_shape(tight)
 }
 
 across(v: Vec3, axis: Vec3) -> Vec3 { return math.sub(v, math.mul_sv(math.dot(v, axis), axis)) }
@@ -710,7 +711,7 @@ place_foot(h: *Human, world_id: WorldId, index: int, calf_index: int, placement:
 create_human(h: *Human, world_id: WorldId, position: Vec3, friction_torque: float, hertz: float, damping_ratio: float, group_index: int, user_data: ptr) {
     shape = human_reference_shape()
     create_human_shaped(h, world_id, Transform { p: position, q: math.quat_identity() }, shape, friction_torque, hertz, damping_ratio, group_index, user_data)
-    free(shape)
+    destroy_shape(shape)
 }
 
 // A figure of a shape, its space put in the world by `placement`.
@@ -725,8 +726,8 @@ create_human_shaped(h: *Human, world_id: WorldId, placement: Transform, shape: p
     if h.ankles && (spec_at(shape, BONE_CALF_L).has_foot == false || spec_at(shape, BONE_CALF_R).has_foot == false) { return }
     h.bone_count = BONE_COUNT
     if h.ankles { h.bone_count = MAX_BONE_COUNT }
-    h.bones = calloc(h.bone_count, sizeof(HumanBone))
-    h.filter_joints = calloc(FILTER_JOINT_COUNT, sizeof(JointId))
+    h.bones = basics.alloc(h.bone_count * sizeof(HumanBone))
+    h.filter_joints = basics.alloc(FILTER_JOINT_COUNT * sizeof(JointId))
     h.filter_joint_count = 0
     i = 0
     while i < h.bone_count {
@@ -864,8 +865,8 @@ take_down(h: *Human) {
         if dynamics.body_is_valid(bone.anchor_id) { dynamics.destroy_body(bone.anchor_id) }
         i = i + 1
     }
-    free(h.bones)
-    free(h.filter_joints)
+    basics.free_bytes(h.bones, h.bone_count * sizeof(HumanBone))
+    basics.free_bytes(h.filter_joints, FILTER_JOINT_COUNT * sizeof(JointId))
     h.bones = null
     h.filter_joints = null
     h.filter_joint_count = 0

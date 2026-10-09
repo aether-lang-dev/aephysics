@@ -53,10 +53,15 @@ const STACK_SIZE = 512
 const CANDIDATE_BATCH = 32
 
 // What a world expects to hold, for the initial capacities.
+// How much a world holds or is sized for (b3Capacity): the broad phase
+// reads the shapes and contacts; a world's maximum, kept every step, adds
+// the bodies (kinematic ones among the dynamic, as the reference counts).
 struct Capacity {
     static_shape_count: int
     dynamic_shape_count: int
     contact_count: int
+    static_body_count: int
+    dynamic_body_count: int
 }
 
 struct BroadPhase {

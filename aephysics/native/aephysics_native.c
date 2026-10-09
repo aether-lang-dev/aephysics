@@ -33,19 +33,10 @@
 
 // --- names ----------------------------------------------------------------------------------------------------
 
-// A body's or shape's name, kept as a plain C copy the world owns and frees
-// (free()): Aether cannot hold on to a string it did not make without the
-// runtime reclaiming it, and frees only what carries its own header, so a
-// plain buffer handed back is read as a literal and left alone.
-void *aephysics_name_copy(const char *s)
-{
-    if (s == NULL) return NULL;
-    size_t n = strlen(s);
-    char *copy = (char *)malloc(n + 1);
-    if (copy != NULL) memcpy(copy, s, n + 1);
-    return copy;
-}
-
+// A name the engine keeps (the world's name cache, a recording's tags) as a
+// plain zero-ended buffer, read back as a string: Aether frees only what
+// carries its own header, so a plain buffer handed back is read as a
+// literal and left alone. Empty for none.
 const char *aephysics_name_text(const void *name) { return name != NULL ? (const char *)name : ""; }
 
 // --- threads --------------------------------------------------------------------------------------------------
@@ -231,47 +222,69 @@ int aephysics_processor_count(void)
 #endif
 }
 
+// Whether this CPU runs AVX2 (the reference's b3IsAVX2Available): the
+// instruction set and the operating system's saving of its registers, as
+// GCC's and Clang's CPU check reads them. Never on a CPU that is not x86.
+int aephysics_has_avx2(void)
+{
+#if defined(__x86_64__) || defined(__i386__)
+    __builtin_cpu_init();
+    return __builtin_cpu_supports("avx2") ? 1 : 0;
+#else
+    return 0;
+#endif
+}
+
 // A counting semaphore (the reference's b3Semaphore): the scheduler's
 // threads wait on it for work and are signalled one per task, or once
 // each to shut down. Win32's, Apple's dispatch one, POSIX's elsewhere.
+// Its block is the caller's (allocated through the engine's allocator, as
+// the reference's b3CreateSemaphore allocates its own through b3Alloc):
+// aephysics_semaphore_bytes says how big, init makes it, destroy undoes
+// init and leaves the block to its owner.
 #ifdef _WIN32
-void *aephysics_semaphore_new(int initial) { return CreateSemaphoreExW(NULL, initial, INT_MAX, NULL, 0, SEMAPHORE_ALL_ACCESS); }
-void aephysics_semaphore_free(void *s) { CloseHandle((HANDLE)s); }
-void aephysics_semaphore_wait(void *s) { WaitForSingleObjectEx((HANDLE)s, INFINITE, FALSE); }
-void aephysics_semaphore_signal(void *s, int count) { ReleaseSemaphore((HANDLE)s, count, NULL); }
-#elif defined(__APPLE__)
-void *aephysics_semaphore_new(int initial) { return (void *)dispatch_semaphore_create(initial); }
-void aephysics_semaphore_free(void *s) { dispatch_release((dispatch_semaphore_t)s); }
-void aephysics_semaphore_wait(void *s) { dispatch_semaphore_wait((dispatch_semaphore_t)s, DISPATCH_TIME_FOREVER); }
-void aephysics_semaphore_signal(void *s, int count)
+typedef struct { HANDLE handle; } AephysicsSemaphore;
+int aephysics_semaphore_init(void *block, int initial)
 {
-    for (int i = 0; i < count; ++i) dispatch_semaphore_signal((dispatch_semaphore_t)s);
+    AephysicsSemaphore *s = (AephysicsSemaphore *)block;
+    s->handle = CreateSemaphoreExW(NULL, initial, INT_MAX, NULL, 0, SEMAPHORE_ALL_ACCESS);
+    return s->handle != NULL;
+}
+void aephysics_semaphore_destroy(void *block) { CloseHandle(((AephysicsSemaphore *)block)->handle); }
+void aephysics_semaphore_wait(void *block) { WaitForSingleObjectEx(((AephysicsSemaphore *)block)->handle, INFINITE, FALSE); }
+void aephysics_semaphore_signal(void *block, int count) { ReleaseSemaphore(((AephysicsSemaphore *)block)->handle, count, NULL); }
+#elif defined(__APPLE__)
+typedef struct { dispatch_semaphore_t handle; } AephysicsSemaphore;
+int aephysics_semaphore_init(void *block, int initial)
+{
+    AephysicsSemaphore *s = (AephysicsSemaphore *)block;
+    s->handle = dispatch_semaphore_create(initial);
+    return s->handle != NULL;
+}
+void aephysics_semaphore_destroy(void *block) { dispatch_release(((AephysicsSemaphore *)block)->handle); }
+void aephysics_semaphore_wait(void *block) { dispatch_semaphore_wait(((AephysicsSemaphore *)block)->handle, DISPATCH_TIME_FOREVER); }
+void aephysics_semaphore_signal(void *block, int count)
+{
+    for (int i = 0; i < count; ++i) dispatch_semaphore_signal(((AephysicsSemaphore *)block)->handle);
 }
 #else
-void *aephysics_semaphore_new(int initial)
+typedef struct { sem_t handle; } AephysicsSemaphore;
+int aephysics_semaphore_init(void *block, int initial)
 {
-    sem_t *s = malloc(sizeof(sem_t));
-    if (s != NULL && sem_init(s, 0, (unsigned int)initial) != 0) {
-        free(s);
-        return NULL;
-    }
-    return s;
+    return sem_init(&((AephysicsSemaphore *)block)->handle, 0, (unsigned int)initial) == 0;
 }
-void aephysics_semaphore_free(void *s)
+void aephysics_semaphore_destroy(void *block) { sem_destroy(&((AephysicsSemaphore *)block)->handle); }
+void aephysics_semaphore_wait(void *block)
 {
-    sem_destroy((sem_t *)s);
-    free(s);
-}
-void aephysics_semaphore_wait(void *s)
-{
-    while (sem_wait((sem_t *)s) != 0) {
+    while (sem_wait(&((AephysicsSemaphore *)block)->handle) != 0) {
     }
 }
-void aephysics_semaphore_signal(void *s, int count)
+void aephysics_semaphore_signal(void *block, int count)
 {
-    for (int i = 0; i < count; ++i) sem_post((sem_t *)s);
+    for (int i = 0; i < count; ++i) sem_post(&((AephysicsSemaphore *)block)->handle);
 }
 #endif
+int aephysics_semaphore_bytes(void) { return (int)sizeof(AephysicsSemaphore); }
 
 // The prefetch, the pause and the atomics are static inline in
 // aephysics_inline.h, so the generated C inlines them.

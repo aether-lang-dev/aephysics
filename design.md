@@ -32,8 +32,9 @@ started until its tests pass.
    returning false where the reference asserts. 12,772 checks against
    test_dynamic_tree.c; the same tree as the reference on the benchmark
    scene (same hits, height, area ratio), insert faster, ray cast 1.9x.
-   Save/load not ported; the moved-marking is atomic, as the reference's,
-   since the parallel layer (14).
+   Save and load came with #148 (`tree_save_bytes`, `tree_load_bytes`,
+   and `aephysics.files` to disk); the moved-marking is atomic, as the
+   reference's, since the parallel layer (14).
 4. **hull** (done): quickhull as `aephysics.hull`, the builder's
    pointers as indices with the intrusive lists chained through the
    pools and their sentinels in extra slots, int half-edge indices, no
@@ -113,7 +114,7 @@ started until its tests pass.
    casts, the box query and the mover through the tree, each child in
    its own frame. 159 checks: test_compound.c's creation, materials,
    sharing, child order, bounds, casts, remap, overlap, query and mover
-   subtests (the byte roundtrip is not ported), plus the compound
+   subtests (the byte roundtrip came with #148), plus the compound
    through the shape dispatch and a field of a thousand spheres. The
    same results as the reference; the build 0.7x, the queries 1.3-1.6x,
    the ray cast 2.9x with the time in the tree's traversal itself
@@ -178,7 +179,7 @@ started until its tests pass.
      sets validated throughout. The reference's hull database (hulls
      deduplicated by content and refcounted across shapes) came later
      (#147): a hull shape holds the world's copy, so its caller may free
-     the hull once the shape is made. The name cache is not ported.
+     the hull once the shape is made. The name cache came with #149.
      Second slice: the contact (creation from the broad phase's pair
      keys through the pair visitors, the edges on both bodies, the
      manifold update -- convex pairs through the manifold module,

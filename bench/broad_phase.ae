@@ -45,7 +45,7 @@ adopt(bp: *BroadPhase) {
 main() {
     bp_block = calloc(1, sizeof(BroadPhase))
     bp = bp_block as *BroadPhase
-    broad_phase.create_broad_phase(bp, Capacity { static_shape_count: 16, dynamic_shape_count: COUNT, contact_count: 4 * COUNT })
+    broad_phase.create_broad_phase(bp, Capacity { static_shape_count: 16, dynamic_shape_count: COUNT, contact_count: 4 * COUNT, static_body_count: 0, dynamic_body_count: 0 })
     boxes_block = calloc(COUNT + 1, sizeof(AABB))
     boxes = boxes_block as AABB[]
     keys_block = calloc(COUNT + 1, 4)

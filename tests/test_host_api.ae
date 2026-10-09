@@ -1,0 +1,281 @@
+// The API a host reaches for beyond the reference's tests (#163): its own
+// allocator, set before anything is made, takes every block the engine
+// allocates (a world on four workers, its scheduler and semaphore, a
+// ragdoll, a snapshot, a recording) and gets every one back but the
+// scratch the engine keeps for the program, each zeroed and asked at the
+// reference's alignment; its log takes the world's memory, part by part,
+// adding up to the counters' byte count; its failure function is called.
+// Then a contact by its id, a joint's tuning, a mesh's material count, the
+// world counts, the version, the maximum capacity (kept at each step's
+// start, never lowered, carried by a snapshot), the counters the reference
+// keeps (tasks, manifold counts, time of impact iterations) and the
+// reference's determinism hash against its own values.
+
+import std.string
+import aephysics.math
+import aephysics.native
+import aephysics.basics
+import aephysics.hull
+import aephysics.mesh
+import aephysics.material
+import aephysics.shape
+import aephysics.manifold
+import aephysics.dynamics
+import aephysics.joint_solver
+import aephysics.physics_world
+import aephysics.human
+import aephysics.snapshot
+import aephysics.recording
+
+extern malloc(size: int) -> ptr
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+extern memset(block: ptr, value: int, size: int) -> ptr
+extern exit(code: int)
+
+var failures = 0
+var checks = 0
+
+ensure(name: string, ok: bool) {
+    checks = checks + 1
+    if !ok {
+        println("host api: FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+// --- the host's allocator, log and failure function ------------------------------------------------
+
+var g_allocations = 0
+var g_releases = 0
+var g_bytes = 0
+var g_wrong_alignment = 0
+
+// Dirty memory, so a block the engine reads before writing would show.
+host_allocate(size: int, alignment: int) -> ptr {
+    native.atomic_add((&g_allocations) as ptr, 1)
+    native.atomic_add((&g_bytes) as ptr, size)
+    if alignment != basics.HOST_ALIGNMENT { native.atomic_add((&g_wrong_alignment) as ptr, 1) }
+    block = malloc(size)
+    memset(block, 205, size)
+    return block
+}
+
+host_release(block: ptr, size: int) {
+    native.atomic_add((&g_releases) as ptr, 1)
+    native.atomic_add((&g_bytes) as ptr, 0 - size)
+    free(block)
+}
+
+var g_lines = 0
+var g_saw_pools = false
+var g_saw_broad_phase = false
+var g_saw_solver_sets = false
+var g_total_kb = 0
+
+host_log(text: string) {
+    g_lines = g_lines + 1
+    if string.equals(text, "id pools") == 1 { g_saw_pools = true }
+    if string.equals(text, "broad-phase") == 1 { g_saw_broad_phase = true }
+    if string.equals(text, "solver sets") == 1 { g_saw_solver_sets = true }
+    if string.starts_with(text, "total: ") == 1 {
+        kb, _err = string.to_int(string.substring(text, 7, string.length(text) - 3))
+        g_total_kb = kb
+    }
+}
+
+var g_failed_line = 0
+host_failed(condition: string, file: string, line: int) -> int {
+    if string.equals(condition, "a < b") == 1 && string.equals(file, "here") == 1 { g_failed_line = line }
+    return 0
+}
+
+// --- a scene of every kind of allocation ----------------------------------------------------------
+
+static_body(world_id: WorldId, p: Vec3) -> BodyId {
+    bdef = dynamics.default_body_def()
+    bdef.position = p
+    return dynamics.create_body(world_id, &bdef)
+}
+
+dynamic_body(world_id: WorldId, p: Vec3) -> BodyId {
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.position = p
+    return dynamics.create_body(world_id, &bdef)
+}
+
+host_api() {
+    wdef = dynamics.default_world_def()
+    wdef.gravity = math.vec3(0.0, 0.0 - 10.0, 0.0)
+    wdef.worker_count = 4
+    before_worlds = physics_world.get_world_count()
+    world_id = dynamics.create_world(&wdef)
+    w = dynamics.get_world(world_id.index1 - 1)
+    ensure("worlds: one more", physics_world.get_world_count() == before_worlds + 1 && physics_world.get_max_world_count() >= before_worlds + 1)
+    ensure("allocator: refused while blocks are out", basics.set_allocator(host_allocate, host_release) == false)
+
+    sdef = dynamics.default_shape_def()
+    ground = static_body(world_id, math.vec3(0.0, 0.0 - 1.0, 0.0))
+    floor_hull = hull.make_box_hull(20.0, 1.0, 20.0)
+    dynamics.create_hull_shape(ground, &sdef, floor_hull)
+    hull.destroy_hull(floor_hull)
+    wave = mesh.create_wave_mesh(8, 8, 1.0, 0.2, 0.3, 0.2)
+    materials_block = calloc(3, sizeof(SurfaceMaterial))
+    materials = materials_block as SurfaceMaterial[]
+    k = 0
+    while k < 3 {
+        materials[k] = material.default_surface_material()
+        k = k + 1
+    }
+    mdef = dynamics.default_shape_def()
+    mdef.materials = materials_block
+    mdef.material_count = 3
+    mesh_shape = dynamics.create_mesh_shape(static_body(world_id, math.vec3(30.0, 0.0, 0.0)), &mdef, wave, math.vec3_one())
+    free(materials_block)
+    ensure("materials: the mesh's three", dynamics.shape_get_mesh_material_count(mesh_shape) == 3)
+
+    box = hull.make_box_hull(0.4, 0.4, 0.4)
+    boxes = 0
+    while boxes < 24 {
+        b = dynamic_body(world_id, math.vec3(0.9 * ((boxes % 6) as float) - 2.5, 0.4 + 0.85 * ((boxes / 6) as float), 0.0))
+        dynamics.create_hull_shape(b, &sdef, box)
+        boxes = boxes + 1
+    }
+    // A bullet straight down onto the ground: the continuous pass finds it.
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.position = math.vec3(8.0, 4.0, 0.0)
+    bdef.linear_velocity = math.vec3(0.0, 0.0 - 300.0, 0.0)
+    bdef.is_bullet = true
+    bullet = dynamics.create_body(world_id, &bdef)
+    ball = dynamics.create_sphere_shape(bullet, &sdef, manifold.sphere(math.vec3_zero(), 0.1))
+    ensure("materials: a sphere's one", dynamics.shape_get_mesh_material_count(ball) == 1)
+    figure = calloc(1, sizeof(Human))
+    h = figure as *Human
+    human.create_human(h, world_id, math.vec3(0.0 - 8.0, 2.0, 0.0), 2.0, 1.0, 0.5, 1, null)
+
+    // A hinge and its tuning.
+    a = dynamic_body(world_id, math.vec3(12.0, 3.0, 0.0))
+    dynamics.create_hull_shape(a, &sdef, box)
+    rdef = dynamics.default_revolute_joint_def()
+    rdef.base.body_id_a = ground
+    rdef.base.body_id_b = a
+    rdef.base.local_frame_a = Transform { p: math.vec3(12.0, 4.0, 0.0), q: math.quat_identity() }
+    rdef.base.local_frame_b = Transform { p: math.vec3(0.0, 0.5, 0.0), q: math.quat_identity() }
+    hinge = dynamics.create_revolute_joint(world_id, &rdef)
+    dynamics.joint_set_constraint_tuning(hinge, 30.0, 2.0)
+    hertz, damping = dynamics.joint_get_constraint_tuning(hinge)
+    ensure("tuning: what was set", hertz == 30.0 && damping == 2.0)
+
+    // Recorded for a few frames, then on.
+    r = recording.create_recording()
+    recording.start_recording(world_id, r)
+    i = 0
+    while i < 90 {
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        if i == 9 { recording.stop_recording(world_id) }
+        i = i + 1
+    }
+    ensure("recording: plays", recording.validate_replay(recording.recording_data(r), recording.recording_size(r), 2))
+    recording.destroy_recording(r)
+
+    // A contact by its id: the one a box reports.
+    data_block = calloc(8, sizeof(ContactData))
+    data = data_block as ContactData[]
+    found = 0
+    probe = 1
+    while found == 0 && probe < 40 {
+        candidate = BodyId { index1: probe, world0: world_id.index1 - 1, generation: dynamics.body_at(w, probe - 1).generation }
+        if dynamics.body_is_valid(candidate) {
+            found = dynamics.body_get_contact_data(candidate, data, 8)
+        }
+        probe = probe + 1
+    }
+    ensure("contact data: a touching contact found (${found})", found > 0)
+    if found > 0 {
+        by_id = dynamics.contact_get_data(data[0].contact_id)
+        ensure("contact data: by id, the same shapes and manifolds", by_id.shape_id_a.index1 == data[0].shape_id_a.index1 && by_id.shape_id_b.index1 == data[0].shape_id_b.index1 &&
+               by_id.manifold_count == data[0].manifold_count && by_id.manifolds == data[0].manifolds && by_id.manifold_count > 0)
+    }
+    stale = dynamics.contact_get_data(ContactId { index1: 0, world0: world_id.index1 - 1, generation: 0 })
+    ensure("contact data: none for an id that is not one", stale.manifold_count == 0 && stale.manifolds == null && stale.shape_id_a.index1 == 0)
+    free(data_block)
+
+    // The counters the reference keeps.
+    c = physics_world.get_counters(world_id)
+    ensure("counters: the byte count is the world's", c.byte_count == physics_world.world_byte_count(w, false) && c.byte_count > (100000 as long))
+    ensure("counters: the step's tasks (${c.task_count})", c.task_count > 0)
+    buckets = 0
+    k = 0
+    while k < dynamics.MANIFOLD_COUNT_BUCKETS {
+        buckets = buckets + c.manifold_counts[k]
+        k = k + 1
+    }
+    ensure("counters: the contacts by manifold count (${buckets})", buckets > 0 && c.manifold_counts[0] > 0)
+    ensure("counters: the bullet's time of impact (${c.distance_iterations})", c.distance_iterations > 0)
+    ensure("counters: the arena's demand", c.arena_capacity >= 0)
+
+    // The memory, part by part, to the host's log.
+    physics_world.dump_memory_stats(world_id)
+    ensure("log: every part (${g_lines} lines)", g_saw_pools && g_saw_broad_phase && g_saw_solver_sets && g_lines > 40)
+    ensure("log: the total is the byte count (${g_total_kb} KB)", (g_total_kb as long) == c.byte_count / (1024 as long))
+
+    // The maximum capacity: what the world held at the last step's start,
+    // never lowered, carried by a snapshot.
+    cap = physics_world.get_max_capacity(world_id)
+    statics = dynamics.get_solver_set(w, dynamics.STATIC_SET).body_sims.count
+    ensure("capacity: the bodies (${cap.static_body_count}, ${cap.dynamic_body_count})", cap.static_body_count == statics && cap.dynamic_body_count == dynamics.world_body_count(w) - statics)
+    ensure("capacity: the shapes and contacts", cap.static_shape_count >= 2 && cap.dynamic_shape_count >= 26 && cap.contact_count > 0)
+    human.destroy_human(h)
+    physics_world.step(world_id, 1.0 / 60.0, 4)
+    after = physics_world.get_max_capacity(world_id)
+    ensure("capacity: never lowered", after.dynamic_body_count == cap.dynamic_body_count && after.dynamic_shape_count == cap.dynamic_shape_count)
+    block, byte_count = snapshot.save_world(world_id)
+    copy_def = dynamics.default_world_def()
+    copy = snapshot.load_world(&copy_def, block, byte_count)
+    copied = physics_world.get_max_capacity(copy)
+    ensure("capacity: carried by a snapshot", copied.dynamic_body_count == after.dynamic_body_count && copied.contact_count == after.contact_count)
+    snapshot.free_snapshot(block, byte_count)
+    dynamics.destroy_world(copy)
+
+    hull.destroy_hull(box)
+    dynamics.destroy_world(world_id)
+    mesh.destroy_mesh(wave)
+    free(figure)
+    ensure("worlds: back to as many", physics_world.get_world_count() == before_worlds)
+}
+
+main() {
+    // Before anything is allocated: the engine's every block is the host's.
+    ensure("allocator: taken at startup", basics.set_allocator(host_allocate, host_release))
+    basics.set_log_fn(host_log)
+    basics.set_assert_fn(host_failed)
+    basics.report_failure("a < b", "here", 7)
+    ensure("failure: the host's function told", g_failed_line == 7)
+
+    host_api()
+
+    // Every block came from the host and went back to it, but the scratch
+    // the modules keep for the program, which the counters still hold.
+    out = native.atomic_load((&g_allocations) as ptr) - native.atomic_load((&g_releases) as ptr)
+    ensure("allocator: every block the host's (${native.atomic_load((&g_allocations) as ptr)} made, ${out} kept, ${basics.alloc_count()} counted)",
+           native.atomic_load((&g_allocations) as ptr) > 500 && out == basics.alloc_count() && native.atomic_load((&g_bytes) as ptr) == basics.bytes_in_use())
+    ensure("allocator: asked at the reference's alignment", native.atomic_load((&g_wrong_alignment) as ptr) == 0)
+
+    // The rest needs no world.
+    version = physics_world.get_version()
+    ensure("version: the reference's 0.2.0", version.major == 0 && version.minor == 2 && version.revision == 0)
+    ensure("precision: world positions are double", physics_world.is_double_precision())
+    ensure("avx2: the CPU's", physics_world.is_avx2_available() == native.has_avx2())
+    ensure("hash: the reference's b3Hash of 13 bytes", basics.djb2_hash(basics.HASH_INIT as long, string.aether_string_raw_ptr("hello physics"), 13) == (4027293447 as long))
+    ensure("hash: of 16 bytes", basics.djb2_hash(basics.HASH_INIT as long, string.aether_string_raw_ptr("0123456789abcdef"), 16) == (1204685188 as long))
+    ensure("hash: of none", basics.djb2_hash(basics.HASH_INIT as long, null, 0) == (5381 as long))
+
+    println("host api: ${checks} checks")
+    if failures > 0 {
+        println("host api: ${failures} failure(s)")
+        exit(1)
+    }
+    println("host api: all checks passed")
+}

@@ -104,7 +104,7 @@ stage_report() {
     if stages_timed() == false || g_stage_steps == 0 || g_stage_ms == null { return }
     clock = stage_clock()
     n = g_stage_steps as float
-    println("aephysics stages ms/step: prepare_joints ${clock[STAGE_PREPARE_JOINTS] / n} prepare_wide ${clock[STAGE_PREPARE_WIDE] / n} prepare_contacts ${clock[STAGE_PREPARE_CONTACTS] / n} integrate_v ${clock[STAGE_INTEGRATE_VELOCITIES] / n} warm ${clock[STAGE_WARM_START] / n} solve ${clock[STAGE_SOLVE] / n} integrate_p ${clock[STAGE_INTEGRATE_POSITIONS] / n} relax ${clock[STAGE_RELAX] / n} restitution ${clock[STAGE_RESTITUTION] / n} store ${clock[STAGE_STORE_WIDE] / n}")
+    basics.log("aephysics stages ms/step: prepare_joints ${clock[STAGE_PREPARE_JOINTS] / n} prepare_wide ${clock[STAGE_PREPARE_WIDE] / n} prepare_contacts ${clock[STAGE_PREPARE_CONTACTS] / n} integrate_v ${clock[STAGE_INTEGRATE_VELOCITIES] / n} warm ${clock[STAGE_WARM_START] / n} solve ${clock[STAGE_SOLVE] / n} integrate_p ${clock[STAGE_INTEGRATE_POSITIONS] / n} relax ${clock[STAGE_RELAX] / n} restitution ${clock[STAGE_RESTITUTION] / n} store ${clock[STAGE_STORE_WIDE] / n}")
     basics.free_bytes(clock as ptr, STAGE_COUNT * 8)
     basics.free_bytes(g_stage_ms, native.MAX_WORKERS * STAGE_COUNT * 8)
     g_stage_ms = null
@@ -247,6 +247,9 @@ struct ContinuousContext {
     sensor_hits: ptr               // SensorHit[MAX_CONTINUOUS_SENSOR_HITS]
     sensor_fractions: ptr          // float[MAX_CONTINUOUS_SENSOR_HITS]
     sensor_count: int
+    distance_iterations: int       // the most the accepted hits took
+    push_back_iterations: int
+    root_iterations: int
 }
 
 var g_sensor_hits: ptr = null
@@ -307,6 +310,9 @@ continuous_query_visitor(proxy_id: int, user_data: long, context: ptr) -> bool {
         if did_hit {
             native.atomic_or((&ctx.fast_sim.flags) as ptr, dynamics.HAD_TIME_OF_IMPACT)
             ctx.fraction = output.fraction
+            ctx.distance_iterations = math.max_int(ctx.distance_iterations, output.distance_iterations)
+            ctx.push_back_iterations = math.max_int(ctx.push_back_iterations, output.push_back_iterations)
+            ctx.root_iterations = math.max_int(ctx.root_iterations, output.root_iterations)
         }
     }
     return true
@@ -340,7 +346,8 @@ solve_continuous(w: *World, sim_index: int, dt: float) {
     dynamic_tree_ = broad_phase.broad_phase_tree(&w.broad_phase, dynamics.BODY_DYNAMIC)
     fast_body = dynamics.body_at(w, fast_sim.body_id)
     ctx = ContinuousContext { w: w, fast_sim: fast_sim, fast_shape: null, sweep: sweep, base: base, fraction: 1.0,
-                              sensor_hits: sensor_hits(), sensor_fractions: sensor_fractions(), sensor_count: 0 }
+                              sensor_hits: sensor_hits(), sensor_fractions: sensor_fractions(), sensor_count: 0,
+                              distance_iterations: 0, push_back_iterations: 0, root_iterations: 0 }
     is_bullet = (fast_sim.flags & dynamics.IS_BULLET) != 0
     mask = dynamic_tree.default_mask_bits()
     shape_id = fast_body.head_shape_id
@@ -412,6 +419,10 @@ solve_continuous(w: *World, sim_index: int, dt: float) {
         }
         i = i + 1
     }
+    tc = dynamics.task_context(w)
+    tc.distance_iterations = math.max_int(tc.distance_iterations, ctx.distance_iterations)
+    tc.push_back_iterations = math.max_int(tc.push_back_iterations, ctx.push_back_iterations)
+    tc.root_iterations = math.max_int(tc.root_iterations, ctx.root_iterations)
 }
 
 // --- finalize -------------------------------------------------------------------------------------------------
