@@ -172,10 +172,11 @@ main() {
     test_ray_aabb()
     test_large_world_manifold()
     test_large_world_aabb()
-    // The manifold module's scratch, six blocks made on its first use and
-    // kept (the clip polygons, the points, the edge rows and lists, the
-    // support search's lanes), is all that stays.
-    ensure("every other counted allocation was freed (${basics.alloc_count() - before})", basics.alloc_count() == before + 6)
+    // The manifold module's scratch, seven blocks made on its first use and
+    // kept (each worker's speculative distance, the clip polygons, the
+    // points, the edge rows and lists, the support search's lanes), is all
+    // that stays.
+    ensure("every other counted allocation was freed (${basics.alloc_count() - before})", basics.alloc_count() == before + 7)
 
     println("collision: ${checks} checks")
     if failures == 0 {
