@@ -1,0 +1,527 @@
+// aephysics.snapshot (#149, the reference's world_snapshot.c): a world of
+// every kind of thing (a box pyramid, spheres, capsules and rocks falling
+// on a mesh, a height field and a baked compound, a static sensor, a
+// hanging chain on hinges with a motor, a ragdoll with ankles and its
+// filter joints, a weld, a prismatic spring, a rope, a wheel, a motor and a
+// parallel joint, a disabled body, a kinematic paddle, a bullet, names,
+// several materials on a mesh) saved and loaded at several moments: the
+// loaded world hashes as the original at once and steps on alike, bit for
+// bit, for 150 steps, with the same contact, sensor and hit events;
+// a loaded world saved again gives the same bytes; the geometry it was
+// loaded with is its own; and every truncation and corruption of the bytes
+// loads no world and leaves nothing allocated.
+
+import std.string
+import aephysics.math
+import aephysics.basics
+import aephysics.hull
+import aephysics.mesh
+import aephysics.height_field
+import aephysics.material
+import aephysics.compound
+import aephysics.manifold
+import aephysics.dynamics
+import aephysics.joint_solver
+import aephysics.physics_world
+import aephysics.human
+import aephysics.snapshot
+
+extern calloc(count: int, size: int) -> ptr
+extern exit(code: int)
+extern free(p: ptr)
+extern memcmp(a: ptr, b: ptr, size: int) -> int
+extern memcpy(dst: ptr, src: ptr, size: int) -> ptr
+
+var failures = 0
+var checks = 0
+
+ensure(name: string, ok: bool) {
+    checks = checks + 1
+    if !ok {
+        println("snapshot: FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+// The geometry the scene's shapes are made from, kept until the end: the
+// hulls go into the worlds' databases, the rest the worlds point at.
+var g_box: ptr = null
+var g_rock: ptr = null
+var g_wave: ptr = null
+var g_field: ptr = null
+var g_compound: ptr = null
+var g_ragdoll: ptr = null
+
+fixtures_ready() {
+    if g_box != null { return }
+    g_box = hull.make_box_hull(0.4, 0.4, 0.4) as ptr
+    g_rock = hull.create_rock(0.35) as ptr
+    g_wave = mesh.create_wave_mesh(20, 20, 1.0, 0.4, 0.3, 0.2) as ptr
+    g_field = height_field.create_grid(12, 12, math.vec3(1.0, 1.0, 1.0), true) as ptr
+    hulls_block = calloc(2, sizeof(CompoundHullDef))
+    defs = hulls_block as CompoundHullDef[]
+    mat = material.default_surface_material()
+    defs[0] = compound.compound_hull_def(g_box as *HullData, Transform { p: math.vec3(0.0 - 1.0, 0.0, 0.0), q: math.quat_identity() }, mat)
+    defs[1] = compound.compound_hull_def(g_box as *HullData, Transform { p: math.vec3(1.0, 0.5, 0.0), q: math.quat_identity() }, mat)
+    cdef = compound.compound_def()
+    cdef.hulls = hulls_block
+    cdef.hull_count = 2
+    g_compound = compound.create_compound(&cdef) as ptr
+    free(hulls_block)
+    g_ragdoll = calloc(1, sizeof(Human))
+}
+
+fixtures_free() {
+    hull.destroy_hull(g_box as *HullData)
+    hull.destroy_hull(g_rock as *HullData)
+    mesh.destroy_mesh(g_wave as *MeshData)
+    height_field.destroy_height_field(g_field as *HeightFieldData)
+    compound.destroy_compound(g_compound as *CompoundData)
+    free(g_ragdoll)
+}
+
+world_def() -> WorldDef {
+    wdef = dynamics.default_world_def()
+    wdef.gravity = math.vec3(0.0, 0.0 - 10.0, 0.0)
+    return wdef
+}
+
+static_body(world_id: WorldId, p: Vec3, name: string) -> BodyId {
+    bdef = dynamics.default_body_def()
+    bdef.position = p
+    bdef.name = name
+    return dynamics.create_body(world_id, &bdef)
+}
+
+dynamic_body(world_id: WorldId, p: Vec3) -> BodyId {
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.position = p
+    return dynamics.create_body(world_id, &bdef)
+}
+
+// The scene: every kind of thing a world holds.
+build_scene(world_id: WorldId) {
+    fixtures_ready()
+    sdef = dynamics.default_shape_def()
+    floor_def = dynamics.default_shape_def()
+    floor_def.name = "floor"
+    ground = static_body(world_id, math.vec3(0.0, 0.0 - 1.0, 0.0), "ground")
+    floor_hull = hull.make_box_hull(30.0, 1.0, 30.0)
+    dynamics.create_hull_shape(ground, &floor_def, floor_hull)
+    hull.destroy_hull(floor_hull)
+
+    // A mesh with three materials, a height field with holes, a compound.
+    materials_block = calloc(3, sizeof(SurfaceMaterial))
+    materials = materials_block as SurfaceMaterial[]
+    k = 0
+    while k < 3 {
+        materials[k] = material.default_surface_material()
+        materials[k].friction = 0.2 + 0.3 * (k as float)
+        k = k + 1
+    }
+    mdef = dynamics.default_shape_def()
+    mdef.materials = materials_block
+    mdef.material_count = 3
+    dynamics.create_mesh_shape(static_body(world_id, math.vec3(8.0, 0.0, 0.0 - 4.0), "waves"), &mdef, g_wave as *MeshData, math.vec3_one())
+    free(materials_block)
+    dynamics.create_height_field_shape(static_body(world_id, math.vec3(0.0 - 14.0, 0.0, 0.0 - 6.0), "field"), &sdef, g_field as *HeightFieldData)
+    dynamics.create_compound_shape(static_body(world_id, math.vec3(0.0 - 6.0, 0.4, 6.0), "compound"), &sdef, g_compound as *CompoundData)
+
+    // A sensor over the pyramid, which the boxes report to.
+    sensor_def = dynamics.default_shape_def()
+    sensor_def.is_sensor = true
+    sensor_def.enable_sensor_events = true
+    sensor_hull = hull.make_box_hull(2.0, 2.0, 2.0)
+    dynamics.create_hull_shape(static_body(world_id, math.vec3(0.0, 1.0, 0.0), "sensor"), &sensor_def, sensor_hull)
+    hull.destroy_hull(sensor_hull)
+
+    // A pyramid of boxes, each reporting to the sensor; one named.
+    box_def = dynamics.default_shape_def()
+    box_def.enable_sensor_events = true
+    row = 0
+    while row < 5 {
+        col = 0
+        while col < 5 - row {
+            b = dynamic_body(world_id, math.vec3(0.82 * (col as float) - 0.41 * ((4 - row) as float), 0.4 + 0.81 * (row as float), 0.0))
+            if row == 4 { dynamics.body_set_name(b, "apex") }
+            dynamics.create_hull_shape(b, &box_def, g_box as *HullData)
+            col = col + 1
+        }
+        row = row + 1
+    }
+
+    // Spheres, capsules and rocks onto the mesh, the field and the compound.
+    i = 0
+    while i < 12 {
+        x = 6.0 + 0.9 * ((i % 4) as float)
+        z = 0.0 - 6.0 + 1.1 * ((i / 4) as float)
+        b = dynamic_body(world_id, math.vec3(x, 2.0 + 0.3 * (i as float), z))
+        if i % 3 == 0 { dynamics.create_sphere_shape(b, &sdef, manifold.sphere(math.vec3_zero(), 0.3)) }
+        else if i % 3 == 1 { dynamics.create_capsule_shape(b, &sdef, Capsule { center1: math.vec3(0.0 - 0.3, 0.0, 0.0), center2: math.vec3(0.3, 0.0, 0.0), radius: 0.2 }) }
+        else { dynamics.create_hull_shape(b, &sdef, g_rock as *HullData) }
+        f = dynamic_body(world_id, math.vec3(0.0 - 14.0 + 1.3 * ((i % 4) as float), 2.5 + 0.2 * (i as float), 0.0 - 4.0 + 1.2 * ((i / 4) as float)))
+        dynamics.create_sphere_shape(f, &sdef, manifold.sphere(math.vec3_zero(), 0.35))
+        c = dynamic_body(world_id, math.vec3(0.0 - 6.5 + 0.8 * ((i % 3) as float), 3.0 + 0.4 * (i as float), 6.0))
+        dynamics.create_hull_shape(c, &sdef, g_rock as *HullData)
+        i = i + 1
+    }
+
+    // A chain of capsules on hinges from an anchor, its first hinge driven.
+    anchor = static_body(world_id, math.vec3(10.0, 8.0, 8.0), "anchor")
+    previous = anchor
+    i = 0
+    while i < 6 {
+        link = dynamic_body(world_id, math.vec3(10.0 + 0.6 * (i as float) + 0.3, 8.0, 8.0))
+        dynamics.create_capsule_shape(link, &sdef, Capsule { center1: math.vec3(0.0 - 0.25, 0.0, 0.0), center2: math.vec3(0.25, 0.0, 0.0), radius: 0.1 })
+        rdef = dynamics.default_revolute_joint_def()
+        rdef.base.body_id_a = previous
+        rdef.base.body_id_b = link
+        rdef.base.local_frame_a = Transform { p: math.vec3(0.3, 0.0, 0.0), q: math.quat_identity() }
+        if i == 0 { rdef.base.local_frame_a = math.transform_identity() }
+        rdef.base.local_frame_b = Transform { p: math.vec3(0.0 - 0.3, 0.0, 0.0), q: math.quat_identity() }
+        if i == 0 {
+            rdef.enable_motor = true
+            rdef.motor_speed = 1.5
+            rdef.max_motor_torque = 50.0
+        }
+        dynamics.create_revolute_joint(world_id, &rdef)
+        previous = link
+        i = i + 1
+    }
+
+    // A ragdoll with ankles, its filter joints among them.
+    h = g_ragdoll as *Human
+    h.bones = null
+    h.filter_joints = null
+    h.filter_joint_count = 0
+    h.is_spawned = false
+    h.ankles = true
+    human.create_human(h, world_id, math.vec3(4.0, 3.0, 6.0), 2.0, 1.0, 0.5, 1, null)
+
+    // A pair of each other joint kind, off to the side.
+    joint_pair(world_id, 0, math.vec3(14.0, 3.0, 0.0 - 10.0))
+    joint_pair(world_id, 1, math.vec3(16.0, 3.0, 0.0 - 10.0))
+    joint_pair(world_id, 2, math.vec3(18.0, 3.0, 0.0 - 10.0))
+    joint_pair(world_id, 3, math.vec3(20.0, 3.0, 0.0 - 10.0))
+    joint_pair(world_id, 4, math.vec3(22.0, 3.0, 0.0 - 10.0))
+    joint_pair(world_id, 5, math.vec3(24.0, 3.0, 0.0 - 10.0))
+
+    // A body disabled, in the disabled set with its shape out of the trees.
+    sleeper = dynamic_body(world_id, math.vec3(0.0 - 20.0, 4.0, 10.0))
+    dynamics.create_hull_shape(sleeper, &sdef, g_box as *HullData)
+    dynamics.body_disable(sleeper)
+
+    // A kinematic paddle sweeping and a bullet at the pyramid.
+    kdef = dynamics.default_body_def()
+    kdef.kind = dynamics.BODY_KINEMATIC
+    kdef.position = math.vec3(0.0 - 3.0, 0.5, 3.0)
+    kdef.linear_velocity = math.vec3(1.0, 0.0, 0.0)
+    kdef.angular_velocity = math.vec3(0.0, 1.0, 0.0)
+    paddle = dynamics.create_body(world_id, &kdef)
+    paddle_hull = hull.make_box_hull(1.0, 0.2, 0.2)
+    dynamics.create_hull_shape(paddle, &sdef, paddle_hull)
+    hull.destroy_hull(paddle_hull)
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.position = math.vec3(0.0, 1.5, 12.0)
+    bdef.linear_velocity = math.vec3(0.0, 0.0, 0.0 - 60.0)
+    bdef.is_bullet = true
+    bdef.name = "bullet"
+    bullet = dynamics.create_body(world_id, &bdef)
+    dynamics.create_sphere_shape(bullet, &sdef, manifold.sphere(math.vec3_zero(), 0.1))
+}
+
+// Two boxes joined by a joint of one kind: a weld, a prismatic spring, a
+// rope, a wheel, a motor or a parallel joint.
+joint_pair(world_id: WorldId, kind: int, p: Vec3) {
+    sdef = dynamics.default_shape_def()
+    a = dynamic_body(world_id, p)
+    dynamics.create_hull_shape(a, &sdef, g_box as *HullData)
+    b = dynamic_body(world_id, math.add(p, math.vec3(0.0, 0.0, 1.2)))
+    dynamics.create_hull_shape(b, &sdef, g_box as *HullData)
+    frame_a = Transform { p: math.vec3(0.0, 0.0, 0.6), q: math.quat_identity() }
+    frame_b = Transform { p: math.vec3(0.0, 0.0, 0.0 - 0.6), q: math.quat_identity() }
+    if kind == 0 {
+        weld_def = dynamics.default_weld_joint_def()
+        weld_def.base.body_id_a = a
+        weld_def.base.body_id_b = b
+        weld_def.base.local_frame_a = frame_a
+        weld_def.base.local_frame_b = frame_b
+        weld_def.linear_hertz = 5.0
+        dynamics.create_weld_joint(world_id, &weld_def)
+    } else if kind == 1 {
+        prismatic_def = dynamics.default_prismatic_joint_def()
+        prismatic_def.base.body_id_a = a
+        prismatic_def.base.body_id_b = b
+        prismatic_def.base.local_frame_a = frame_a
+        prismatic_def.base.local_frame_b = frame_b
+        prismatic_def.enable_spring = true
+        prismatic_def.hertz = 2.0
+        prismatic_def.damping_ratio = 0.3
+        prismatic_def.enable_limit = true
+        prismatic_def.lower_translation = 0.0 - 0.3
+        prismatic_def.upper_translation = 0.3
+        dynamics.create_prismatic_joint(world_id, &prismatic_def)
+    } else if kind == 2 {
+        rope_def = dynamics.default_distance_joint_def()
+        rope_def.base.body_id_a = a
+        rope_def.base.body_id_b = b
+        rope_def.base.local_frame_a = frame_a
+        rope_def.base.local_frame_b = frame_b
+        rope_def.length = 0.2
+        rope_def.enable_limit = true
+        rope_def.min_length = 0.1
+        rope_def.max_length = 0.5
+        dynamics.create_distance_joint(world_id, &rope_def)
+    } else if kind == 3 {
+        wheel_def = dynamics.default_wheel_joint_def()
+        wheel_def.base.body_id_a = a
+        wheel_def.base.body_id_b = b
+        wheel_def.base.local_frame_a = frame_a
+        wheel_def.base.local_frame_b = frame_b
+        wheel_def.enable_spin_motor = true
+        wheel_def.spin_speed = 4.0
+        wheel_def.max_spin_torque = 10.0
+        dynamics.create_wheel_joint(world_id, &wheel_def)
+    } else if kind == 4 {
+        motor_def = dynamics.default_motor_joint_def()
+        motor_def.base.body_id_a = a
+        motor_def.base.body_id_b = b
+        motor_def.base.local_frame_a = frame_a
+        motor_def.base.local_frame_b = frame_b
+        motor_def.angular_velocity = math.vec3(0.0, 1.0, 0.0)
+        motor_def.max_velocity_torque = 20.0
+        dynamics.create_motor_joint(world_id, &motor_def)
+    } else {
+        parallel_def = dynamics.default_parallel_joint_def()
+        parallel_def.base.body_id_a = a
+        parallel_def.base.body_id_b = b
+        parallel_def.base.local_frame_a = frame_a
+        parallel_def.base.local_frame_b = frame_b
+        parallel_def.hertz = 3.0
+        parallel_def.max_torque = 30.0
+        dynamics.create_parallel_joint(world_id, &parallel_def)
+    }
+}
+
+// The events of the last step, folded into one number to compare.
+events_of(world_id: WorldId) -> long {
+    w = dynamics.get_world(world_id.index1 - 1)
+    folded = dynamics.world_contact_begin_event_count(w) as long
+    folded = folded * (1009 as long) + (dynamics.world_contact_end_event_count(w) as long)
+    folded = folded * (1009 as long) + (dynamics.world_sensor_begin_event_count(w) as long)
+    folded = folded * (1009 as long) + (dynamics.world_sensor_end_event_count(w) as long)
+    folded = folded * (1009 as long) + (dynamics.world_contact_hit_event_count(w) as long)
+    return folded
+}
+
+state_hash(world_id: WorldId) -> long { return dynamics.hash_world_state(dynamics.get_world(world_id.index1 - 1)) }
+
+steps(world_id: WorldId, count: int) {
+    i = 0
+    while i < count {
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        i = i + 1
+    }
+}
+
+// The scene run `before` steps, saved and loaded; then both stepped 150
+// steps, their hashes compared every step.
+round_trip(before: int) {
+    wdef = world_def()
+    original = dynamics.create_world(&wdef)
+    build_scene(original)
+    steps(original, before)
+    block, byte_count = snapshot.save_world(original)
+    ensure("round trip at ${before}: saved (${byte_count} bytes)", block != null && byte_count > 0)
+    loaded = snapshot.load_world(&wdef, block, byte_count)
+    ensure("round trip at ${before}: loaded", dynamics.world_is_valid(loaded))
+    if dynamics.world_is_valid(loaded) == false {
+        snapshot.free_snapshot(block, byte_count)
+        human.destroy_human(g_ragdoll as *Human)
+        dynamics.destroy_world(original)
+        return
+    }
+    ensure("round trip at ${before}: the same state at once", state_hash(loaded) == state_hash(original))
+    a = physics_world.get_counters(original)
+    b = physics_world.get_counters(loaded)
+    ensure("round trip at ${before}: the same bodies, shapes, contacts, joints and islands",
+           a.body_count == b.body_count && a.shape_count == b.shape_count && a.contact_count == b.contact_count &&
+           a.joint_count == b.joint_count && a.island_count == b.island_count)
+
+    // Saved again at once, the same bytes: the snapshot is a fixed point.
+    again, again_count = snapshot.save_world(loaded)
+    ensure("round trip at ${before}: a loaded world saves to the same bytes (${again_count} against ${byte_count}, first apart at ${first_difference(again, block, math.min_int(again_count, byte_count))})",
+           again_count == byte_count && memcmp(again, block, byte_count) == 0)
+    snapshot.free_snapshot(again, again_count)
+
+    alike = true
+    first_apart = 0 - 1
+    events_alike = true
+    events_seen = 0 as long
+    i = 0
+    while i < 150 {
+        physics_world.step(original, 1.0 / 60.0, 4)
+        physics_world.step(loaded, 1.0 / 60.0, 4)
+        if alike && state_hash(original) != state_hash(loaded) {
+            alike = false
+            first_apart = i
+        }
+        if events_of(original) != events_of(loaded) { events_alike = false }
+        events_seen = events_seen + events_of(original)
+        i = i + 1
+    }
+    ensure("round trip at ${before}: 150 steps alike, bit for bit (first apart at ${first_apart})", alike)
+    ensure("round trip at ${before}: the same contact, sensor and hit events every step (${events_seen} folded)", events_alike)
+    // Before the scene settles there are events to compare.
+    if before < 100 { ensure("round trip at ${before}: events happened to compare", events_seen > (0 as long)) }
+    a = physics_world.get_counters(original)
+    b = physics_world.get_counters(loaded)
+    ensure("round trip at ${before}: the same counts after (${a.contact_count} contacts, ${a.awake_contact_count} awake)",
+           a.contact_count == b.contact_count && a.awake_contact_count == b.awake_contact_count && a.island_count == b.island_count)
+
+    // The loaded world's geometry is its own: the scene's blocks are not
+    // what its shapes hold.
+    w = dynamics.get_world(loaded.index1 - 1)
+    owns = w.owned_geometry.count == 3
+    i = 0
+    while i < w.shapes.count {
+        s = dynamics.world_shape_at(w, i)
+        if s.id != dynamics.NULL_INDEX {
+            if s.geometry.mesh.data == (g_wave as *MeshData) || s.geometry.height_field == (g_field as *HeightFieldData) || s.geometry.compound == (g_compound as *CompoundData) { owns = false }
+        }
+        i = i + 1
+    }
+    ensure("round trip at ${before}: the mesh, the field and the compound are the loaded world's own", owns)
+
+    snapshot.free_snapshot(block, byte_count)
+    human.destroy_human(g_ragdoll as *Human)
+    dynamics.destroy_world(original)
+    dynamics.destroy_world(loaded)
+}
+
+first_difference(a: ptr, b: ptr, count: int) -> int {
+    x = a as byte[]
+    y = b as byte[]
+    i = 0
+    while i < count {
+        if (x[i] as int) != (y[i] as int) { return i }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+// Loaded with four workers what one stepped: the step's results do not
+// depend on the worker count, so the two still step alike, bit for bit.
+across_workers() {
+    wdef = world_def()
+    original = dynamics.create_world(&wdef)
+    build_scene(original)
+    steps(original, 20)
+    block, byte_count = snapshot.save_world(original)
+    four = world_def()
+    four.worker_count = 4
+    loaded = snapshot.load_world(&four, block, byte_count)
+    ensure("workers: loaded with four", dynamics.world_is_valid(loaded))
+    if dynamics.world_is_valid(loaded) {
+        alike = true
+        i = 0
+        while i < 120 {
+            physics_world.step(original, 1.0 / 60.0, 4)
+            physics_world.step(loaded, 1.0 / 60.0, 4)
+            if state_hash(original) != state_hash(loaded) { alike = false }
+            i = i + 1
+        }
+        ensure("workers: one and four step alike for 120 steps after the load", alike)
+        dynamics.destroy_world(loaded)
+    }
+    snapshot.free_snapshot(block, byte_count)
+    human.destroy_human(g_ragdoll as *Human)
+    dynamics.destroy_world(original)
+}
+
+// Every damage to the bytes loads no world and leaves nothing behind.
+corruptions() {
+    wdef = world_def()
+    original = dynamics.create_world(&wdef)
+    build_scene(original)
+    steps(original, 30)
+    block, byte_count = snapshot.save_world(original)
+    human.destroy_human(g_ragdoll as *Human)
+    dynamics.destroy_world(original)
+
+    before = basics.alloc_count()
+    refused_all = true
+    cut = 0
+    while cut < byte_count {
+        if loads(&wdef, block, cut) { refused_all = false }
+        cut = cut + 1 + cut / 7
+    }
+    ensure("corruptions: every truncation is refused", refused_all)
+    ensure("corruptions: a byte too many is refused", loads_longer(&wdef, block, byte_count) == false)
+    ensure("corruptions: another magic is refused", loads_flipped(&wdef, block, byte_count, 0) == false)
+    ensure("corruptions: another version is refused", loads_flipped(&wdef, block, byte_count, 4) == false)
+    ensure("corruptions: another layout is refused", loads_flipped(&wdef, block, byte_count, 8) == false)
+    ensure("corruptions: no bytes are refused", dynamics.world_is_valid(snapshot.load_world(&wdef, null, 0)) == false)
+    ensure("corruptions: nothing left allocated (${basics.alloc_count() - before})", basics.alloc_count() == before)
+    good = snapshot.load_world(&wdef, block, byte_count)
+    ensure("corruptions: the bytes themselves still load", dynamics.world_is_valid(good))
+    dynamics.destroy_world(good)
+    snapshot.free_snapshot(block, byte_count)
+}
+
+loads(wdef: *WorldDef, block: ptr, count: int) -> bool {
+    id = snapshot.load_world(wdef, block, count)
+    if dynamics.world_is_valid(id) {
+        dynamics.destroy_world(id)
+        return true
+    }
+    return false
+}
+
+loads_longer(wdef: *WorldDef, block: ptr, count: int) -> bool {
+    longer = calloc(1, count + 1)
+    memcpy(longer, block, count)
+    result = loads(wdef, longer, count + 1)
+    free(longer)
+    return result
+}
+
+loads_flipped(wdef: *WorldDef, block: ptr, count: int, at: int) -> bool {
+    copy = calloc(1, count)
+    memcpy(copy, block, count)
+    bytes = copy as byte[]
+    bytes[at] = ((bytes[at] as int) ^ 1) as byte
+    result = loads(wdef, copy, count)
+    free(copy)
+    return result
+}
+
+main() {
+    // The modules' scratch lives as long as the program: taken before the count.
+    dynamics.reserve_scratch()
+    compound.reserve_scratch()
+    height_field.reserve_scratch()
+    fixtures_ready()
+    // The first round trip also makes the solver's own buffers, kept for the
+    // program; the count is taken after it, so every later round trip and
+    // the corruptions must leave nothing.
+    round_trip(0)
+    before = basics.alloc_count()
+    round_trip(1)
+    round_trip(45)
+    round_trip(200)
+    across_workers()
+    corruptions()
+    ensure("every counted allocation was freed (${basics.alloc_count() - before})", basics.alloc_count() == before)
+    fixtures_free()
+
+    println("snapshot: ${checks} checks")
+    if failures == 0 {
+        println("snapshot: all checks passed")
+    } else {
+        println("snapshot: ${failures} failure(s)")
+        exit(1)
+    }
+}

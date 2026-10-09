@@ -363,7 +363,9 @@ started until its tests pass.
    allocator's zeroing was a millisecond a step (the reference's does
    not zero; poisoning the memory shows nothing reads it first).
 15. **recording and replay**, `world_snapshot`: last, since they are the
-   tooling and not the engine.
+   tooling and not the engine. The snapshot is in (`aephysics.snapshot`,
+   #149's first part): a loaded world steps on bit for bit as the one it
+   was taken from. Recording, replay and the name cache build on it.
 16. **benchmarks** (done, #141): `reference/benchmark/main.c`'s thirteen
    scenes and its SAT runs, against the reference's own scene functions
    on the same machine: the large pyramid, the many pyramids and the

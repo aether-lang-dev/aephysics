@@ -1,0 +1,945 @@
+// A world as bytes and back (Box3D's world_snapshot.c, #149): everything a
+// step reads, so a world loaded from a snapshot steps on exactly as the
+// world it was taken from. The settings, the id pools, the solver sets
+// with their sims, the bodies, the shapes with their geometry (each block
+// once, however many shapes share it), the fat boxes, the contacts with
+// their manifolds and mesh caches, the joints, the sensors, the islands,
+// the three trees and the pair set, and the constraint graph's colours.
+// What a step builds fresh each time (its events, its scratch, the
+// solver's constraints) is not kept, nor is what the host wires in (user
+// data, callbacks, the worker count), which the caller's WorldDef gives
+// the loaded world.
+//
+// A snapshot is this build's: its layout tag folds in the sizes of every
+// record it copies whole and the geometry's versions, so one from another
+// layout is refused rather than misread. Every count is checked against
+// the bytes before anything is copied, every geometry block is checked as
+// bytes from outside are (hull_bytes_valid and its kin), every pointer a
+// record carried is cleared before the record is used, and the loaded
+// world must pass the world's own validation; a snapshot that fails any
+// of it loads no world.
+
+import std.string
+import std.mem
+import aephysics.math
+import aephysics.native
+import aephysics.basics
+import aephysics.dynamic_tree
+import aephysics.hull
+import aephysics.mesh
+import aephysics.height_field
+import aephysics.compound
+import aephysics.shape
+import aephysics.broad_phase
+import aephysics.mesh_contact
+import aephysics.dynamics
+
+exports (
+    SNAPSHOT_MAGIC, SNAPSHOT_VERSION, snapshot_layout, save_world, load_world, free_snapshot
+)
+
+extern memcpy(dst: ptr, src: ptr, size: int) -> ptr
+extern memset(block: ptr, value: int, size: int) -> ptr
+extern strlen(s: ptr) -> int
+extern malloc(size: int) -> ptr
+
+const SNAPSHOT_MAGIC = 0x4E535041    // "APSN", little-endian
+const SNAPSHOT_VERSION = 1
+const NULL_INDEX = 0 - 1
+
+// --- the bytes written -------------------------------------------------------------------------------
+
+struct SnapWriter {
+    data: ptr
+    size: int
+    capacity: int
+}
+
+writer_grow(wr: *SnapWriter, n: int) {
+    if wr.size + n <= wr.capacity { return }
+    capacity = math.max_int(math.max_int(2 * wr.capacity, wr.size + n), 4096)
+    block = basics.alloc(capacity)
+    if wr.data != null {
+        memcpy(block, wr.data, wr.size)
+        basics.free_bytes(wr.data, wr.capacity)
+    }
+    wr.data = block
+    wr.capacity = capacity
+}
+
+w_bytes(wr: *SnapWriter, src: ptr, n: int) {
+    if n <= 0 { return }
+    writer_grow(wr, n)
+    memcpy(wr.data + wr.size, src, n)
+    wr.size = wr.size + n
+}
+
+w_int(wr: *SnapWriter, v: int) {
+    holder = v
+    w_bytes(wr, (&holder) as ptr, 4)
+}
+
+w_long(wr: *SnapWriter, v: long) {
+    holder = v
+    w_bytes(wr, (&holder) as ptr, 8)
+}
+
+w_float(wr: *SnapWriter, v: float) {
+    holder = v
+    w_bytes(wr, (&holder) as ptr, 8)
+}
+
+w_bool(wr: *SnapWriter, v: bool) {
+    if v { w_int(wr, 1) } else { w_int(wr, 0) }
+}
+
+w_vec3(wr: *SnapWriter, v: Vec3) {
+    w_float(wr, v.x)
+    w_float(wr, v.y)
+    w_float(wr, v.z)
+}
+
+// A buffer: its stride, its count, its items.
+w_buffer(wr: *SnapWriter, b: *Buffer) {
+    w_int(wr, b.stride)
+    w_int(wr, b.count)
+    w_bytes(wr, b.data, b.count * b.stride)
+}
+
+w_ints(wr: *SnapWriter, a: *Ints) {
+    w_int(wr, a.count)
+    w_bytes(wr, a.data, a.count * 4)
+}
+
+w_bitset(wr: *SnapWriter, b: *BitSet) {
+    w_int(wr, b.block_count)
+    w_bytes(wr, b.bits, b.block_count * 8)
+}
+
+w_idpool(wr: *SnapWriter, p: *IdPool) {
+    w_int(wr, p.next_index)
+    w_ints(wr, &p.free_ids)
+}
+
+// A name: its length and its bytes, or -1 for none.
+w_name(wr: *SnapWriter, name: ptr) {
+    if name == null {
+        w_int(wr, NULL_INDEX)
+        return
+    }
+    n = strlen(name)
+    w_int(wr, n)
+    w_bytes(wr, name, n)
+}
+
+// --- the bytes read ----------------------------------------------------------------------------------
+
+struct SnapReader {
+    data: ptr
+    size: int
+    at: int
+    ok: bool
+}
+
+r_need(rd: *SnapReader, n: int) -> bool {
+    if rd.ok == false { return false }
+    if n < 0 || n > rd.size - rd.at {
+        rd.ok = false
+        return false
+    }
+    return true
+}
+
+r_bytes(rd: *SnapReader, dst: ptr, n: int) {
+    if r_need(rd, n) == false { return }
+    if n > 0 { memcpy(dst, rd.data + rd.at, n) }
+    rd.at = rd.at + n
+}
+
+r_int(rd: *SnapReader) -> int {
+    holder = 0
+    r_bytes(rd, (&holder) as ptr, 4)
+    return holder
+}
+
+r_long(rd: *SnapReader) -> long {
+    holder = 0 as long
+    r_bytes(rd, (&holder) as ptr, 8)
+    return holder
+}
+
+r_float(rd: *SnapReader) -> float {
+    holder = 0.0
+    r_bytes(rd, (&holder) as ptr, 8)
+    return holder
+}
+
+r_bool(rd: *SnapReader) -> bool {
+    v = r_int(rd)
+    if v != 0 && v != 1 { rd.ok = false }
+    return v == 1
+}
+
+r_vec3(rd: *SnapReader) -> Vec3 {
+    x = r_float(rd)
+    y = r_float(rd)
+    z = r_float(rd)
+    return math.vec3(x, y, z)
+}
+
+// A count the bytes left can hold, `size` bytes each, or the reader failed.
+r_count(rd: *SnapReader, size: int) -> int {
+    count = r_int(rd)
+    if rd.ok == false { return 0 }
+    if count < 0 || basics.section_fits(rd.at, count, size, rd.size) == false {
+        rd.ok = false
+        return 0
+    }
+    return count
+}
+
+// A buffer of `stride`-byte items; an empty one when the bytes are not one.
+r_buffer(rd: *SnapReader, stride: int) -> Buffer {
+    s = r_int(rd)
+    if rd.ok && s != stride { rd.ok = false }
+    count = r_count(rd, stride)
+    if rd.ok == false { return basics.buffer_create(stride, 0) }
+    b = basics.buffer_create(stride, count)
+    r_bytes(rd, b.data, count * stride)
+    b.count = count
+    return b
+}
+
+r_ints(rd: *SnapReader) -> Ints {
+    count = r_count(rd, 4)
+    if rd.ok == false { return basics.ints_create(0) }
+    a = basics.ints_create(count)
+    r_bytes(rd, a.data, count * 4)
+    a.count = count
+    return a
+}
+
+r_bitset(rd: *SnapReader) -> BitSet {
+    count = r_count(rd, 8)
+    b = basics.bitset_create(64 * math.max_int(count, 1))
+    if rd.ok == false { return b }
+    r_bytes(rd, b.bits, count * 8)
+    b.block_count = count
+    return b
+}
+
+r_idpool(rd: *SnapReader) -> IdPool {
+    next_index = r_int(rd)
+    free_ids = r_ints(rd)
+    if next_index < 0 { rd.ok = false }
+    return IdPool { free_ids: free_ids, next_index: next_index }
+}
+
+// A name as a C copy (name_free's), or null.
+r_name(rd: *SnapReader) -> ptr {
+    n = r_int(rd)
+    if rd.ok == false || n == NULL_INDEX { return null }
+    if r_need(rd, n) == false { return null }
+    block = malloc(n + 1)
+    memcpy(block, rd.data + rd.at, n)
+    memset(block + n, 0, 1)
+    rd.at = rd.at + n
+    return block
+}
+
+// --- the layout --------------------------------------------------------------------------------------
+
+// This build's layout: the size of every record copied whole and the
+// versions of the geometry and saved trees, folded by FNV-1a. A snapshot
+// carries it, and one of another layout is refused.
+snapshot_layout() -> long {
+    hash = 0 - 3750763034362895579
+    prime = 1099511628211 as long
+    sizes_block = basics.alloc(24 * 8)
+    sizes = sizes_block as long[]
+    sizes[0] = sizeof(Body) as long
+    sizes[1] = sizeof(WorldShape) as long
+    sizes[2] = sizeof(Contact) as long
+    sizes[3] = sizeof(Joint) as long
+    sizes[4] = sizeof(BodySim) as long
+    sizes[5] = sizeof(BodyState) as long
+    sizes[6] = sizeof(JointSim) as long
+    sizes[7] = sizeof(IslandSim) as long
+    sizes[8] = sizeof(ContactLink) as long
+    sizes[9] = sizeof(JointLink) as long
+    sizes[10] = sizeof(ContactSpec) as long
+    sizes[11] = sizeof(Manifold) as long
+    sizes[12] = sizeof(DynamicTreeNode) as long
+    sizes[13] = sizeof(TreeProxy) as long
+    sizes[14] = sizeof(TriangleCache) as long
+    sizes[15] = sizeof(SurfaceMaterial) as long
+    sizes[16] = sizeof(AABBf) as long
+    sizes[17] = sizeof(SetItem) as long
+    sizes[18] = hull.HULL_VERSION as long
+    sizes[19] = mesh.MESH_VERSION as long
+    sizes[20] = height_field.HEIGHT_FIELD_VERSION as long
+    sizes[21] = compound.COMPOUND_VERSION as long
+    sizes[22] = dynamic_tree.tree_save_version()
+    sizes[23] = dynamics.GRAPH_COLOR_COUNT as long
+    i = 0
+    while i < 24 {
+        hash = (hash ^ sizes[i]) * prime
+        i = i + 1
+    }
+    basics.free_bytes(sizes_block, 24 * 8)
+    return hash
+}
+
+// --- the geometry, each block once --------------------------------------------------------------------
+
+struct GeometryEntry {
+    kind: int
+    block: ptr
+    byte_count: int
+}
+
+struct GeometryTable {
+    map: LongMap         // a block's address to its entry
+    entries: Buffer      // GeometryEntry
+}
+
+geometry_entry(t: *GeometryTable, index: int) -> *GeometryEntry { return (t.entries.data + index * sizeof(GeometryEntry)) as *GeometryEntry }
+
+// The shape's geometry block, with its kind and length, or NULL_INDEX for a
+// shape that holds none (a sphere, a capsule).
+shape_geometry_index(t: *GeometryTable, s: *WorldShape) -> int {
+    kind = s.geometry.kind
+    if kind == shape.SHAPE_HULL { return table_index(t, kind, s.geometry.hull as ptr, s.geometry.hull.byte_count) }
+    if kind == shape.SHAPE_MESH { return table_index(t, kind, s.geometry.mesh.data as ptr, s.geometry.mesh.data.byte_count) }
+    if kind == shape.SHAPE_HEIGHT_FIELD { return table_index(t, kind, s.geometry.height_field as ptr, s.geometry.height_field.byte_count) }
+    if kind == shape.SHAPE_COMPOUND { return table_index(t, kind, s.geometry.compound as ptr, s.geometry.compound.byte_count) }
+    return NULL_INDEX
+}
+
+table_index(t: *GeometryTable, kind: int, block: ptr, byte_count: int) -> int {
+    if block == null { return NULL_INDEX }
+    key = mem.ptr_to_long(block)
+    found = basics.map_get(&t.map, key, NULL_INDEX)
+    if found != NULL_INDEX { return found }
+    index = basics.buffer_push(&t.entries)
+    entry = geometry_entry(t, index)
+    entry.kind = kind
+    entry.block = block
+    entry.byte_count = byte_count
+    basics.map_set(&t.map, key, index)
+    return index
+}
+
+// --- saving ------------------------------------------------------------------------------------------
+
+// The world as one block of bytes and its length, the block the caller's
+// to free (free_snapshot); null and 0 for a world that is not one or is
+// mid-step.
+save_world(world_id: WorldId) -> (ptr, int) {
+    if dynamics.world_is_valid(world_id) == false { return null, 0 }
+    w = dynamics.get_world(world_id.index1 - 1)
+    if w.locked { return null, 0 }
+    wr = SnapWriter { data: null, size: 0, capacity: 0 }
+    w_int(&wr, SNAPSHOT_MAGIC)
+    w_int(&wr, SNAPSHOT_VERSION)
+    w_long(&wr, snapshot_layout())
+
+    // The settings and the scalars a step carries over.
+    w_vec3(&wr, w.gravity)
+    w_float(&wr, w.hit_event_threshold)
+    w_float(&wr, w.restitution_threshold)
+    w_int(&wr, w.restitution_iterations)
+    w_bool(&wr, w.enable_restitution_propagation)
+    w_bool(&wr, w.enable_kinematic_static_softness)
+    w_float(&wr, w.max_linear_speed)
+    w_float(&wr, w.contact_speed)
+    w_float(&wr, w.contact_hertz)
+    w_float(&wr, w.contact_damping_ratio)
+    w_float(&wr, w.contact_recycle_distance)
+    w_bool(&wr, w.enable_sleep)
+    w_bool(&wr, w.enable_warm_starting)
+    w_bool(&wr, w.enable_continuous)
+    w_bool(&wr, w.enable_speculative)
+    w_long(&wr, w.step_index)
+    w_int(&wr, w.split_island_id)
+    w_int(&wr, w.split_island_candidate)
+    w_float(&wr, w.split_sleep_time)
+    w_int(&wr, w.compound_shape_count)
+    w_float(&wr, w.inv_h)
+    w_float(&wr, w.inv_dt)
+
+    w_idpool(&wr, &w.body_id_pool)
+    w_idpool(&wr, &w.solver_set_id_pool)
+    w_idpool(&wr, &w.joint_id_pool)
+    w_idpool(&wr, &w.contact_id_pool)
+    w_idpool(&wr, &w.island_id_pool)
+    w_idpool(&wr, &w.shape_id_pool)
+
+    // The solver sets; a free one is its index alone.
+    w_int(&wr, w.solver_sets.count)
+    i = 0
+    while i < w.solver_sets.count {
+        set = dynamics.solver_set_at(w, i)
+        w_int(&wr, set.set_index)
+        if set.set_index != NULL_INDEX {
+            w_buffer(&wr, &set.body_sims)
+            w_buffer(&wr, &set.body_states)
+            w_buffer(&wr, &set.joint_sims)
+            w_ints(&wr, &set.contact_indices)
+            w_buffer(&wr, &set.island_sims)
+        }
+        i = i + 1
+    }
+
+    // The bodies, their pointers cleared in the copy, each name after.
+    w_int(&wr, w.bodies.count)
+    i = 0
+    while i < w.bodies.count {
+        b = dynamics.body_at(w, i)
+        start = wr.size
+        w_bytes(&wr, b as ptr, sizeof(Body))
+        body_copy = (wr.data + start) as *Body
+        body_copy.name = null
+        body_copy.user_data = null
+        w_name(&wr, b.name)
+        i = i + 1
+    }
+
+    // The geometry the live shapes hold, each block once.
+    table = GeometryTable { map: basics.map_create(16), entries: basics.buffer_create(sizeof(GeometryEntry), 0) }
+    indices_block = basics.alloc(math.max_int(w.shapes.count, 1) * 4)
+    indices = indices_block as int[]
+    i = 0
+    while i < w.shapes.count {
+        s = dynamics.world_shape_at(w, i)
+        indices[i] = NULL_INDEX
+        if s.id != NULL_INDEX { indices[i] = shape_geometry_index(&table, s) }
+        i = i + 1
+    }
+    w_int(&wr, table.entries.count)
+    i = 0
+    while i < table.entries.count {
+        entry = geometry_entry(&table, i)
+        w_int(&wr, entry.kind)
+        w_int(&wr, entry.byte_count)
+        start = wr.size
+        w_bytes(&wr, entry.block, entry.byte_count)
+        if entry.kind == shape.SHAPE_COMPOUND {
+            // The copy's tree pointers cleared, as convert_compound_to_bytes clears them.
+            compound_copy = (wr.data + start) as *CompoundData
+            compound_copy.tree.nodes = null
+            compound_copy.tree.proxies = null
+            compound_copy.tree.stack = null
+            compound_copy.tree.stack_dist = null
+        }
+        i = i + 1
+    }
+
+    // The shapes, their pointers cleared in the copy; then each one's
+    // geometry entry, its materials and its name.
+    w_int(&wr, w.shapes.count)
+    i = 0
+    while i < w.shapes.count {
+        s = dynamics.world_shape_at(w, i)
+        start = wr.size
+        w_bytes(&wr, s as ptr, sizeof(WorldShape))
+        shape_copy = (wr.data + start) as *WorldShape
+        shape_copy.geometry.hull = null
+        shape_copy.geometry.mesh.data = null
+        shape_copy.geometry.height_field = null
+        shape_copy.geometry.compound = null
+        shape_copy.materials = null
+        shape_copy.user_data = null
+        shape_copy.name = null
+        w_int(&wr, indices[i])
+        if s.id != NULL_INDEX && s.materials != null {
+            w_int(&wr, s.material_count)
+            w_bytes(&wr, s.materials, s.material_count * sizeof(SurfaceMaterial))
+        } else {
+            w_int(&wr, 0)
+        }
+        if s.id != NULL_INDEX { w_name(&wr, s.name) } else { w_name(&wr, null) }
+        i = i + 1
+    }
+    basics.free_bytes(indices_block, math.max_int(w.shapes.count, 1) * 4)
+    basics.map_destroy(&table.map)
+    basics.buffer_destroy(&table.entries)
+
+    w_buffer(&wr, &w.fat_aabbs)
+
+    // The contacts: the record with its pointers cleared, then a live
+    // contact's manifolds and, for a mesh contact, its triangles.
+    w_int(&wr, w.contacts.count)
+    i = 0
+    while i < w.contacts.count {
+        c = dynamics.contact_at(w, i)
+        start = wr.size
+        w_bytes(&wr, c as ptr, sizeof(Contact))
+        contact_copy = (wr.data + start) as *Contact
+        contact_copy.manifolds = null
+        is_mesh = (c.flags & dynamics.SIM_MESH_CONTACT) != 0
+        if is_mesh {
+            // The copy says what a load makes of it: the triangles without
+            // their spare room.
+            copy_cache = dynamics.mesh_cache_of(contact_copy)
+            copy_cache.triangles = null
+            copy_cache.capacity = copy_cache.count
+        }
+        if c.contact_id != NULL_INDEX {
+            w_bytes(&wr, c.manifolds, c.manifold_count * sizeof(Manifold))
+            if is_mesh {
+                cache = dynamics.mesh_cache_of(c)
+                w_int(&wr, cache.count)
+                w_bytes(&wr, cache.triangles, cache.count * sizeof(TriangleCache))
+            }
+        }
+        i = i + 1
+    }
+
+    w_int(&wr, w.joints.count)
+    i = 0
+    while i < w.joints.count {
+        start = wr.size
+        w_bytes(&wr, dynamics.joint_at(w, i) as ptr, sizeof(Joint))
+        joint_copy = (wr.data + start) as *Joint
+        joint_copy.user_data = null
+        i = i + 1
+    }
+
+    w_int(&wr, w.sensors.count)
+    i = 0
+    while i < w.sensors.count {
+        sensor = dynamics.sensor_at(w, i)
+        w_int(&wr, sensor.shape_id)
+        w_buffer(&wr, &sensor.hits)
+        w_buffer(&wr, &sensor.overlaps1)
+        w_buffer(&wr, &sensor.overlaps2)
+        i = i + 1
+    }
+
+    // The islands; a free one is its scalars alone.
+    w_int(&wr, w.islands.count)
+    i = 0
+    while i < w.islands.count {
+        island = dynamics.island_at(w, i)
+        w_int(&wr, island.set_index)
+        w_int(&wr, island.local_index)
+        w_int(&wr, island.island_id)
+        w_int(&wr, island.constraint_remove_count)
+        if island.island_id != NULL_INDEX {
+            w_ints(&wr, &island.bodies)
+            w_buffer(&wr, &island.contacts)
+            w_buffer(&wr, &island.joints)
+        }
+        i = i + 1
+    }
+
+    // The trees as dynamic_tree saves them, and the pair set whole (its
+    // slots in place, so a walk over it meets the pairs in the same order).
+    t = 0
+    while t < broad_phase.BODY_TYPE_COUNT {
+        block, byte_count = dynamic_tree.tree_save_bytes(broad_phase.broad_phase_tree(&w.broad_phase, t))
+        w_int(&wr, byte_count)
+        w_bytes(&wr, block, byte_count)
+        if block != null { basics.free_bytes(block, byte_count) }
+        t = t + 1
+    }
+    w_int(&wr, w.broad_phase.pair_set.capacity)
+    w_int(&wr, w.broad_phase.pair_set.count)
+    w_bytes(&wr, w.broad_phase.pair_set.items, w.broad_phase.pair_set.capacity * sizeof(SetItem))
+
+    // The colours: each one's bodies (but the overflow's), joints and contacts.
+    k = 0
+    while k < dynamics.GRAPH_COLOR_COUNT {
+        color = graph_color(w, k)
+        if k < dynamics.OVERFLOW_INDEX { w_bitset(&wr, &color.body_set) }
+        w_buffer(&wr, &color.joint_sims)
+        w_ints(&wr, &color.convex_contacts)
+        w_buffer(&wr, &color.contacts)
+        k = k + 1
+    }
+
+    // The block trimmed to its length, so the caller frees what it holds.
+    exact = basics.alloc(wr.size)
+    memcpy(exact, wr.data, wr.size)
+    basics.free_bytes(wr.data, wr.capacity)
+    return exact, wr.size
+}
+
+graph_color(w: *World, k: int) -> *GraphColor { return (w.constraint_graph.colors + k * sizeof(GraphColor)) as *GraphColor }
+
+// A snapshot block save_world gave.
+free_snapshot(block: ptr, byte_count: int) {
+    if block != null { basics.free_bytes(block, byte_count) }
+}
+
+// --- loading -----------------------------------------------------------------------------------------
+
+// A world made from `def` (its workers, callbacks and user data; the
+// snapshot gives everything else) and filled from the snapshot in `size`
+// bytes; a null id when the bytes are not a snapshot of this layout or any
+// part of them fails its checks, in which case nothing is left behind.
+load_world(def: *WorldDef, data: ptr, size: int) -> WorldId {
+    null_id = WorldId { index1: 0, generation: 0 }
+    if data == null || size < 16 { return null_id }
+    rd = SnapReader { data: data, size: size, at: 0, ok: true }
+    if r_int(&rd) != SNAPSHOT_MAGIC || r_int(&rd) != SNAPSHOT_VERSION || r_long(&rd) != snapshot_layout() { return null_id }
+    world_id = dynamics.create_world(def)
+    if dynamics.world_is_valid(world_id) == false { return null_id }
+    w = dynamics.get_world(world_id.index1 - 1)
+    if fill_world(w, &rd) == false || rd.at != rd.size || world_valid(w) == false {
+        dynamics.destroy_world(world_id)
+        return null_id
+    }
+    return world_id
+}
+
+// The world's own invariants over everything loaded.
+world_valid(w: *World) -> bool {
+    if dynamics.validate_solver_sets(w) == false { return false }
+    if dynamics.validate_contacts(w) == false { return false }
+    if dynamics.validate_joints(w) == false { return false }
+    return broad_phase.validate_broad_phase(&w.broad_phase)
+}
+
+// Every section into the fresh world. The world stays one destroy_world can
+// free at every point: a container is replaced only by a whole one, and a
+// record's pointers are cleared before it joins its container.
+fill_world(w: *World, rd: *SnapReader) -> bool {
+    w.gravity = r_vec3(rd)
+    w.hit_event_threshold = r_float(rd)
+    w.restitution_threshold = r_float(rd)
+    w.restitution_iterations = r_int(rd)
+    w.enable_restitution_propagation = r_bool(rd)
+    w.enable_kinematic_static_softness = r_bool(rd)
+    w.max_linear_speed = r_float(rd)
+    w.contact_speed = r_float(rd)
+    w.contact_hertz = r_float(rd)
+    w.contact_damping_ratio = r_float(rd)
+    w.contact_recycle_distance = r_float(rd)
+    w.enable_sleep = r_bool(rd)
+    w.enable_warm_starting = r_bool(rd)
+    w.enable_continuous = r_bool(rd)
+    w.enable_speculative = r_bool(rd)
+    w.step_index = r_long(rd)
+    w.split_island_id = r_int(rd)
+    w.split_island_candidate = r_int(rd)
+    w.split_sleep_time = r_float(rd)
+    w.compound_shape_count = r_int(rd)
+    w.inv_h = r_float(rd)
+    w.inv_dt = r_float(rd)
+    if rd.ok == false { return false }
+    if w.restitution_iterations < 0 || w.restitution_iterations > dynamics.MAX_RESTITUTION_ITERATIONS { return false }
+
+    // The fresh world's solver sets and pools give way first, then each
+    // pool and set is read whole.
+    i = 0
+    while i < w.solver_sets.count {
+        if dynamics.solver_set_at(w, i).set_index != NULL_INDEX { dynamics.destroy_solver_set(w, i) }
+        i = i + 1
+    }
+    w.solver_sets.count = 0
+    replace_pool(&w.body_id_pool, r_idpool(rd))
+    replace_pool(&w.solver_set_id_pool, r_idpool(rd))
+    replace_pool(&w.joint_id_pool, r_idpool(rd))
+    replace_pool(&w.contact_id_pool, r_idpool(rd))
+    replace_pool(&w.island_id_pool, r_idpool(rd))
+    replace_pool(&w.shape_id_pool, r_idpool(rd))
+    if rd.ok == false { return false }
+
+    set_count = r_count(rd, 4)
+    i = 0
+    while i < set_count && rd.ok {
+        set_index = r_int(rd)
+        index = basics.buffer_push(&w.solver_sets)
+        set = dynamics.solver_set_at(w, index)
+        memset(set as ptr, 0, sizeof(SolverSet))
+        set.set_index = NULL_INDEX
+        if set_index != NULL_INDEX && rd.ok {
+            set.body_sims = r_buffer(rd, sizeof(BodySim))
+            set.body_states = r_buffer(rd, sizeof(BodyState))
+            set.joint_sims = r_buffer(rd, sizeof(JointSim))
+            set.contact_indices = r_ints(rd)
+            set.island_sims = r_buffer(rd, sizeof(IslandSim))
+            set.set_index = set_index
+            if set_index != i { rd.ok = false }
+        }
+        i = i + 1
+    }
+    if rd.ok == false || w.solver_sets.count < 3 { return false }
+
+    // The bodies: each record with its pointers cleared, then its name.
+    body_count = r_count(rd, sizeof(Body))
+    basics.buffer_destroy(&w.bodies)
+    w.bodies = basics.buffer_create(sizeof(Body), math.max_int(body_count, 16))
+    i = 0
+    while i < body_count && rd.ok {
+        index = basics.buffer_push(&w.bodies)
+        b = dynamics.body_at(w, index)
+        r_bytes(rd, b as ptr, sizeof(Body))
+        b.name = null
+        b.user_data = null
+        b.name = r_name(rd)
+        i = i + 1
+    }
+    if rd.ok == false { return false }
+
+    // The geometry, each block copied into the world and checked as bytes
+    // from outside are: a hull goes into the hull database when a shape
+    // takes it, a mesh, height field or compound becomes the world's own.
+    geometry_count = r_count(rd, 8)
+    kinds_block = basics.alloc(math.max_int(geometry_count, 1) * 4)
+    kinds = kinds_block as int[]
+    blocks_block = basics.alloc(math.max_int(geometry_count, 1) * 8)
+    blocks = blocks_block as ptr[]
+    loaded = 0
+    while loaded < geometry_count && rd.ok {
+        kind = r_int(rd)
+        byte_count = r_int(rd)
+        if byte_count <= 0 || r_need(rd, byte_count) == false {
+            rd.ok = false
+            break
+        }
+        block = basics.alloc(byte_count)
+        memcpy(block, rd.data + rd.at, byte_count)
+        rd.at = rd.at + byte_count
+        valid = false
+        if kind == shape.SHAPE_HULL { valid = hull.hull_bytes_valid(block as *HullData, byte_count) && (block as *HullData).byte_count == byte_count }
+        else if kind == shape.SHAPE_MESH { valid = mesh.mesh_bytes_valid(block as *MeshData, byte_count) && (block as *MeshData).byte_count == byte_count }
+        else if kind == shape.SHAPE_HEIGHT_FIELD { valid = height_field.height_field_bytes_valid(block as *HeightFieldData, byte_count) && (block as *HeightFieldData).byte_count == byte_count }
+        else if kind == shape.SHAPE_COMPOUND { valid = compound.convert_bytes_to_compound(block, byte_count) != null }
+        if valid == false {
+            basics.free_bytes(block, byte_count)
+            rd.ok = false
+            break
+        }
+        // The world owns all but the hulls, which the database copies.
+        if kind != shape.SHAPE_HULL { dynamics.adopt_geometry(w, block, byte_count) }
+        kinds[loaded] = kind
+        blocks[loaded] = block
+        loaded = loaded + 1
+    }
+
+    // The shapes: each record with its pointers cleared, then its geometry,
+    // materials and name.
+    shape_count = r_count(rd, sizeof(WorldShape))
+    if rd.ok {
+        basics.buffer_destroy(&w.shapes)
+        w.shapes = basics.buffer_create(sizeof(WorldShape), math.max_int(shape_count, 16))
+    }
+    i = 0
+    while i < shape_count && rd.ok {
+        index = basics.buffer_push(&w.shapes)
+        s = dynamics.world_shape_at(w, index)
+        r_bytes(rd, s as ptr, sizeof(WorldShape))
+        s.geometry.hull = null
+        s.geometry.mesh.data = null
+        s.geometry.height_field = null
+        s.geometry.compound = null
+        s.materials = null
+        s.user_data = null
+        s.name = null
+        geometry_index = r_int(rd)
+        material_count = r_count(rd, sizeof(SurfaceMaterial))
+        if rd.ok == false { break }
+        if s.id != NULL_INDEX {
+            kind = s.geometry.kind
+            needs_block = kind == shape.SHAPE_HULL || kind == shape.SHAPE_MESH || kind == shape.SHAPE_HEIGHT_FIELD || kind == shape.SHAPE_COMPOUND
+            if kind < 0 || kind >= shape.SHAPE_KIND_COUNT { rd.ok = false }
+            else if needs_block {
+                if geometry_index < 0 || geometry_index >= loaded || kinds[geometry_index] != kind { rd.ok = false }
+                else if kind == shape.SHAPE_HULL { s.geometry.hull = dynamics.add_hull_to_database(w, blocks[geometry_index] as *HullData) }
+                else if kind == shape.SHAPE_MESH { s.geometry.mesh.data = blocks[geometry_index] as *MeshData }
+                else if kind == shape.SHAPE_HEIGHT_FIELD { s.geometry.height_field = blocks[geometry_index] as *HeightFieldData }
+                else { s.geometry.compound = blocks[geometry_index] as *CompoundData }
+            } else if geometry_index != NULL_INDEX { rd.ok = false }
+        } else if geometry_index != NULL_INDEX { rd.ok = false }
+        if material_count > 0 && rd.ok {
+            if s.id == NULL_INDEX || material_count != s.material_count { rd.ok = false }
+            else {
+                s.materials = basics.alloc(material_count * sizeof(SurfaceMaterial))
+                r_bytes(rd, s.materials, material_count * sizeof(SurfaceMaterial))
+            }
+        }
+        s.name = r_name(rd)
+        i = i + 1
+    }
+    // The hulls' copies were only for the database to take its own from.
+    k = 0
+    while k < loaded {
+        if kinds[k] == shape.SHAPE_HULL { hull.destroy_hull(blocks[k] as *HullData) }
+        k = k + 1
+    }
+    basics.free_bytes(kinds_block, math.max_int(geometry_count, 1) * 4)
+    basics.free_bytes(blocks_block, math.max_int(geometry_count, 1) * 8)
+    if rd.ok == false { return false }
+
+    fat = r_buffer(rd, sizeof(AABBf))
+    basics.buffer_destroy(&w.fat_aabbs)
+    w.fat_aabbs = fat
+    if rd.ok == false || w.fat_aabbs.count != w.shapes.count { return false }
+
+    // The contacts: each record with its manifolds and mesh cache cleared,
+    // then the live ones' manifolds into the world's allocators.
+    contact_count = r_count(rd, sizeof(Contact))
+    if rd.ok {
+        basics.buffer_destroy(&w.contacts)
+        w.contacts = basics.buffer_create(sizeof(Contact), math.max_int(contact_count, 16))
+    }
+    i = 0
+    while i < contact_count && rd.ok {
+        index = basics.buffer_push(&w.contacts)
+        c = dynamics.contact_at(w, index)
+        r_bytes(rd, c as ptr, sizeof(Contact))
+        manifold_count = c.manifold_count
+        c.manifolds = null
+        c.manifold_count = 0
+        is_mesh = (c.flags & dynamics.SIM_MESH_CONTACT) != 0
+        if is_mesh {
+            cache = dynamics.mesh_cache_of(c)
+            cache.triangles = null
+            cache.count = 0
+            cache.capacity = 0
+        }
+        if c.contact_id != NULL_INDEX {
+            if manifold_count < 0 || basics.section_fits(rd.at, manifold_count, sizeof(Manifold), rd.size) == false {
+                rd.ok = false
+                break
+            }
+            if manifold_count > 0 {
+                dynamics.allocate_manifolds(w, c, manifold_count)
+                r_bytes(rd, c.manifolds, manifold_count * sizeof(Manifold))
+            }
+            if is_mesh {
+                triangle_count = r_count(rd, sizeof(TriangleCache))
+                if triangle_count > 0 && rd.ok {
+                    cache = dynamics.mesh_cache_of(c)
+                    cache.triangles = basics.alloc(triangle_count * sizeof(TriangleCache))
+                    cache.capacity = triangle_count
+                    r_bytes(rd, cache.triangles, triangle_count * sizeof(TriangleCache))
+                    cache.count = triangle_count
+                }
+            }
+        } else if manifold_count != 0 { rd.ok = false }
+        i = i + 1
+    }
+    if rd.ok == false { return false }
+
+    joint_count = r_count(rd, sizeof(Joint))
+    basics.buffer_destroy(&w.joints)
+    w.joints = basics.buffer_create(sizeof(Joint), math.max_int(joint_count, 16))
+    i = 0
+    while i < joint_count && rd.ok {
+        index = basics.buffer_push(&w.joints)
+        j = dynamics.joint_at(w, index)
+        r_bytes(rd, j as ptr, sizeof(Joint))
+        j.user_data = null
+        i = i + 1
+    }
+    if rd.ok == false { return false }
+
+    sensor_count = r_count(rd, 4)
+    i = 0
+    while i < w.sensors.count {
+        sensor = dynamics.sensor_at(w, i)
+        basics.buffer_destroy(&sensor.hits)
+        basics.buffer_destroy(&sensor.overlaps1)
+        basics.buffer_destroy(&sensor.overlaps2)
+        i = i + 1
+    }
+    w.sensors.count = 0
+    i = 0
+    while i < sensor_count && rd.ok {
+        index = basics.buffer_push(&w.sensors)
+        sensor = dynamics.sensor_at(w, index)
+        memset(sensor as ptr, 0, sizeof(Sensor))
+        sensor.shape_id = r_int(rd)
+        sensor.hits = r_buffer(rd, 8)
+        sensor.overlaps1 = r_buffer(rd, 8)
+        sensor.overlaps2 = r_buffer(rd, 8)
+        i = i + 1
+    }
+    if rd.ok == false { return false }
+
+    island_count = r_count(rd, 16)
+    basics.buffer_destroy(&w.islands)
+    w.islands = basics.buffer_create(sizeof(Island), math.max_int(island_count, 16))
+    i = 0
+    while i < island_count && rd.ok {
+        index = basics.buffer_push(&w.islands)
+        island = dynamics.island_at(w, index)
+        memset(island as ptr, 0, sizeof(Island))
+        island.set_index = r_int(rd)
+        island.local_index = r_int(rd)
+        island_id = r_int(rd)
+        island.constraint_remove_count = r_int(rd)
+        island.island_id = NULL_INDEX
+        if island_id != NULL_INDEX && rd.ok {
+            island.bodies = r_ints(rd)
+            island.contacts = r_buffer(rd, sizeof(ContactLink))
+            island.joints = r_buffer(rd, sizeof(JointLink))
+            island.island_id = island_id
+        }
+        i = i + 1
+    }
+    if rd.ok == false { return false }
+
+    // The trees: each loaded as dynamic_tree loads saved bytes (its own
+    // checks), then put in place of the fresh one.
+    t = 0
+    while t < broad_phase.BODY_TYPE_COUNT && rd.ok {
+        byte_count = r_int(rd)
+        if r_need(rd, byte_count) == false { break }
+        aligned = basics.alloc(math.max_int(byte_count, 1))
+        memcpy(aligned, rd.data + rd.at, byte_count)
+        rd.at = rd.at + byte_count
+        tree = dynamic_tree.tree_load_bytes(aligned, byte_count, 1.0)
+        basics.free_bytes(aligned, math.max_int(byte_count, 1))
+        if tree.nodes == null {
+            rd.ok = false
+            break
+        }
+        slot = broad_phase.broad_phase_tree(&w.broad_phase, t)
+        dynamic_tree.tree_destroy(slot)
+        memcpy(slot as ptr, (&tree) as ptr, sizeof(DynamicTree))
+        t = t + 1
+    }
+    if rd.ok == false { return false }
+    capacity = r_int(rd)
+    pair_count = r_int(rd)
+    if rd.ok == false || capacity < 16 || basics.is_power_of_2(capacity) == false || pair_count < 0 || 2 * pair_count > capacity { return false }
+    if basics.section_fits(rd.at, capacity, sizeof(SetItem), rd.size) == false { return false }
+    basics.set_destroy(&w.broad_phase.pair_set)
+    w.broad_phase.pair_set = HashSet { items: basics.alloc(capacity * sizeof(SetItem)), capacity: capacity, count: pair_count }
+    r_bytes(rd, w.broad_phase.pair_set.items, capacity * sizeof(SetItem))
+
+    // The colours: each container read whole in place of the fresh one's;
+    // the step's constraints start empty.
+    k = 0
+    while k < dynamics.GRAPH_COLOR_COUNT && rd.ok {
+        color = graph_color(w, k)
+        if k < dynamics.OVERFLOW_INDEX {
+            bodies = r_bitset(rd)
+            basics.bitset_destroy(&color.body_set)
+            color.body_set = bodies
+        }
+        joints = r_buffer(rd, sizeof(JointSim))
+        basics.buffer_destroy(&color.joint_sims)
+        color.joint_sims = joints
+        convex = r_ints(rd)
+        basics.ints_destroy(&color.convex_contacts)
+        color.convex_contacts = convex
+        specs = r_buffer(rd, sizeof(ContactSpec))
+        basics.buffer_destroy(&color.contacts)
+        color.contacts = specs
+        k = k + 1
+    }
+    return rd.ok
+}
+
+// The fresh world's pool given way to the loaded one.
+replace_pool(dst: *IdPool, src: IdPool) {
+    basics.idpool_destroy(dst)
+    dst.free_ids = src.free_ids
+    dst.next_index = src.next_index
+}
