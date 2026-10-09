@@ -277,6 +277,9 @@ const EDGE_LIST_B = 128
 const EDGE_LIST_BYTES = 2 * 128 * 4
 // The pairs left that pay for the probe's second cull (B3_EDGE_PROBE_MIN_TESTS).
 const EDGE_PROBE_MIN_TESTS = 10
+// The hulls at or under this many vertices are searched one vertex at a time.
+const WIDE_SUPPORT_MIN_VERTICES = 16
+
 // How far under the best edge separation a lane's single-precision
 // separation may fall and still be measured in double: well past a float's
 // rounding at the hulls' scale (the test runs in A's frame, the hulls
@@ -1312,6 +1315,11 @@ filter_edge_candidates(planes: Plane[], edges: HalfEdge[], cosines: f32[], probe
 // where that one ties values within 2^-16 of each other. The caller
 // measures the separation of the chosen vertex in double.
 support_index_wide(h: *HullData, direction: Vec3) -> int {
+    // A small hull is searched in double, one vertex at a time: the lanes'
+    // reduction costs more than eight or sixteen dot products (measured on
+    // the reference's rocks, ten vertices, and boxes and six-sided
+    // cylinders), and the answer is the same first maximum.
+    if h.vertex_count <= WIDE_SUPPORT_MIN_VERTICES { return support_index(hull.hull_points(h), h.vertex_count, direction) }
     scratch_ready()
     stride = hull.hull_soa_stride(h.vertex_count)
     rows = hull.hull_soa_vertices(h)

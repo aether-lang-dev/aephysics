@@ -1001,9 +1001,9 @@ tree_query_on(t: *DynamicTree, stack_block: ptr, box: AABB, mask_bits: long, req
     nodes = t.nodes as DynamicTreeNode[]
     proxies = t.proxies as TreeProxy[]
     stack = stack_block as int[]
-    // The query box narrowed outward once, so a node it touches in double
-    // is never missed in single precision.
-    q = math.aabb_round_out(box)
+    // The double query box against each node's float box widened (exact):
+    // a node's box holds every double box stored under it, so nothing the
+    // query touches is missed, and no rounding is paid for per query.
     stack_count = 0
     stack[stack_count] = root_pair(nodes)
     stack_count = stack_count + 1
@@ -1018,9 +1018,9 @@ tree_query_on(t: *DynamicTree, stack_block: ptr, box: AABB, mask_bits: long, req
             i = i + 1
             lo = nodes[index].aabb.lower
             up = nodes[index].aabb.upper
-            if up.x < q.lower.x || lo.x > q.upper.x { continue }
-            if up.y < q.lower.y || lo.y > q.upper.y { continue }
-            if up.z < q.lower.z || lo.z > q.upper.z { continue }
+            if (up.x as float) < box.lower.x || (lo.x as float) > box.upper.x { continue }
+            if (up.y as float) < box.lower.y || (lo.y as float) > box.upper.y { continue }
+            if (up.z as float) < box.lower.z || (lo.z as float) > box.upper.z { continue }
             flags = nodes[index].flag_index
             if is_leaf(flags) {
                 proxy_id = proxy_id_of(flags)

@@ -11,7 +11,8 @@ exports (
     MAX_WORKERS, worker_index, set_worker_index, claim_slots, release_slots, enter_traversal, leave_traversal, yield_thread, pause, processor_count, scratch,
     atomic_load, atomic_store, atomic_add, atomic_or, atomic_cas,
     semaphore_new, semaphore_free, semaphore_wait, semaphore_signal,
-    name_copy, name_text, name_free, prefetch, load_word, load_u8, load_u16, f32_bits, f64_bits
+    name_copy, name_text, name_free, prefetch, load_word, load_u8, load_u16, f32_bits, f64_bits,
+    round_down_f32, round_up_f32
 )
 
 // The most workers a world can have: every module's scratch is a block
@@ -42,6 +43,8 @@ extern aephysics_load_u8(p: ptr, index: long) -> int @c_import
 extern aephysics_load_u16(p: ptr, index: long) -> int @c_import
 extern aephysics_f32_bits(value: f32) -> long @c_import
 extern aephysics_f64_bits(value: float) -> long @c_import
+extern aephysics_round_down_f32(x: float) -> f32 @c_import
+extern aephysics_round_up_f32(x: float) -> f32 @c_import
 extern aephysics_name_copy(s: string) -> ptr
 extern aephysics_name_text(name: ptr) -> string
 extern free(p: ptr)
@@ -63,6 +66,10 @@ load_u16(p: ptr, index: long) -> int { return aephysics_load_u16(p, index) }
 // A value's bits: a single's as an unsigned 32-bit value, a double's whole.
 f32_bits(value: f32) -> long { return aephysics_f32_bits(value) }
 f64_bits(value: float) -> long { return aephysics_f64_bits(value) }
+
+// A double narrowed to the nearest float at or below it, or at or above.
+round_down_f32(x: float) -> f32 { return aephysics_round_down_f32(x) }
+round_up_f32(x: float) -> f32 { return aephysics_round_up_f32(x) }
 
 // A name the world keeps: a plain copy of `s` (null for none), its text
 // (empty for none), and its release.

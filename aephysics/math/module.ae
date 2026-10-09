@@ -21,6 +21,7 @@
 // is_normalized, ...) a caller checks where it matters, and the functions
 // return what the original returns on the degenerate case.
 import std.string
+import aephysics.native
 
 exports (
     Vec2, Vec3, CosSin, Quat, Transform, Matrix2, Matrix3, AABB, Plane, SegmentDistanceResult,
@@ -73,9 +74,6 @@ extern sqrt(x: float) -> float
 // libm's single-precision square root: the one the f32 family uses, so a
 // length is computed at the width it is stored at.
 extern sqrtf(x: f32) -> f32
-// The next float toward a direction: exact IEEE, so the outward rounding
-// of a box is the same on every platform.
-extern nextafterf(x: f32, y: f32) -> f32
 extern remainder(x: float, y: float) -> float
 
 const PI = 3.14159265359
@@ -1266,19 +1264,12 @@ struct AABBf {
 infinity_f32() -> f32 { return infinity() as f32 }
 
 // A coordinate narrowed toward negative infinity (b3RoundDownFloat): the
-// nearest float at or below it.
-round_down_f32(x: float) -> f32 {
-    f = x as f32
-    if (f as float) > x { return nextafterf(f, 0.0 - infinity_f32()) }
-    return f
-}
+// nearest float at or below it. The step to the next float is exact IEEE
+// (nextafterf's, done on the bits inline), so every platform gets the same.
+round_down_f32(x: float) -> f32 { return native.round_down_f32(x) }
 
 // A coordinate narrowed toward positive infinity (b3RoundUpFloat).
-round_up_f32(x: float) -> f32 {
-    f = x as f32
-    if (f as float) < x { return nextafterf(f, infinity_f32()) }
-    return f
-}
+round_up_f32(x: float) -> f32 { return native.round_up_f32(x) }
 
 // The box narrowed outward (the rounding of b3OffsetAABB): it holds `a`.
 aabb_round_out(a: AABB) -> AABBf {

@@ -819,7 +819,8 @@ corrupted(block: ptr, byte_count: int, what: int) -> bool {
 // Single-precision nodes far out (#151): 300 centimetre boxes at 1e7,
 // each held by its leaf, the root holding them all; every proxy a double
 // query box touches is found (the tree may find more, a float being a
-// metre there), and exactly the ones whose rounded-out boxes touch it.
+// metre there), and exactly the ones whose stored (rounded-out) boxes the
+// query box touches, compared in double.
 test_far_boxes() {
     seed = 777
     tree = dynamic_tree.tree_create(16)
@@ -855,19 +856,18 @@ test_far_boxes() {
         query = math.aabb(math.sub(center, math.vec3(r, r, r)), math.add(center, math.vec3(r, r, r)))
         tree_hits = hitset_create()
         dynamic_tree.tree_query(&tree, query, dynamic_tree.default_mask_bits(), false, collect, (&tree_hits) as ptr)
-        q = math.aabb_round_out(query)
         i = 0
         while i < PROXY_COUNT {
             found = hitset_has(&tree_hits, i)
             if math.aabb_overlaps(boxes[i], query) && found == false { superset = false }
-            if math.aabbf_overlaps(math.aabb_round_out(boxes[i]), q) != found { exact = false }
+            if math.aabb_overlaps(math.aabb_widen(math.aabb_round_out(boxes[i])), query) != found { exact = false }
             i = i + 1
         }
         hitset_destroy(&tree_hits)
         round = round + 1
     }
     ensure("far: every box a query touches in double is found", superset)
-    ensure("far: and exactly the rounded-out boxes it touches", exact)
+    ensure("far: and exactly the stored boxes it touches", exact)
     free(boxes_block)
     dynamic_tree.tree_destroy(&tree)
 }

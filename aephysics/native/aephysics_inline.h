@@ -86,4 +86,40 @@ static inline long long aephysics_f64_bits(double value)
     return bits;
 }
 
+// A double narrowed to the nearest float at or below it, and at or above
+// it: the bounds of a single-precision box rounded outward (the
+// reference's b3RoundDownFloat and b3RoundUpFloat). The step to the next
+// float is the one on its bits that nextafterf takes, inline: a box is
+// rounded on every tree query, and the libm call was most of the cost.
+// Zero steps to the smallest denormal of the other sign, the largest
+// float to infinity and infinity to the largest float, as nextafterf's do;
+// a NaN is never stepped. Written without branches: whether a coordinate
+// needs the step is a coin flip, and a branch on it mispredicted half the
+// time (the continuous pass rounds a box for every fast shape).
+static inline float aephysics_round_down_f32(double x)
+{
+    float f = (float)x;
+    unsigned int bits;
+    __builtin_memcpy(&bits, &f, 4);
+    unsigned int need = (double)f > x;
+    unsigned int stepped = bits + ((bits >> 31) ? 1u : 0xFFFFFFFFu);
+    stepped = f == 0.0f ? 0x80000001u : stepped;
+    bits = need ? stepped : bits;
+    __builtin_memcpy(&f, &bits, 4);
+    return f;
+}
+
+static inline float aephysics_round_up_f32(double x)
+{
+    float f = (float)x;
+    unsigned int bits;
+    __builtin_memcpy(&bits, &f, 4);
+    unsigned int need = (double)f < x;
+    unsigned int stepped = bits + ((bits >> 31) ? 0xFFFFFFFFu : 1u);
+    stepped = f == 0.0f ? 0x00000001u : stepped;
+    bits = need ? stepped : bits;
+    __builtin_memcpy(&f, &bits, 4);
+    return f;
+}
+
 #endif

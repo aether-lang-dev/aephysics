@@ -70,7 +70,15 @@ outward_rounding() {
         i = i + 1
     }
     ensure("rounding: down at or below, up at or above, every value", held)
-    ensure("rounding: one float when exact, adjacent floats when not", tight)
+    ensure("rounding: one float when exact, adjacent floats when not (libm's nextafterf the judge)", tight)
+    // The inline step against libm's at zero, at the largest float and at
+    // the smallest denormals: the same float every time.
+    tiny = 1.0e-46
+    ensure("rounding: just under zero is the smallest negative denormal", math.round_down_f32(0.0 - tiny) == nextafterf(0.0, 0.0 - math.infinity_f32()))
+    ensure("rounding: just over zero is the smallest positive denormal", math.round_up_f32(tiny) == nextafterf(0.0, math.infinity_f32()))
+    big = 3.40282347e38 * 1.0000001
+    ensure("rounding: past the largest float, down is the largest float and up infinity",
+           math.round_down_f32(big) == nextafterf(math.infinity_f32(), 0.0) && (math.round_up_f32(big) as float) == 1.0 / g_zero_m)
     inf = 1.0 / g_zero_m
     ensure("rounding: the infinities stay infinite", (math.round_down_f32(inf) as float) == inf && (math.round_up_f32(0.0 - inf) as float) == 0.0 - inf)
     far = math.aabb(math.vec3(10000000.01, 0.0 - 0.3, 5.7), math.vec3(10000000.02, 0.4, 5.71))
