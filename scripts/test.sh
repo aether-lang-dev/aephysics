@@ -12,10 +12,11 @@ export AETHER_AEPHYSICS_CFLAGS="${AETHER_AEPHYSICS_CFLAGS:-}"
 mkdir -p target
 failures=0
 # Every module checked whole first, and a warning fails it too. A module
-# checked on its own can pass what a program importing it is refused
-# (aether#2683), so each is also checked as an import: the checks of the
-# modules importing it and the tests' builds take every function of every
-# imported module (aether#2613), and every module is imported by one.
+# checked on its own once passed what a program importing it was refused
+# (aether#2683, fixed in 0.806.0), so each is also checked as an import:
+# the checks of the modules importing it and the tests' builds take every
+# function of every imported module (aether#2613), and every module is
+# imported by one.
 for module in aephysics/*/module.ae; do
     name="$(basename "$(dirname "$module")")"
     if ! AETHER_LIB_DIR="$root" ae check "$module" >"target/check_$name.log" 2>&1 || grep -q "warning\[" "target/check_$name.log"; then

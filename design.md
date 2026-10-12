@@ -395,10 +395,10 @@ started until its tests pass.
    `body_get_local_point_velocity`) until the replay dispatcher called
    every recorded one: `ae build` checked only what a program reaches
    (aether#2613, fixed in 0.799.0), so the gate now runs `ae check` on
-   every module. A module checked on its own can still pass a local
-   named after the function it calls, which a program importing it is
-   refused (aether#2683, aephysics#169), so the gate counts on each
-   module also being checked as an import.
+   every module. A module checked on its own once passed a local named
+   after the function it calls, which a program importing it was refused
+   (aether#2683, fixed in 0.806.0; aephysics#169), so the gate counts on
+   each module also being checked as an import.
 16. **benchmarks** (done, #141): `reference/benchmark/main.c`'s thirteen
    scenes and its SAT runs, against the reference's own scene functions
    on the same machine: the large pyramid, the many pyramids and the
