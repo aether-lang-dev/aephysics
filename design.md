@@ -390,7 +390,12 @@ started until its tests pass.
    `enable_kinematic_speculation`, a contact with a kinematic body keeps
    speculative points out to the pair's travel over the step (the manifold
    functions read a per-worker speculative distance the collide pass sets
-   per contact) and the kinematic body's fat bounds cover its next step. Two
+   per contact) and the kinematic body's fat bounds cover its next step.
+   `enable_travel_speculation` (#173) does the same for every contact and
+   every moving body, a fast body's bounds after its sweep included, for a
+   fast dynamic body: a 1.2 t car at 6.5 m/s moves 11 cm a step, under the
+   reference's continuous threshold (half its extent), and found the light
+   bodies it struck 5 to 8 cm inside it on the first frame. Two
    functions no test called hid type errors (`body_apply_force`,
    `body_get_local_point_velocity`) until the replay dispatcher called
    every recorded one: `ae build` checked only what a program reaches
