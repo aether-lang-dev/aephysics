@@ -1026,6 +1026,165 @@ test_ankle_crouch() {
            math.abs_float(deep.x - over) < 4.0 && math.abs_float(deep.y - over) < 4.0)
 }
 
+// #174: with ankles each calf's capsule stops at its ankle, its cap within
+// the joint (the reference's reaches a radius past the ankle into the
+// foot's place); its knee end and radius are the reference's, and its far
+// end (human_bone_far_end) is still the ankle. Without ankles the calf's
+// capsule is the reference's whole. The issue's own measure: a figure
+// standing with ankles stands on its feet, its shins' end caps off the
+// ground, where the capsule as specified rests on it beside the foot.
+capsule_far(c: Capsule, from: Vec3) -> Vec3 {
+    if math.length(math.sub(c.center2, from)) > math.length(math.sub(c.center1, from)) { return c.center2 }
+    return c.center1
+}
+
+capsule_near(c: Capsule, from: Vec3) -> Vec3 {
+    if math.length(math.sub(c.center2, from)) > math.length(math.sub(c.center1, from)) { return c.center1 }
+    return c.center2
+}
+
+// The ground's normal load on one shape, in newtons, over this step's substeps.
+ground_load(world_id: WorldId, shape_id: ShapeId, data: ContactData[]) -> float {
+    ground = ground_of(world_id)
+    load = 0.0
+    count = dynamics.shape_get_contact_data(shape_id, data, 8)
+    c = 0
+    while c < count {
+        on_ground = dynamics.shape_get_body(data[c].shape_id_a).index1 == ground.index1 || dynamics.shape_get_body(data[c].shape_id_b).index1 == ground.index1
+        if on_ground {
+            m = 0
+            while m < data[c].manifold_count {
+                mf = ((data[c].manifolds + m * sizeof(Manifold)) as ptr) as *Manifold
+                p = 0
+                while p < mf.point_count {
+                    load = load + (dynamics.manifold_point_at(mf, p).total_normal_impulse as float)
+                    p = p + 1
+                }
+                m = m + 1
+            }
+        }
+        c = c + 1
+    }
+    return load * 60.0
+}
+
+// The figure's load on the ground, (shins, feet) as shares of its weight
+// averaged over its last second: the reference's sample, standing on its
+// tight limits under the align spring for four seconds, its joints' springs
+// and friction stiff enough to hold it upright but its ankles soft, free to
+// let the feet lie as the load puts them (as an active ragdoll's are). The
+// capsule as specified puts 42% of the weight on the shins' end caps here.
+standing_legs(ankles: bool) -> Vec2 {
+    world_id = world_with_ground()
+    h = Human { bones: null, filter_joints: null, filter_joint_count: 0, friction_torque: 0.0, is_spawned: false }
+    h.ankles = ankles
+    shape = human.human_reference_shape()
+    human.human_tight_limits(shape)
+    human.create_human_shaped(&h, world_id, Transform { p: math.vec3(0.0, 0.05, 0.0), q: math.quat_identity() }, shape, 50.0, 20.0, 1.0, 1, null)
+    human.destroy_shape(shape)
+    human.human_align_spring(&h, world_id, ground_of(world_id), 25.0, 1.0)
+    if ankles {
+        joint_solver.spherical_joint_set_spring_hertz(human.bone_at(&h, human.BONE_FOOT_L).joint_id, 1.0)
+        joint_solver.spherical_joint_set_spring_hertz(human.bone_at(&h, human.BONE_FOOT_R).joint_id, 1.0)
+        joint_solver.spherical_joint_set_max_motor_torque(human.bone_at(&h, human.BONE_FOOT_L).joint_id, 3.0)
+        joint_solver.spherical_joint_set_max_motor_torque(human.bone_at(&h, human.BONE_FOOT_R).joint_id, 3.0)
+    }
+    weight = 0.0
+    i = 0
+    while i < h.bone_count {
+        weight = weight + dynamics.body_get_mass(human.bone_at(&h, i).body_id)
+        i = i + 1
+    }
+    weight = weight * math.length(dynamics.default_world_def().gravity)
+    data_block = calloc(8, sizeof(ContactData))
+    data = data_block as ContactData[]
+    shins = 0.0
+    feet = 0.0
+    s = 0
+    while s < 240 {
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        if s >= 180 {
+            side = 0
+            while side < 2 {
+                calf = human.bone_at(&h, human.BONE_CALF_L)
+                if side == 1 { calf = human.bone_at(&h, human.BONE_CALF_R) }
+                foot_shape = calf.foot_shape_id
+                if ankles {
+                    foot_shape = human.bone_at(&h, human.BONE_FOOT_L).shape_id
+                    if side == 1 { foot_shape = human.bone_at(&h, human.BONE_FOOT_R).shape_id }
+                }
+                shins = shins + ground_load(world_id, calf.shape_id, data)
+                feet = feet + ground_load(world_id, foot_shape, data)
+                side = side + 1
+            }
+        }
+        s = s + 1
+    }
+    pelvis_y = dynamics.body_get_position(human.bone_at(&h, human.BONE_PELVIS).body_id).y
+    ensure("shins: standing (ankles ${ankles}), the pelvis up (${pelvis_y} m)", pelvis_y > 0.8)
+    free(data_block)
+    human.destroy_human(&h)
+    dynamics.destroy_world(world_id)
+    return Vec2 { x: shins / 60.0 / weight, y: feet / 60.0 / weight }
+}
+
+test_ankle_shins() {
+    reference = human.human_reference_shape()
+    world_id = world_with_ground()
+    h = Human { bones: null, filter_joints: null, filter_joint_count: 0, friction_torque: 0.0, is_spawned: false }
+    ensure("shins: a figure not spawned has no far end", math.length(human.human_bone_far_end(&h, human.BONE_CALF_L)) == 0.0)
+    h.ankles = true
+    human.create_human(&h, world_id, math.vec3(0.0, 1.0, 0.0), 5.0, 1.0, 0.7, 1, null)
+    origin = math.vec3_zero()
+    side = 0
+    while side < 2 {
+        calf_index = human.BONE_CALF_L
+        foot_index = human.BONE_FOOT_L
+        if side == 1 {
+            calf_index = human.BONE_CALF_R
+            foot_index = human.BONE_FOOT_R
+        }
+        spec = human.spec_at(reference, calf_index)
+        calf = human.bone_at(&h, calf_index)
+        foot = human.bone_at(&h, foot_index)
+        c = dynamics.shape_get_capsule(calf.shape_id)
+        ankle = foot.local_frame_a.p
+        knee = capsule_near(c, origin)
+        far = capsule_far(c, origin)
+        tip = math.add(far, math.mul_sv(c.radius, math.normalize(math.sub(far, knee))))
+        ensure("shins (side ${side}): with ankles the shin's cap ends at the ankle (${math.length(math.sub(tip, ankle))} m)", math.length(math.sub(tip, ankle)) < 0.00001)
+        ensure("shins (side ${side}): the ankle is where the reference's capsule ends", math.length(math.sub(ankle, capsule_far(spec.capsule, origin))) < 0.000001)
+        ensure("shins (side ${side}): its knee end and radius the reference's",
+               math.length(math.sub(knee, capsule_near(spec.capsule, origin))) < 0.000001 && math.abs_float(c.radius - spec.capsule.radius) < 0.000001)
+        ensure("shins (side ${side}): its far end is the ankle", math.length(math.sub(human.human_bone_far_end(&h, calf_index), ankle)) < 0.000001)
+        fc = dynamics.shape_get_capsule(foot.shape_id)
+        ensure("shins (side ${side}): the foot's far end is its toe, away from the ankle",
+               math.length(math.sub(human.human_bone_far_end(&h, foot_index), capsule_far(fc, foot.local_frame_b.p))) < 0.000001)
+        side = side + 1
+    }
+    ensure("shins: past the bones, no far end", math.length(human.human_bone_far_end(&h, human.MAX_BONE_COUNT)) == 0.0)
+    human.destroy_human(&h)
+    h = Human { bones: null, filter_joints: null, filter_joint_count: 0, friction_torque: 0.0, is_spawned: false }
+    human.create_human(&h, world_id, math.vec3(0.0, 1.0, 0.0), 5.0, 1.0, 0.7, 1, null)
+    calf = human.bone_at(&h, human.BONE_CALF_L)
+    c = dynamics.shape_get_capsule(calf.shape_id)
+    spec = human.spec_at(reference, human.BONE_CALF_L)
+    ensure("shins: without ankles the calf's capsule is the reference's whole",
+           math.length(math.sub(c.center1, spec.capsule.center1)) < 0.000001 && math.length(math.sub(c.center2, spec.capsule.center2)) < 0.000001)
+    ensure("shins: and its far end the capsule's", math.length(math.sub(human.human_bone_far_end(&h, human.BONE_CALF_L), capsule_far(spec.capsule, origin))) < 0.000001)
+    elbow = human.bone_at(&h, human.BONE_LOWER_ARM_L)
+    ec = dynamics.shape_get_capsule(elbow.shape_id)
+    ensure("shins: a forearm's far end is past the wrist, its capsule's", math.length(math.sub(human.human_bone_far_end(&h, human.BONE_LOWER_ARM_L), capsule_far(ec, origin))) < 0.000001)
+    human.destroy_human(&h)
+    dynamics.destroy_world(world_id)
+    human.destroy_shape(reference)
+    ankled = standing_legs(true)
+    whole = standing_legs(false)
+    println("human: standing, the shares of the weight on shins and feet: with ankles ${ankled.x} and ${ankled.y}, without ${whole.x} and ${whole.y}")
+    ensure("shins: standing with ankles, the feet bear the figure (${ankled.y} of its weight)", ankled.y > 0.97 && ankled.y < 1.03)
+    ensure("shins: and the shins nothing (${ankled.x})", ankled.x < 0.001)
+}
+
 main() {
     g_slab = hull.make_box_hull(20.0, 1.0, 20.0) as ptr
     test_build_and_fall()
@@ -1041,6 +1200,7 @@ main() {
     test_grip()
     test_ankles()
     test_ankle_crouch()
+    test_ankle_shins()
     hull.destroy_hull(g_slab as *HullData)
     println("human: ${checks} checks")
     if failures == 0 {

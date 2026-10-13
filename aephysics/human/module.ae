@@ -37,6 +37,7 @@ exports (
     BONE_FOOT_L, BONE_FOOT_R, MAX_BONE_COUNT, ANKLE_PLANTAR_DEGREES, ANKLE_DORSAL_DEGREES, ANKLE_SIDE_DEGREES, ANKLE_ROLL_DEGREES,
     HumanBone, Human, BoneSpec, bone_at, filter_joint_at, spec_at,
     human_reference_shape, human_anatomical_limits, human_tight_limits, human_chain_child, human_shape_head, human_shape_tail, human_shape_toe, human_fit_shape, destroy_shape, create_human_shaped,
+    human_bone_far_end,
     create_human, destroy_human, human_set_velocity, human_apply_angular_impulse, human_set_joint_friction_torque,
     human_set_joint_spring_hertz, human_set_joint_damping_ratio, human_align_spring, human_release_align_spring, human_create_motor_anchors,
     human_create_parallel_anchors, human_destroy_anchors, human_has_anchors, human_set_anchor_target, human_set_bullet
@@ -79,7 +80,8 @@ const ANKLE_FRICTION = 0.6
 // frame in the reference pose, and the joint's limits and friction.
 // Its own capsule (the shin's on a calf, which carries the foot too:
 // a body lists its shapes newest first, so the first it lists is the
-// foot) and the foot's, a null id on every other bone.
+// foot) and the foot's, a null id on every other bone. With ankles a
+// calf carries only its shin, and the shin stops at the ankle (#174).
 struct HumanBone {
     body_id: BodyId
     joint_id: JointId
@@ -116,6 +118,25 @@ struct Human {
 
 bone_at(h: *Human, index: int) -> *HumanBone { return (h.bones + index * sizeof(HumanBone)) as *HumanBone }
 filter_joint_at(h: *Human, index: int) -> JointId { return (h.filter_joints as JointId[])[index] }
+
+// A built bone's far end in its body's frame: the end of its own capsule
+// farther from its joint (a forearm's past the wrist, a foot's at the
+// toe), but a calf with ankles ends at its ankle, the foot's joint, which
+// its shin stops short of by a radius (#174). A figure not spawned, or an
+// index past its bones, has none: zero.
+human_bone_far_end(h: *Human, index: int) -> Vec3 {
+    if h.is_spawned == false || index < 0 || index >= h.bone_count { return math.vec3_zero() }
+    if h.ankles && (index == BONE_CALF_L || index == BONE_CALF_R) {
+        foot = BONE_FOOT_L
+        if index == BONE_CALF_R { foot = BONE_FOOT_R }
+        return bone_at(h, foot).local_frame_a.p
+    }
+    bone = bone_at(h, index)
+    c = dynamics.shape_get_capsule(bone.shape_id)
+    joint = bone.local_frame_b.p
+    if math.length(math.sub(c.center2, joint)) > math.length(math.sub(c.center1, joint)) { return c.center2 }
+    return c.center1
+}
 
 transform_of(px: float, py: float, pz: float, qx: float, qy: float, qz: float, qs: float) -> Transform {
     return Transform { p: math.vec3(px, py, pz), q: math.quat_vs(math.vec3(qx, qy, qz), qs) }
@@ -644,7 +665,14 @@ place_bone(h: *Human, world_id: WorldId, index: int, placement: Transform, spec:
     sdef.filter.group_index = spec.group * group_index
     sdef.base_material.friction = spec.friction
     sdef.base_material.rolling_resistance = 0.1
-    bone.shape_id = dynamics.create_capsule_shape(bone.body_id, &sdef, spec.capsule)
+    // A calf whose foot is a bone of its own stops at the ankle, its cap
+    // within the joint: as specified its cap reaches a radius past the
+    // ankle, through the foot's place, and stands on the ground beside the
+    // foot, so the shins would carry the figure (#174). Its spec keeps the
+    // ankle, where the foot's joint is made.
+    capsule = spec.capsule
+    if spec.has_foot && foot_on_calf == false { capsule = short_of_ankle(spec.capsule) }
+    bone.shape_id = dynamics.create_capsule_shape(bone.body_id, &sdef, capsule)
     bone.foot_shape_id = dynamics.null_shape_id()
     if spec.has_foot && foot_on_calf {
         fdef = dynamics.default_shape_def()
@@ -663,11 +691,32 @@ place_bone(h: *Human, world_id: WorldId, index: int, placement: Transform, spec:
     bone.joint_friction = spec.joint_friction
 }
 
+// A calf's capsule with its ankle end, the one farther from the knee,
+// drawn in by its radius, so its cap ends at the ankle; one no longer than
+// its radius collapses to its knee end (made a sphere, as any capsule that
+// short is).
+short_of_ankle(c: Capsule) -> Capsule {
+    far_is_second = math.length(c.center2) > math.length(c.center1)
+    knee = c.center2
+    ankle = c.center1
+    if far_is_second {
+        knee = c.center1
+        ankle = c.center2
+    }
+    along = math.sub(ankle, knee)
+    span = math.length(along)
+    if span <= 0.0 { return c }
+    end = math.sub(ankle, math.mul_sv(math.min_float(c.radius, span) / span, along))
+    if far_is_second { return manifold.capsule(knee, end, c.radius) }
+    return manifold.capsule(end, knee, c.radius)
+}
+
 // A calf's foot as a bone of its own: a body in the calf's frame carrying
 // the foot's capsule, on a spherical joint at the ankle (the far end of the
-// calf's capsule). The joint's frame looks down the foot (z from the ankle
-// to the toe) with x the way the toes go down (the shin's line across the
-// foot), so its elliptical cone reaches ANKLE_PLANTAR_DEGREES toward x and
+// calf's capsule as specified, where the built shin's cap ends, #174). The
+// joint's frame looks down the foot (z from the ankle to the toe) with x
+// the way the toes go down (the shin's line across the foot), so its
+// elliptical cone reaches ANKLE_PLANTAR_DEGREES toward x and
 // ANKLE_DORSAL_DEGREES back (a centre tipped toward x by half their
 // difference), ANKLE_SIDE_DEGREES across, and its twist is the sole's roll.
 // The foot rests in the calf's frame, so both frames are one at rest.
