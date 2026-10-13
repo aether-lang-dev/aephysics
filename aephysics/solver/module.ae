@@ -318,15 +318,29 @@ continuous_query_visitor(proxy_id: int, user_data: long, context: ptr) -> bool {
     return true
 }
 
-// A shape's bounds after the sweep, and the fat bounds and proxy grown when they no longer hold it.
-grow_bounds(w: *World, s: *WorldShape, sim: *BodySim, is_bullet: bool) {
-    if math.aabbf_holds(dynamics.shape_fat_aabb(w, s.id), s.aabb) { return }
+// A shape's bounds after the sweep, and the fat bounds and proxy grown when
+// they no longer hold it (or `covered`, what they must hold besides: the
+// next step's travel with enable_travel_speculation).
+grow_bounds(w: *World, s: *WorldShape, sim: *BodySim, is_bullet: bool, covered: AABB) {
+    if math.aabbf_holds(dynamics.shape_fat_aabb(w, s.id), covered) { return }
     margin = math.vec3(s.aabb_margin, s.aabb_margin, s.aabb_margin)
-    fat = math.aabb_round_out(AABB { lower: math.sub(s.aabb.lower, margin), upper: math.add(s.aabb.upper, margin) })
+    fat = math.aabb_round_out(AABB { lower: math.sub(covered.lower, margin), upper: math.add(covered.upper, margin) })
     dynamics.set_shape_fat_aabb(w, s.id, fat)
     native.atomic_or((&sim.flags) as ptr, dynamics.ENLARGE_BOUNDS)
     // A bullet's proxies are enlarged later, serially.
     if is_bullet == false { broad_phase.broad_phase_mark_proxy_moved(&w.broad_phase, s.proxy_key, fat) }
+}
+
+// A shape's bounds `aabb`, and with every contact reaching out over the
+// step's travel (enable_travel_speculation) the same swept over the next
+// step at the body's velocity, so a pair a fast body will meet exists in
+// time (#173). Its own bounds otherwise.
+next_cover(w: *World, aabb: AABB, state: *BodyState, sim: *BodySim, dt: float) -> AABB {
+    if !w.enable_travel_speculation || dt <= 0.0 { return aabb }
+    ahead = math.offset_aabb(aabb, math.mul_sv(dt, math.widen3(state.v)))
+    swept = math.aabb_union(aabb, ahead)
+    turn = dt * math.length(math.widen3(state.w)) * math.length(math.widen3(sim.max_extent))
+    return AABB { lower: math.sub(swept.lower, math.vec3(turn, turn, turn)), upper: math.add(swept.upper, math.vec3(turn, turn, turn)) }
 }
 
 // A fast body swept against the static world (a bullet against the
@@ -393,16 +407,17 @@ solve_continuous(w: *World, sim_index: int, dt: float) {
         while shape_id != NULL_INDEX {
             s = dynamics.world_shape_at(w, shape_id)
             s.aabb = shape.compute_fat_shape_aabb(&s.geometry, t, dynamics.SPECULATIVE_DISTANCE)
-            grow_bounds(w, s, fast_sim, is_bullet)
+            grow_bounds(w, s, fast_sim, is_bullet, next_cover(w, s.aabb, state, fast_sim, dt))
             shape_id = s.next_shape_id
         }
     } else {
         fast_sim.rotation0 = math.narrow_quat(fast_sim.transform.q)
         fast_sim.center0 = fast_sim.center
         shape_id = fast_body.head_shape_id
+        state = dynamics.body_state_at(awake, sim_index)
         while shape_id != NULL_INDEX {
             s = dynamics.world_shape_at(w, shape_id)
-            grow_bounds(w, s, fast_sim, is_bullet)
+            grow_bounds(w, s, fast_sim, is_bullet, next_cover(w, s.aabb, state, fast_sim, dt))
             shape_id = s.next_shape_id
         }
     }
@@ -530,9 +545,10 @@ finalize_range(start: int, end: int, worker: int, context: ptr) {
             shape_id = body.head_shape_id
             // A kinematic body's fat bounds cover its next step's sweep when
             // its contacts reach out over it (enable_kinematic_speculation),
-            // so a pair it will meet exists in time; its shapes' own bounds
-            // stay where they are.
-            sweeps = w.enable_kinematic_speculation && body.kind == dynamics.BODY_KINEMATIC && time_step > 0.0
+            // so a pair it will meet exists in time; a dynamic body's too
+            // when every contact does (enable_travel_speculation, #173); its
+            // shapes' own bounds stay where they are.
+            sweeps = ((w.enable_kinematic_speculation && body.kind == dynamics.BODY_KINEMATIC) || w.enable_travel_speculation) && time_step > 0.0
             travel = math.mul_sv(time_step, v)
             turn = time_step * math.length(wv) * math.length(math.widen3(sim.max_extent))
             while shape_id != NULL_INDEX {

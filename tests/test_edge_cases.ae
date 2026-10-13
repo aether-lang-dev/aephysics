@@ -1233,6 +1233,73 @@ test_kinematic_speculation() {
     dynamics.destroy_world(world_id)
 }
 
+// A fast dynamic body's strike (#173): a heavy dynamic box, a car's mass
+// (1200 kg), driven into a light dynamic body at 7 m/s, 11.7 cm a step.
+// With every contact reaching out over the step's travel the target is
+// brought up to speed as the gap closes and the strike's first frame is
+// under a centimetre deep; the reference's 2 cm of speculation found it
+// the travel less 2 cm inside. The car is a dynamic body pushed by nothing
+// but its own speed: no kinematic body anywhere, so the kinematic flag
+// changes nothing.
+dynamic_strike(travel: bool, speed: float, kind: int) -> float {
+    fixtures_ready()
+    wdef = dynamics.default_world_def()
+    wdef.gravity = math.vec3_zero()
+    wdef.enable_travel_speculation = travel
+    world_id = dynamics.create_world(&wdef)
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.position = math.vec3(0.0 - 2.0, 0.5, 0.0)
+    bdef.linear_velocity = math.vec3(speed, 0.0, 0.0)
+    car = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    // A 1 m box: 1200 kg.
+    sdef.density = 1200.0
+    dynamics.create_hull_shape(car, &sdef, g_box as *HullData)
+    target_def = dynamics.default_body_def()
+    target_def.kind = dynamics.BODY_DYNAMIC
+    target_def.position = math.vec3(0.0, 0.5, 0.0)
+    target = dynamics.create_body(world_id, &target_def)
+    tdef = dynamics.default_shape_def()
+    half = 0.3
+    if kind == STRIKE_BALL { dynamics.create_sphere_shape(target, &tdef, manifold.sphere(math.vec3_zero(), 0.3)) }
+    else {
+        // Across the strike, its rounded side to the car's face: a limb.
+        dynamics.create_capsule_shape(target, &tdef, Capsule { center1: math.vec3(0.0, 0.0, 0.0 - 0.3), center2: math.vec3(0.0, 0.0, 0.3), radius: 0.06 })
+        half = 0.06
+    }
+    deepest = 0.0
+    s = 0
+    while s < 40 {
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        gap = dynamics.body_get_position(target).x - (dynamics.body_get_position(car).x + 0.5) - half
+        if gap < deepest { deepest = gap }
+        s = s + 1
+    }
+    struck = dynamics.body_get_linear_velocity(target).x
+    dynamics.destroy_world(world_id)
+    if struck < 0.5 * speed { return 0.0 - 1.0 }
+    return deepest
+}
+
+test_travel_speculation() {
+    ball = dynamic_strike(true, 7.0, STRIKE_BALL)
+    ensure("travel speculation: a ball a dynamic car strikes at 7 m/s, its deepest under 1 cm (${ball} m)", ball > 0.0 - 0.01)
+    reference = dynamic_strike(false, 7.0, STRIKE_BALL)
+    ensure("and 6 cm or more without it, the reference's (${reference} m)", reference < 0.0 - 0.06)
+    limb = dynamic_strike(true, 7.0, STRIKE_CAPSULE)
+    ensure("travel speculation: a 6 cm limb the car strikes at 7 m/s, under 1 cm (${limb} m)", limb > 0.0 - 0.01)
+    limb_reference = dynamic_strike(false, 7.0, STRIKE_CAPSULE)
+    ensure("and 6 cm or more without it (${limb_reference} m)", limb_reference < 0.0 - 0.06)
+    fast = dynamic_strike(true, 20.0, STRIKE_BALL)
+    ensure("travel speculation: at 20 m/s, 33 cm a step past the bounds' margin (${fast} m)", fast > 0.0 - 0.01)
+    world_id = new_world()
+    ensure("travel speculation: off by default, the reference's", physics_world.is_travel_speculation_enabled(world_id) == false)
+    physics_world.enable_travel_speculation(world_id, true)
+    ensure("travel speculation: and a world turns it on", physics_world.is_travel_speculation_enabled(world_id))
+    dynamics.destroy_world(world_id)
+}
+
 // A hull of twelve random points rocking on the floor about one of its
 // vertices (#134), from its state at step 800 of the soak's seed 1. The
 // reference, and this engine before, rocked it in a cycle of 400 steps for
@@ -1736,6 +1803,7 @@ main() {
     test_elliptical_cone()
     test_kinematic_softness()
     test_kinematic_speculation()
+    test_travel_speculation()
     test_rocking_hull()
     test_encoded_sims()
     test_non_dynamic_joint_disable()
