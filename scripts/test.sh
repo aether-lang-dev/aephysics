@@ -25,6 +25,17 @@ for module in aephysics/*/module.ae; do
         failures=$((failures + 1))
     fi
 done
+# The benchmarks are built, not run (scripts/bench.sh runs them against
+# the reference): nothing else builds them, so an API change could leave
+# one behind unseen (bench/broad_phase.ae was, past AABBf).
+for bench in bench/*.ae; do
+    name="$(basename "$bench" .ae)"
+    if ! AETHER_LIB_DIR="$root" ae build "$bench" -o "target/bench_$name" >"target/bench_$name.log" 2>&1; then
+        echo "FAIL  bench $name (build)"
+        grep -A3 "error" "target/bench_$name.log" | head -12
+        failures=$((failures + 1))
+    fi
+done
 for test in tests/test_*.ae; do
     name="$(basename "$test" .ae)"
     if ! AETHER_LIB_DIR="$root" ae build "$test" -o "target/$name" >"target/$name.log" 2>&1; then
