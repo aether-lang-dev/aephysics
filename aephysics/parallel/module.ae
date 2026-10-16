@@ -179,7 +179,7 @@ all_complete(s: *Scheduler) -> bool {
 // A task in the next slot, as the given worker; the handle to finish
 // it by. With one worker it runs here and now. One signal per task: at
 // most one thread picks it up.
-enqueue(s: *Scheduler, body: fn(ptr) -> void, context: ptr, worker_index: int) -> *Task {
+enqueue(s: *Scheduler, body: fn(ptr) -> void, context: @keep ptr, worker_index: int) -> *Task {
     if s.worker_count <= 1 {
         t = task_at(s, 0)
         t.body = body
@@ -255,7 +255,7 @@ for_trampoline(context: ptr) {
 // done, with how many blocks there were. Blocks stay at min_range until
 // there would be more than 32 a worker, then grow so the count stays
 // bounded; one worker runs the range as one block.
-parallel_for(s: *Scheduler, body: fn(int, int, int, ptr) -> void, item_count: int, min_range: int, context: ptr) -> int {
+parallel_for(s: *Scheduler, body: fn(int, int, int, ptr) -> void, item_count: int, min_range: int, context: @keep ptr) -> int {
     if item_count <= 0 { return 0 }
     worker_count = s.worker_count
     // The caller is the range's worker 0 and keeps its own slot (a world's

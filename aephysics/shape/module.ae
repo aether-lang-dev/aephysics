@@ -428,7 +428,7 @@ reserve_scratch() {
 }
 
 // A proxy whose points are the module's own copy when they were the sphere module's shared ones.
-own_proxy(shape: *Shape, block: ptr) -> ShapeProxy {
+own_proxy(shape: *Shape, block: @keep ptr) -> ShapeProxy {
     proxy = make_shape_proxy(shape)
     kind = shape.kind
     if kind == SHAPE_SPHERE || kind == SHAPE_CAPSULE {

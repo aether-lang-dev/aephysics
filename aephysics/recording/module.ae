@@ -1532,7 +1532,7 @@ player_frame_query_hit(p: *Player, query: int, hit: int) -> QueryHit {
 // The host's debug shape callbacks for the player's world, now and through
 // every restore (b3RecPlayer_SetDebugShapeCallbacks): what the old ones
 // made is given back to them, and the player rewinds to frame 0.
-player_set_debug_shape_callbacks(p: *Player, create: fn(*DebugShape, ptr) -> ptr, destroy: fn(ptr, ptr), context: ptr) {
+player_set_debug_shape_callbacks(p: *Player, create: fn(*DebugShape, ptr) -> ptr, destroy: fn(ptr, ptr), context: @keep ptr) {
     p.def.create_debug_shape = create
     p.def.destroy_debug_shape = destroy
     p.def.user_debug_shape_context = context

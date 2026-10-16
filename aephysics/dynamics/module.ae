@@ -2735,7 +2735,7 @@ rec_geometry(r: *Recording, kind: int, block: ptr) {
 // content hash and then every byte, so two blocks on one hash stay two;
 // else `copy` (alloc's, the recording's from now, freed when found)
 // becomes a new one.
-intern_geometry(r: *Recording, kind: int, hash: long, copy: ptr, byte_count: int) -> int {
+intern_geometry(r: *Recording, kind: int, hash: long, copy: @keep ptr, byte_count: int) -> int {
     index = basics.map_get(&r.geometry_heads, hash, NULL_INDEX)
     while index != NULL_INDEX {
         entry = recorded_geometry_at(r, index)
@@ -3295,7 +3295,7 @@ struct OwnedGeometry {
     byte_count: int
 }
 
-adopt_geometry(w: *World, block: ptr, byte_count: int) {
+adopt_geometry(w: *World, block: @keep ptr, byte_count: int) {
     index = basics.buffer_push(&w.owned_geometry)
     owned = (w.owned_geometry.data + index * sizeof(OwnedGeometry)) as *OwnedGeometry
     owned.block = block
@@ -3553,7 +3553,7 @@ set_surface_material(id: ShapeId, m: SurfaceMaterial) {
 }
 shape_get_material_count(id: ShapeId) -> int { return get_shape_full_id(world_at(id.world0), id).material_count }
 shape_is_sensor(id: ShapeId) -> bool { return get_shape_full_id(world_at(id.world0), id).sensor_index != NULL_INDEX }
-shape_set_user_data(id: ShapeId, data: ptr) { get_shape_full_id(world_at(id.world0), id).user_data = data }
+shape_set_user_data(id: ShapeId, data: @keep ptr) { get_shape_full_id(world_at(id.world0), id).user_data = data }
 shape_get_user_data(id: ShapeId) -> ptr { return get_shape_full_id(world_at(id.world0), id).user_data }
 shape_get_flags(id: ShapeId) -> int { return get_shape_full_id(world_at(id.world0), id).flags }
 // A shape's geometry, in the body's frame (b3Shape_GetSphere and its siblings; the wrong kind asserts in the reference).
@@ -4344,7 +4344,7 @@ body_set_gravity_scale(id: BodyId, scale: float) {
     get_body_sim(w, get_body_full_id(w, id)).gravity_scale = scale
 }
 body_get_gravity_scale(id: BodyId) -> float { w = body_world(id); return get_body_sim(w, get_body_full_id(w, id)).gravity_scale }
-body_set_user_data(id: BodyId, data: ptr) { get_body_full_id(body_world(id), id).user_data = data }
+body_set_user_data(id: BodyId, data: @keep ptr) { get_body_full_id(body_world(id), id).user_data = data }
 body_get_user_data(id: BodyId) -> ptr { return get_body_full_id(body_world(id), id).user_data }
 body_is_awake(id: BodyId) -> bool { return get_body_full_id(body_world(id), id).set_index == AWAKE_SET }
 body_is_enabled(id: BodyId) -> bool { return get_body_full_id(body_world(id), id).set_index != DISABLED_SET }
@@ -4582,7 +4582,7 @@ release_debug_shapes(w: *World) {
 
 // The host's debug shape callbacks changed: what the old ones made is
 // given back to them first, and the next draw makes new ones.
-set_debug_shape_callbacks(w: *World, create: fn(*DebugShape, ptr) -> ptr, destroy: fn(ptr, ptr), context: ptr) {
+set_debug_shape_callbacks(w: *World, create: fn(*DebugShape, ptr) -> ptr, destroy: fn(ptr, ptr), context: @keep ptr) {
     release_debug_shapes(w)
     w.create_debug_shape = create
     w.destroy_debug_shape = destroy
@@ -6207,7 +6207,7 @@ claim_worker_slots(count: int) -> int { return native.claim_slots(count) }
 // the reference's task callbacks: a game runs its physics on its own job
 // system; else the world's own, destroyed with it), the worker slots its
 // steps run as, and a task context each.
-create_workers(w: *World, scheduler: ptr, count: int) {
+create_workers(w: *World, scheduler: @keep ptr, count: int) {
     if scheduler != null {
         w.scheduler = scheduler
         w.owns_scheduler = false
@@ -7268,7 +7268,7 @@ joint_get_local_frame_b(id: JointId) -> Transform {
     w = world_at(id.world0)
     return get_joint_sim(w, get_joint_full_id(w, id)).local_frame_b
 }
-joint_set_user_data(id: JointId, data: ptr) { get_joint_full_id(world_at(id.world0), id).user_data = data }
+joint_set_user_data(id: JointId, data: @keep ptr) { get_joint_full_id(world_at(id.world0), id).user_data = data }
 joint_get_user_data(id: JointId) -> ptr { return get_joint_full_id(world_at(id.world0), id).user_data }
 joint_get_collide_connected(id: JointId) -> bool { return get_joint_full_id(world_at(id.world0), id).collide_connected }
 joint_is_awake(id: JointId) -> bool { return get_joint_full_id(world_at(id.world0), id).set_index == AWAKE_SET }
@@ -7560,7 +7560,7 @@ should_bodies_collide(w: *World, body_a: *Body, body_b: *Body) -> bool {
     return true
 }
 
-world_set_custom_filter(w: *World, filter: fn(ShapeId, ShapeId, ptr) -> bool, context: ptr) {
+world_set_custom_filter(w: *World, filter: fn(ShapeId, ShapeId, ptr) -> bool, context: @keep ptr) {
     w.custom_filter = filter
     w.custom_filter_context = context
     w.has_custom_filter = true
@@ -8279,7 +8279,7 @@ world_joint_event(w: *World, index: int) -> JointEvent {
 }
 
 // The pre-solve callback: a continuous hit it refuses is ignored.
-world_set_pre_solve(w: *World, callback_fn: fn(ShapeId, ShapeId, Vec3, Vec3, ptr) -> bool, context: ptr) {
+world_set_pre_solve(w: *World, callback_fn: fn(ShapeId, ShapeId, Vec3, Vec3, ptr) -> bool, context: @keep ptr) {
     w.pre_solve = callback_fn
     w.pre_solve_context = context
     w.has_pre_solve = true

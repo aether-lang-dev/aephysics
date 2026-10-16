@@ -446,7 +446,7 @@ set_gravity(id: WorldId, gravity: Vec3) {
     if dynamics.world_is_valid(id) { dynamics.get_world(id.index1 - 1).gravity = gravity }
 }
 get_gravity(id: WorldId) -> Vec3 { return dynamics.get_world(id.index1 - 1).gravity }
-set_user_data(id: WorldId, data: ptr) {
+set_user_data(id: WorldId, data: @keep ptr) {
     if dynamics.world_is_valid(id) { dynamics.get_world(id.index1 - 1).user_data = data }
 }
 get_user_data(id: WorldId) -> ptr { return dynamics.get_world(id.index1 - 1).user_data }
@@ -458,11 +458,11 @@ set_restitution_callback(id: WorldId, callback_fn: fn(float, long, float, long) 
     w = world_of(id)
     if w != null { w.restitution_callback = callback_fn }
 }
-set_custom_filter_callback(id: WorldId, callback_fn: fn(ShapeId, ShapeId, ptr) -> bool, context: ptr) {
+set_custom_filter_callback(id: WorldId, callback_fn: fn(ShapeId, ShapeId, ptr) -> bool, context: @keep ptr) {
     w = world_of(id)
     if w != null { dynamics.world_set_custom_filter(w, callback_fn, context) }
 }
-set_pre_solve_callback(id: WorldId, callback_fn: fn(ShapeId, ShapeId, Vec3, Vec3, ptr) -> bool, context: ptr) {
+set_pre_solve_callback(id: WorldId, callback_fn: fn(ShapeId, ShapeId, Vec3, Vec3, ptr) -> bool, context: @keep ptr) {
     w = world_of(id)
     if w != null { dynamics.world_set_pre_solve(w, callback_fn, context) }
 }
@@ -797,7 +797,7 @@ aabb_query_visitor(proxy_id: int, user_data: long, context: ptr) -> bool {
 }
 
 // overlap_aabb's work, unrecorded.
-overlap_aabb_internal(id: WorldId, box: AABB, filter: QueryFilter, visitor: fn(ShapeId, ptr) -> bool, context: ptr) -> TreeStats {
+overlap_aabb_internal(id: WorldId, box: AABB, filter: QueryFilter, visitor: fn(ShapeId, ptr) -> bool, context: @keep ptr) -> TreeStats {
     stats = TreeStats { node_visits: 0, leaf_visits: 0 }
     w = world_of(id)
     if w == null { return stats }
@@ -825,7 +825,7 @@ shape_overlap_visitor(proxy_id: int, user_data: long, context: ptr) -> bool {
 }
 
 // overlap_shape's work, unrecorded.
-overlap_shape_internal(id: WorldId, origin: Vec3, proxy: ShapeProxy, filter: QueryFilter, visitor: fn(ShapeId, ptr) -> bool, context: ptr) -> TreeStats {
+overlap_shape_internal(id: WorldId, origin: Vec3, proxy: ShapeProxy, filter: QueryFilter, visitor: fn(ShapeId, ptr) -> bool, context: @keep ptr) -> TreeStats {
     stats = TreeStats { node_visits: 0, leaf_visits: 0 }
     w = world_of(id)
     if w == null { return stats }
@@ -869,7 +869,7 @@ mover_collide_visitor(proxy_id: int, user_data: long, context: ptr) -> bool {
 }
 
 // collide_mover's work, unrecorded.
-collide_mover_internal(id: WorldId, origin: Vec3, mover: Capsule, filter: QueryFilter, visitor: fn(ShapeId, PlaneResult[], int, ptr) -> bool, context: ptr) {
+collide_mover_internal(id: WorldId, origin: Vec3, mover: Capsule, filter: QueryFilter, visitor: fn(ShapeId, PlaneResult[], int, ptr) -> bool, context: @keep ptr) {
     w = world_of(id)
     if w == null { return }
     if math.is_valid_position(origin) == false || valid_capsule(mover) == false { return }
@@ -920,7 +920,7 @@ ray_cast_visitor(input: *RayCastInput, proxy_id: int, user_data: long, context: 
 
 // cast_ray's work, unrecorded.
 cast_ray_internal(id: WorldId, origin: Vec3, translation: Vec3, filter: QueryFilter,
-         visitor: fn(ShapeId, Vec3, Vec3, float, long, int, int, ptr) -> float, context: ptr) -> TreeStats {
+         visitor: fn(ShapeId, Vec3, Vec3, float, long, int, int, ptr) -> float, context: @keep ptr) -> TreeStats {
     stats = TreeStats { node_visits: 0, leaf_visits: 0 }
     w = world_of(id)
     if w == null { return stats }
@@ -996,7 +996,7 @@ shape_cast_visitor(input: *BoxCastInput, proxy_id: int, user_data: long, context
 
 // cast_shape's work, unrecorded.
 cast_shape_internal(id: WorldId, origin: Vec3, proxy: ShapeProxy, translation: Vec3, filter: QueryFilter,
-           visitor: fn(ShapeId, Vec3, Vec3, float, long, int, int, ptr) -> float, context: ptr) -> TreeStats {
+           visitor: fn(ShapeId, Vec3, Vec3, float, long, int, int, ptr) -> float, context: @keep ptr) -> TreeStats {
     stats = TreeStats { node_visits: 0, leaf_visits: 0 }
     w = world_of(id)
     if w == null { return stats }
@@ -1053,7 +1053,7 @@ var g_mover_points: ptr = null   // Vec3[2]
 mover_points() -> ptr { return native.scratch(g_mover_points, 2 * sizeof(Vec3)) }
 
 // cast_mover's work, unrecorded.
-cast_mover_internal(id: WorldId, origin: Vec3, mover: Capsule, translation: Vec3, filter: QueryFilter, has_filter: bool, filter_fn: fn(ShapeId, ptr) -> bool, context: ptr) -> float {
+cast_mover_internal(id: WorldId, origin: Vec3, mover: Capsule, translation: Vec3, filter: QueryFilter, has_filter: bool, filter_fn: fn(ShapeId, ptr) -> bool, context: @keep ptr) -> float {
     w = world_of(id)
     if w == null { return 1.0 }
     if math.is_valid_position(origin) == false || math.is_valid_vec3(translation) == false || valid_capsule(mover) == false { return 1.0 }
@@ -1096,7 +1096,7 @@ accept_shape(shape_id: ShapeId, context: ptr) -> bool { return true }
 keep_cast(shape_id: ShapeId, point: Vec3, normal: Vec3, fraction: float, user_material_id: long, triangle_index: int, child_index: int, context: ptr) -> float { return 1.0 }
 accept_planes(shape_id: ShapeId, planes: PlaneResult[], count: int, context: ptr) -> bool { return true }
 
-query_recorder(context: ptr) -> QueryRecorder {
+query_recorder(context: @keep ptr) -> QueryRecorder {
     return QueryRecorder { payload: dynamics.rec_payload_create(), overlap: accept_shape, cast: keep_cast, planes: accept_planes,
                            has_overlap: false, context: context, count: 0 }
 }
@@ -1166,7 +1166,7 @@ record_plane_visit(shape_id: ShapeId, planes: PlaneResult[], count: int, context
 
 // Every shape whose fat bounds overlap the box, through the visitor
 // until it returns false; the tree visits made.
-overlap_aabb(id: WorldId, box: AABB, filter: QueryFilter, visitor: fn(ShapeId, ptr) -> bool, context: ptr) -> TreeStats {
+overlap_aabb(id: WorldId, box: AABB, filter: QueryFilter, visitor: fn(ShapeId, ptr) -> bool, context: @keep ptr) -> TreeStats {
     if recording_query(id) == false { return overlap_aabb_internal(id, box, filter, visitor, context) }
     q = query_recorder(context)
     q.overlap = visitor
@@ -1183,7 +1183,7 @@ overlap_aabb(id: WorldId, box: AABB, filter: QueryFilter, visitor: fn(ShapeId, p
 }
 
 // Every shape a convex proxy (given relative to the origin) overlaps.
-overlap_shape(id: WorldId, origin: Vec3, proxy: ShapeProxy, filter: QueryFilter, visitor: fn(ShapeId, ptr) -> bool, context: ptr) -> TreeStats {
+overlap_shape(id: WorldId, origin: Vec3, proxy: ShapeProxy, filter: QueryFilter, visitor: fn(ShapeId, ptr) -> bool, context: @keep ptr) -> TreeStats {
     if recording_query(id) == false { return overlap_shape_internal(id, origin, proxy, filter, visitor, context) }
     q = query_recorder(context)
     q.overlap = visitor
@@ -1203,7 +1203,7 @@ overlap_shape(id: WorldId, origin: Vec3, proxy: ShapeProxy, filter: QueryFilter,
 // The planes of every shape the character mover's capsule (relative to
 // the origin) touches, a shape's planes at a time (up to 64), through
 // the visitor until it returns false.
-collide_mover(id: WorldId, origin: Vec3, mover: Capsule, filter: QueryFilter, visitor: fn(ShapeId, PlaneResult[], int, ptr) -> bool, context: ptr) {
+collide_mover(id: WorldId, origin: Vec3, mover: Capsule, filter: QueryFilter, visitor: fn(ShapeId, PlaneResult[], int, ptr) -> bool, context: @keep ptr) {
     if recording_query(id) == false {
         collide_mover_internal(id, origin, mover, filter, visitor, context)
         return
@@ -1224,7 +1224,7 @@ collide_mover(id: WorldId, origin: Vec3, mover: Capsule, filter: QueryFilter, vi
 // visitor, whose return clips the ray (0 stops it, 1 keeps everything,
 // -1 ignores that shape); the tree visits made.
 cast_ray(id: WorldId, origin: Vec3, translation: Vec3, filter: QueryFilter,
-         visitor: fn(ShapeId, Vec3, Vec3, float, long, int, int, ptr) -> float, context: ptr) -> TreeStats {
+         visitor: fn(ShapeId, Vec3, Vec3, float, long, int, int, ptr) -> float, context: @keep ptr) -> TreeStats {
     if recording_query(id) == false { return cast_ray_internal(id, origin, translation, filter, visitor, context) }
     q = query_recorder(context)
     q.cast = visitor
@@ -1270,7 +1270,7 @@ rec_ray_result(payload: *Recording, result: RayResult) {
 // A convex proxy (relative to the origin) swept along the translation,
 // each hit through the visitor as the ray cast's.
 cast_shape(id: WorldId, origin: Vec3, proxy: ShapeProxy, translation: Vec3, filter: QueryFilter,
-           visitor: fn(ShapeId, Vec3, Vec3, float, long, int, int, ptr) -> float, context: ptr) -> TreeStats {
+           visitor: fn(ShapeId, Vec3, Vec3, float, long, int, int, ptr) -> float, context: @keep ptr) -> TreeStats {
     if recording_query(id) == false { return cast_shape_internal(id, origin, proxy, translation, filter, visitor, context) }
     q = query_recorder(context)
     q.cast = visitor
@@ -1291,7 +1291,7 @@ cast_shape(id: WorldId, origin: Vec3, proxy: ShapeProxy, translation: Vec3, filt
 // touching a shape (its filter asked per shape when given). Recorded, the
 // filter is asked through the recorder for every candidate, given or not,
 // so a replay sees the same decisions.
-cast_mover(id: WorldId, origin: Vec3, mover: Capsule, translation: Vec3, filter: QueryFilter, has_filter: bool, filter_fn: fn(ShapeId, ptr) -> bool, context: ptr) -> float {
+cast_mover(id: WorldId, origin: Vec3, mover: Capsule, translation: Vec3, filter: QueryFilter, has_filter: bool, filter_fn: fn(ShapeId, ptr) -> bool, context: @keep ptr) -> float {
     if recording_query(id) == false { return cast_mover_internal(id, origin, mover, translation, filter, has_filter, filter_fn, context) }
     q = query_recorder(context)
     q.overlap = filter_fn

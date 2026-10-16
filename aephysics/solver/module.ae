@@ -802,7 +802,7 @@ init_blocks(blocks: ptr, dim: BlockDim, item_count: int, kind: int, color: int) 
 }
 
 // A stage set up; the next one to fill.
-init_stage(stage: *SolverStage, kind: int, blocks: ptr, block_count: int, color: int) -> *SolverStage {
+init_stage(stage: *SolverStage, kind: int, blocks: @keep ptr, block_count: int, color: int) -> *SolverStage {
     stage.completion_count = 0
     stage.kind = kind
     stage.blocks = blocks

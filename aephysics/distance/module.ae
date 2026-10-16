@@ -150,7 +150,7 @@ struct TOIOutput {
     root_iterations: int
 }
 
-shape_proxy(points: ptr, count: int, radius: float) -> ShapeProxy {
+shape_proxy(points: @keep ptr, count: int, radius: float) -> ShapeProxy {
     return ShapeProxy { points: points, count: count, radius: radius }
 }
 

@@ -89,7 +89,7 @@ free_defs(d: Defs) {
     free(d.spheres)
 }
 
-point_proxy(block: ptr, p: Vec3, radius: float) -> ShapeProxy {
+point_proxy(block: @keep ptr, p: Vec3, radius: float) -> ShapeProxy {
     points = block as Vec3[]
     points[0] = p
     return distance.shape_proxy(block, 1, radius)
@@ -984,7 +984,7 @@ test_two_materials_many_children() {
 
 // The reference's BuildSerializableCompound: one child of each kind, a
 // capsule, a box hull at x = 5, a box mesh at z = 5 and a sphere at x = -5.
-serializable(md: *MeshData, box: *HullData, materials: ptr) -> *CompoundData {
+serializable(md: *MeshData, box: *HullData, materials: @keep ptr) -> *CompoundData {
     mat = material.default_surface_material()
     capsules_block = calloc(1, sizeof(CompoundCapsuleDef))
     hulls_block = calloc(1, sizeof(CompoundHullDef))

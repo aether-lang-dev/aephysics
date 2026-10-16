@@ -193,7 +193,7 @@ count_color_constraints(color: *GraphColor, with_convex: bool) {
 // One contact's constraint from its manifolds (b3PrepareContacts_Mesh's body).
 // The separation is split: s = base + dot(cB + rB - cA - rA, normal) with the
 // normal held fixed, so the sub-steps only need the bodies' deltas.
-prepare_contact(ctx: *StepContext, c: *Contact, cc: *ContactConstraint, manifolds: ptr) {
+prepare_contact(ctx: *StepContext, c: *Contact, cc: *ContactConstraint, manifolds: @keep ptr) {
     warm_start_scale = 0.0
     if ctx.enable_warm_starting { warm_start_scale = 1.0 }
     inv_tau = 1.0 / dynamics.SPECULATIVE_DISTANCE

@@ -110,7 +110,7 @@ compound_hull_def(h: *HullData, t: Transform, material: SurfaceMaterial) -> Comp
     return CompoundHullDef { hull: h, transform: t, material: material }
 }
 
-compound_mesh_def(m: *MeshData, t: Transform, scale: Vec3, materials: ptr, material_count: int) -> CompoundMeshDef {
+compound_mesh_def(m: *MeshData, t: Transform, scale: Vec3, materials: @keep ptr, material_count: int) -> CompoundMeshDef {
     return CompoundMeshDef { mesh_data: m, transform: t, scale: scale, materials: materials, material_count: material_count }
 }
 
@@ -338,7 +338,7 @@ table_index(t: *MaterialTable, m: SurfaceMaterial) -> int {
 
 // A shared block (a hull or a mesh) by its hash, verified by its bytes;
 // the index of an equal one seen before, or the count (a new one).
-shared_index(map: *LongMap, hash: long, block: ptr, byte_count: int, blocks: ptr[], counts: int[], count: int) -> int {
+shared_index(map: *LongMap, hash: long, block: @keep ptr, byte_count: int, blocks: ptr[], counts: int[], count: int) -> int {
     found = basics.map_get(map, hash, NULL_INDEX)
     if found != NULL_INDEX && counts[found] == byte_count && memcmp(blocks[found], block, byte_count) == 0 { return found }
     blocks[count] = block
@@ -675,7 +675,7 @@ convert_compound_to_bytes(c: *CompoundData) -> ptr {
 // holds is followed. The bytes are changed in place (the tree's pointers
 // set) and stay the caller's: free them as they were allocated, not with
 // destroy_compound unless they came from create_compound.
-convert_bytes_to_compound(bytes: ptr, byte_count: int) -> *CompoundData {
+convert_bytes_to_compound(bytes: @keep ptr, byte_count: int) -> *CompoundData {
     if bytes == null || byte_count < sizeof(CompoundData) { return null }
     c = bytes as *CompoundData
     if c.version != COMPOUND_VERSION || c.byte_count != byte_count { return null }
@@ -930,7 +930,7 @@ query_visitor(proxy_id: int, user_data: long, context: ptr) -> bool {
 
 // Every child whose bounds overlap a box in the compound's frame, to the
 // visitor, until it returns false.
-query_compound(c: *CompoundData, bounds: AABB, visitor: fn(*CompoundData, int, ptr) -> bool, context: ptr) {
+query_compound(c: *CompoundData, bounds: AABB, visitor: fn(*CompoundData, int, ptr) -> bool, context: @keep ptr) {
     ctx = QueryContext { compound: c, visitor: visitor, user_context: context }
     dynamic_tree.tree_query(&c.tree, bounds, dynamic_tree.default_mask_bits(), false, query_visitor, (&ctx) as ptr)
 }

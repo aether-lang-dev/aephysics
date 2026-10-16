@@ -616,7 +616,7 @@ name_cache_add_bytes(c: *NameCache, text: ptr, length: int) -> int {
     return id
 }
 
-name_cache_put(c: *NameCache, id: int, name: ptr, length: int) {
+name_cache_put(c: *NameCache, id: int, name: @keep ptr, length: int) {
     index = buffer_push(&c.entries)
     entry = name_entry_at(c, index)
     entry.id = id
@@ -943,7 +943,7 @@ block_allocate(a: *BlockAllocator) -> ptr {
     return (a.blocks.data as ptr[])[block_index] + offset * a.element_size
 }
 
-block_free(a: *BlockAllocator, element: ptr) {
+block_free(a: *BlockAllocator, element: @keep ptr) {
     a.allocation_count = a.allocation_count - 1
     (element as ptr[])[0] = a.free_list
     a.free_list = element

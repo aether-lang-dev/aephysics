@@ -650,7 +650,7 @@ point_foot(spec: *BoneSpec, axis: Vec3, toe: Vec3, head: Vec3) {
 
 // A bone's body and shapes: the body at its frame placed by `placement`,
 // the capsule (and a calf's foot) with its material; the joint data on the bone.
-place_bone(h: *Human, world_id: WorldId, index: int, placement: Transform, spec: *BoneSpec, user_data: ptr, group_index: int, foot_on_calf: bool) {
+place_bone(h: *Human, world_id: WorldId, index: int, placement: Transform, spec: *BoneSpec, user_data: @keep ptr, group_index: int, foot_on_calf: bool) {
     bone = bone_at(h, index)
     bone.parent_index = spec.parent
     bone.reference_frame = spec.reference
@@ -720,7 +720,7 @@ short_of_ankle(c: Capsule) -> Capsule {
 // ANKLE_DORSAL_DEGREES back (a centre tipped toward x by half their
 // difference), ANKLE_SIDE_DEGREES across, and its twist is the sole's roll.
 // The foot rests in the calf's frame, so both frames are one at rest.
-place_foot(h: *Human, world_id: WorldId, index: int, calf_index: int, placement: Transform, spec: *BoneSpec, user_data: ptr, group_index: int) {
+place_foot(h: *Human, world_id: WorldId, index: int, calf_index: int, placement: Transform, spec: *BoneSpec, user_data: @keep ptr, group_index: int) {
     bone = bone_at(h, index)
     bone.parent_index = calf_index
     bone.reference_frame = spec.reference
@@ -757,14 +757,14 @@ place_foot(h: *Human, world_id: WorldId, index: int, calf_index: int, placement:
 }
 
 // The reference's figure standing at `position`.
-create_human(h: *Human, world_id: WorldId, position: Vec3, friction_torque: float, hertz: float, damping_ratio: float, group_index: int, user_data: ptr) {
+create_human(h: *Human, world_id: WorldId, position: Vec3, friction_torque: float, hertz: float, damping_ratio: float, group_index: int, user_data: @keep ptr) {
     shape = human_reference_shape()
     create_human_shaped(h, world_id, Transform { p: position, q: math.quat_identity() }, shape, friction_torque, hertz, damping_ratio, group_index, user_data)
     destroy_shape(shape)
 }
 
 // A figure of a shape, its space put in the world by `placement`.
-create_human_shaped(h: *Human, world_id: WorldId, placement: Transform, shape: ptr, friction_torque: float, hertz: float, damping_ratio: float, group_index: int, user_data: ptr) {
+create_human_shaped(h: *Human, world_id: WorldId, placement: Transform, shape: ptr, friction_torque: float, hertz: float, damping_ratio: float, group_index: int, user_data: @keep ptr) {
     // A figure is made whole or not at all: refused inputs leave it
     // unspawned. One already spawned is not made over (its bodies would
     // be lost to it): it is destroyed first.

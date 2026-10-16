@@ -41,7 +41,7 @@ small(name: string, value: float, tolerance: float) {
 }
 
 // A flat 3 x 3 field at y = 0 with the given cell materials.
-make_flat_field(materials: ptr, clockwise: bool) -> *HeightFieldData {
+make_flat_field(materials: @keep ptr, clockwise: bool) -> *HeightFieldData {
     heights = calloc(9, 8)
     def = height_field.height_field_def()
     def.heights = heights
@@ -291,7 +291,7 @@ test_straddle() {
 
 // The proxy against every triangle that is not a hole: the truth the grid
 // walk is checked against.
-brute_force_shape_cast(h: *HeightFieldData, proxy: ShapeProxy, translation: Vec3, tri_block: ptr) -> CastOutput {
+brute_force_shape_cast(h: *HeightFieldData, proxy: ShapeProxy, translation: Vec3, tri_block: @keep ptr) -> CastOutput {
     best = distance.empty_cast_output()
     best_fraction = 1.0
     tri = tri_block as Vec3[]

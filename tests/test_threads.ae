@@ -72,7 +72,7 @@ closest_cast(shape_id: ShapeId, point: Vec3, normal: Vec3, fraction: float, user
     return fraction
 }
 
-cast_answer(i: int, block: ptr) -> float {
+cast_answer(i: int, block: @keep ptr) -> float {
     points = block as Vec3[]
     points[0] = math.vec3_zero()
     best = (block + sizeof(Vec3)) as float[]
@@ -88,7 +88,7 @@ count_overlap(shape_id: ShapeId, context: ptr) -> bool {
     return true
 }
 
-overlap_answer(i: int, block: ptr) -> float {
+overlap_answer(i: int, block: @keep ptr) -> float {
     points = block as Vec3[]
     points[0] = math.vec3_zero()
     n = (block + sizeof(Vec3)) as int[]

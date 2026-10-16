@@ -141,7 +141,7 @@ has_concave_edge(m: *MeshData) -> bool {
     return false
 }
 
-valley_def(vertices: ptr, indices: ptr) -> MeshDef {
+valley_def(vertices: @keep ptr, indices: @keep ptr) -> MeshDef {
     def = mesh.mesh_def()
     def.vertices = vertices
     def.stride = sizeof(Vec3)

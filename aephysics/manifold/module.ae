@@ -173,7 +173,7 @@ empty_point() -> LocalManifoldPoint {
 }
 
 // A manifold over a point buffer of the given capacity, which the caller allocated.
-local_manifold(points: ptr) -> LocalManifold {
+local_manifold(points: @keep ptr) -> LocalManifold {
     return LocalManifold { normal: math.vec3_zero(), triangle_normal: math.vec3_zero(), points: points, point_count: 0,
                            triangle_index: NULL_INDEX, i1: 0, i2: 0, i3: 0, squared_distance: 0.0, feature: 0, triangle_flags: 0 }
 }

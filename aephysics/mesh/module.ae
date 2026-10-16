@@ -381,7 +381,7 @@ find_duplicate(h: *SpatialHash, current: int) -> int {
 
 // The unique vertices into dst_vertices and the remapped indices into
 // dst_indices; returns the unique count.
-weld_vertices(src_vertices: ptr, stride: int, vertex_count: int, src_indices: int[], index_count: int,
+weld_vertices(src_vertices: @keep ptr, stride: int, vertex_count: int, src_indices: int[], index_count: int,
               dst_vertices: Vec3[], dst_indices: int[], tolerance: float) -> int {
     h = SpatialHash { nodes: basics.alloc(2 * vertex_count * 4), node_count: 0, vertices: src_vertices,
                       vertex_count: vertex_count, stride: stride, cells: basics.map_create(vertex_count),
@@ -1242,7 +1242,7 @@ fill_indices(indices: int[], values: int[], count: int) {
     }
 }
 
-box_mesh_from(vertices_block: ptr, indices: int[], use_median_split: bool, identify: bool) -> *MeshData {
+box_mesh_from(vertices_block: @keep ptr, indices: int[], use_median_split: bool, identify: bool) -> *MeshData {
     indices_block = basics.alloc(36 * 4)
     fill_indices(indices_block as int[], indices, 36)
     def = mesh_def()
@@ -1358,7 +1358,7 @@ intersect_ray_triangle(ray_start: Vec3, ray_delta: Vec3, vertex1: Vec3, vertex2:
 // --- proxies ------------------------------------------------------------------------------------
 
 // A proxy's points taken into the frame of a transform, into the buffer.
-make_local_proxy(proxy: ShapeProxy, t: Transform, buffer: ptr) -> ShapeProxy {
+make_local_proxy(proxy: ShapeProxy, t: Transform, buffer: @keep ptr) -> ShapeProxy {
     inv = math.invert_transform(t)
     r = math.make_matrix_from_quat(inv.q)
     count = math.min_int(proxy.count, MAX_SHAPE_CAST_POINTS)

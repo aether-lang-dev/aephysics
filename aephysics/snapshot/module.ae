@@ -324,7 +324,7 @@ shape_geometry_index(t: *GeometryTable, s: *WorldShape) -> int {
     return NULL_INDEX
 }
 
-table_index(t: *GeometryTable, kind: int, block: ptr, byte_count: int) -> int {
+table_index(t: *GeometryTable, kind: int, block: @keep ptr, byte_count: int) -> int {
     if block == null { return NULL_INDEX }
     key = mem.ptr_to_long(block)
     found = basics.map_get(&t.map, key, NULL_INDEX)
@@ -588,7 +588,7 @@ free_snapshot(block: ptr, byte_count: int) {
 // snapshot gives everything else) and filled from the snapshot in `size`
 // bytes; a null id when the bytes are not a snapshot of this layout or any
 // part of them fails its checks, in which case nothing is left behind.
-load_world(def: *WorldDef, data: ptr, size: int) -> WorldId {
+load_world(def: *WorldDef, data: @keep ptr, size: int) -> WorldId {
     null_id = WorldId { index1: 0, generation: 0 }
     if data == null || size < 16 { return null_id }
     rd = SnapReader { data: data, size: size, at: 0, ok: true }
@@ -610,7 +610,7 @@ load_world(def: *WorldDef, data: ptr, size: int) -> WorldId {
 // snapshot of this layout or fail any check; the world is then left empty,
 // as a new world from `def` is, never half loaded. `def` gives the
 // capacities the emptied world starts from.
-restore_world(world_id: WorldId, def: *WorldDef, data: ptr, size: int) -> bool {
+restore_world(world_id: WorldId, def: *WorldDef, data: @keep ptr, size: int) -> bool {
     if data == null || size < 16 { return false }
     rd = SnapReader { data: data, size: size, at: 0, ok: true }
     if r_int(&rd) != SNAPSHOT_MAGIC || r_int(&rd) != SNAPSHOT_VERSION || r_long(&rd) != snapshot_layout() { return false }
