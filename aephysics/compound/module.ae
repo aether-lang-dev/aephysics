@@ -46,6 +46,7 @@ exports (
 
 extern memcpy(dst: ptr, src: ptr, size: int) -> ptr
 extern memcmp(a: ptr, b: ptr, size: int) -> int
+extern memset(block: ptr, value: int, size: int) -> ptr
 
 const NULL_INDEX = 0 - 1
 const COMPOUND_VERSION = 0x5C0E7B9C  // the baked tree's nodes in single precision (#151); before, a mesh child's materials became a table (Box3D #172)
@@ -334,6 +335,19 @@ table_index(t: *MaterialTable, m: SurfaceMaterial) -> int {
     t.count = t.count + 1
     if found == NULL_INDEX { basics.map_set(&t.map, h, index) }
     return index
+}
+
+// The bytes past each of `count` elements' last field, `used` bytes in,
+// to its `size`, zeroed: a struct's tail padding. `used` is the sum of the
+// fields' sizes, which is the last field's end in the structs it is given
+// (none has padding between its fields).
+zero_tails(at: ptr, count: int, size: int, used: int) {
+    if used >= size { return }
+    i = 0
+    while i < count {
+        memset(at + i * size + used, 0, size - used)
+        i = i + 1
+    }
 }
 
 // A shared block (a hull or a mesh) by its hash, verified by its bytes;
@@ -632,6 +646,14 @@ create_compound(def: *CompoundDef) -> *CompoundData {
         i = i + 1
     }
     if sphere_count > 0 { memcpy(block + sphere_offset, sphere_instances_block, sphere_count * sizeof(CompoundSphere)) }
+    // The instances and materials were built as struct values, so their
+    // tail padding holds whatever the stack did: zeroed here, so the same
+    // compound gives the same bytes on every platform and build.
+    zero_tails(block + material_offset, table.count, sizeof(SurfaceMaterial), 2 * sizeof(Vec3) + 8 + 4)   // three floats, then a Vec3, a long, an int
+    zero_tails(block + capsule_offset, capsule_count, sizeof(CompoundCapsule), sizeof(Capsule) + 4)
+    zero_tails(block + hull_offset, hull_count, sizeof(HullInstance), sizeof(Transform) + 8)
+    zero_tails(block + mesh_offset, mesh_count, sizeof(MeshInstance), sizeof(Transform) + sizeof(Vec3) + 12)
+    zero_tails(block + sphere_offset, sphere_count, sizeof(CompoundSphere), sizeof(Sphere) + 4)
 
     basics.map_destroy(&table.map)
     basics.free_bytes(table.scratch, 64)
