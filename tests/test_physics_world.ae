@@ -2057,6 +2057,19 @@ count_planes(id: ShapeId, planes: PlaneResult[], count: int, context: ptr) -> bo
     return true
 }
 
+// #179: a caller's borrowed context reaches every world query without
+// @keep, since a query only lends it to its own recorder for the call.
+// The context here is a plain ptr on purpose: if a query required @keep
+// again, this file would stop building. The queries count into it.
+borrowed_queries(world_id: WorldId, filter: QueryFilter, context: ptr) {
+    physics_world.cast_ray(world_id, math.vec3_zero(), math.vec3(20.0, 0.0, 0.0), filter, count_and_clip, context)
+    physics_world.overlap_aabb(world_id, AABB { lower: math.vec3(3.0, 0.0 - 1.0, 0.0 - 1.0), upper: math.vec3(11.5, 1.0, 1.0) }, filter, count_overlap, context)
+    physics_world.overlap_shape(world_id, math.vec3(10.0, 0.0, 0.0), point_proxy(math.vec3_zero(), 1.5), filter, count_overlap, context)
+    physics_world.cast_shape(world_id, math.vec3_zero(), point_proxy(math.vec3_zero(), 0.25), math.vec3(20.0, 0.0, 0.0), filter, count_and_clip, context)
+    physics_world.cast_mover(world_id, math.vec3_zero(), Capsule { center1: math.vec3_zero(), center2: math.vec3(0.0, 1.0, 0.0), radius: 0.25 }, math.vec3(10.0, 0.0, 0.0), filter, true, count_overlap, context)
+    physics_world.collide_mover(world_id, math.vec3(4.0, 0.0, 0.0), Capsule { center1: math.vec3(0.0, 0.0 - 0.5, 0.0), center2: math.vec3(0.0, 0.5, 0.0), radius: 0.3 }, filter, count_planes, context)
+}
+
 test_world_queries() {
     wdef = dynamics.default_world_def()
     world_id = dynamics.create_world(&wdef)
@@ -2097,6 +2110,11 @@ test_world_queries() {
     counter[0] = 0
     physics_world.overlap_shape(world_id, math.vec3(10.0, 5.0, 0.0), point_proxy(math.vec3_zero(), 1.5), filter, count_overlap, counter_block)
     ensure("world overlap shape: none above", counter[0] == 0)
+    // A borrowed context (no @keep) through all six queries: the ray's 3,
+    // the box's 2, the proxy's 1 and the cast's 3, plus the mover's (#179).
+    counter[0] = 0
+    borrowed_queries(world_id, filter, counter_block)
+    ensure("world queries: a borrowed context reaches all six (${counter[0]})", counter[0] >= 9)
     // A shape cast along the row: three hits when nothing clips.
     counter[0] = 0
     physics_world.cast_shape(world_id, math.vec3_zero(), point_proxy(math.vec3_zero(), 0.25), math.vec3(20.0, 0.0, 0.0), filter, count_and_clip, counter_block)
