@@ -41,7 +41,7 @@ small(name: string, value: float, tolerance: float) {
 }
 
 // A flat 3 x 3 field at y = 0 with the given cell materials.
-make_flat_field(materials: @keep ptr, clockwise: bool) -> *HeightFieldData {
+make_flat_field(materials: ptr, clockwise: bool) -> *HeightFieldData {
     heights = calloc(9, 8)
     def = height_field.height_field_def()
     def.heights = heights

@@ -952,7 +952,7 @@ query_visitor(proxy_id: int, user_data: long, context: ptr) -> bool {
 
 // Every child whose bounds overlap a box in the compound's frame, to the
 // visitor, until it returns false.
-query_compound(c: *CompoundData, bounds: AABB, visitor: fn(*CompoundData, int, ptr) -> bool, context: @keep ptr) {
+query_compound(c: *CompoundData, bounds: AABB, visitor: fn(*CompoundData, int, ptr) -> bool, context: ptr) {
     ctx = QueryContext { compound: c, visitor: visitor, user_context: context }
     dynamic_tree.tree_query(&c.tree, bounds, dynamic_tree.default_mask_bits(), false, query_visitor, (&ctx) as ptr)
 }

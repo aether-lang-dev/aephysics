@@ -535,7 +535,7 @@ corruptions() {
     snapshot.free_snapshot(block, byte_count)
 }
 
-loads(wdef: *WorldDef, block: @keep ptr, count: int) -> bool {
+loads(wdef: *WorldDef, block: ptr, count: int) -> bool {
     id = snapshot.load_world(wdef, block, count)
     if dynamics.world_is_valid(id) {
         dynamics.destroy_world(id)

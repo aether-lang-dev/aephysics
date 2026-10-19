@@ -636,7 +636,7 @@ test_bad_geometry() {
 
 // Meshes and height fields of numbers the reference would read past or
 // sort wrong are not made; sound ones next to them are.
-mesh_of(vertices: @keep ptr, indices: @keep ptr, materials: @keep ptr) -> *MeshData {
+mesh_of(vertices: ptr, indices: ptr, materials: ptr) -> *MeshData {
     mdef = mesh.mesh_def()
     mdef.vertices = vertices
     mdef.indices = indices
@@ -646,7 +646,7 @@ mesh_of(vertices: @keep ptr, indices: @keep ptr, materials: @keep ptr) -> *MeshD
     return mesh.create_mesh(&mdef, null, 0)
 }
 
-field_of(heights: @keep ptr, scale: Vec3, lower: float, upper: float) -> *HeightFieldData {
+field_of(heights: ptr, scale: Vec3, lower: float, upper: float) -> *HeightFieldData {
     hdef = height_field.height_field_def()
     hdef.heights = heights
     hdef.count_x = 2
@@ -748,7 +748,7 @@ test_bad_meshes() {
 // Compounds of children a shape would refuse are not made; a mesh child
 // scaled to nothing on an axis is kept off zero as a mesh shape is, so a
 // ray into it divides by no zero.
-compound_of_spheres(spheres: @keep ptr, count: int) -> *CompoundData {
+compound_of_spheres(spheres: ptr, count: int) -> *CompoundData {
     cdef = compound.compound_def()
     cdef.spheres = spheres
     cdef.sphere_count = count
