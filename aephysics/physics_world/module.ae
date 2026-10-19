@@ -1096,9 +1096,12 @@ accept_shape(shape_id: ShapeId, context: ptr) -> bool { return true }
 keep_cast(shape_id: ShapeId, point: Vec3, normal: Vec3, fraction: float, user_material_id: long, triangle_index: int, child_index: int, context: ptr) -> float { return 1.0 }
 accept_planes(shape_id: ShapeId, planes: PlaneResult[], count: int, context: ptr) -> bool { return true }
 
-query_recorder(context: @keep ptr) -> QueryRecorder {
+// A recorder with no visitor and no context yet: each query sets the
+// caller's on its own local, which it lends to the internal query only,
+// so the caller's context is borrowed, never kept (#179).
+query_recorder() -> QueryRecorder {
     return QueryRecorder { payload: dynamics.rec_payload_create(), overlap: accept_shape, cast: keep_cast, planes: accept_planes,
-                           has_overlap: false, context: context, count: 0 }
+                           has_overlap: false, context: null, count: 0 }
 }
 
 // Whether the query asked of `id` is one to record: the world records and
@@ -1166,9 +1169,10 @@ record_plane_visit(shape_id: ShapeId, planes: PlaneResult[], count: int, context
 
 // Every shape whose fat bounds overlap the box, through the visitor
 // until it returns false; the tree visits made.
-overlap_aabb(id: WorldId, box: AABB, filter: QueryFilter, visitor: fn(ShapeId, ptr) -> bool, context: @keep ptr) -> TreeStats {
+overlap_aabb(id: WorldId, box: AABB, filter: QueryFilter, visitor: fn(ShapeId, ptr) -> bool, context: ptr) -> TreeStats {
     if recording_query(id) == false { return overlap_aabb_internal(id, box, filter, visitor, context) }
-    q = query_recorder(context)
+    q = query_recorder()
+    q.context = context
     q.overlap = visitor
     q.has_overlap = true
     dynamics.rec_aabb(q.payload, box)
@@ -1183,9 +1187,10 @@ overlap_aabb(id: WorldId, box: AABB, filter: QueryFilter, visitor: fn(ShapeId, p
 }
 
 // Every shape a convex proxy (given relative to the origin) overlaps.
-overlap_shape(id: WorldId, origin: Vec3, proxy: ShapeProxy, filter: QueryFilter, visitor: fn(ShapeId, ptr) -> bool, context: @keep ptr) -> TreeStats {
+overlap_shape(id: WorldId, origin: Vec3, proxy: ShapeProxy, filter: QueryFilter, visitor: fn(ShapeId, ptr) -> bool, context: ptr) -> TreeStats {
     if recording_query(id) == false { return overlap_shape_internal(id, origin, proxy, filter, visitor, context) }
-    q = query_recorder(context)
+    q = query_recorder()
+    q.context = context
     q.overlap = visitor
     q.has_overlap = true
     dynamics.rec_vec3(q.payload, origin)
@@ -1203,12 +1208,13 @@ overlap_shape(id: WorldId, origin: Vec3, proxy: ShapeProxy, filter: QueryFilter,
 // The planes of every shape the character mover's capsule (relative to
 // the origin) touches, a shape's planes at a time (up to 64), through
 // the visitor until it returns false.
-collide_mover(id: WorldId, origin: Vec3, mover: Capsule, filter: QueryFilter, visitor: fn(ShapeId, PlaneResult[], int, ptr) -> bool, context: @keep ptr) {
+collide_mover(id: WorldId, origin: Vec3, mover: Capsule, filter: QueryFilter, visitor: fn(ShapeId, PlaneResult[], int, ptr) -> bool, context: ptr) {
     if recording_query(id) == false {
         collide_mover_internal(id, origin, mover, filter, visitor, context)
         return
     }
-    q = query_recorder(context)
+    q = query_recorder()
+    q.context = context
     q.planes = visitor
     dynamics.rec_vec3(q.payload, origin)
     dynamics.rec_capsule_value(q.payload, mover)
@@ -1224,9 +1230,10 @@ collide_mover(id: WorldId, origin: Vec3, mover: Capsule, filter: QueryFilter, vi
 // visitor, whose return clips the ray (0 stops it, 1 keeps everything,
 // -1 ignores that shape); the tree visits made.
 cast_ray(id: WorldId, origin: Vec3, translation: Vec3, filter: QueryFilter,
-         visitor: fn(ShapeId, Vec3, Vec3, float, long, int, int, ptr) -> float, context: @keep ptr) -> TreeStats {
+         visitor: fn(ShapeId, Vec3, Vec3, float, long, int, int, ptr) -> float, context: ptr) -> TreeStats {
     if recording_query(id) == false { return cast_ray_internal(id, origin, translation, filter, visitor, context) }
-    q = query_recorder(context)
+    q = query_recorder()
+    q.context = context
     q.cast = visitor
     dynamics.rec_vec3(q.payload, origin)
     dynamics.rec_vec3(q.payload, translation)
@@ -1270,9 +1277,10 @@ rec_ray_result(payload: *Recording, result: RayResult) {
 // A convex proxy (relative to the origin) swept along the translation,
 // each hit through the visitor as the ray cast's.
 cast_shape(id: WorldId, origin: Vec3, proxy: ShapeProxy, translation: Vec3, filter: QueryFilter,
-           visitor: fn(ShapeId, Vec3, Vec3, float, long, int, int, ptr) -> float, context: @keep ptr) -> TreeStats {
+           visitor: fn(ShapeId, Vec3, Vec3, float, long, int, int, ptr) -> float, context: ptr) -> TreeStats {
     if recording_query(id) == false { return cast_shape_internal(id, origin, proxy, translation, filter, visitor, context) }
-    q = query_recorder(context)
+    q = query_recorder()
+    q.context = context
     q.cast = visitor
     dynamics.rec_vec3(q.payload, origin)
     dynamics.rec_shape_proxy(q.payload, proxy)
@@ -1291,9 +1299,10 @@ cast_shape(id: WorldId, origin: Vec3, proxy: ShapeProxy, translation: Vec3, filt
 // touching a shape (its filter asked per shape when given). Recorded, the
 // filter is asked through the recorder for every candidate, given or not,
 // so a replay sees the same decisions.
-cast_mover(id: WorldId, origin: Vec3, mover: Capsule, translation: Vec3, filter: QueryFilter, has_filter: bool, filter_fn: fn(ShapeId, ptr) -> bool, context: @keep ptr) -> float {
+cast_mover(id: WorldId, origin: Vec3, mover: Capsule, translation: Vec3, filter: QueryFilter, has_filter: bool, filter_fn: fn(ShapeId, ptr) -> bool, context: ptr) -> float {
     if recording_query(id) == false { return cast_mover_internal(id, origin, mover, translation, filter, has_filter, filter_fn, context) }
-    q = query_recorder(context)
+    q = query_recorder()
+    q.context = context
     q.overlap = filter_fn
     q.has_overlap = has_filter
     dynamics.rec_vec3(q.payload, origin)
