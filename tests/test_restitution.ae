@@ -20,7 +20,6 @@ import aephysics.physics_world
 extern calloc(count: int, size: int) -> ptr
 extern exit(code: int)
 extern free(p: ptr)
-extern sqrt(x: float) -> float
 
 const TIME_STEP = 0.016666666666666666
 const SUB_STEP_COUNT = 4
@@ -713,7 +712,7 @@ test_impulse() {
     weight_impulse = mass * 10.0 * TIME_STEP
     j = 0
     while j < 4 {
-        impact_speed = sqrt(20.0 * heights[j])
+        impact_speed = math.sqrt_float(20.0 * heights[j])
         expect_toi = impact_speed > fast_speed
         tolerance = 0.00001 * mass * (10.0 + impact_speed)
         k = 0

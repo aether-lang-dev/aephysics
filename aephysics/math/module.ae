@@ -21,6 +21,7 @@
 // is_normalized, ...) a caller checks where it matters, and the functions
 // return what the original returns on the degenerate case.
 import std.string
+import std.math as stdmath
 import aephysics.native
 
 exports (
@@ -70,9 +71,11 @@ exports (
     vec3_text, quat_text
 )
 
-extern sqrt(x: float) -> float
 // libm's single-precision square root: the one the f32 family uses, so a
-// length is computed at the width it is stored at.
+// length is computed at the width it is stored at. Exact at every -O
+// level: the x87 sqrt MinGW's library has at -O0 keeps 64 bits, enough
+// for a float to round once (no float of 304 million differs from the
+// SSE instruction's).
 extern sqrtf(x: f32) -> f32
 extern remainder(x: float, y: float) -> float
 
@@ -230,7 +233,15 @@ clamp_float(a: float, lower: float, upper: float) -> float {
     return a
 }
 lerp_float(a: float, b: float, alpha: float) -> float { return (1.0 - alpha) * a + alpha * b }
-sqrt_float(a: float) -> float { return sqrt(a) }
+// The square root of every double in the engine, rounded exactly, as
+// IEEE 754 has it and the golden trace needs at every -O level (#184).
+// It is std.math's, which runs in Aether's optimized runtime as the
+// instruction. libm's own, bound here before, is the instruction too
+// once GCC inlines it, but at -O0 every call reaches the library, and
+// MinGW's is the x87 sqrt at 64-bit precision, which rounds twice: one
+// ulp off for 1 input in 4,000. The call costs nothing measurable
+// (bench/RESULTS.md).
+sqrt_float(a: float) -> float { return stdmath.sqrt(a) }
 
 // An approximate arctangent in [-pi, pi], hand coded for cross-platform
 // determinism (the standard library's is not). Accurate to about 0.0023
@@ -292,7 +303,7 @@ compute_cos_sin(radians: float) -> CosSin {
         s = 16.0 * x * (PI - x) / (5.0 * pi2 - 4.0 * x * (PI - x))
     }
 
-    mag = sqrt(s * s + c * c)
+    mag = sqrt_float(s * s + c * c)
     inv_mag = 0.0
     if mag > 0.0 { inv_mag = 1.0 / mag }
     return CosSin { cosine: c * inv_mag, sine: s * inv_mag }
@@ -312,7 +323,7 @@ sub(a: Vec3, b: Vec3) -> Vec3 { return Vec3 { x: a.x - b.x, y: a.y - b.y, z: a.z
 mul(a: Vec3, b: Vec3) -> Vec3 { return Vec3 { x: a.x * b.x, y: a.y * b.y, z: a.z * b.z } }
 neg(a: Vec3) -> Vec3 { return Vec3 { x: 0.0 - a.x, y: 0.0 - a.y, z: 0.0 - a.z } }
 dot(a: Vec3, b: Vec3) -> float { return a.x * b.x + a.y * b.y + a.z * b.z }
-length(v: Vec3) -> float { return sqrt(dot(v, v)) }
+length(v: Vec3) -> float { return sqrt_float(dot(v, v)) }
 length_squared(a: Vec3) -> float { return a.x * a.x + a.y * a.y + a.z * a.z }
 distance(a: Vec3, b: Vec3) -> float { return length(sub(b, a)) }
 distance_squared(a: Vec3, b: Vec3) -> float { return length_squared(sub(b, a)) }
@@ -321,7 +332,7 @@ distance_squared(a: Vec3, b: Vec3) -> float { return length_squared(sub(b, a)) }
 normalize(a: Vec3) -> Vec3 {
     ls = a.x * a.x + a.y * a.y + a.z * a.z
     if ls > 1000.0 * TINY {
-        s = 1.0 / sqrt(ls)
+        s = 1.0 / sqrt_float(ls)
         return Vec3 { x: s * a.x, y: s * a.y, z: s * a.z }
     }
     return vec3_zero()
@@ -332,7 +343,7 @@ normalize(a: Vec3) -> Vec3 {
 get_length_and_normalize(length_out: float[], a: Vec3) -> Vec3 {
     ls = a.x * a.x + a.y * a.y + a.z * a.z
     if ls > 1000.0 * TINY {
-        l = sqrt(ls)
+        l = sqrt_float(ls)
         length_out[0] = l
         s = 1.0 / l
         return Vec3 { x: s * a.x, y: s * a.y, z: s * a.z }
@@ -505,7 +516,7 @@ negate_quat(q: Quat) -> Quat { return quat_vs(neg(qv(q)), 0.0 - q.w) }
 normalize_quat(q: Quat) -> Quat {
     ls = dot_quat(q, q)
     if ls > 1000.0 * TINY {
-        s = 1.0 / sqrt(ls)
+        s = 1.0 / sqrt_float(ls)
         return quat_vs(Vec3 { x: s * q.x, y: s * q.y, z: s * q.z }, s * q.w)
     }
     return quat_identity()
@@ -520,7 +531,7 @@ make_quat_from_axis_angle(axis: Vec3, radians: float) -> Quat {
 // The axis of a unit quaternion, and in `radians_out[0]` its angle; a zero
 // axis for no rotation.
 get_axis_angle(radians_out: float[], q: Quat) -> Vec3 {
-    l = sqrt(q.x * q.x + q.y * q.y + q.z * q.z)
+    l = sqrt_float(q.x * q.x + q.y * q.y + q.z * q.z)
     radians_out[0] = 2.0 * atan2_approx(l, q.w)
     if l > 0.0 {
         inv = 1.0 / l
@@ -530,7 +541,7 @@ get_axis_angle(radians_out: float[], q: Quat) -> Vec3 {
 }
 
 get_quat_angle(q: Quat) -> float {
-    l = sqrt(q.x * q.x + q.y * q.y + q.z * q.z)
+    l = sqrt_float(q.x * q.x + q.y * q.y + q.z * q.z)
     return 2.0 * atan2_approx(l, q.w)
 }
 
@@ -581,8 +592,8 @@ get_twist_angle(q: Quat) -> float {
 // Swing angle for a cone limit, in [0, pi]; polarity cannot matter since
 // every term is squared.
 get_swing_angle(q: Quat) -> float {
-    x = sqrt(q.z * q.z + q.w * q.w)
-    y = sqrt(q.x * q.x + q.y * q.y)
+    x = sqrt_float(q.z * q.z + q.w * q.w)
+    y = sqrt_float(q.x * q.x + q.y * q.y)
     return 2.0 * atan2_approx(y, x)
 }
 

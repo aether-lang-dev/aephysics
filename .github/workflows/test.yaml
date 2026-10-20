@@ -7,6 +7,15 @@ on:
       - main
   pull_request:
 
+# Pin: 0.835.0, the latest release: its lane moves (aether#2550), bit
+# casts and reductions (#2603) and `@target("avx2") import` (#2607) are
+# what the wide gather, the wide separating axis test and the run-time
+# width are written with. A reproducible bootstrap version: the floor
+# this code needs, verified by every job below.
+env:
+  AE_PIN: 0.835.0
+  AEB_REF: v0.328
+
 jobs:
   test:
     name: aephysics tests
@@ -15,15 +24,9 @@ jobs:
       - name: Checkout aephysics
         uses: actions/checkout@v4
 
-      # Pin: 0.835.0, the latest release: its lane moves (aether#2550), bit
-      # casts and reductions (#2603) and `@target("avx2") import` (#2607) are
-      # what the wide gather, the wide separating axis test and the run-time
-      # width are written with. A reproducible bootstrap
-      # version: the floor this code needs, verified on Linux by this job.
       - name: Install the released Aether toolchain and aeb
         run: |
-          curl -fsSL https://raw.githubusercontent.com/aether-lang-dev/aeb/main/get.sh \
-            | AE_PIN=0.835.0 AEB_REF=v0.328 sh
+          curl -fsSL https://raw.githubusercontent.com/aether-lang-dev/aeb/main/get.sh | sh
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Run the tests with ae
@@ -55,9 +58,69 @@ jobs:
 
       - name: Install the released Aether toolchain and aeb
         run: |
-          curl -fsSL https://raw.githubusercontent.com/aether-lang-dev/aeb/main/get.sh \
-            | AE_PIN=0.835.0 AEB_REF=v0.328 sh
+          curl -fsSL https://raw.githubusercontent.com/aether-lang-dev/aeb/main/get.sh | sh
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Run the tests with ae
         run: scripts/test.sh
+
+  # Windows, where ae3d and Siltreach run, and -O0, which ae3d builds its
+  # suites at. Neither was built here, and two bugs reached ae3d first
+  # (#184): four workers parting at -O0, because MinGW's library sqrt
+  # rounds twice at the main thread's x87 precision (the engine now takes
+  # std.math's), and GCC on Win64 crashing on the AVX2 copies at -O0
+  # (aether#3023). This leg cannot see the crash: `ae build` passes
+  # -fstack-protector-strong, which keeps GCC clear of it, and a build
+  # that calls gcc itself without it (ae3d's) is where it shows.
+  windows:
+    name: aephysics tests (Windows x86-64)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - name: Checkout aephysics
+        uses: actions/checkout@v4
+
+      # UCRT64: the release's libaether.a links the Universal CRT, and does
+      # not link against an msvcrt gcc. diffutils for the golden trace's
+      # diff, which MSYS2's base install lacks.
+      - name: Set up MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          install: >-
+            diffutils
+            unzip
+            mingw-w64-ucrt-x86_64-gcc
+
+      # The Windows release is a .zip, and get.sh looks for a .tar.gz (it
+      # would build the compiler from source instead), so it is fetched
+      # here.
+      - name: Install the released Aether toolchain
+        run: |
+          mkdir -p target
+          curl -fsSL -o target/aether.zip \
+            "https://github.com/aether-lang-dev/aether/releases/download/v$AE_PIN/aether-$AE_PIN-windows-x86_64.zip"
+          mkdir -p "$HOME/aether" && unzip -q target/aether.zip -d "$HOME/aether"
+          "$HOME/aether/bin/ae" version
+
+      # PATH is set in each step: setup-msys2's shell does not read what
+      # GITHUB_PATH adds.
+      - name: Run the tests with ae
+        run: |
+          export PATH="$HOME/aether/bin:$PATH"
+          scripts/test.sh
+
+      # Unoptimized, every maths function is a library call and every
+      # function holds its lanes on the stack: the scenes keep their bits
+      # over four workers, and the trace matches the golden one.
+      - name: The determinism scenes at -O0
+        env:
+          AETHER_AEPHYSICS_CFLAGS: -O0
+        run: |
+          export PATH="$HOME/aether/bin:$PATH"
+          ae build tests/test_determinism.ae -o target/test_determinism
+          target/test_determinism
+          scripts/golden_trace.sh check

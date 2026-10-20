@@ -580,8 +580,8 @@ aim_ellipse(shape: ptr, index: int, up: Vec3, forward: Vec3, ahead: float, back:
     minor_degrees = hs
     iteration = 0
     while iteration < 32 {
-        minor_degrees = hs / sqrt(math.max_float(1.0 - (cf * cf) / (major_degrees * major_degrees), 0.01))
-        major_degrees = hf / sqrt(math.max_float(1.0 - (cs * cs) / (minor_degrees * minor_degrees), 0.01))
+        minor_degrees = hs / math.sqrt_float(math.max_float(1.0 - (cf * cf) / (major_degrees * major_degrees), 0.01))
+        major_degrees = hf / math.sqrt_float(math.max_float(1.0 - (cs * cs) / (minor_degrees * minor_degrees), 0.01))
         iteration = iteration + 1
     }
     spec.swing_degrees = major_degrees

@@ -170,7 +170,7 @@ compared bit for bit; the query spawn sleeps a step after the
 reference's with its 59 query hits, the mesh drop two; and its rolling
 mix of spheres, capsules and boxes with rolling resistance, whose trace
 folds the manifolds' impulses in, the scene of its SIMD width test, which here steps every scene at width
-4 and at the AVX2 copy's 8 in one process, bit for bit; 30 checks) and `test_large_world.ae` (a stack, a bullet and the
+4 and at the AVX2 copy's 8 in one process, bit for bit; 29 checks) and `test_large_world.ae` (a stack, a bullet and the
 origin-relative queries at x = 0 and at x = 1e7 agree, the whole
 engine being in doubles; 43 checks), `test_collision.ae` (the reference's
 test_collision.c: boxes valid and not, a ray against a box in its twelve
@@ -239,12 +239,14 @@ The step is deterministic across platforms and worker counts, not
 only across runs: `AEPHYSICS_TRACE=1 target/test_determinism` prints
 every body's checksum after every step with its bits, and
 `scripts/golden_trace.sh check` (run by `scripts/test.sh`) diffs that
-against `tests/golden/determinism_trace.txt` on every step of the four
-scenes. CI checks it on Linux, on Linux with `-mavx2 -mfma` and on macOS
-arm64; Windows (MinGW) gives the same bits. The engine's own maths (the
-reference's cos, sin and atan2 approximations, `sqrt`, `floor` and
-`remainder` as the only libm calls) and `-ffp-contract=off` are what make
-that hold: without the flag GCC and clang fuse multiply-adds wherever the
+against `tests/golden/determinism_trace.txt` on every step of the five
+scenes. CI checks it on Linux, on Linux with `-mavx2 -mfma`, on macOS
+arm64 and on Windows x86-64 (MinGW), there also unoptimized (#184). The
+engine's own maths (the reference's cos, sin and atan2 approximations;
+`sqrtf`, `floor` and `remainder` as the only libm calls; std.math's
+`sqrt`, exact at every `-O` level, where MinGW's library `sqrt` rounds
+twice at `-O0`) and `-ffp-contract=off` are what make that hold: without
+the flag GCC and clang fuse multiply-adds wherever the
 target has FMA, and arm64 parted from Linux on the first step (#125). A
 program that builds aephysics into itself must pass `-ffp-contract=off`
 in its own `[build] cflags`, as `ae` reads only the root manifest's.

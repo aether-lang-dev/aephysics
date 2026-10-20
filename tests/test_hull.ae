@@ -18,7 +18,6 @@ extern free(p: ptr)
 extern memcmp(a: ptr, b: ptr, size: int) -> int
 extern sin(x: float) -> float
 extern cos(x: float) -> float
-extern sqrt(x: float) -> float
 
 var failures = 0
 var checks = 0
@@ -119,8 +118,8 @@ test_tetrahedron() {
     ensure("tetrahedron: 4 faces", h.face_count == 4)
     euler("tetrahedron", h)
     expected_volume = 1.0 / 6.0
-    expected_area = 1.5 + 0.5 * sqrt(3.0)
-    expected_inner = 0.25 / sqrt(3.0)
+    expected_area = 1.5 + 0.5 * math.sqrt_float(3.0)
+    expected_inner = 0.25 / math.sqrt_float(3.0)
     small("tetrahedron: volume", h.volume - expected_volume, 0.00001)
     small("tetrahedron: surface area", h.surface_area - expected_area, 0.00001)
     small("tetrahedron: inner radius", h.inner_radius - expected_inner, 0.00001)
@@ -335,8 +334,8 @@ fill_sphere_sample(points: Vec3[], count: int, seed: int) {
         u1 = unit_random()
         u2 = 2.0 * math.PI * unit_random()
         u3 = 2.0 * math.PI * unit_random()
-        s1 = sqrt(1.0 - u1)
-        s2 = sqrt(u1)
+        s1 = math.sqrt_float(1.0 - u1)
+        s2 = math.sqrt_float(u1)
         points[i] = math.vec3(s1 * sin(u2), s1 * cos(u2), s2 * sin(u3))
         i = i + 1
     }

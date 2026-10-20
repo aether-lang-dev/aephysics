@@ -32,7 +32,6 @@ extern calloc(count: int, size: int) -> ptr
 extern free(p: ptr)
 extern cos(x: float) -> float
 extern sin(x: float) -> float
-extern sqrt(x: float) -> float
 
 var failures = 0
 var checks = 0
@@ -828,9 +827,9 @@ capture_friction(friction_a: float, id_a: long, friction_b: float, id_b: long) -
     if id_a == (101 as long) || id_b == (101 as long) { g_saw_child0 = true }
     if id_a == (202 as long) || id_b == (202 as long) {
         g_saw_child1 = true
-        g_mixed_friction = sqrt(friction_a * friction_b)
+        g_mixed_friction = math.sqrt_float(friction_a * friction_b)
     }
-    return sqrt(friction_a * friction_b)
+    return math.sqrt_float(friction_a * friction_b)
 }
 
 // TestCompoundContactMaterials: a unit-friction sphere struck down onto

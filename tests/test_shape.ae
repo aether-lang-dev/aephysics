@@ -29,7 +29,6 @@ extern exit(code: int)
 extern free(p: ptr)
 extern sin(x: float) -> float
 extern cos(x: float) -> float
-extern sqrt(x: float) -> float
 
 var failures = 0
 var checks = 0
@@ -476,7 +475,7 @@ sphere_hit_error(s: Sphere, origin: Vec3, translation: Vec3, point: Vec3) -> flo
     d = math.normalize(translation)
     b = math.dot(sv, d)
     cc = math.dot(sv, sv) - r * r
-    t = 0.0 - b - sqrt(b * b - cc)
+    t = 0.0 - b - math.sqrt_float(b * b - cc)
     return math.distance(point, math.mul_add(origin, t, d))
 }
 
@@ -489,7 +488,7 @@ capsule_hit_error(c: Capsule, origin: Vec3, translation: Vec3, point: Vec3) -> f
     qa = math.dot(dp, dp)
     qb = 2.0 * math.dot(sp, dp)
     qc = math.dot(sp, sp) - c.radius * c.radius
-    tau = (0.0 - qb - sqrt(qb * qb - 4.0 * qa * qc)) / (2.0 * qa)
+    tau = (0.0 - qb - math.sqrt_float(qb * qb - 4.0 * qa * qc)) / (2.0 * qa)
     return math.distance(point, math.mul_add(origin, tau, d))
 }
 
@@ -784,7 +783,7 @@ test_dispatch() {
     small("mesh centroid", math.length(shape.get_shape_centroid(&sh)), 0.000001)
     extent = shape.compute_shape_extent(&sh, math.vec3_zero())
     small("mesh max extent", extent.max_extent.x - 2.0, 0.000001)
-    small("mesh min extent", extent.min_extent - sqrt(8.0), 0.000001)
+    small("mesh min extent", extent.min_extent - math.sqrt_float(8.0), 0.000001)
     extent = shape.compute_shape_extent(&sh, math.vec3(1.0, 0.0, 0.0))
     small("mesh max extent off centre", extent.max_extent.x - 3.0, 0.000001)
     ensure("mesh has no mass", shape.compute_shape_mass(&sh).mass == 0.0)

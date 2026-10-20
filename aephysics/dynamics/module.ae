@@ -166,7 +166,6 @@ exports (
 extern memset(block: ptr, value: int, size: int) -> ptr
 extern memcpy(dst: ptr, src: ptr, size: int) -> ptr
 extern memcmp(a: ptr, b: ptr, size: int) -> int
-extern sqrt(x: float) -> float
 
 const NULL_INDEX = 0 - 1
 const MAX_WORLDS = 128
@@ -390,7 +389,7 @@ struct ShapeId {
     generation: int
 }
 
-default_friction(friction_a: float, user_a: long, friction_b: float, user_b: long) -> float { return sqrt(friction_a * friction_b) }
+default_friction(friction_a: float, user_a: long, friction_b: float, user_b: long) -> float { return math.sqrt_float(friction_a * friction_b) }
 default_restitution(restitution_a: float, user_a: long, restitution_b: float, user_b: long) -> float { return math.max_float(restitution_a, restitution_b) }
 
 default_world_def() -> WorldDef {
@@ -2201,7 +2200,7 @@ compute_shape_margin(g: *Shape) -> float {
             max_extent_sqr = math.max_float(max_extent_sqr, math.distance_squared(points[i], g.hull.center))
             i = i + 1
         }
-        margin = sqrt(max_extent_sqr)
+        margin = math.sqrt_float(max_extent_sqr)
     } else {
         // Static-only shapes: the broad phase uses the speculative distance for static proxies.
         return MAX_AABB_MARGIN
@@ -6007,7 +6006,7 @@ try_recycle_contact(w: *World, c: *Contact, sim_a: *BodySim, sim_b: *BodySim, st
     max_extent = math.max_vec3(max_extent_a, max_extent_b)
     dist_squared = math.distance_squared(xf.p, xfc.p)
     if angular_distance <= CONTACT_RECYCLE_ANGULAR_DISTANCE || dist_squared >= tolerance * tolerance { return false }
-    slack = tolerance - sqrt(dist_squared)
+    slack = tolerance - math.sqrt_float(dist_squared)
     qr = math.inv_mul_quat(xfc.q, xf.q)
     a = math.abs_vec3(math.qv(qr))
     arc = math.vec3(a.y * max_extent.z + a.z * max_extent.y, a.z * max_extent.x + a.x * max_extent.z, a.x * max_extent.y + a.y * max_extent.x)
@@ -7079,7 +7078,7 @@ cone_reach(s: *SphericalJoint, b: Vec3) -> ConeReach {
 // The ellipse's half-angle in a direction: the polar radius of an ellipse
 // of half-angles a (along the major axis) and b (across it).
 cone_radius(a: float, b: float, along_major: float, along_minor: float) -> float {
-    return a * b / sqrt((b * along_major) * (b * along_major) + (a * along_minor) * (a * along_minor))
+    return a * b / math.sqrt_float((b * along_major) * (b * along_major) + (a * along_minor) * (a * along_minor))
 }
 
 // How far frame B's z is inside the cone, radians: the limit's separation
@@ -7394,13 +7393,13 @@ get_joint_reaction(w: *World, sim: *JointSim, inv_time_step: float) -> JointReac
     } else if kind == JOINT_WHEEL {
         wheel = wheel_joint_of(sim)
         axial = wheel.suspension_spring_impulse + wheel.lower_suspension_impulse - wheel.upper_suspension_impulse
-        linear_impulse = sqrt(wheel.linear_impulse.x * wheel.linear_impulse.x + wheel.linear_impulse.y * wheel.linear_impulse.y + axial * axial)
+        linear_impulse = math.sqrt_float(wheel.linear_impulse.x * wheel.linear_impulse.x + wheel.linear_impulse.y * wheel.linear_impulse.y + axial * axial)
         // The spin with the lock (unsteered) or the steering, on their
         // (orthogonal at rest) axes; the spin alone missed a wheel wrenched sideways.
         lock_x = wheel.angular_impulse.x
         lock_y = wheel.angular_impulse.y
         if wheel.enable_steering { lock_y = wheel.steering_spring_impulse + wheel.lower_steering_impulse - wheel.upper_steering_impulse }
-        angular_impulse = sqrt(lock_x * lock_x + lock_y * lock_y + wheel.spin_impulse * wheel.spin_impulse)
+        angular_impulse = math.sqrt_float(lock_x * lock_x + lock_y * lock_y + wheel.spin_impulse * wheel.spin_impulse)
     }
     return JointReaction { force: linear_impulse * inv_time_step, torque: angular_impulse * inv_time_step }
 }
@@ -7462,7 +7461,7 @@ line_separation(dp: Vec3, axis: Vec3, enable_limit: bool, lower: float, upper: f
         if translation < lower { limit = lower - translation }
         if upper < translation { limit = translation - upper }
     }
-    return sqrt(across + limit * limit)
+    return math.sqrt_float(across + limit * limit)
 }
 
 // The same as an angle (the wheel joint's is a todo in the reference: zero
@@ -7531,7 +7530,7 @@ wheel_angular_separation(wheel: *WheelJoint, q_a: Quat, q_b: Quat, rel_q: Quat) 
     matrix_a = math.make_matrix_from_quat(q_a)
     matrix_b = math.make_matrix_from_quat(q_b)
     toward = math.clamp_float(math.abs_float(math.dot(matrix_b.cz, matrix_a.cx)), 0.0, 1.0)
-    lean = math.atan2_approx(toward, sqrt(1.0 - toward * toward))
+    lean = math.atan2_approx(toward, math.sqrt_float(1.0 - toward * toward))
     excess = 0.0
     if wheel.enable_steering_limit {
         angle = math.atan2_approx(0.0 - math.dot(matrix_b.cz, matrix_a.cy), math.dot(matrix_b.cz, matrix_a.cz))
