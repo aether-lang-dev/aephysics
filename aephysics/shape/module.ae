@@ -377,8 +377,8 @@ collide_mover(planes: PlaneResult[], capacity: int, shape: *Shape, t: Transform,
 make_shape_proxy(shape: *Shape) -> ShapeProxy {
     kind = shape.kind
     if kind == SHAPE_CAPSULE { return sphere.capsule_proxy(shape.capsule) }
-    if kind == SHAPE_SPHERE { return sphere.sphere_proxy(shape.sphere) }
-    if kind == SHAPE_HULL { return hull.hull_proxy(shape.hull) }
+    if kind == SHAPE_SPHERE { return sphere.proxy(shape.sphere) }
+    if kind == SHAPE_HULL { return hull.proxy(shape.hull) }
     return distance.shape_proxy(null, 0, 0.0)
 }
 
@@ -497,7 +497,7 @@ compound_time_of_impact_visitor(c: *CompoundData, child_index: int, context: ptr
         ctx.input.proxy_a = distance.shape_proxy(toi_points_a(), 2, child.capsule.radius)
         better_hit(ctx, distance.time_of_impact(&ctx.input))
     } else if kind == SHAPE_HULL {
-        ctx.input.proxy_a = hull.hull_proxy(child.hull)
+        ctx.input.proxy_a = hull.proxy(child.hull)
         better_hit(ctx, distance.time_of_impact(&ctx.input))
     } else if kind == SHAPE_SPHERE {
         points = toi_points_a() as Vec3[]

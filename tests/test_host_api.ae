@@ -268,8 +268,8 @@ main() {
     ensure("version: the reference's 0.2.0", version.major == 0 && version.minor == 2 && version.revision == 0)
     ensure("precision: world positions are double", physics_world.is_double_precision())
     ensure("avx2: the CPU's", physics_world.is_avx2_available() == native.has_avx2())
-    ensure("hash: the reference's b3Hash of 13 bytes", basics.djb2_hash(basics.HASH_INIT as long, string.aether_string_raw_ptr("hello physics"), 13) == (4027293447 as long))
-    ensure("hash: of 16 bytes", basics.djb2_hash(basics.HASH_INIT as long, string.aether_string_raw_ptr("0123456789abcdef"), 16) == (1204685188 as long))
+    ensure("hash: the reference's b3Hash of 13 bytes", basics.djb2_hash(basics.HASH_INIT as long, (string.bytes("hello physics") as ptr), 13) == (4027293447 as long))
+    ensure("hash: of 16 bytes", basics.djb2_hash(basics.HASH_INIT as long, (string.bytes("0123456789abcdef") as ptr), 16) == (1204685188 as long))
     ensure("hash: of none", basics.djb2_hash(basics.HASH_INIT as long, null, 0) == (5381 as long))
 
     println("host api: ${checks} checks")

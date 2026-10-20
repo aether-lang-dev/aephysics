@@ -1805,7 +1805,7 @@ test_body_queries() {
 // test_body_query.c, the rest (#143): the hull-proxy overlaps, the
 // compound on a turned body through both overlaps, and the mover's time
 // of impact against one body in every case the reference asks.
-hull_proxy(h: *HullData) -> ShapeProxy { return distance.shape_proxy(hull.hull_points(h) as ptr, h.vertex_count, 0.0) }
+hull_proxy(h: *HullData) -> ShapeProxy { return distance.shape_proxy(hull.points(h) as ptr, h.vertex_count, 0.0) }
 
 overlap_count(world_id: WorldId, origin: Vec3, proxy: ShapeProxy) -> int {
     counter = calloc(1, 4)

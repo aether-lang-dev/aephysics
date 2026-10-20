@@ -59,7 +59,7 @@ min_separation(m: *LocalManifold) -> float {
     s = math.MAX_FLOAT
     i = 0
     while i < m.point_count {
-        s = math.min_float(s, manifold.manifold_point(m, i).separation)
+        s = math.min_float(s, manifold.point(m, i).separation)
         i = i + 1
     }
     return s
@@ -69,14 +69,14 @@ min_separation(m: *LocalManifold) -> float {
 
 // The projection gap min over B minus max over A along a unit axis from A to B.
 sep_along(hull_a: *HullData, hull_b: *HullData, xf_b: Transform, n: Vec3) -> float {
-    points_a = hull.hull_points(hull_a)
+    points_a = hull.points(hull_a)
     max_a = 0.0 - math.MAX_FLOAT
     i = 0
     while i < hull_a.vertex_count {
         max_a = math.max_float(max_a, math.dot(n, points_a[i]))
         i = i + 1
     }
-    points_b = hull.hull_points(hull_b)
+    points_b = hull.points(hull_b)
     min_b = math.MAX_FLOAT
     i = 0
     while i < hull_b.vertex_count {
@@ -89,14 +89,14 @@ sep_along(hull_a: *HullData, hull_b: *HullData, xf_b: Transform, n: Vec3) -> flo
 // Every face normal and every edge cross product, both ways: the true maximum.
 oracle_separation(hull_a: *HullData, hull_b: *HullData, xf_b: Transform) -> float {
     best = 0.0 - math.MAX_FLOAT
-    planes_a = hull.hull_planes(hull_a)
+    planes_a = hull.planes(hull_a)
     i = 0
     while i < hull_a.face_count {
         best = math.max_float(best, sep_along(hull_a, hull_b, xf_b, planes_a[i].normal))
         best = math.max_float(best, sep_along(hull_a, hull_b, xf_b, math.neg(planes_a[i].normal)))
         i = i + 1
     }
-    planes_b = hull.hull_planes(hull_b)
+    planes_b = hull.planes(hull_b)
     i = 0
     while i < hull_b.face_count {
         n = math.rotate_vector(xf_b.q, planes_b[i].normal)
@@ -104,10 +104,10 @@ oracle_separation(hull_a: *HullData, hull_b: *HullData, xf_b: Transform) -> floa
         best = math.max_float(best, sep_along(hull_a, hull_b, xf_b, math.neg(n)))
         i = i + 1
     }
-    edges_a = hull.hull_edges(hull_a)
-    points_a = hull.hull_points(hull_a)
-    edges_b = hull.hull_edges(hull_b)
-    points_b = hull.hull_points(hull_b)
+    edges_a = hull.edges(hull_a)
+    points_a = hull.points(hull_a)
+    edges_b = hull.edges(hull_b)
+    points_b = hull.points(hull_b)
     i = 0
     while i < hull_a.edge_count {
         dir_a = math.sub(points_a[edges_a[i + 1].origin], points_a[edges_a[i].origin])
@@ -150,9 +150,9 @@ test_sat_fixed() {
     small("sat face a: separation", q.separation - 0.2, 0.00001)
     small("sat face a: normal x", q.normal.x - 1.0, 0.000001)
     small("sat face a: normal y", q.normal.y, 0.000001)
-    planes_a = hull.hull_planes(a)
+    planes_a = hull.planes(a)
     small("sat face a: the +x face", planes_a[q.index_a].normal.x - 1.0, 0.000001)
-    points_b = hull.hull_points(b)
+    points_b = hull.points(b)
     small("sat face a: B's -x vertex", points_b[q.index_b].x + 0.5, 0.000001)
     small("sat face a: consistent", sep_along(a, b, xf, q.normal) - q.separation, 0.00001)
     hull.destroy_hull(b)
@@ -168,9 +168,9 @@ test_sat_fixed() {
     ensure("sat face b: kind", q.kind == manifold.AXIS_FACE_B)
     small("sat face b: separation", q.separation - gap, 0.00001)
     small("sat face b: normal x", q.normal.x - 1.0, 0.00001)
-    planes_b = hull.hull_planes(b)
+    planes_b = hull.planes(b)
     small("sat face b: B's -x face", planes_b[q.index_b].normal.x + 1.0, 0.00001)
-    points_a = hull.hull_points(a_rot)
+    points_a = hull.points(a_rot)
     small("sat face b: A's +x vertex", points_a[q.index_a].x - a_extent, 0.0001)
     small("sat face b: consistent", sep_along(a_rot, b, xf, q.normal) - q.separation, 0.0001)
     hull.destroy_hull(b)
@@ -330,7 +330,7 @@ test_crossed_edge() {
         small("crossed: normal y", m.normal.y, 0.000001)
         small("crossed: normal z", m.normal.z, 0.000001)
         if m.point_count == 1 {
-            p = manifold.manifold_point(&m, 0)
+            p = manifold.point(&m, 0)
             small("crossed: separation", p.separation - expected, 0.00001)
             small("crossed: point x", p.point.x - 0.5 * d, 0.00001)
             small("crossed: point y", p.point.y, 0.00001)
@@ -342,7 +342,7 @@ test_crossed_edge() {
         manual_cache.kind = manifold.AXIS_MANUAL_EDGE_PAIR
         manifold.collide_hulls(&manual, 8, a, b, slide_x(d), &manual_cache)
         ensure("crossed manual: one point", manual.point_count == 1)
-        if manual.point_count == 1 { small("crossed manual: separation", manifold.manifold_point(&manual, 0).separation - expected, 0.00001) }
+        if manual.point_count == 1 { small("crossed manual: separation", manifold.point(&manual, 0).separation - expected, 0.00001) }
         i = i + 1
     }
     // Beyond the speculative distance: the axis, no contact.
@@ -370,7 +370,7 @@ test_crossed_edge() {
         ensure("scale ${s}: edge pair", cache.kind == manifold.AXIS_EDGE_PAIR)
         small("scale ${s}: normal x", m.normal.x - 1.0, 0.000001)
         if m.point_count == 1 {
-            p = manifold.manifold_point(&m, 0)
+            p = manifold.point(&m, 0)
             small("scale ${s}: separation", p.separation - expected, tolerance)
             small("scale ${s}: point x", p.point.x - 0.5 * d, tolerance)
             small("scale ${s}: point y", p.point.y, tolerance)
@@ -393,7 +393,7 @@ test_crossed_edge() {
     manifold.collide_hulls(&m, 8, a, b, slide_x(1.4105), &cache)
     ensure("edge cache: still one point", m.point_count == 1)
     ensure("edge cache: the cache answered", cache.separation == seeded && cache.hit == 1)
-    if m.point_count == 1 { small("edge cache: new separation", manifold.manifold_point(&m, 0).separation - (1.4105 - ROOT2), 0.00001) }
+    if m.point_count == 1 { small("edge cache: new separation", manifold.point(&m, 0).separation - (1.4105 - ROOT2), 0.00001) }
     small("edge cache: normal x", m.normal.x - 1.0, 0.000001)
     manifold.collide_hulls(&m, 8, a, b, slide_x(1.5), &cache)
     ensure("edge cache: past the band, no points", m.point_count == 0)
@@ -407,8 +407,8 @@ test_crossed_edge() {
     manifold.collide_hulls(&m, 8, a, b, inside, &cache)
     ensure("endpoint inside: one point", m.point_count == 1)
     if m.point_count == 1 {
-        small("endpoint inside: separation", manifold.manifold_point(&m, 0).separation - (1.41 - ROOT2), 0.00001)
-        small("endpoint inside: point y", manifold.manifold_point(&m, 0).point.y - 0.49, 0.00001)
+        small("endpoint inside: separation", manifold.point(&m, 0).separation - (1.41 - ROOT2), 0.00001)
+        small("endpoint inside: point y", manifold.point(&m, 0).point.y - 0.49, 0.00001)
     }
     off = Transform { p: math.vec3(1.41, 0.55, 0.0), q: math.quat_identity() }
     m = manifold.local_manifold(points)
@@ -453,7 +453,7 @@ test_parallel_edges() {
             bound = half_diagonal * angle + 0.00001
             k = 0
             while k < m.point_count {
-                small("parallel: separation", manifold.manifold_point(&m, k).separation + overlap, bound)
+                small("parallel: separation", manifold.point(&m, k).separation + overlap, bound)
                 k = k + 1
             }
             // Forced edge: exactly parallel finds nothing; otherwise never positive.
@@ -466,7 +466,7 @@ test_parallel_edges() {
             } else if manual.point_count > 0 {
                 ensure("parallel manual: one point", manual.point_count == 1)
                 ensure("parallel manual: normal up", math.dot(manual.normal, math.vec3_axis_y()) > 0.99)
-                s = manifold.manifold_point(&manual, 0).separation
+                s = manifold.point(&manual, 0).separation
                 ensure("parallel manual: not positive (${s})", s <= 0.0 && s >= 0.0 - overlap - half_diagonal * angle - 0.0001)
             }
             j = j + 1
@@ -546,7 +546,7 @@ test_ridge_crossing() {
         small("ridge deep ${i}: normal y", m.normal.y - 1.0, 0.0001)
         small("ridge deep ${i}: normal z", m.normal.z, 0.0001)
         if m.point_count == 1 {
-            p = manifold.manifold_point(&m, 0)
+            p = manifold.point(&m, 0)
             small("ridge deep ${i}: separation", p.separation + overlap, 0.0001)
             small("ridge deep ${i}: point y", p.point.y - (ridge_y - 0.5 * overlap), 0.0001)
             small("ridge deep ${i}: point x", p.point.x, 0.01)
@@ -582,7 +582,7 @@ check_edge_contact(name: string, m: *LocalManifold, p1: Vec3, e1: Vec3, p2: Vec3
     small("${name}: perpendicular to e2", math.dot(m.normal, math.normalize(e2)), normal_tol)
     closest = math.line_distance(p1, e1, p2, e2)
     expected_separation = math.dot(axis, math.sub(closest.point2, closest.point1)) - radius
-    p = manifold.manifold_point(m, 0)
+    p = manifold.point(m, 0)
     small("${name}: separation", p.separation - expected_separation, sep_tol)
     expected_point = math.mul_sv(0.5, math.add(math.mul_sub(closest.point1, radius, axis), closest.point2))
     small("${name}: point x", p.point.x - expected_point.x, point_tol)
@@ -591,14 +591,14 @@ check_edge_contact(name: string, m: *LocalManifold, p1: Vec3, e1: Vec3, p2: Vec3
 }
 
 hull_edge_tail(h: *HullData, edge_index: int, t: Transform) -> Vec3 {
-    edges = hull.hull_edges(h)
-    points = hull.hull_points(h)
+    edges = hull.edges(h)
+    points = hull.points(h)
     return math.transform_point(t, points[edges[edge_index].origin])
 }
 
 hull_edge_vector(h: *HullData, edge_index: int, t: Transform) -> Vec3 {
-    edges = hull.hull_edges(h)
-    points = hull.hull_points(h)
+    edges = hull.edges(h)
+    points = hull.points(h)
     tail = math.transform_point(t, points[edges[edge_index].origin])
     head = math.transform_point(t, points[edges[edges[edge_index].twin].origin])
     return math.sub(head, tail)
@@ -701,12 +701,12 @@ cylinder_hull(radius: float, half_height: float) -> *HullData {
 // for an axis (arcs crossing past its epsilon, not near parallel).
 brute_edge_separation(a: *HullData, b: *HullData, xf: Transform) -> float {
     r = math.make_matrix_from_quat(xf.q)
-    planes_a = hull.hull_planes(a)
-    points_a = hull.hull_points(a)
-    edges_a = hull.hull_edges(a)
-    planes_b = hull.hull_planes(b)
-    points_b = hull.hull_points(b)
-    edges_b = hull.hull_edges(b)
+    planes_a = hull.planes(a)
+    points_a = hull.points(a)
+    edges_a = hull.edges(a)
+    planes_b = hull.planes(b)
+    points_b = hull.points(b)
+    edges_b = hull.edges(b)
     tol = manifold.PARALLEL_EDGE_TOL * manifold.PARALLEL_EDGE_TOL
     eps = 0.0 - 0.0001
     best = 0.0 - math.MAX_FLOAT
@@ -811,7 +811,7 @@ test_hull_capsule_edge_deep() {
                 manifold.collide_hull_and_capsule(&m, 8, h, c, math.transform_identity(), &cache)
                 ensure("capsule edge deep: one point (${i} ${j} ${k})", m.point_count == 1)
                 if m.point_count == 1 {
-                    ensure("capsule edge deep: penetrating", manifold.manifold_point(&m, 0).separation < 0.0)
+                    ensure("capsule edge deep: penetrating", manifold.point(&m, 0).separation < 0.0)
                     check_edge_contact("capsule edge deep", &m, edge_point, edge_dir, c1, math.sub(c2, c1), outward, radii[j], 0.0001, 0.0001, 0.0001)
                 }
                 count = count + 1
@@ -848,7 +848,7 @@ test_sphere_hull_seam() {
         manifold.collide_hull_and_sphere(&m, 8, h, s, math.transform_identity(), &cache)
         ensure("sphere seam: one point", m.point_count == 1)
         if m.point_count == 1 {
-            separation = manifold.manifold_point(&m, 0).separation
+            separation = manifold.point(&m, 0).separation
             expected = (y - 0.5) - radius
             small("sphere seam: separation", separation - expected, 0.00001)
             small("sphere seam: normal x", m.normal.x, 0.00001)
@@ -878,7 +878,7 @@ test_sphere_hull_seam() {
         expected = (y - 0.5) - radius
         k = 0
         while k < m.point_count {
-            small("capsule seam: separation", manifold.manifold_point(&m, k).separation - expected, 0.00001)
+            small("capsule seam: separation", manifold.point(&m, k).separation - expected, 0.00001)
             k = k + 1
         }
         small("capsule seam: normal x", m.normal.x, 0.00001)
@@ -919,8 +919,8 @@ test_sphere_hull_seam() {
                     small("capsule face deep: normal z", m.normal.z, 0.00001)
                     expected = (y - 0.5) - radii[r]
                     if m.point_count == 2 {
-                        small("capsule face deep: separation 0", manifold.manifold_point(&m, 0).separation - expected, 0.00001)
-                        small("capsule face deep: separation 1", manifold.manifold_point(&m, 1).separation - expected, 0.00001)
+                        small("capsule face deep: separation 0", manifold.point(&m, 0).separation - expected, 0.00001)
+                        small("capsule face deep: separation 1", manifold.point(&m, 1).separation - expected, 0.00001)
                     }
                     ensure("capsule face deep: penetrating", expected < 0.0)
                     face_contacts = face_contacts + 1
@@ -946,8 +946,8 @@ test_rounded_pairs() {
     manifold.collide_spheres(&m, 8, a, b, Transform { p: math.vec3(0.7, 0.0, 0.0), q: math.quat_identity() })
     ensure("spheres: one point", m.point_count == 1)
     if m.point_count == 1 {
-        small("spheres: separation", manifold.manifold_point(&m, 0).separation + 0.05, 0.00001)
-        small("spheres: point at the midpoint", manifold.manifold_point(&m, 0).point.x - 0.475, 0.00001)
+        small("spheres: separation", manifold.point(&m, 0).separation + 0.05, 0.00001)
+        small("spheres: point at the midpoint", manifold.point(&m, 0).point.x - 0.475, 0.00001)
     }
     small("spheres: normal", m.normal.x - 1.0, 0.00001)
     m = manifold.local_manifold(points)
@@ -958,7 +958,7 @@ test_rounded_pairs() {
     m = manifold.local_manifold(points)
     manifold.collide_capsule_and_sphere(&m, 8, c, b, Transform { p: math.vec3(0.3, 0.4, 0.0), q: math.quat_identity() })
     ensure("capsule-sphere: one point", m.point_count == 1)
-    if m.point_count == 1 { small("capsule-sphere: separation", manifold.manifold_point(&m, 0).separation + 0.05, 0.00001) }
+    if m.point_count == 1 { small("capsule-sphere: separation", manifold.point(&m, 0).separation + 0.05, 0.00001) }
     small("capsule-sphere: normal y", m.normal.y - 1.0, 0.00001)
 
     // Parallel capsules: two points; crossed: one.
@@ -968,13 +968,13 @@ test_rounded_pairs() {
     ensure("capsules parallel: two points", m.point_count == 2)
     small("capsules parallel: normal y", m.normal.y - 1.0, 0.00001)
     if m.point_count == 2 {
-        small("capsules parallel: separation 0", manifold.manifold_point(&m, 0).separation + 0.01, 0.00001)
-        small("capsules parallel: separation 1", manifold.manifold_point(&m, 1).separation + 0.01, 0.00001)
+        small("capsules parallel: separation 0", manifold.point(&m, 0).separation + 0.01, 0.00001)
+        small("capsules parallel: separation 1", manifold.point(&m, 1).separation + 0.01, 0.00001)
     }
     m = manifold.local_manifold(points)
     manifold.collide_capsules(&m, 8, c, d, Transform { p: math.vec3(0.0, 0.39, 0.0), q: exact_quat(math.vec3_axis_y(), 0.5 * math.PI) })
     ensure("capsules crossed: one point", m.point_count == 1)
-    if m.point_count == 1 { small("capsules crossed: separation", manifold.manifold_point(&m, 0).separation + 0.01, 0.00001) }
+    if m.point_count == 1 { small("capsules crossed: separation", manifold.point(&m, 0).separation + 0.01, 0.00001) }
     m = manifold.local_manifold(points)
     manifold.collide_capsules(&m, 8, c, d, Transform { p: math.vec3(0.0, 0.5, 0.0), q: math.quat_identity() })
     ensure("capsules apart: empty", m.point_count == 0)

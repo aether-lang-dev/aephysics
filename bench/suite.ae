@@ -709,8 +709,8 @@ struct SatPass {
 }
 
 sat_pass(a: *HullData, b: *HullData, transforms: Transform[], caches: SimplexCache[], warm: bool) -> SatPass {
-    input = DistanceInput { proxy_a: ShapeProxy { points: hull.hull_points(a) as ptr, count: a.vertex_count, radius: 0.0 },
-                            proxy_b: ShapeProxy { points: hull.hull_points(b) as ptr, count: b.vertex_count, radius: 0.0 },
+    input = DistanceInput { proxy_a: ShapeProxy { points: hull.points(a) as ptr, count: a.vertex_count, radius: 0.0 },
+                            proxy_b: ShapeProxy { points: hull.points(b) as ptr, count: b.vertex_count, radius: 0.0 },
                             transform: math.transform_identity(), use_radii: false }
     sum = 0.0
     t0 = clock()
@@ -755,8 +755,8 @@ sat_pair(kind_a: int, kind_b: int) {
     caches_block = calloc(SAT_PAIRS, sizeof(SimplexCache))
     transforms = transforms_block as Transform[]
     caches = caches_block as SimplexCache[]
-    input = DistanceInput { proxy_a: ShapeProxy { points: hull.hull_points(a) as ptr, count: a.vertex_count, radius: 0.0 },
-                            proxy_b: ShapeProxy { points: hull.hull_points(b) as ptr, count: b.vertex_count, radius: 0.0 },
+    input = DistanceInput { proxy_a: ShapeProxy { points: hull.points(a) as ptr, count: a.vertex_count, radius: 0.0 },
+                            proxy_b: ShapeProxy { points: hull.points(b) as ptr, count: b.vertex_count, radius: 0.0 },
                             transform: math.transform_identity(), use_radii: false }
     // Each pair placed half the speculative distance apart, as the
     // reference places them: from far out along a random direction, moved

@@ -157,7 +157,7 @@ test_box_on_grid() {
     b = shape.hull_shape(box, 1.0)
     xf_a = math.transform_identity()
     xf_b = Transform { p: math.vec3(0.3, 0.49, 0.2), q: math.quat_identity() }
-    cache = mesh_contact.mesh_contact_cache_create()
+    cache = mesh_contact.cache_create()
     r = manifolds(&cache, &ground, xf_a, &b, xf_b, false)
     ensure("box: triangles cached (${cache.count})", cache.count == 8)
     ensure("box: one cluster (${r.cluster_count})", r.cluster_count == 1)
@@ -220,7 +220,7 @@ test_box_on_grid() {
         ensure("tilted box: the faces at the edge", math.abs_float(n0.x + n1.x - 1.0) < 0.0001 && math.abs_float(n0.y + n1.y - 1.0) < 0.0001)
         ensure("tilted box: touching (${min_separation(r)})", min_separation(r) < 0.0 && min_separation(r) > 0.0 - 0.02)
     }
-    mesh_contact.mesh_contact_cache_destroy(&cache)
+    mesh_contact.cache_destroy(&cache)
     hull.destroy_hull(box)
     mesh.destroy_mesh(grid)
 }
@@ -230,7 +230,7 @@ test_sphere_seams() {
     ground = shape.mesh_shape(mesh.mesh(grid, math.vec3_one()), 1)
     s = shape.sphere_shape(manifold.sphere(math.vec3_zero(), 0.5), 1.0)
     xf_a = math.transform_identity()
-    cache = mesh_contact.mesh_contact_cache_create()
+    cache = mesh_contact.cache_create()
     // On an interior vertex of the grid (a whole number of cells from the corner): one point.
     xf_b = Transform { p: math.vec3(1.0, 0.49, 1.0), q: math.quat_identity() }
     r = manifolds(&cache, &ground, xf_a, &s, xf_b, false)
@@ -254,8 +254,8 @@ test_sphere_seams() {
     mesh.destroy_mesh(grid)
     wave = mesh.create_wave_mesh(20, 20, 1.0, 0.5, 0.25, 0.0)
     ground = shape.mesh_shape(mesh.mesh(wave, math.vec3_one()), 1)
-    mesh_contact.mesh_contact_cache_destroy(&cache)
-    cache = mesh_contact.mesh_contact_cache_create()
+    mesh_contact.cache_destroy(&cache)
+    cache = mesh_contact.cache_create()
     // Sampling the surface for the lowest point along x at the mesh's middle row.
     lowest = math.MAX_FLOAT
     lowest_x = 0.0
@@ -272,7 +272,7 @@ test_sphere_seams() {
     r = manifolds(&cache, &ground, xf_a, &s, xf_b, false)
     ensure("sphere in a valley: clusters (${r.cluster_count})", r.cluster_count >= 1 && r.cluster_count <= 2)
     ensure("sphere in a valley: touching", min_separation(r) < 0.02)
-    mesh_contact.mesh_contact_cache_destroy(&cache)
+    mesh_contact.cache_destroy(&cache)
     mesh.destroy_mesh(wave)
 }
 
@@ -280,7 +280,7 @@ test_capsule_and_field() {
     grid = mesh.create_grid_mesh(8, 8, 1.0, 1, true)
     ground = shape.mesh_shape(mesh.mesh(grid, math.vec3_one()), 1)
     xf_a = math.transform_identity()
-    cache = mesh_contact.mesh_contact_cache_create()
+    cache = mesh_contact.cache_create()
     // A capsule lying along x across three triangles: one cluster, two points at its ends.
     c_shape = shape.capsule_shape(manifold.capsule(math.vec3(0.0 - 1.0, 0.0, 0.0), math.vec3(1.0, 0.0, 0.0), 0.3), 1.0)
     xf_b = Transform { p: math.vec3(0.4, 0.29, 0.3), q: math.quat_identity() }
@@ -303,7 +303,7 @@ test_capsule_and_field() {
         ensure("capsule: points under the axis", on_axis)
         ensure("capsule: both ends kept", ends == 2)
     }
-    mesh_contact.mesh_contact_cache_destroy(&cache)
+    mesh_contact.cache_destroy(&cache)
     mesh.destroy_mesh(grid)
 
     // The box on a flat height field: the same one cluster of four.
@@ -311,7 +311,7 @@ test_capsule_and_field() {
     f_shape = shape.height_field_shape(field, 1)
     box = hull.make_box_hull(0.5, 0.5, 0.5)
     b = shape.hull_shape(box, 1.0)
-    cache = mesh_contact.mesh_contact_cache_create()
+    cache = mesh_contact.cache_create()
     xf_b = Transform { p: math.vec3(2.3, 0.49, 2.2), q: math.quat_identity() }
     r = manifolds(&cache, &f_shape, xf_a, &b, xf_b, false)
     ensure("field: triangles cached (${cache.count})", cache.count >= 2 && cache.count <= 8)
@@ -321,7 +321,7 @@ test_capsule_and_field() {
         // The grid's quantum puts its surface 0.0039 under y = 0.
         small("field: separation", min_separation(r) + 0.01 - 0.0039, 0.001)
     }
-    mesh_contact.mesh_contact_cache_destroy(&cache)
+    mesh_contact.cache_destroy(&cache)
     height_field.destroy_height_field(field)
 
     // A ridge: a field rising to a crest along z at x = 3; a box straddling the crest
@@ -337,7 +337,7 @@ test_capsule_and_field() {
         heights[i] = h
         i = i + 1
     }
-    def = height_field.height_field_def()
+    def = height_field.def()
     def.heights = heights_block
     def.count_x = 6
     def.count_z = 6
@@ -345,7 +345,7 @@ test_capsule_and_field() {
     def.global_maximum_height = 1.0
     ridge = height_field.create_height_field(&def)
     r_shape = shape.height_field_shape(ridge, 1)
-    cache = mesh_contact.mesh_contact_cache_create()
+    cache = mesh_contact.cache_create()
     xf_b = Transform { p: math.vec3(3.0, 0.5 + 0.5 - 0.01, 2.5), q: math.quat_identity() }
     r = manifolds(&cache, &r_shape, xf_a, &b, xf_b, false)
     ensure("ridge: clusters (${r.cluster_count})", r.cluster_count >= 2)
@@ -361,7 +361,7 @@ test_capsule_and_field() {
     }
     ensure("ridge: triangle normals lean both ways", leaning_left >= 1 && leaning_right >= 1)
     ensure("ridge: touching", min_separation(r) < 0.0 && min_separation(r) > 0.0 - 0.05)
-    mesh_contact.mesh_contact_cache_destroy(&cache)
+    mesh_contact.cache_destroy(&cache)
     height_field.destroy_height_field(ridge)
     free(heights_block)
 
@@ -373,7 +373,7 @@ test_capsule_and_field() {
     xf_a = Transform { p: math.vec3(10.0, 20.0, 30.0), q: q }
     // Local (0.3, 0.49, 0.2) in world: p + q * local = (10 - 0.49, 20 + 0.3, 30.2).
     xf_b = Transform { p: math.transform_point(xf_a, math.vec3(0.3, 0.49, 0.2)), q: q }
-    cache = mesh_contact.mesh_contact_cache_create()
+    cache = mesh_contact.cache_create()
     r = manifolds(&cache, &ground, xf_a, &b, xf_b, false)
     ensure("moved mesh: one cluster of four", r.cluster_count == 1 && cluster(r, 0).point_count == 4)
     if r.cluster_count == 1 {
@@ -381,7 +381,7 @@ test_capsule_and_field() {
         small("moved mesh: normal in the box's frame", cluster(r, 0).manifold_normal.y - 1.0, 0.0001)
         small("moved mesh: separation", min_separation(r) + 0.01, 0.0001)
     }
-    mesh_contact.mesh_contact_cache_destroy(&cache)
+    mesh_contact.cache_destroy(&cache)
     mesh.destroy_mesh(grid)
     hull.destroy_hull(box)
 }

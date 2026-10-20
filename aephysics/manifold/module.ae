@@ -343,10 +343,10 @@ const EDGE_SCRATCH_BYTES = AXIS_FIELDS * AXIS_SLOTS * 4 + B_FRAME_SLOTS * 24
 // normal, then the more anti-parallel of that edge's two faces. Extended
 // from the plain search so a wedge gets the right incident face.
 find_incident_face(h: *HullData, ref_normal: Vec3, vertex_index: int) -> int {
-    vertices = hull.hull_vertices(h)
-    edges = hull.hull_edges(h)
-    planes = hull.hull_planes(h)
-    points = hull.hull_points(h)
+    vertices = hull.vertices(h)
+    edges = hull.edges(h)
+    planes = hull.planes(h)
+    points = hull.points(h)
     min_edge = NULL_INDEX
     min_projection = math.MAX_FLOAT
     start = vertices[vertex_index]
@@ -454,10 +454,10 @@ clip_segment(segment: ClipVertex[], plane: Plane) -> int {
 
 // The segment against the side planes of a hull face: 2 if it survives, else 0.
 clip_segment_to_hull_face(segment: ClipVertex[], h: *HullData, ref_face: int) -> int {
-    faces = hull.hull_faces(h)
-    planes = hull.hull_planes(h)
-    edges = hull.hull_edges(h)
-    points = hull.hull_points(h)
+    faces = hull.faces(h)
+    planes = hull.planes(h)
+    edges = hull.edges(h)
+    points = hull.points(h)
     ref_plane = planes[ref_face]
     start = faces[ref_face]
     edge_index = start
@@ -646,7 +646,7 @@ collide_hull_and_sphere(m: *LocalManifold, capacity: int, hull_a: *HullData, sph
     m.point_count = 0
     if capacity == 0 { return }
     center = math.transform_point(transform_b_to_a, sphere_b.center)
-    input = DistanceInput { proxy_a: hull.hull_proxy(hull_a), proxy_b: distance.shape_proxy((&center) as ptr, 1, 0.0),
+    input = DistanceInput { proxy_a: hull.proxy(hull_a), proxy_b: distance.shape_proxy((&center) as ptr, 1, 0.0),
                             transform: math.transform_identity(), use_radii: false }
     radius_a = 0.0
     radius_b = sphere_b.radius
@@ -666,7 +666,7 @@ collide_hull_and_sphere(m: *LocalManifold, capacity: int, hull_a: *HullData, sph
         return
     }
     // Deep: the face the centre is least below.
-    planes = hull.hull_planes(hull_a)
+    planes = hull.planes(hull_a)
     best_index = NULL_INDEX
     best_distance = 0.0 - math.MAX_FLOAT
     i = 0
@@ -753,7 +753,7 @@ collide_capsules(m: *LocalManifold, capacity: int, capsule_a: Capsule, capsule_b
 
 // The hull face the capsule is least below, and the capsule end that is.
 query_face_direction_hull_and_capsule(h: *HullData, c: Capsule, capsule_transform: Transform) -> SeparatingAxis {
-    planes = hull.hull_planes(h)
+    planes = hull.planes(h)
     p1 = math.transform_point(capsule_transform, c.center1)
     p2 = math.transform_point(capsule_transform, c.center2)
     max_face = NULL_INDEX
@@ -789,9 +789,9 @@ query_edge_direction_hull_and_capsule(h: *HullData, c: Capsule, capsule_transfor
     p_a = math.transform_point(capsule_transform, c.center1)
     q_a = math.transform_point(capsule_transform, c.center2)
     e_a = math.sub(q_a, p_a)
-    edges = hull.hull_edges(h)
-    points = hull.hull_points(h)
-    planes = hull.hull_planes(h)
+    edges = hull.edges(h)
+    points = hull.points(h)
+    planes = hull.planes(h)
     squared_tolerance = PARALLEL_EDGE_TOL * PARALLEL_EDGE_TOL
     index = 0
     while index < h.edge_count {
@@ -824,7 +824,7 @@ query_edge_direction_hull_and_capsule(h: *HullData, c: Capsule, capsule_transfor
 build_hull_face_and_capsule_contact(m: *LocalManifold, hull_a: *HullData, capsule_b: Capsule, transform_b_to_a: Transform,
                                     query: SeparatingAxis) -> bool {
     reach = speculative_distance()
-    planes = hull.hull_planes(hull_a)
+    planes = hull.planes(hull_a)
     ref_face = query.index_a
     ref_plane = planes[ref_face]
     scratch_ready()
@@ -856,8 +856,8 @@ build_hull_and_capsule_edge_contact(m: *LocalManifold, capacity: int, hull_a: *H
     p_c = math.transform_point(transform_b_to_a, capsule_b.center1)
     q_c = math.transform_point(transform_b_to_a, capsule_b.center2)
     e_c = math.sub(q_c, p_c)
-    edges = hull.hull_edges(hull_a)
-    points = hull.hull_points(hull_a)
+    edges = hull.edges(hull_a)
+    points = hull.points(hull_a)
     edge2 = query.index_b
     p_h = points[edges[edge2].origin]
     q_h = points[edges[edges[edge2].twin].origin]
@@ -878,7 +878,7 @@ collide_hull_and_capsule(m: *LocalManifold, capacity: int, hull_a: *HullData, ca
     reach = speculative_distance()
     m.point_count = 0
     if capacity < 2 { return }
-    input = DistanceInput { proxy_a: hull.hull_proxy(hull_a), proxy_b: distance.shape_proxy((&capsule_b) as ptr, 2, 0.0),
+    input = DistanceInput { proxy_a: hull.proxy(hull_a), proxy_b: distance.shape_proxy((&capsule_b) as ptr, 2, 0.0),
                             transform: transform_b_to_a, use_radii: false }
     output = distance.shape_distance(&input, cache, null, 0)
     if output.distance > capsule_b.radius + reach {
@@ -888,7 +888,7 @@ collide_hull_and_capsule(m: *LocalManifold, capacity: int, hull_a: *HullData, ca
 
     if output.distance > 100.0 * FLOAT_EPSILON {
         // Shallow.
-        planes = hull.hull_planes(hull_a)
+        planes = hull.planes(hull_a)
         delta = output.normal
         ref_face = hull.find_hull_support_face(hull_a, delta)
         ref_plane = planes[ref_face]
@@ -954,12 +954,12 @@ compute_separating_axis(hull_a: *HullData, hull_b: *HullData, xf_b: Transform, e
         edge: SeparatingAxis { normal: math.vec3_zero(), separation: 0.0 - math.MAX_FLOAT, index_a: NULL_INDEX, index_b: NULL_INDEX, kind: AXIS_EDGE_PAIR },
         separated_feature: AXIS_INVALID
     }
-    planes_a = hull.hull_planes(hull_a)
-    points_a = hull.hull_points(hull_a)
-    planes_b = hull.hull_planes(hull_b)
-    points_b = hull.hull_points(hull_b)
-    edges_a = hull.hull_edges(hull_a)
-    edges_b = hull.hull_edges(hull_b)
+    planes_a = hull.planes(hull_a)
+    points_a = hull.points(hull_a)
+    planes_b = hull.planes(hull_b)
+    points_b = hull.points(hull_b)
+    edges_a = hull.edges(hull_a)
+    edges_b = hull.edges(hull_b)
 
     // No face can separate the hulls by more than its normal's reach along
     // the line between their centres less their inner spheres' radii
@@ -1093,8 +1093,8 @@ compute_separating_axis(hull_a: *HullData, hull_b: *HullData, xf_b: Transform, e
     center_a_in_b = math.mul_mv(inv_r, math.sub(hull_a.center, xf_b.p))
     scratch_ready()
     lists = edge_lists() as int[]
-    cosines_a = hull.hull_edge_cosines(hull_a)
-    cosines_b = hull.hull_edge_cosines(hull_b)
+    cosines_a = hull.edge_cosines(hull_a)
+    cosines_b = hull.edge_cosines(hull_b)
     na = 0
     i = 0
     while i < hull_a.edge_count {
@@ -1352,10 +1352,10 @@ support_index_wide(h: *HullData, direction: Vec3) -> int {
     // reduction costs more than eight or sixteen dot products (measured on
     // the reference's rocks, ten vertices, and boxes and six-sided
     // cylinders), and the answer is the same first maximum.
-    if h.vertex_count <= WIDE_SUPPORT_MIN_VERTICES { return support_index(hull.hull_points(h), h.vertex_count, direction) }
+    if h.vertex_count <= WIDE_SUPPORT_MIN_VERTICES { return support_index(hull.points(h), h.vertex_count, direction) }
     scratch_ready()
-    stride = hull.hull_soa_stride(h.vertex_count)
-    rows = hull.hull_soa_vertices(h)
+    stride = hull.soa_stride(h.vertex_count)
+    rows = hull.soa_vertices(h)
     d = math.narrow3(direction)
     dx = lanes.splat8(d.x)
     dy = lanes.splat8(d.y)
@@ -1424,9 +1424,9 @@ get_best_axis(query: *AxisQuery) -> SeparatingAxis {
 // The incident face of the hull, in frame A, as a clip polygon with each
 // vertex tagged by its edges; separations from the reference plane.
 build_polygon(out: ClipVertex[], transform: Transform, h: *HullData, inc_face: int, ref_plane: Plane) -> int {
-    faces = hull.hull_faces(h)
-    edges = hull.hull_edges(h)
-    points = hull.hull_points(h)
+    faces = hull.faces(h)
+    edges = hull.edges(h)
+    points = hull.points(h)
     start = faces[inc_face]
     edge_index = start
     out_count = 0
@@ -1455,12 +1455,12 @@ build_polygon(out: ClipVertex[], transform: Transform, h: *HullData, inc_face: i
 add_near_vertices(out: ClipVertex[], count: int, hull_a: *HullData, ref_face: int, ref_plane: Plane,
                   hull_b: *HullData, inc_face: int, transform_b_to_a: Transform) -> int {
     reach = speculative_distance()
-    faces_a = hull.hull_faces(hull_a)
-    edges_a = hull.hull_edges(hull_a)
-    points_a = hull.hull_points(hull_a)
-    faces_b = hull.hull_faces(hull_b)
-    edges_b = hull.hull_edges(hull_b)
-    points_b = hull.hull_points(hull_b)
+    faces_a = hull.faces(hull_a)
+    edges_a = hull.edges(hull_a)
+    points_a = hull.points(hull_a)
+    faces_b = hull.faces(hull_b)
+    edges_b = hull.edges(hull_b)
+    points_b = hull.points(hull_b)
     m = math.make_matrix_from_quat(transform_b_to_a.q)
     out_count = count
     v = 0
@@ -1507,10 +1507,10 @@ add_near_vertices(out: ClipVertex[], count: int, hull_a: *HullData, ref_face: in
 build_face_a_contact(m: *LocalManifold, capacity: int, hull_a: *HullData, hull_b: *HullData, transform_b_to_a: Transform,
                      query: SeparatingAxis, cache: *SATCache) -> bool {
     reach = speculative_distance()
-    faces_a = hull.hull_faces(hull_a)
-    edges_a = hull.hull_edges(hull_a)
-    planes_a = hull.hull_planes(hull_a)
-    points_a = hull.hull_points(hull_a)
+    faces_a = hull.faces(hull_a)
+    edges_a = hull.edges(hull_a)
+    planes_a = hull.planes(hull_a)
+    points_a = hull.points(hull_a)
     ref_face = query.index_a
     ref_plane = planes_a[ref_face]
 
@@ -1601,10 +1601,10 @@ build_face_b_contact(m: *LocalManifold, capacity: int, hull_a: *HullData, hull_b
 // both segments; halfway between them.
 build_edge_contact(m: *LocalManifold, hull_a: *HullData, hull_b: *HullData, transform_b_to_a: Transform,
                    query: SeparatingAxis, cache: *SATCache) -> bool {
-    edges_a = hull.hull_edges(hull_a)
-    points_a = hull.hull_points(hull_a)
-    edges_b = hull.hull_edges(hull_b)
-    points_b = hull.hull_points(hull_b)
+    edges_a = hull.edges(hull_a)
+    points_a = hull.points(hull_a)
+    edges_b = hull.edges(hull_b)
+    points_b = hull.points(hull_b)
     p_a = points_a[edges_a[query.index_a].origin]
     q_a = points_a[edges_a[edges_a[query.index_a].twin].origin]
     e_a = math.sub(q_a, p_a)
@@ -1637,12 +1637,12 @@ collide_hulls(m: *LocalManifold, capacity: int, hull_a: *HullData, hull_b: *Hull
     reach = speculative_distance()
     m.point_count = 0
     if capacity < 4 { return }
-    edges_a = hull.hull_edges(hull_a)
-    planes_a = hull.hull_planes(hull_a)
-    points_a = hull.hull_points(hull_a)
-    edges_b = hull.hull_edges(hull_b)
-    planes_b = hull.hull_planes(hull_b)
-    points_b = hull.hull_points(hull_b)
+    edges_a = hull.edges(hull_a)
+    planes_a = hull.planes(hull_a)
+    points_a = hull.points(hull_a)
+    edges_b = hull.edges(hull_b)
+    planes_b = hull.planes(hull_b)
+    points_b = hull.points(hull_b)
     cache.hit = 0
 
     if cache.kind == AXIS_FACE_A {

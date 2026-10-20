@@ -647,7 +647,7 @@ mesh_of(vertices: ptr, indices: ptr, materials: ptr) -> *MeshData {
 }
 
 field_of(heights: ptr, scale: Vec3, lower: float, upper: float) -> *HeightFieldData {
-    hdef = height_field.height_field_def()
+    hdef = height_field.def()
     hdef.heights = heights
     hdef.count_x = 2
     hdef.count_z = 2

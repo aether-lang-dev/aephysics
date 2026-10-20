@@ -57,7 +57,7 @@ min_separation(m: *LocalManifold) -> float {
     s = math.MAX_FLOAT
     i = 0
     while i < m.point_count {
-        s = math.min_float(s, manifold.manifold_point(m, i).separation)
+        s = math.min_float(s, manifold.point(m, i).separation)
         i = i + 1
     }
     return s
@@ -76,7 +76,7 @@ check_edge_contact(name: string, m: *LocalManifold, p1: Vec3, e1: Vec3, p2: Vec3
     small("${name}: perpendicular to e2", math.dot(m.normal, math.normalize(e2)), normal_tol)
     closest = math.line_distance(p1, e1, p2, e2)
     expected_separation = math.dot(axis, math.sub(closest.point2, closest.point1)) - radius
-    p = manifold.manifold_point(m, 0)
+    p = manifold.point(m, 0)
     small("${name}: separation", p.separation - expected_separation, sep_tol)
     expected_point = math.mul_sv(0.5, math.add(math.mul_sub(closest.point1, radius, axis), closest.point2))
     small("${name}: point x", p.point.x - expected_point.x, point_tol)
@@ -85,14 +85,14 @@ check_edge_contact(name: string, m: *LocalManifold, p1: Vec3, e1: Vec3, p2: Vec3
 }
 
 hull_edge_tail(h: *HullData, edge_index: int) -> Vec3 {
-    edges = hull.hull_edges(h)
-    points = hull.hull_points(h)
+    edges = hull.edges(h)
+    points = hull.points(h)
     return points[edges[edge_index].origin]
 }
 
 hull_edge_vector(h: *HullData, edge_index: int) -> Vec3 {
-    edges = hull.hull_edges(h)
-    points = hull.hull_points(h)
+    edges = hull.edges(h)
+    points = hull.points(h)
     return math.sub(points[edges[edges[edge_index].twin].origin], points[edges[edge_index].origin])
 }
 
@@ -128,7 +128,7 @@ test_triangle_edge() {
         small("triangle edge ${i}: normal y", m.normal.y - expected_normal.y, 0.00001)
         small("triangle edge ${i}: normal z", m.normal.z - expected_normal.z, 0.00001)
         if m.point_count == 1 {
-            p = manifold.manifold_point(&m, 0)
+            p = manifold.point(&m, 0)
             small("triangle edge ${i}: separation", p.separation - gap, 0.00001)
             small("triangle edge ${i}: point x", p.point.x - expected_point.x, 0.00001)
             small("triangle edge ${i}: point y", p.point.y - expected_point.y, 0.00001)
@@ -319,8 +319,8 @@ test_triangle_capsule() {
                 if m.point_count == 2 {
                     lower = math.min_float(c1.y, c2.y) - radii2[r]
                     upper = math.max_float(c1.y, c2.y) - radii2[r]
-                    s0 = manifold.manifold_point(&m, 0).separation
-                    s1 = manifold.manifold_point(&m, 1).separation
+                    s0 = manifold.point(&m, 0).separation
+                    s1 = manifold.point(&m, 1).separation
                     small("capsule face deep: min separation", math.min_float(s0, s1) - lower, 0.00001)
                     small("capsule face deep: max separation", math.max_float(s0, s1) - upper, 0.00001)
                     ensure("capsule face deep: penetrating", math.min_float(s0, s1) < 0.0)
@@ -362,14 +362,14 @@ test_sphere_and_closest() {
     ensure("sphere face: one point", m.point_count == 1)
     ensure("sphere face: feature", m.feature == triangle_manifold.FEATURE_TRIANGLE_FACE)
     small("sphere face: normal y", m.normal.y - 1.0, 0.00001)
-    if m.point_count == 1 { small("sphere face: separation", manifold.manifold_point(&m, 0).separation - 0.01, 0.00001) }
+    if m.point_count == 1 { small("sphere face: separation", manifold.point(&m, 0).separation - 0.01, 0.00001) }
     // Off an edge: the normal from the edge to the centre.
     s = manifold.sphere(math.vec3(0.0, 0.15, 0.0 - 1.15), 0.25)
     m = manifold.local_manifold(points)
     triangle_manifold.collide_triangle_and_sphere(&m, 8, v1, v2, v3, s)
     ensure("sphere edge: one point", m.point_count == 1)
     ensure("sphere edge: feature", m.feature == triangle_manifold.FEATURE_EDGE3)
-    if m.point_count == 1 { small("sphere edge: separation", manifold.manifold_point(&m, 0).separation - (sqrt(0.045) - 0.25), 0.00001) }
+    if m.point_count == 1 { small("sphere edge: separation", manifold.point(&m, 0).separation - (sqrt(0.045) - 0.25), 0.00001) }
     // Below the plane: culled. Far above: nothing.
     s = manifold.sphere(math.vec3(0.0, 0.0 - 0.1, 0.0), 0.25)
     m = manifold.local_manifold(points)
@@ -400,7 +400,7 @@ test_resting_cube() {
     small("resting: normal up", m.normal.y - 1.0, 0.00001)
     i = 0
     while i < m.point_count {
-        small("resting: separation", manifold.manifold_point(&m, i).separation - 0.005, 0.00001)
+        small("resting: separation", manifold.point(&m, i).separation - 0.005, 0.00001)
         i = i + 1
     }
     ensure("resting: cache miss the first time", cache.hit == 0)

@@ -81,14 +81,15 @@ Install the released toolchain with the shared, version-pinned installer
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/aether-lang-dev/aeb/main/get.sh \
-  | AE_PIN=0.830.0 AEB_REF=v0.326 sh
+  | AE_PIN=0.835.0 AEB_REF=v0.328 sh
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-This installs `ae` 0.830.0, the release CI pins, and `aeb` v0.326 under
+This installs `ae` 0.835.0, the release CI pins, and `aeb` v0.328 under
 `~/.local` (`PREFIX` overrides it), using release binaries where available.
-CI verifies only the pinned release; older ones are not tested (the
-eight-wide lanes, `f32x8`, arrived in 0.788.0).
+CI verifies only the pinned release; older ones are not tested (the lane
+moves and `@target("avx2")` imports this code is written with arrived in
+0.835.0).
 
 ```
 scripts/test.sh                 # builds and runs every tests/test_*.ae with ae; what CI runs

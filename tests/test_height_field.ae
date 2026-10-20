@@ -43,7 +43,7 @@ small(name: string, value: float, tolerance: float) {
 // A flat 3 x 3 field at y = 0 with the given cell materials.
 make_flat_field(materials: ptr, clockwise: bool) -> *HeightFieldData {
     heights = calloc(9, 8)
-    def = height_field.height_field_def()
+    def = height_field.def()
     def.heights = heights
     def.material_indices = materials
     def.scale = math.vec3(1.0, 1.0, 1.0)
@@ -127,7 +127,7 @@ test_create() {
     heights = heights_block as float[]
     heights[4] = 0.75
     heights[8] = 3.0
-    def = height_field.height_field_def()
+    def = height_field.def()
     def.heights = heights_block
     def.scale = math.vec3(2.0, 0.5, 2.0)
     def.count_x = 3
@@ -157,7 +157,7 @@ test_flags() {
     materials = materials_block as int[]
     materials[4] = height_field.HEIGHT_FIELD_HOLE
     heights = calloc(16, 8)
-    def = height_field.height_field_def()
+    def = height_field.def()
     def.heights = heights
     def.material_indices = materials_block
     def.count_x = 4
@@ -208,7 +208,7 @@ test_ray_and_overlap() {
     // A flat field with a tight range recovers y = 0 to a hundred-thousandth.
     heights = calloc(16, 8)
     materials = calloc(9, 4)
-    def = height_field.height_field_def()
+    def = height_field.def()
     def.heights = heights
     def.material_indices = materials
     def.count_x = 4
@@ -295,7 +295,7 @@ brute_force_shape_cast(h: *HeightFieldData, proxy: ShapeProxy, translation: Vec3
     best = distance.empty_cast_output()
     best_fraction = 1.0
     tri = tri_block as Vec3[]
-    materials = height_field.height_field_material_indices(h)
+    materials = height_field.material_indices(h)
     count = height_field.height_field_triangle_count(h)
     t = 0
     while t < count {
@@ -321,7 +321,7 @@ brute_force_shape_cast(h: *HeightFieldData, proxy: ShapeProxy, translation: Vec3
 brute_force_ray_cast(h: *HeightFieldData, origin: Vec3, translation: Vec3) -> CastOutput {
     best = distance.empty_cast_output()
     best_fraction = 1.0
-    materials = height_field.height_field_material_indices(h)
+    materials = height_field.material_indices(h)
     count = height_field.height_field_triangle_count(h)
     t = 0
     while t < count {
@@ -637,7 +637,7 @@ test_file_roundtrip() {
     materials[1] = height_field.HEIGHT_FIELD_HOLE
     materials[2] = 1
     materials[3] = 2
-    def = height_field.height_field_def()
+    def = height_field.def()
     def.heights = heights_block
     def.material_indices = materials_block
     def.scale = math.vec3(1.5, 2.0, 0.75)
@@ -661,7 +661,7 @@ test_file_roundtrip() {
         small("file: scale z", loaded.scale.z - def.scale.z, 0.0000002)
         small("file: the lowest height", loaded.min_height - def.global_minimum_height, 0.0000002)
         small("file: the highest height", loaded.max_height - def.global_maximum_height, 0.0000002)
-        cells = height_field.height_field_material_indices(loaded)
+        cells = height_field.material_indices(loaded)
         i = 0
         while i < 4 {
             ensure("file: cell ${i}'s material", (cells[i] as int) == materials[i])
@@ -690,7 +690,7 @@ test_file_roundtrip() {
     ensure("file: the reference's text loads", theirs != null)
     if theirs != null {
         ensure("file: its counts and winding", theirs.row_count == 3 && theirs.column_count == 3 && theirs.clockwise)
-        cells = height_field.height_field_material_indices(theirs)
+        cells = height_field.material_indices(theirs)
         ensure("file: its materials", (cells[0] as int) == 0 && (cells[1] as int) == 255 && (cells[2] as int) == 1 && (cells[3] as int) == 2)
         quanta = height_field.height_field_quanta(theirs)
         quantum = 2.0 / 65535.0
@@ -725,7 +725,7 @@ test_file_roundtrip() {
     good = text_field("2 2\n1 1 1\n-1 1\n0\n0\n0.5\n0\n0\n7\n")
     ensure("file: the smallest good file loads", good != null && good.row_count == 2 && good.column_count == 2)
     if good != null { height_field.destroy_height_field(good) }
-    empty = height_field.height_field_def()
+    empty = height_field.def()
     ensure("file: a definition without heights is not dumped", files.dump_height_data(&empty, path) == false)
     free(heights_block)
     free(materials_block)

@@ -113,7 +113,7 @@ test_large_world_manifold() {
     ensure("large world manifold: four points at the origin", origin.point_count == 4)
     i = 0
     while i < origin.point_count {
-        small("large world manifold: a tenth deep", manifold.manifold_point(&origin, i).separation + 0.1, 0.01)
+        small("large world manifold: a tenth deep", manifold.point(&origin, i).separation + 0.1, 0.01)
         i = i + 1
     }
     base = math.vec3(10000000.0, 10000000.0, 10000000.0)
@@ -127,8 +127,8 @@ test_large_world_manifold() {
     small("large world manifold: the normal", math.length(math.sub(far.normal, origin.normal)), 0.0001)
     i = 0
     while i < far.point_count {
-        p = manifold.manifold_point(&far, i)
-        q = manifold.manifold_point(&origin, i)
+        p = manifold.point(&far, i)
+        q = manifold.point(&origin, i)
         small("large world manifold: the separation", p.separation - q.separation, 0.0001)
         small("large world manifold: the point", math.length(math.sub(p.point, q.point)), 0.0001)
         i = i + 1

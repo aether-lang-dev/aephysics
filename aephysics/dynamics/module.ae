@@ -1545,8 +1545,8 @@ get_max_world_count() -> int { return g_max_world_count }
 // world's def from it to grow nothing while stepping.
 track_capacity(w: *World) {
     c = &w.max_capacity
-    c.static_shape_count = math.max_int(c.static_shape_count, dynamic_tree.tree_get_proxy_count(broad_phase.broad_phase_tree(&w.broad_phase, BODY_STATIC)))
-    c.dynamic_shape_count = math.max_int(c.dynamic_shape_count, dynamic_tree.tree_get_proxy_count(broad_phase.broad_phase_tree(&w.broad_phase, BODY_DYNAMIC)))
+    c.static_shape_count = math.max_int(c.static_shape_count, dynamic_tree.tree_get_proxy_count(broad_phase.tree(&w.broad_phase, BODY_STATIC)))
+    c.dynamic_shape_count = math.max_int(c.dynamic_shape_count, dynamic_tree.tree_get_proxy_count(broad_phase.tree(&w.broad_phase, BODY_DYNAMIC)))
     static_bodies = solver_set_at(w, STATIC_SET).body_sims.count
     c.static_body_count = math.max_int(c.static_body_count, static_bodies)
     c.dynamic_body_count = math.max_int(c.dynamic_body_count, world_body_count(w) - static_bodies)
@@ -1712,7 +1712,7 @@ free_world_contents(w: *World) {
         c = contact_at(w, i)
         if c.contact_id != NULL_INDEX {
             free_manifolds(w, c)
-            if (c.flags & SIM_MESH_CONTACT) != 0 { mesh_contact.mesh_contact_cache_destroy(mesh_cache_of(c)) }
+            if (c.flags & SIM_MESH_CONTACT) != 0 { mesh_contact.cache_destroy(mesh_cache_of(c)) }
         }
         i = i + 1
     }
@@ -2147,7 +2147,7 @@ destroy_body(id: BodyId) {
         release_debug_shape(w, s)
         if s.sensor_index != NULL_INDEX { destroy_sensor(w, s) }
         if s.proxy_key != NULL_INDEX {
-            broad_phase.broad_phase_destroy_proxy(&w.broad_phase, s.proxy_key)
+            broad_phase.destroy_proxy(&w.broad_phase, s.proxy_key)
             s.proxy_key = NULL_INDEX
         }
         if s.materials != null {
@@ -2192,7 +2192,7 @@ compute_shape_margin(g: *Shape) -> float {
     if kind == KIND_SPHERE { margin = g.sphere.radius }
     else if kind == KIND_CAPSULE { margin = 0.5 * math.distance(g.capsule.center2, g.capsule.center1) + g.capsule.radius }
     else if kind == KIND_HULL {
-        points = hull.hull_points(g.hull)
+        points = hull.points(g.hull)
         max_extent_sqr = 0.0
         i = 0
         while i < g.hull.vertex_count {
@@ -2219,7 +2219,7 @@ update_shape_aabbs(w: *World, s: *WorldShape, t: Transform, proxy_kind: int) {
 
 create_shape_proxy(w: *World, s: *WorldShape, kind: int, t: Transform, force_pair_creation: bool) {
     update_shape_aabbs(w, s, t, kind)
-    s.proxy_key = broad_phase.broad_phase_create_proxy(&w.broad_phase, kind, shape_fat_aabb(w, s.id), s.filter.category_bits, s.id, force_pair_creation)
+    s.proxy_key = broad_phase.create_proxy(&w.broad_phase, kind, shape_fat_aabb(w, s.id), s.filter.category_bits, s.id, force_pair_creation)
 }
 
 // A shape on a body: its slot, its geometry, its materials, its proxy in
@@ -2687,7 +2687,7 @@ rec_string(r: *Recording, s: string) {
     }
     n = string.length(s)
     rec_int(r, n)
-    rec_raw(r, string.aether_string_raw_ptr(s), n)
+    rec_raw(r, (string.bytes(s) as ptr), n)
 }
 
 // A shape def's materials: their count, then each one, or -1 for none.
@@ -2857,7 +2857,7 @@ query_tag_key(id: long, name: string) -> long {
         i = i + 1
     }
     if name != null {
-        bytes = string.aether_string_raw_ptr(name)
+        bytes = (string.bytes(name) as ptr)
         n = string.length(name)
         i = 0
         while i < n {
@@ -2881,7 +2881,7 @@ intern_tag(r: *Recording, key: long, id: long, name: string) {
     if name != null && string.length(name) > 0 {
         tag.length = string.length(name)
         tag.name = basics.alloc(tag.length + 1)
-        memcpy(tag.name, string.aether_string_raw_ptr(name), tag.length)
+        memcpy(tag.name, (string.bytes(name) as ptr), tag.length)
     }
     basics.map_set(&r.tag_heads, key, index)
 }
@@ -3455,7 +3455,7 @@ destroy_shape(id: ShapeId, update_body_mass: bool) {
     release_debug_shape(w, s)
     if s.sensor_index != NULL_INDEX { destroy_sensor(w, s) }
     if s.proxy_key != NULL_INDEX {
-        broad_phase.broad_phase_destroy_proxy(&w.broad_phase, s.proxy_key)
+        broad_phase.destroy_proxy(&w.broad_phase, s.proxy_key)
         s.proxy_key = NULL_INDEX
     }
     if s.materials != null {
@@ -3521,10 +3521,10 @@ reset_shape_proxy(w: *World, s: *WorldShape, wake_bodies: bool, remake: bool) {
         kind = broad_phase.proxy_type(s.proxy_key)
         update_shape_aabbs(w, s, t, kind)
         if remake {
-            broad_phase.broad_phase_destroy_proxy(&w.broad_phase, s.proxy_key)
-            s.proxy_key = broad_phase.broad_phase_create_proxy(&w.broad_phase, kind, shape_fat_aabb(w, s.id), s.filter.category_bits, s.id, true)
+            broad_phase.destroy_proxy(&w.broad_phase, s.proxy_key)
+            s.proxy_key = broad_phase.create_proxy(&w.broad_phase, kind, shape_fat_aabb(w, s.id), s.filter.category_bits, s.id, true)
         } else {
-            broad_phase.broad_phase_move_proxy(&w.broad_phase, s.proxy_key, shape_fat_aabb(w, s.id))
+            broad_phase.move_proxy(&w.broad_phase, s.proxy_key, shape_fat_aabb(w, s.id))
         }
     } else {
         // A disabled body's shape: its bounds kept current for when it returns.
@@ -3721,10 +3721,10 @@ shape_apply_wind(id: ShapeId, wind: Vec3, drag: float, lift: float, max_speed: f
         }
     } else {
         h = s.geometry.hull
-        points = hull.hull_points(h)
-        edges = hull.hull_edges(h)
-        planes = hull.hull_planes(h)
-        faces = hull.hull_faces(h)
+        points = hull.points(h)
+        edges = hull.edges(h)
+        planes = hull.planes(h)
+        faces = hull.faces(h)
         m = math.make_matrix_from_quat(q)
         f = 0
         while f < h.face_count {
@@ -3988,7 +3988,7 @@ body_set_transform(id: BodyId, position: Vec3, rotation: Quat) {
         if math.aabbf_holds(old_fat, s.aabb) {
             set_shape_fat_aabb(w, s.id, old_fat)
         } else if s.proxy_key != NULL_INDEX {
-            broad_phase.broad_phase_move_proxy(&w.broad_phase, s.proxy_key, shape_fat_aabb(w, s.id))
+            broad_phase.move_proxy(&w.broad_phase, s.proxy_key, shape_fat_aabb(w, s.id))
         }
         shape_id = s.next_shape_id
     }
@@ -4811,7 +4811,7 @@ create_contact(w: *World, shape_a: *WorldShape, shape_b: *WorldShape, child_inde
     c.flags = flags
     if (flags & SIM_MESH_CONTACT) != 0 {
         mesh_caches = (&c.caches) as MeshContactCache[]
-        mesh_caches[0] = mesh_contact.mesh_contact_cache_create()
+        mesh_caches[0] = mesh_contact.cache_create()
     } else {
         convex_caches = (&c.caches) as TriangleCache[]
         convex_caches[0] = TriangleCache { triangle_index: NULL_INDEX, simplex_cache: distance.empty_cache(), sat_cache: manifold.empty_sat_cache() }
@@ -4919,7 +4919,7 @@ destroy_contact(w: *World, c: *Contact, wake_bodies: bool) {
     if c.edge_b.next_key != NULL_INDEX { set_contact_edge_prev(w, c.edge_b.next_key, c.edge_b.prev_key) }
     if body_b.head_contact_key == ((contact_id << 1) | 1) { body_b.head_contact_key = c.edge_b.next_key }
     body_b.contact_count = body_b.contact_count - 1
-    if (flags & SIM_MESH_CONTACT) != 0 { mesh_contact.mesh_contact_cache_destroy(mesh_cache_of(c)) }
+    if (flags & SIM_MESH_CONTACT) != 0 { mesh_contact.cache_destroy(mesh_cache_of(c)) }
     if c.island_id != NULL_INDEX { unlink_contact(w, c) }
     if c.color_index != NULL_INDEX {
         remove_contact_from_graph(w, body_id_a, body_id_b, c.color_index, c.local_index, (flags & SIM_MESH_CONTACT) != 0)
@@ -5055,7 +5055,7 @@ compute_convex_manifold(w: *World, c: *Contact, geometry_a: *Shape, xf_a: Transf
     offset = math.sub(xf_a.p, xf_b.p)
     i = 0
     while i < m.point_count {
-        source = manifold.manifold_point(&m, i)
+        source = manifold.point(&m, i)
         p = manifold_point_at(target, i)
         anchor_a = math.mul_mv(matrix_a, source.point)
         p.anchor_a = math.narrow3(anchor_a)
@@ -5259,14 +5259,14 @@ update_mesh_contact(w: *World, c: *Contact, mesh_geometry: *Shape, mesh_shape: *
                 triangle_index = manifold_point_at(m, j).triangle_index
                 material_index = 0
                 if mesh_geometry.kind == KIND_MESH {
-                    indices = mesh.mesh_material_indices(mesh_geometry.mesh.data)
+                    indices = mesh.material_indices(mesh_geometry.mesh.data)
                     material_index = indices[triangle_index]
                     if material_map != null {
                         map = material_map as int[]
                         material_index = map[math.clamp_int(material_index, 0, material_map_count - 1)]
                     }
                 } else {
-                    cell_materials = height_field.height_field_material_indices(mesh_geometry.height_field)
+                    cell_materials = height_field.material_indices(mesh_geometry.height_field)
                     material_index = cell_materials[triangle_index >> 1] as int
                 }
                 material_index = math.clamp_int(material_index, 0, mesh_shape.material_count - 1)
@@ -7333,7 +7333,7 @@ joint_set_collide_connected(id: JointId, should_collide: bool) {
         if body_a.shape_count < body_b.shape_count { shape_id = body_a.head_shape_id }
         while shape_id != NULL_INDEX {
             s = world_shape_at(w, shape_id)
-            if s.proxy_key != NULL_INDEX { broad_phase.broad_phase_mark_proxy_moved_serial(&w.broad_phase, s.proxy_key) }
+            if s.proxy_key != NULL_INDEX { broad_phase.mark_proxy_moved_serial(&w.broad_phase, s.proxy_key) }
             shape_id = s.next_shape_id
         }
     } else {
@@ -7757,7 +7757,7 @@ body_set_type(id: BodyId, kind: int) {
     while shape_id != NULL_INDEX {
         s = world_shape_at(w, shape_id)
         shape_id = s.next_shape_id
-        if s.proxy_key != NULL_INDEX { broad_phase.broad_phase_destroy_proxy(&w.broad_phase, s.proxy_key) }
+        if s.proxy_key != NULL_INDEX { broad_phase.destroy_proxy(&w.broad_phase, s.proxy_key) }
         create_shape_proxy(w, s, kind, t, true)
     }
     key = body.head_joint_key
@@ -7804,7 +7804,7 @@ body_disable(id: BodyId) {
         s = world_shape_at(w, shape_id)
         shape_id = s.next_shape_id
         if s.proxy_key != NULL_INDEX {
-            broad_phase.broad_phase_destroy_proxy(&w.broad_phase, s.proxy_key)
+            broad_phase.destroy_proxy(&w.broad_phase, s.proxy_key)
             s.proxy_key = NULL_INDEX
         }
     }
@@ -8179,9 +8179,9 @@ overlap_sensors(w: *World) {
         qc = SensorQueryContext { w: w, sensor: sensor, sensor_shape: sensor_shape, transform: get_body_sim(w, body).transform }
         bounds = sensor_shape.aabb
         mask = sensor_shape.filter.mask_bits
-        dynamic_tree.tree_query(broad_phase.broad_phase_tree(&w.broad_phase, BODY_STATIC), bounds, mask, false, sensor_query_visitor, (&qc) as ptr)
-        dynamic_tree.tree_query(broad_phase.broad_phase_tree(&w.broad_phase, BODY_KINEMATIC), bounds, mask, false, sensor_query_visitor, (&qc) as ptr)
-        dynamic_tree.tree_query(broad_phase.broad_phase_tree(&w.broad_phase, BODY_DYNAMIC), bounds, mask, false, sensor_query_visitor, (&qc) as ptr)
+        dynamic_tree.tree_query(broad_phase.tree(&w.broad_phase, BODY_STATIC), bounds, mask, false, sensor_query_visitor, (&qc) as ptr)
+        dynamic_tree.tree_query(broad_phase.tree(&w.broad_phase, BODY_KINEMATIC), bounds, mask, false, sensor_query_visitor, (&qc) as ptr)
+        dynamic_tree.tree_query(broad_phase.tree(&w.broad_phase, BODY_DYNAMIC), bounds, mask, false, sensor_query_visitor, (&qc) as ptr)
         overlaps = sensor.overlaps2.data as long[]
         broad_phase.sort_longs(overlaps, sensor.overlaps2.count)
         unique = 0
@@ -8295,14 +8295,14 @@ shape_user_material_id(s: *WorldShape, child_index: int, triangle_index: int) ->
     material_index = 0
     kind = s.geometry.kind
     if kind == KIND_MESH {
-        indices = mesh.mesh_material_indices(s.geometry.mesh.data)
+        indices = mesh.material_indices(s.geometry.mesh.data)
         material_index = indices[triangle_index]
     } else if kind == KIND_HEIGHT_FIELD {
         material_index = height_field.get_height_field_material(s.geometry.height_field, triangle_index)
     } else if kind == KIND_COMPOUND {
         child = compound.get_compound_child(s.geometry.compound, child_index)
         if child.kind == KIND_MESH {
-            indices = mesh.mesh_material_indices(child.mesh.data)
+            indices = mesh.material_indices(child.mesh.data)
             material_index = compound.child_material(child, indices[triangle_index])
         } else {
             material_index = child.material_index0

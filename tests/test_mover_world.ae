@@ -170,7 +170,7 @@ test_world_mesh_materials() {
     sdef.material_count = 2
     dynamics.create_mesh_shape(body_id, &sdef, m, math.vec3_one())
     physics_world.step(world_id, 1.0 / 60.0, 1)
-    baked = mesh.mesh_material_indices(m)
+    baked = mesh.material_indices(m)
     filter = shape.default_query_filter()
     // A mover hanging just above the first triangle, its radius reaching 0.05 into the surface.
     kept = calloc(16, sizeof(PlaneResult))

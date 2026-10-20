@@ -594,7 +594,7 @@ name_cache_add(c: *NameCache, name: string) -> int {
     if name == null { return NULL_NAME }
     length = string.length(name)
     if length == 0 { return NULL_NAME }
-    return name_cache_add_bytes(c, string.aether_string_raw_ptr(name), length)
+    return name_cache_add_bytes(c, (string.bytes(name) as ptr), length)
 }
 
 // The id of the `length` bytes at `text`, interned when they are new.
