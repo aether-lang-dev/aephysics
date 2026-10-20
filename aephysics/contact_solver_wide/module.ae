@@ -201,7 +201,6 @@ struct WideConstraint {
     inv_inertia_b: SymMatrix3W
     normal: Vec3W
     tangent1: Vec3W
-    tangent2: Vec3W
     center_a: Vec3W                // the friction centres
     center_b: Vec3W
     twist_mass: f32x8
@@ -535,7 +534,6 @@ prepare_wide_slot(ctx: *StepContext, color: *GraphColor, slot: int, end: int) {
     tangent2 = cross_w(tangent1, normal)
     c.normal = normal
     c.tangent1 = tangent1
-    c.tangent2 = tangent2
     tangent_velocity = gather_vec3f(k0.tangent_velocity, k1.tangent_velocity, k2.tangent_velocity, k3.tangent_velocity, k4.tangent_velocity, k5.tangent_velocity, k6.tangent_velocity, k7.tangent_velocity)
     c.tangent_velocity1 = dot_w(tangent_velocity, tangent1)
     c.tangent_velocity2 = dot_w(tangent_velocity, tangent2)
@@ -698,7 +696,8 @@ warm_start_wide_contacts(ctx: *StepContext, constraints: ptr, count: int) {
             j = j + 1
         }
         normal = c.normal
-        friction = mul_add_sv_w(mul_sv_w(c.friction_impulse.x, c.tangent1), c.friction_impulse.y, c.tangent2)
+        tangent2 = cross_w(c.tangent1, normal)
+        friction = mul_add_sv_w(mul_sv_w(c.friction_impulse.x, c.tangent1), c.friction_impulse.y, tangent2)
         linear = mul_add_sv_w(friction, total_normal_impulse, normal)
         twist = mul_sv_w(c.twist_impulse, normal)
         angular_a = add_v_w(add_v_w(cross_w(moment_a, normal), cross_w(c.center_a, friction)), twist)
@@ -814,7 +813,8 @@ solve_wide_contacts(ctx: *StepContext, constraints: ptr, count: int, use_bias: b
             vr_a = add_v_w(b_a.v, cross_w(b_a.w, c_a))
             vr_b = add_v_w(b_b.v, cross_w(b_b.w, c_b))
             vr = sub_v_w(vr_b, vr_a)
-            vt = Vec2W { x: sub_w(dot_w(vr, c.tangent1), c.tangent_velocity1), y: sub_w(dot_w(vr, c.tangent2), c.tangent_velocity2) }
+            tangent2 = cross_w(c.tangent1, c.normal)
+            vt = Vec2W { x: sub_w(dot_w(vr, c.tangent1), c.tangent_velocity1), y: sub_w(dot_w(vr, tangent2), c.tangent_velocity2) }
             tm = mul_mv2_w(c.tangent_mass, vt)
             new_friction = Vec2W { x: sub_w(c.friction_impulse.x, tm.x), y: sub_w(c.friction_impulse.y, tm.y) }
             max_friction = mul_w(c.friction, total_normal_impulse)
@@ -825,7 +825,7 @@ solve_wide_contacts(ctx: *StepContext, constraints: ptr, count: int, use_bias: b
             new_friction = Vec2W { x: mul_w(scale, new_friction.x), y: mul_w(scale, new_friction.y) }
             delta_friction = Vec2W { x: sub_w(new_friction.x, c.friction_impulse.x), y: sub_w(new_friction.y, c.friction_impulse.y) }
             c.friction_impulse = new_friction
-            p = add_v_w(mul_sv_w(delta_friction.x, c.tangent1), mul_sv_w(delta_friction.y, c.tangent2))
+            p = add_v_w(mul_sv_w(delta_friction.x, c.tangent1), mul_sv_w(delta_friction.y, tangent2))
             b_a.w = mul_sub_mv_w(b_a.w, c.inv_inertia_a, cross_w(c_a, p))
             b_a.v = mul_sub_sv_w(b_a.v, c.inv_mass_a, p)
             b_b.w = mul_add_mv_w(b_b.w, c.inv_inertia_b, cross_w(c_b, p))
@@ -909,10 +909,15 @@ store_wide_range(ctx: *StepContext, color: *GraphColor, start: int, end: int, hi
     w = ctx.world
     has_hits = false
     neg_threshold = 0.0 - w.hit_event_threshold
+    // The second tangent is not stored (Box3D's "todo test computing the
+    // tangents on the fly"): cross(tangent1, normal) again, once a slot,
+    // the bits prepare computed it with.
+    tangent2 = Vec3W { x: zero_w(), y: zero_w(), z: zero_w() }
     i = start
     while i < end {
         c = wide_constraint_at(color.wide_constraints, i / WIDTH)
         l = i % WIDTH
+        if l == 0 || i == start { tangent2 = cross_w(c.tangent1, c.normal) }
         // The next slot's manifolds, which nothing has touched since the
         // collide pass, fetched while this slot's are written.
         if l == 0 && i + WIDTH < end {
@@ -929,9 +934,9 @@ store_wide_range(ctx: *StepContext, color: *GraphColor, start: int, end: int, hi
         m = ptr_lane(&c.manifolds, l) as *Manifold
         f1 = lane(c.friction_impulse.x, l)
         f2 = lane(c.friction_impulse.y, l)
-        m.friction_impulse = math.narrow3(math.vec3(f1 * lane(c.tangent1.x, l) + f2 * lane(c.tangent2.x, l),
-                                       f1 * lane(c.tangent1.y, l) + f2 * lane(c.tangent2.y, l),
-                                       f1 * lane(c.tangent1.z, l) + f2 * lane(c.tangent2.z, l)))
+        m.friction_impulse = math.narrow3(math.vec3(f1 * lane(c.tangent1.x, l) + f2 * lane(tangent2.x, l),
+                                       f1 * lane(c.tangent1.y, l) + f2 * lane(tangent2.y, l),
+                                       f1 * lane(c.tangent1.z, l) + f2 * lane(tangent2.z, l)))
         m.twist_impulse = lane(c.twist_impulse, l)
         m.rolling_impulse = Vec3f { x: lanes.lane8(c.rolling_impulse.x, l as long), y: lanes.lane8(c.rolling_impulse.y, l as long), z: lanes.lane8(c.rolling_impulse.z, l as long) }
         point_count = m.point_count
