@@ -25,7 +25,6 @@ exports (
     sphere_proxy, capsule_proxy, segment_proxy, length_scratch
 )
 
-extern sqrt(x: float) -> float
 
 // Closer than this is an overlap (a tenth of the linear slop).
 const OVERLAP_SLOP = 0.0005
@@ -117,7 +116,7 @@ ray_cast_sphere(s: Sphere, origin: Vec3, translation: Vec3, max_fraction: float)
     c = math.mul_add(shifted, t, d)
     cc = math.dot(c, c)
     if cc > rr { return output }
-    h = sqrt(rr - cc)
+    h = math.sqrt_float(rr - cc)
     fraction = t - h
     if fraction < 0.0 || max_fraction * length < fraction {
         // The intersection is off the segment; an origin inside still counts.
@@ -149,7 +148,7 @@ ray_cast_hollow_sphere(s: Sphere, origin: Vec3, translation: Vec3, max_fraction:
     r = s.radius
     rr = r * r
     if cc > rr { return output }
-    h = sqrt(rr - cc)
+    h = math.sqrt_float(rr - cc)
     fraction = t - h
     if fraction < 0.0 { fraction = t + h }
     if fraction < 0.0 { return output }

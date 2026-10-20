@@ -719,7 +719,7 @@ segment_proxy_distance(input: *DistanceInput, cache: *SimplexCache) -> DistanceO
     gap_sq = math.dot(gap, gap)
     // Touching cores: no normal, no radii, as GJK's overlap.
     if gap_sq < 1000.0 * FLOAT_MIN { return output }
-    length = sqrt(gap_sq)
+    length = math.sqrt_float(gap_sq)
     normal = math.mul_sv(1.0 / length, gap)
     output.distance = length
     output.normal = normal
@@ -916,7 +916,7 @@ triangle_point_distance(input: *DistanceInput, cache: *SimplexCache, out: *Dista
     }
     cache.metric = 0.0
     if count == 2 { cache.metric = math.distance(feature_point(near.f0, t0, t1, t2), feature_point(near.f1, t0, t1, t2)) }
-    if count == 3 { cache.metric = sqrt(area_sq) / 2.0 }
+    if count == 3 { cache.metric = math.sqrt_float(area_sq) / 2.0 }
     if triangle_is_a { write_output(out, input, near.point, p, true) } else { write_output(out, input, p, near.point, true) }
     return true
 }
@@ -971,7 +971,7 @@ write_output(out: *DistanceOutput, input: *DistanceInput, point_a: Vec3, point_b
     gap = math.sub(point_b, point_a)
     gap_sq = math.dot(gap, gap)
     if separate == false || gap_sq < 1000.0 * FLOAT_MIN { return }
-    length = sqrt(gap_sq)
+    length = math.sqrt_float(gap_sq)
     normal = math.mul_sv(1.0 / length, gap)
     out.distance = length
     out.normal = normal

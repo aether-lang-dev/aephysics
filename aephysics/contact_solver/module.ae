@@ -32,7 +32,6 @@ exports (
     color_constraint_counts, count_color_constraints
 )
 
-extern sqrt(x: float) -> float
 
 const MIN_FRICTION_WEIGHT = 0.0000000001
 const NULL_INDEX = 0 - 1
@@ -512,7 +511,7 @@ solve_contacts(ctx: *StepContext, constraints: ptr, count: int, use_bias: bool) 
                     max_rolling = rolling_resistance * total_normal_impulse
                     mag_sqr = math.dot(constraint.rolling_impulse, constraint.rolling_impulse)
                     if mag_sqr > max_rolling * max_rolling + math.EPSILON {
-                        constraint.rolling_impulse = math.mul_sv(max_rolling / sqrt(mag_sqr), constraint.rolling_impulse)
+                        constraint.rolling_impulse = math.mul_sv(max_rolling / math.sqrt_float(mag_sqr), constraint.rolling_impulse)
                     }
                     delta_rolling = math.sub(constraint.rolling_impulse, old_rolling)
                     w_a = math.sub(w_a, math.mul_mv(i_a, delta_rolling))
@@ -532,7 +531,7 @@ solve_contacts(ctx: *StepContext, constraints: ptr, count: int, use_bias: bool) 
                 max_friction = friction * total_normal_impulse
                 length_squared = math.dot2(new_friction, new_friction)
                 if length_squared > max_friction * max_friction {
-                    scale = max_friction / sqrt(length_squared)
+                    scale = max_friction / math.sqrt_float(length_squared)
                     new_friction = math.mul_sv2(scale, new_friction)
                 }
                 delta_friction = math.sub2(new_friction, constraint.friction_impulse)

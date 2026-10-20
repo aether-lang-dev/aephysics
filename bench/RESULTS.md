@@ -1336,8 +1336,11 @@ The convex pile (5,120 hulls), ms per step, the best of three alternated
 pairs: collide 7.65 to 7.07, step 11.32 to 10.74. Box3D in the same
 period: collide 5.81-5.88, step 8.94-9.07, so the collide pass went from
 1.31x to 1.20x. What is left in the SAT is the scalar work around the
-lanes (the candidate edges' inscribed-sphere tests, a face's bias) and the
-slice indexing the arrays go through.
+lanes (the candidate edges' inscribed-sphere tests, a face's bias). The
+slice indexing the arrays go through costs nothing: GCC folds every bounds
+test once the views inline, and the profile samples on aether_slice.h's
+line are skid from the element loads, which a raw pointer pays too
+(aether#3020, measured by the Aether session).
 
 The wide contact stages gather and scatter their bodies through 8x8
 register transposes (Box3D's b3GatherBodies, b3ScatterBodies). The second
@@ -1351,6 +1354,28 @@ a default build (no -mavx2), large pyramid, best of four: width 4 runs
 8.18 ms a step and width 8 runs 6.77 (solve 1.57 to 1.15, relax 1.79 to
 1.23), the speed of the -mavx2 build. test_determinism steps every scene
 at both widths in one process, bit for bit.
+
+### std.math's square root (2026-10-20, #184)
+
+At -O0 every `sqrt` is a library call, and MinGW's library `sqrt` is the
+x87 one at the 64-bit precision a MinGW main thread runs with. It rounds
+twice: 253 of 1,000,000 random inputs come out one ulp off the
+instruction, so the -O0 trace left the golden one at step 10 of the wave
+pile. The engine's double square root is now std.math's, which runs in
+Aether's optimized runtime as the instruction. It is a call that GCC
+cannot inline into the solvers, where libm's became one `sqrtsd`. The
+default build, ms a step, three alternated runs each:
+
+| scene | libm `sqrt`, inlined | std.math `sqrt`, called |
+|---|---|---|
+| large pyramid | 6.00 / 6.03 / 6.34 | 6.16 / 6.00 / 6.50 |
+| many pyramids | 13.55 / 13.16 / 14.93 | 14.35 / 12.67 / 14.44 |
+| joint grid | 11.38 / 12.26 / 12.05 | 11.33 / 11.86 / 11.95 |
+
+Within the runs' own spread (the machine was in use), and the best of
+each is the same or better with the call. The bits are the same. libm's
+`sqrtf` stays: its 64-bit x87 result rounds to a float once, and no
+float of 304 million differs from `sqrtss`.
 
 ## Build flags (inlining)
 

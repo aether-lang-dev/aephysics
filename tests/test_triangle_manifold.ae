@@ -21,7 +21,6 @@ extern exit(code: int)
 extern free(p: ptr)
 extern sin(x: float) -> float
 extern cos(x: float) -> float
-extern sqrt(x: float) -> float
 
 var failures = 0
 var checks = 0
@@ -369,7 +368,7 @@ test_sphere_and_closest() {
     triangle_manifold.collide_triangle_and_sphere(&m, 8, v1, v2, v3, s)
     ensure("sphere edge: one point", m.point_count == 1)
     ensure("sphere edge: feature", m.feature == triangle_manifold.FEATURE_EDGE3)
-    if m.point_count == 1 { small("sphere edge: separation", manifold.point(&m, 0).separation - (sqrt(0.045) - 0.25), 0.00001) }
+    if m.point_count == 1 { small("sphere edge: separation", manifold.point(&m, 0).separation - (math.sqrt_float(0.045) - 0.25), 0.00001) }
     // Below the plane: culled. Far above: nothing.
     s = manifold.sphere(math.vec3(0.0, 0.0 - 0.1, 0.0), 0.25)
     m = manifold.local_manifold(points)

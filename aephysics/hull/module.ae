@@ -45,7 +45,6 @@ extern memcpy(dst: ptr, src: ptr, size: int) -> ptr
 extern memmove(dst: ptr, src: ptr, size: int) -> ptr
 extern memset(block: ptr, value: int, size: int) -> ptr
 extern memcmp(a: ptr, b: ptr, size: int) -> int
-extern sqrt(x: float) -> float
 
 const NULL_INDEX = 0 - 1
 const MAX_HULL_VERTICES = 128
@@ -1798,7 +1797,7 @@ create_rock(radius: float) -> *HullData {
     count = 10
     block = basics.alloc(count * sizeof(Vec3))
     points = block as Vec3[]
-    phi = (1.0 + sqrt(5.0)) / 2.0
+    phi = (1.0 + math.sqrt_float(5.0)) / 2.0
     theta = 2.0 * math.PI / phi
     cosine = 1.0
     sine = 0.0
@@ -1806,7 +1805,7 @@ create_rock(radius: float) -> *HullData {
     i = 0
     while i < count {
         z = 1.0 - (2.0 * (i as float) + 1.0) / (count as float)
-        radius_xy = sqrt(1.0 - z * z)
+        radius_xy = math.sqrt_float(1.0 - z * z)
         points[i] = math.vec3(radius * radius_xy * cosine, radius * radius_xy * sine, radius * z)
         c0 = cosine
         s0 = sine

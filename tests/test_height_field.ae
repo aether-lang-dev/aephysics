@@ -23,7 +23,6 @@ extern calloc(count: int, size: int) -> ptr
 extern exit(code: int)
 extern free(p: ptr)
 extern memcmp(a: ptr, b: ptr, size: int) -> int
-extern sqrt(x: float) -> float
 
 var failures = 0
 var checks = 0

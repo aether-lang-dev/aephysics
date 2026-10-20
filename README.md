@@ -241,12 +241,12 @@ every body's checksum after every step with its bits, and
 `scripts/golden_trace.sh check` (run by `scripts/test.sh`) diffs that
 against `tests/golden/determinism_trace.txt` on every step of the five
 scenes. CI checks it on Linux, on Linux with `-mavx2 -mfma`, on macOS
-arm64 and on Windows x86-64 (MinGW), there also unoptimized (#184): at
-`-O0` every `sqrt` is the C library's, and the library has to round it
-exactly, as the instruction does. The engine's own maths (the
-reference's cos, sin and atan2 approximations, `sqrt`, `floor` and
-`remainder` as the only libm calls) and `-ffp-contract=off` are what make
-that hold: without the flag GCC and clang fuse multiply-adds wherever the
+arm64 and on Windows x86-64 (MinGW), there also unoptimized (#184). The
+engine's own maths (the reference's cos, sin and atan2 approximations;
+`sqrtf`, `floor` and `remainder` as the only libm calls; std.math's
+`sqrt`, exact at every `-O` level, where MinGW's library `sqrt` rounds
+twice at `-O0`) and `-ffp-contract=off` are what make that hold: without
+the flag GCC and clang fuse multiply-adds wherever the
 target has FMA, and arm64 parted from Linux on the first step (#125). A
 program that builds aephysics into itself must pass `-ffp-contract=off`
 in its own `[build] cflags`, as `ae` reads only the root manifest's.

@@ -33,7 +33,6 @@ import aephysics.parallel
 extern calloc(count: int, size: int) -> ptr
 extern exit(code: int)
 extern free(p: ptr)
-extern sqrt(x: float) -> float
 
 var failures = 0
 var checks = 0
@@ -118,8 +117,8 @@ random_unit_vector() -> Vec3 {
     u1 = random_float_range(0.0, 1.0)
     u2 = random_float_range(0.0, 2.0 * math.PI)
     u3 = random_float_range(0.0, 2.0 * math.PI)
-    sqrt1_minus_u1 = sqrt(1.0 - u1)
-    sqrt_u1 = sqrt(u1)
+    sqrt1_minus_u1 = math.sqrt_float(1.0 - u1)
+    sqrt_u1 = math.sqrt_float(u1)
     cs2 = math.compute_cos_sin(u2)
     cs3 = math.compute_cos_sin(u3)
     return math.vec3(sqrt1_minus_u1 * cs2.sine, sqrt1_minus_u1 * cs2.cosine, sqrt_u1 * cs3.sine)
@@ -129,8 +128,8 @@ random_quat() -> Quat {
     u1 = random_float_range(0.0, 1.0)
     u2 = random_float_range(0.0, 2.0 * math.PI)
     u3 = random_float_range(0.0, 2.0 * math.PI)
-    sqrt1_minus_u1 = sqrt(1.0 - u1)
-    sqrt_u1 = sqrt(u1)
+    sqrt1_minus_u1 = math.sqrt_float(1.0 - u1)
+    sqrt_u1 = math.sqrt_float(u1)
     cs2 = math.compute_cos_sin(u2)
     cs3 = math.compute_cos_sin(u3)
     return math.quat_vs(math.vec3(sqrt1_minus_u1 * cs2.sine, sqrt1_minus_u1 * cs2.cosine, sqrt_u1 * cs3.sine), sqrt_u1 * cs3.cosine)

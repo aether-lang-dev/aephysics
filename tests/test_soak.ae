@@ -26,7 +26,6 @@ import aephysics.dynamics
 import aephysics.physics_world
 
 extern exit(code: int)
-extern sqrt(x: float) -> float
 
 var failures = 0
 var checks = 0
@@ -255,7 +254,7 @@ soak(seed: int) {
     start = energy_of(bodies)
     // The fastest any body may go: thrown at up to 2 m/s per axis from the
     // top layer, it falls the whole height; spin adds its rim's speed.
-    speed_cap = 1.25 * sqrt(12.0 + 2.0 * GRAVITY * (top + 1.0)) + 6.0
+    speed_cap = 1.25 * math.sqrt_float(12.0 + 2.0 * GRAVITY * (top + 1.0)) + 6.0
     peak = start
     fastest = 0.0
     lowest = 0.0

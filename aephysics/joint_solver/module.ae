@@ -87,7 +87,6 @@ exports (
     draw_joint
 )
 
-extern sqrt(x: float) -> float
 
 const NULL_INDEX = 0 - 1
 
@@ -875,7 +874,7 @@ solve_parallel_joint(base: *JointSim, ctx: *StepContext) {
                        y: 0.0 - j.softness.mass_scale * sol.y - j.softness.impulse_scale * old_impulse.y }
         j.perp_impulse = math.add2(old_impulse, delta)
         if math.dot2(j.perp_impulse, j.perp_impulse) > max_impulse * max_impulse {
-            j.perp_impulse = math.mul_sv2(max_impulse / sqrt(math.dot2(j.perp_impulse, j.perp_impulse)), j.perp_impulse)
+            j.perp_impulse = math.mul_sv2(max_impulse / math.sqrt_float(math.dot2(j.perp_impulse, j.perp_impulse)), j.perp_impulse)
         }
         delta = math.sub2(j.perp_impulse, old_impulse)
         angular = math.blend2(delta.x, perp_x, delta.y, perp_y)
@@ -1660,7 +1659,7 @@ prepare_spherical_joint(base: *JointSim, ctx: *StepContext) {
     }
     if j.enable_twist_limit {
         rel_q = math.inv_mul_quat(j.frame_a.q, j.frame_b.q)
-        tan_half = sqrt((rel_q.x * rel_q.x + rel_q.y * rel_q.y) / (rel_q.z * rel_q.z + rel_q.w * rel_q.w))
+        tan_half = math.sqrt_float((rel_q.x * rel_q.x + rel_q.y * rel_q.y) / (rel_q.z * rel_q.z + rel_q.w * rel_q.w))
         swing_axis = math.normalize(math.cross(cone_axis, twist_axis))
         perp = math.cross(swing_axis, cone_axis)
         jacobian = math.mul_add(cone_axis, tan_half, perp)

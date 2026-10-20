@@ -21,7 +21,6 @@ exports (
     ray_cast_capsule, shape_cast_capsule, collide_mover_and_capsule
 )
 
-extern sqrt(x: float) -> float
 
 // The capsule's mass: a cylinder and a sphere (the two caps) about the
 // midpoint, the caps carried out to the ends by Steiner, then turned
@@ -93,7 +92,7 @@ ray_cast_capsule(c: Capsule, origin: Vec3, translation: Vec3, max_fraction: floa
     }
     // The ray's origin from the first centre, projected onto the axis.
     s = math.sub(origin, c1)
-    length = sqrt(length_squared)
+    length = math.sqrt_float(length_squared)
     axis = math.mul_sv(1.0 / length, d)
     u = math.dot(s, axis)
     c_axis = math.mul_sv(u, axis)
@@ -137,7 +136,7 @@ ray_cast_capsule(c: Capsule, origin: Vec3, translation: Vec3, max_fraction: floa
         // Casting away from the axis, or never closing to the radius.
         if beta >= 0.0 || disc < 0.0 { return output }
         // The near root in the form that avoids the cancellation as the ray nears parallel.
-        tr = gamma / (0.0 - beta + sqrt(disc))
+        tr = gamma / (0.0 - beta + math.sqrt_float(disc))
     } else {
         // The closest points of the infinite ray and the infinite axis.
         inv_det = 1.0 / det
@@ -151,7 +150,7 @@ ray_cast_capsule(c: Capsule, origin: Vec3, translation: Vec3, max_fraction: floa
         g2 = math.length_squared(g)
         if g2 > r * r { return output }
         // The ray into the cylinder, relative to the closest point (like the sphere).
-        h = sqrt((r * r - g2) * inv_det)
+        h = math.sqrt_float((r * r - g2) * inv_det)
         tr = t2 - h
     }
     if tr < 0.0 || max_fraction * ray_length < tr { return output }

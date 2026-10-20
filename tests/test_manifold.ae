@@ -21,7 +21,6 @@ extern exit(code: int)
 extern free(p: ptr)
 extern sin(x: float) -> float
 extern cos(x: float) -> float
-extern sqrt(x: float) -> float
 
 var failures = 0
 var checks = 0
