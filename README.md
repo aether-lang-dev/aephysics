@@ -239,9 +239,11 @@ The step is deterministic across platforms and worker counts, not
 only across runs: `AEPHYSICS_TRACE=1 target/test_determinism` prints
 every body's checksum after every step with its bits, and
 `scripts/golden_trace.sh check` (run by `scripts/test.sh`) diffs that
-against `tests/golden/determinism_trace.txt` on every step of the four
-scenes. CI checks it on Linux, on Linux with `-mavx2 -mfma` and on macOS
-arm64; Windows (MinGW) gives the same bits. The engine's own maths (the
+against `tests/golden/determinism_trace.txt` on every step of the five
+scenes. CI checks it on Linux, on Linux with `-mavx2 -mfma`, on macOS
+arm64 and on Windows x86-64 (MinGW), there also unoptimized (#184): at
+`-O0` every `sqrt` is the C library's, and the library has to round it
+exactly, as the instruction does. The engine's own maths (the
 reference's cos, sin and atan2 approximations, `sqrt`, `floor` and
 `remainder` as the only libm calls) and `-ffp-contract=off` are what make
 that hold: without the flag GCC and clang fuse multiply-adds wherever the
