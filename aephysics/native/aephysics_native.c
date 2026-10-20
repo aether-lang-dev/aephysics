@@ -222,19 +222,6 @@ int aephysics_processor_count(void)
 #endif
 }
 
-// Whether this CPU runs AVX2 (the reference's b3IsAVX2Available): the
-// instruction set and the operating system's saving of its registers, as
-// GCC's and Clang's CPU check reads them. Never on a CPU that is not x86.
-int aephysics_has_avx2(void)
-{
-#if defined(__x86_64__) || defined(__i386__)
-    __builtin_cpu_init();
-    return __builtin_cpu_supports("avx2") ? 1 : 0;
-#else
-    return 0;
-#endif
-}
-
 // A counting semaphore (the reference's b3Semaphore): the scheduler's
 // threads wait on it for work and are signalled one per task, or once
 // each to shut down. Win32's, Apple's dispatch one, POSIX's elsewhere.

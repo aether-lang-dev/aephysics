@@ -486,7 +486,7 @@ corner_sign(i: int) -> Vec3 {
 check_transformed_box(name: string, h: Vec3, xf: Transform) {
     box = hull.make_transformed_box_hull(h.x, h.y, h.z, xf)
     tol = 0.00001
-    points = hull.hull_points(box)
+    points = hull.points(box)
     i = 0
     while i < 8 {
         expected = math.transform_point(xf, math.mul(corner_sign(i), h))
@@ -495,7 +495,7 @@ check_transformed_box(name: string, h: Vec3, xf: Transform) {
         small("${name}: corner ${i} z", points[i].z - expected.z, tol)
         i = i + 1
     }
-    planes = hull.hull_planes(box)
+    planes = hull.planes(box)
     i = 0
     while i < 6 {
         local_normal = math.vec3_axis_z()
@@ -549,10 +549,10 @@ test_transformed_box() {
     ensure("ray: from inside hits at the origin", inside.hit && inside.fraction == 0.0)
     // The support vertex along +x+y+z is the (1,1,1) corner; the shadow along x is 4.
     sv = hull.find_hull_support_vertex(box, math.vec3(1.0, 1.0, 1.0))
-    points = hull.hull_points(box)
+    points = hull.points(box)
     small("support vertex", points[sv].x + points[sv].y + points[sv].z - 3.0, 0.00001)
     sf = hull.find_hull_support_face(box, math.vec3(0.0, 1.0, 0.0))
-    planes = hull.hull_planes(box)
+    planes = hull.planes(box)
     small("support face", planes[sf].normal.y - 1.0, 0.00001)
     small("projected area", hull.compute_hull_projected_area(box, math.vec3(1.0, 0.0, 0.0)) - 4.0, 0.00001)
     extent = hull.compute_hull_extent(box, math.vec3_zero())
@@ -739,7 +739,7 @@ test_overlap_planes() {
         p[1] = math.add(p[0], math.vec3(0.5 * cos(t), 0.4 * sin(2.0 * t), 0.3))
         proxy = distance.shape_proxy(points_block, 1 + k % 2, 0.05 + 0.2 * math.abs_float(cos(3.1 * t)))
         quick = hull.overlap_hull(box, at, proxy)
-        input = DistanceInput { proxy_a: hull.hull_proxy(box), proxy_b: proxy, transform: math.inv_mul_transforms(at, math.transform_identity()), use_radii: true }
+        input = DistanceInput { proxy_a: hull.proxy(box), proxy_b: proxy, transform: math.inv_mul_transforms(at, math.transform_identity()), use_radii: true }
         cache = distance.empty_cache()
         exact = distance.shape_distance(&input, &cache, null, 0).distance < 0.1 * math.LINEAR_SLOP
         if quick != exact { disagree = disagree + 1 }

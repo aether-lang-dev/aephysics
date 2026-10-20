@@ -49,7 +49,7 @@ read_aligned(path: string) -> (ptr, int) {
         return null, 0
     }
     block = basics.alloc(length)
-    memcpy(block, string.aether_string_raw_ptr(data), length)
+    memcpy(block, (string.bytes(data) as ptr), length)
     string.free(data)
     return block, length
 }
@@ -170,7 +170,7 @@ load_height_field(path: string) -> *HeightFieldData {
     if string.length(err) > 0 { return null }
     // The reader takes the text over and frees it when it goes.
     r = Reader { text: text, length: length, at: 0, ok: true }
-    def = height_field.height_field_def()
+    def = height_field.def()
     def.count_x = read_int(&r)
     def.count_z = read_int(&r)
     def.scale.x = read_float(&r)

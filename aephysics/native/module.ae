@@ -8,7 +8,7 @@
 @source("aephysics_native.c")
 @c_include("aephysics_inline.h")
 exports (
-    MAX_WORKERS, worker_index, set_worker_index, claim_slots, release_slots, enter_traversal, leave_traversal, yield_thread, pause, processor_count, has_avx2, scratch,
+    MAX_WORKERS, worker_index, set_worker_index, claim_slots, release_slots, enter_traversal, leave_traversal, yield_thread, pause, processor_count, scratch,
     atomic_load, atomic_store, atomic_add, atomic_or, atomic_cas,
     semaphore_bytes, semaphore_init, semaphore_destroy, semaphore_wait, semaphore_signal,
     name_text, prefetch, load_word, load_u8, load_u16, f32_bits, f64_bits,
@@ -27,7 +27,6 @@ extern aephysics_enter_traversal(depths: ptr) -> int
 extern aephysics_leave_traversal(depths: ptr)
 extern aephysics_yield()
 extern aephysics_processor_count() -> int
-extern aephysics_has_avx2() -> int
 extern aephysics_pause() @c_import
 extern aephysics_atomic_load(p: ptr) -> int @c_import
 extern aephysics_atomic_store(p: ptr, value: int) @c_import
@@ -95,9 +94,6 @@ leave_traversal(depths: ptr) { aephysics_leave_traversal(depths) }
 yield_thread() { aephysics_yield() }
 pause() { aephysics_pause() }
 processor_count() -> int { return aephysics_processor_count() }
-
-// Whether this CPU runs AVX2 instructions.
-has_avx2() -> bool { return aephysics_has_avx2() != 0 }
 
 // Atomics on an int where it sits (`(&s.field) as ptr`), sequentially
 // consistent: the solver's block claims and completion counts, its sync

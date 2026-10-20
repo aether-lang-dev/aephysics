@@ -33,6 +33,10 @@ import aephysics.dynamics
 import aephysics.parallel
 import aephysics.contact_solver
 import aephysics.contact_solver_wide
+// #156: the wide stages a second time, compiled for AVX2, chosen per world by
+// its simd_width (basics.set_simd_width, b3SetSIMDWidth): one binary runs
+// eight lanes to a register where the CPU has AVX2 and anywhere else.
+@target("avx2") import aephysics.contact_solver_wide as contact_solver_wide8
 import aephysics.joint_solver
 
 exports (
@@ -149,8 +153,12 @@ integrate_velocities_range(ctx: *StepContext, start: int, end: int) {
         state = state_at(ctx.states, i)
         v = math.widen3(state.v)
         wv = math.widen3(state.w)
-        linear_damping = 1.0 / (1.0 + h * sim.linear_damping)
-        angular_damping = 1.0 / (1.0 + h * sim.angular_damping)
+        // 1 / (1 + h c) is 1 exactly when c is 0 (or -0), as most bodies
+        // have it: the divide is skipped then, with the same bits.
+        linear_damping = 1.0
+        if sim.linear_damping != 0.0 { linear_damping = 1.0 / (1.0 + h * sim.linear_damping) }
+        angular_damping = 1.0
+        if sim.angular_damping != 0.0 { angular_damping = 1.0 / (1.0 + h * sim.angular_damping) }
         gravity_scale = 0.0
         if sim.inv_mass > 0.0 { gravity_scale = sim.gravity_scale }
         linear_delta = math.blend2(h * sim.inv_mass, math.widen3(sim.force), h * gravity_scale, gravity)
@@ -159,15 +167,42 @@ integrate_velocities_range(ctx: *StepContext, start: int, end: int) {
         wv = math.mul_add(angular_delta, angular_damping, wv)
         // Gyroscopic: I (w2 - w1) + h w2 x (I w2) = 0, solved for w2 in the body's frame.
         q = math.mul_quat(math.widen_quat(state.dq), sim.transform.q)
-        inertia = math.invert_matrix(math.widen_mat3(sim.inv_inertia_local))
         omega1 = math.inv_rotate_vector(q, wv)
         omega2 = omega1
-        i00 = inertia.cx.x
-        i01 = inertia.cy.x
-        i02 = inertia.cz.x
-        i11 = inertia.cy.y
-        i12 = inertia.cz.y
-        i22 = inertia.cz.z
+        // The local inertia does not change over a step: inverted on the
+        // first sub-step and kept for the rest, the same doubles (Box3D
+        // inverts it every sub-step, its own "todo wasteful computation").
+        i00 = 0.0
+        i01 = 0.0
+        i02 = 0.0
+        i11 = 0.0
+        i12 = 0.0
+        i22 = 0.0
+        kept = ctx.body_inertias as float[]
+        if ctx.body_inertias != null && ctx.sub_step_index > 0 {
+            i00 = kept[i * 6]
+            i01 = kept[i * 6 + 1]
+            i02 = kept[i * 6 + 2]
+            i11 = kept[i * 6 + 3]
+            i12 = kept[i * 6 + 4]
+            i22 = kept[i * 6 + 5]
+        } else {
+            inertia = math.invert_matrix(math.widen_mat3(sim.inv_inertia_local))
+            i00 = inertia.cx.x
+            i01 = inertia.cy.x
+            i02 = inertia.cz.x
+            i11 = inertia.cy.y
+            i12 = inertia.cz.y
+            i22 = inertia.cz.z
+            if ctx.body_inertias != null {
+                kept[i * 6] = i00
+                kept[i * 6 + 1] = i01
+                kept[i * 6 + 2] = i02
+                kept[i * 6 + 3] = i11
+                kept[i * 6 + 4] = i12
+                kept[i * 6 + 5] = i22
+            }
+        }
         iteration = 0
         while iteration < GYROSCOPIC_ITERATIONS {
             w1 = omega2.x
@@ -292,7 +327,7 @@ continuous_query_visitor(proxy_id: int, user_data: long, context: ptr) -> bool {
         if filter(dynamics.make_shape_id(w, s), dynamics.make_shape_id(w, fast_shape), w.custom_filter_context) == false { return true }
     }
     sweep_a = dynamics.make_relative_sweep(sim, ctx.base)
-    output = shape.shape_time_of_impact(&s.geometry, &fast_shape.geometry, sweep_a, ctx.sweep, ctx.fraction, is_sensor)
+    output = shape.time_of_impact(&s.geometry, &fast_shape.geometry, sweep_a, ctx.sweep, ctx.fraction, is_sensor)
     if is_sensor {
         if output.fraction <= ctx.fraction && ctx.sensor_count < MAX_CONTINUOUS_SENSOR_HITS {
             hits = ctx.sensor_hits as SensorHit[]
@@ -328,7 +363,7 @@ grow_bounds(w: *World, s: *WorldShape, sim: *BodySim, is_bullet: bool, covered: 
     dynamics.set_shape_fat_aabb(w, s.id, fat)
     native.atomic_or((&sim.flags) as ptr, dynamics.ENLARGE_BOUNDS)
     // A bullet's proxies are enlarged later, serially.
-    if is_bullet == false { broad_phase.broad_phase_mark_proxy_moved(&w.broad_phase, s.proxy_key, fat) }
+    if is_bullet == false { broad_phase.mark_proxy_moved(&w.broad_phase, s.proxy_key, fat) }
 }
 
 // A shape's bounds `aabb`, and with every contact reaching out over the
@@ -355,9 +390,9 @@ solve_continuous(w: *World, sim_index: int, dt: float) {
     base = fast_sim.center0
     sweep = dynamics.make_relative_sweep(fast_sim, base)
     xf2 = Transform { p: math.sub(sweep.c2, math.rotate_vector(sweep.q2, sweep.local_center)), q: sweep.q2 }
-    static_tree = broad_phase.broad_phase_tree(&w.broad_phase, dynamics.BODY_STATIC)
-    kinematic_tree = broad_phase.broad_phase_tree(&w.broad_phase, dynamics.BODY_KINEMATIC)
-    dynamic_tree_ = broad_phase.broad_phase_tree(&w.broad_phase, dynamics.BODY_DYNAMIC)
+    static_tree = broad_phase.tree(&w.broad_phase, dynamics.BODY_STATIC)
+    kinematic_tree = broad_phase.tree(&w.broad_phase, dynamics.BODY_KINEMATIC)
+    dynamic_tree_ = broad_phase.tree(&w.broad_phase, dynamics.BODY_DYNAMIC)
     fast_body = dynamics.body_at(w, fast_sim.body_id)
     ctx = ContinuousContext { w: w, fast_sim: fast_sim, fast_shape: null, sweep: sweep, base: base, fraction: 1.0,
                               sensor_hits: sensor_hits(), sensor_fractions: sensor_fractions(), sensor_count: 0,
@@ -564,7 +599,7 @@ finalize_range(start: int, end: int, worker: int, context: ptr) {
                     margin = math.vec3(s.aabb_margin, s.aabb_margin, s.aabb_margin)
                     fat = math.aabb_round_out(AABB { lower: math.sub(covered.lower, margin), upper: math.add(covered.upper, margin) })
                     dynamics.set_shape_fat_aabb(w, shape_id, fat)
-                    broad_phase.broad_phase_mark_proxy_moved(&w.broad_phase, s.proxy_key, fat)
+                    broad_phase.mark_proxy_moved(&w.broad_phase, s.proxy_key, fat)
                 }
                 shape_id = s.next_shape_id
             }
@@ -861,14 +896,26 @@ execute_block(stage: *SolverStage, sc: *SolverContext, b: *SolverBlock, worker: 
         slots = color.wide_constraints + start * sizeof(WideConstraint)
         first = start * contact_solver_wide.WIDTH
         last = math.min_int(end * contact_solver_wide.WIDTH, color.convex_contacts.count)
-        if kind == STAGE_PREPARE_WIDE {
-            contact_solver_wide.prepare_wide_range(ctx, color, first, last)
-        } else if kind == STAGE_WARM_START { contact_solver_wide.warm_start_wide_contacts(ctx, slots, count) }
-        else if kind == STAGE_SOLVE { contact_solver_wide.solve_wide_contacts(ctx, slots, count, true) }
-        else if kind == STAGE_RELAX { contact_solver_wide.solve_wide_contacts(ctx, slots, count, false) }
-        else if kind == STAGE_RESTITUTION { contact_solver_wide.apply_wide_restitution(ctx, slots, count) }
-        else if kind == STAGE_STORE_WIDE {
-            if contact_solver_wide.store_wide_range(ctx, color, first, last, &tc.hit_event_bits) { tc.has_hit_events = true }
+        if w.simd_width == 8 {
+            if kind == STAGE_PREPARE_WIDE {
+                contact_solver_wide8.prepare_wide_range(ctx, color, first, last)
+            } else if kind == STAGE_WARM_START { contact_solver_wide8.warm_start_wide_contacts(ctx, slots, count) }
+            else if kind == STAGE_SOLVE { contact_solver_wide8.solve_wide_contacts(ctx, slots, count, true) }
+            else if kind == STAGE_RELAX { contact_solver_wide8.solve_wide_contacts(ctx, slots, count, false) }
+            else if kind == STAGE_RESTITUTION { contact_solver_wide8.apply_wide_restitution(ctx, slots, count) }
+            else if kind == STAGE_STORE_WIDE {
+                if contact_solver_wide8.store_wide_range(ctx, color, first, last, &tc.hit_event_bits) { tc.has_hit_events = true }
+            }
+        } else {
+            if kind == STAGE_PREPARE_WIDE {
+                contact_solver_wide.prepare_wide_range(ctx, color, first, last)
+            } else if kind == STAGE_WARM_START { contact_solver_wide.warm_start_wide_contacts(ctx, slots, count) }
+            else if kind == STAGE_SOLVE { contact_solver_wide.solve_wide_contacts(ctx, slots, count, true) }
+            else if kind == STAGE_RELAX { contact_solver_wide.solve_wide_contacts(ctx, slots, count, false) }
+            else if kind == STAGE_RESTITUTION { contact_solver_wide.apply_wide_restitution(ctx, slots, count) }
+            else if kind == STAGE_STORE_WIDE {
+                if contact_solver_wide.store_wide_range(ctx, color, first, last, &tc.hit_event_bits) { tc.has_hit_events = true }
+            }
         }
         if timed { stage_note(kind, at) }
         return
@@ -1012,6 +1059,7 @@ orchestrate(sc: *SolverContext) {
 
     sub = 0
     while sub < ctx.sub_step_count {
+        ctx.sub_step_index = sub   // before the stage starts the workers
         // The stage index restarts each sub-step; the sync indices keep growing.
         iteration_stage = stage_index
         execute_main_stage(stage_at(stages, iteration_stage), sc, sync_bits(body_sync, iteration_stage))
@@ -1110,6 +1158,8 @@ solve_step(w: *World, ctx: *StepContext) {
     stack = &w.stack
     ctx.bullet_body_count = 0
     ctx.bullet_bodies = basics.stack_alloc(stack, awake_body_count * 4)
+    ctx.body_inertias = basics.stack_alloc(stack, awake_body_count * 6 * 8)
+    ctx.sub_step_index = 0
     ctx.sims = awake.body_sims.data
     ctx.states = awake.body_states.data
     resize_move_events(w, awake_body_count)
@@ -1156,7 +1206,9 @@ solve_step(w: *World, ctx: *StepContext) {
         wide_base = wide_base + color.wide_constraint_count
         contact_base = contact_base + color.contact_constraint_count
         manifold_base = manifold_base + color.manifold_constraint_count
-        if wide { contact_solver_wide.zero_wide_tail(color) }
+        // The copy that runs the stages makes its zero record, here on one thread.
+        if wide && w.simd_width == 8 { contact_solver_wide8.zero_wide_tail(color) }
+        if wide && w.simd_width != 8 { contact_solver_wide.zero_wide_tail(color) }
         c = c + 1
     }
     overflow = dynamics.graph_color(w, dynamics.OVERFLOW_INDEX)
@@ -1323,6 +1375,8 @@ solve_step(w: *World, ctx: *StepContext) {
     basics.stack_free(stack, manifold_block)
     basics.stack_free(stack, contact_block)
     basics.stack_free(stack, wide_block)
+    basics.stack_free(stack, ctx.body_inertias)
+    ctx.body_inertias = null
     c = 0
     while c < dynamics.GRAPH_COLOR_COUNT {
         color = dynamics.graph_color(w, c)
@@ -1336,8 +1390,8 @@ solve_step(w: *World, ctx: *StepContext) {
     report_joint_events(w)
     if has_hits { report_hit_events(w) } else { basics.buffer_clear(&w.contact_hit_events) }
 
-    dynamic_tree.tree_refit(broad_phase.broad_phase_tree(&w.broad_phase, dynamics.BODY_KINEMATIC))
-    dynamic_tree.tree_refit(broad_phase.broad_phase_tree(&w.broad_phase, dynamics.BODY_DYNAMIC))
+    dynamic_tree.tree_refit(broad_phase.tree(&w.broad_phase, dynamics.BODY_KINEMATIC))
+    dynamic_tree.tree_refit(broad_phase.tree(&w.broad_phase, dynamics.BODY_DYNAMIC))
     profile.refit = lap(&ticks)
 
     // Bullets: swept against everything now that the trees hold the step's
@@ -1346,7 +1400,7 @@ solve_step(w: *World, ctx: *StepContext) {
     bullets = ctx.bullet_bodies as int[]
     basics.sort_ints(bullets, ctx.bullet_body_count)
     parallel.parallel_for(w.scheduler as *Scheduler, bullet_range, ctx.bullet_body_count, 8, ctx as ptr)
-    tree = broad_phase.broad_phase_tree(&w.broad_phase, dynamics.BODY_DYNAMIC)
+    tree = broad_phase.tree(&w.broad_phase, dynamics.BODY_DYNAMIC)
     i = 0
     while i < ctx.bullet_body_count {
         bullet_sim = dynamics.body_sim_at(awake, bullets[i])

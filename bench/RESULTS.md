@@ -1306,6 +1306,52 @@ step, and each new box is rounded (the inline, branch-free bit step of
 nextafterf); a tree query no longer rounds at all, the double box
 compared against the widened nodes.
 
+### The reference's wide SAT, the lanes transposed, the width at run time (2026-10-20, #150, #121, #156)
+
+Aether 0.835.0 brought what the last section waited on: lane moves
+(aether#2550), bit casts and a horizontal minimum (#2603), and a module
+imported a second time at `@target("avx2")` (#2607).
+
+The separating axis test is now Box3D's wide one line for line
+(`aephysics.sat`, after `convex_manifold_wide.inl`), in single precision
+from the hulls' rows. The support search keeps the vertex index in the low
+seven mantissa bits, so one horizontal minimum gives the vertex, for every
+hull size. The face dots and B's frame are taken in lanes, the edge pairs
+eight at a time, and the improving lanes are reduced in order. The double
+recompute is gone, which is what changed the golden trace (the wave pile
+now sleeps at step 320, where it slept at 326; Box3D's own sleeps at 314).
+Microseconds a query, ours before (2026-10-20, the old test) / ours after /
+the reference in the same run as after, AVX2:
+
+| pair | SAT | SAT, no early return |
+|---|---|---|
+| complex/complex | 1.83 / 1.32 / 0.95 | 15.6 / 7.43 / 6.15 |
+| complex/rock | 1.18 / 0.89 / 0.65 | 5.63 / 3.44 / 2.75 |
+| complex/cylinder | 2.33 / 1.56 / 1.06 | 15.1 / 7.34 / 6.14 |
+| rock/rock | 0.61 / 0.52 / 0.39 | 2.17 / 1.53 / 1.23 |
+| rock/cylinder | 1.55 / 1.06 / 0.76 | 5.92 / 3.64 / 3.05 |
+| cylinder/cylinder | 2.98 / 2.02 / 1.41 | 11.6 / 8.47 / 7.62 |
+
+The convex pile (5,120 hulls), ms per step, the best of three alternated
+pairs: collide 7.65 to 7.07, step 11.32 to 10.74. Box3D in the same
+period: collide 5.81-5.88, step 8.94-9.07, so the collide pass went from
+1.31x to 1.20x. What is left in the SAT is the scalar work around the
+lanes (the candidate edges' inscribed-sphere tests, a face's bias) and the
+slice indexing the arrays go through.
+
+The wide contact stages gather and scatter their bodies through 8x8
+register transposes (Box3D's b3GatherBodies, b3ScatterBodies). The second
+tangent is computed where it is used, not stored. Large pyramid, -mavx2,
+medians of alternated runs: step 7.69 to 6.80 ms; warm start 0.91 to 0.72,
+solve 1.36 to 1.15, relax 1.49 to 1.25. The bits did not change.
+
+One binary now runs both widths: the solver and the SAT each have a copy
+compiled for AVX2, chosen by `basics.set_simd_width` (0 asks the CPU). In
+a default build (no -mavx2), large pyramid, best of four: width 4 runs
+8.18 ms a step and width 8 runs 6.77 (solve 1.57 to 1.15, relax 1.79 to
+1.23), the speed of the -mavx2 build. test_determinism steps every scene
+at both widths in one process, bit for bit.
+
 ## Build flags (inlining)
 
 The generated C of every Aether function is a plain `static` function,

@@ -566,10 +566,10 @@ compute_mesh_manifolds(cache: *MeshContactCache, mesh_shape: *Shape, xf_a: Trans
                     accepted[accepted_count] = this_manifold
                     accepted_count = accepted_count + 1
                 } else {
-                    min_separation = manifold.manifold_point(m, 0).separation
+                    min_separation = manifold.point(m, 0).separation
                     i = 1
                     while i < point_count {
-                        min_separation = math.min_float(min_separation, manifold.manifold_point(m, i).separation)
+                        min_separation = math.min_float(min_separation, manifold.point(m, i).separation)
                         i = i + 1
                     }
                     if min_separation < 0.0 - 2.0 * linear_slop {
@@ -695,7 +695,7 @@ compute_mesh_manifolds(cache: *MeshContactCache, mesh_shape: *Shape, xf_a: Trans
         target = clusters[cluster_index].points as LocalManifoldPoint[]
         j = 0
         while j < m.point_count {
-            p = manifold.manifold_point(m, j)
+            p = manifold.point(m, j)
             p.triangle_index = m.triangle_index
             target[clusters[cluster_index].point_count] = p
             clusters[cluster_index].point_count = clusters[cluster_index].point_count + 1

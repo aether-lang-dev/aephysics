@@ -38,7 +38,7 @@ var g_arena: ptr = null
 
 run(name: string, ground: *Shape, convex: *Shape, radius: float) {
     arena = g_arena as *Arena
-    cache = mesh_contact.mesh_contact_cache_create()
+    cache = mesh_contact.cache_create()
     xf_a = math.transform_identity()
     clusters = 0
     points = 0
@@ -74,7 +74,7 @@ run(name: string, ground: *Shape, convex: *Shape, radius: float) {
     }
     t1 = clock()
     println("aephysics mesh_contact: ${name} ${STEPS} steps ${ms(t1 - t0)} ms (${clusters} clusters, ${points} points, separation sum ${separation_sum}, ${hits} cache hits)")
-    mesh_contact.mesh_contact_cache_destroy(&cache)
+    mesh_contact.cache_destroy(&cache)
 }
 
 main() {

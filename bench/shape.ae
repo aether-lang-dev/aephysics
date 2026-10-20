@@ -81,7 +81,7 @@ main() {
         local = math.vec3(2.5 * cos(5.0 * a), 4.0, 1.2 * sin(5.0 * a))
         start[0] = math.transform_point(transform, local)
         translation = math.rotate_vector(q, math.vec3(0.0, 0.0 - 8.0, 0.5 * sin(9.0 * a)))
-        out = shape.shape_cast_shape(&sh, transform, distance.shape_proxy(start_block, 1, 0.3), translation, 1.0, false)
+        out = shape.cast_shape(&sh, transform, distance.shape_proxy(start_block, 1, 0.3), translation, 1.0, false)
         if out.hit {
             cast_hits = cast_hits + 1
             cast_sum = cast_sum + out.fraction

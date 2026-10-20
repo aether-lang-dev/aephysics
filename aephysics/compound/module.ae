@@ -772,7 +772,7 @@ compound_sections_fit(c: *CompoundData) -> bool {
         offset = hulls[i].hull_offset
         if hulls[i].material_index < 0 || hulls[i].material_index >= c.material_count { return false }
         if offset < header || offset > n - sizeof(HullData) { return false }
-        if hull.hull_bytes_valid((block + offset) as *HullData, n - offset) == false { return false }
+        if hull.bytes_valid((block + offset) as *HullData, n - offset) == false { return false }
         i = i + 1
     }
     meshes = (block + c.mesh_offset) as MeshInstance[]
@@ -782,7 +782,7 @@ compound_sections_fit(c: *CompoundData) -> bool {
         if meshes[i].material_count < 1 || meshes[i].material_start < 0 { return false }
         if meshes[i].material_count > c.material_map_count - meshes[i].material_start { return false }
         if offset < header || offset > n - sizeof(MeshData) { return false }
-        if mesh.mesh_bytes_valid((block + offset) as *MeshData, n - offset) == false { return false }
+        if mesh.bytes_valid((block + offset) as *MeshData, n - offset) == false { return false }
         i = i + 1
     }
     spheres = (block + c.sphere_offset) as CompoundSphere[]

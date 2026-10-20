@@ -547,7 +547,7 @@ save_world(world_id: WorldId) -> (ptr, int) {
     // slots in place, so a walk over it meets the pairs in the same order).
     t = 0
     while t < broad_phase.BODY_TYPE_COUNT {
-        block, byte_count = dynamic_tree.tree_save_bytes(broad_phase.broad_phase_tree(&w.broad_phase, t))
+        block, byte_count = dynamic_tree.tree_save_bytes(broad_phase.tree(&w.broad_phase, t))
         w_int(&wr, byte_count)
         w_bytes(&wr, block, byte_count)
         if block != null { basics.free_bytes(block, byte_count) }
@@ -777,9 +777,9 @@ fill_world(w: *World, rd: *SnapReader) -> bool {
         memcpy(block, rd.data + rd.at, byte_count)
         rd.at = rd.at + byte_count
         valid = false
-        if kind == shape.SHAPE_HULL { valid = hull.hull_bytes_valid(block as *HullData, byte_count) && (block as *HullData).byte_count == byte_count }
-        else if kind == shape.SHAPE_MESH { valid = mesh.mesh_bytes_valid(block as *MeshData, byte_count) && (block as *MeshData).byte_count == byte_count }
-        else if kind == shape.SHAPE_HEIGHT_FIELD { valid = height_field.height_field_bytes_valid(block as *HeightFieldData, byte_count) && (block as *HeightFieldData).byte_count == byte_count }
+        if kind == shape.SHAPE_HULL { valid = hull.bytes_valid(block as *HullData, byte_count) && (block as *HullData).byte_count == byte_count }
+        else if kind == shape.SHAPE_MESH { valid = mesh.bytes_valid(block as *MeshData, byte_count) && (block as *MeshData).byte_count == byte_count }
+        else if kind == shape.SHAPE_HEIGHT_FIELD { valid = height_field.bytes_valid(block as *HeightFieldData, byte_count) && (block as *HeightFieldData).byte_count == byte_count }
         else if kind == shape.SHAPE_COMPOUND { valid = compound.convert_bytes_to_compound(block, byte_count) != null }
         if valid == false {
             basics.free_bytes(block, byte_count)
@@ -972,7 +972,7 @@ fill_world(w: *World, rd: *SnapReader) -> bool {
             rd.ok = false
             break
         }
-        slot = broad_phase.broad_phase_tree(&w.broad_phase, t)
+        slot = broad_phase.tree(&w.broad_phase, t)
         dynamic_tree.tree_destroy(slot)
         memcpy(slot as ptr, (&tree) as ptr, sizeof(DynamicTree))
         t = t + 1

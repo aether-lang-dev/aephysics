@@ -181,7 +181,7 @@ test_shape_movers() {
     count = mesh.collide_mover_and_mesh(planes, 4, sh, manifold.capsule(math.vec3(0.0 - 2.0, 0.15, 0.0), math.vec3(0.0 - 2.0, 0.35, 0.0), 0.2))
     ensure("mirrored mesh front", count == 1 && planes[0].plane.normal.y > 0.99)
     ensure("mirrored mesh material", count == 1 && planes[0].material_index == 1)
-    mesh_materials = mesh.mesh_material_indices(md)
+    mesh_materials = mesh.material_indices(md)
     ensure("mirrored mesh triangle material", count == 1 && mesh_materials[planes[0].triangle_index] == 1)
     ensure("mirrored mesh back culled", mesh.collide_mover_and_mesh(planes, 4, sh, manifold.capsule(math.vec3(0.0 - 2.0, 0.0 - 0.35, 0.0), math.vec3(0.0 - 2.0, 0.0 - 0.15, 0.0), 0.2)) == 0)
     mesh.destroy_mesh(md)
@@ -194,7 +194,7 @@ test_shape_movers() {
     heights = calloc(9, 8)
     materials_block = calloc(4, 4)
     materials = materials_block as int[]
-    def = height_field.height_field_def()
+    def = height_field.def()
     def.heights = heights
     def.material_indices = materials_block
     def.count_x = 3

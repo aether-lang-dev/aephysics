@@ -61,11 +61,11 @@ main() {
         jitter = 0.3 * sin(7.0 * (i as float))
         c = math.vec3(1.4 * x + jitter, 1.0 + 1.4 * y, 1.4 * z + 0.3 * cos(11.0 * (i as float)))
         boxes[i] = AABB { lower: math.sub(c, math.vec3(0.5, 0.5, 0.5)), upper: math.add(c, math.vec3(0.5, 0.5, 0.5)) }
-        keys[i] = broad_phase.broad_phase_create_proxy(bp, broad_phase.BODY_DYNAMIC, math.aabb_round_out(boxes[i]), all_bits(), i, false)
+        keys[i] = broad_phase.create_proxy(bp, broad_phase.BODY_DYNAMIC, math.aabb_round_out(boxes[i]), all_bits(), i, false)
         i = i + 1
     }
     boxes[COUNT] = AABB { lower: math.vec3(0.0 - 5.0, 0.0 - 1.0, 0.0 - 5.0), upper: math.vec3(40.0, 0.6, 40.0) }
-    keys[COUNT] = broad_phase.broad_phase_create_proxy(bp, broad_phase.BODY_STATIC, math.aabb_round_out(boxes[COUNT]), all_bits(), COUNT, false)
+    keys[COUNT] = broad_phase.create_proxy(bp, broad_phase.BODY_STATIC, math.aabb_round_out(boxes[COUNT]), all_bits(), COUNT, false)
     t1 = clock()
     first = broad_phase.update_broad_phase_pairs(bp, visitors, false)
     adopt(bp)
@@ -78,7 +78,7 @@ main() {
         while i < COUNT {
             d = math.vec3(0.05 * sin((i + step) as float), 0.05 * cos((3 * i + step) as float), 0.05 * sin((5 * i + 2 * step) as float))
             boxes[i] = AABB { lower: math.add(boxes[i].lower, d), upper: math.add(boxes[i].upper, d) }
-            broad_phase.broad_phase_move_proxy(bp, keys[i], math.aabb_round_out(boxes[i]))
+            broad_phase.move_proxy(bp, keys[i], math.aabb_round_out(boxes[i]))
             i = i + 1
         }
         n = broad_phase.update_broad_phase_pairs(bp, visitors, false)

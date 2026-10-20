@@ -1,0 +1,641 @@
+// aephysics.sat: the separating axis test between two hulls as Box3D's wide
+// one does it (convex_manifold_wide.inl, b3ComputeSeparatingAxis at e77352c,
+// after Cairn Overturf, https://cairnc.github.io/posts/improvements-to-the-separating-axis/):
+// single precision, eight lanes a pass, from the hulls' single-precision rows
+// (hull.soa_vertices, soa_normals, edge_cosines).
+//
+// - The support search keeps a vertex's index in the low seven mantissa bits
+//   of its value (b3EmbedIndexW / b3MinIndexW), so one horizontal minimum
+//   gives the value and the vertex.
+// - The faces' dots with the line between the centres are taken eight a pass,
+//   and a face whose bound cannot beat the best separation so far is skipped.
+// - An edge takes part only when its Gauss-map arc can beat the best face
+//   (the inscribed-sphere test), culled again from the best faces' support
+//   points when enough pairs are left.
+// - B's normals and vertices go into A's frame once, as rows, and the edge
+//   pairs are tested eight of A's a pass, the lanes reduced in order.
+//
+// The manifold module imports this twice, plain and at @target("avx2"), and
+// calls the copy basics.get_simd_width() names, as Box3D calls
+// b3ComputeSeparatingAxisW4 or W8 (#150, #156). Both copies give the same bits.
+import std.lanes
+import aephysics.math
+import aephysics.native
+import aephysics.basics
+import aephysics.hull
+
+exports (
+    SatAxis, SatQuery, SAT_INVALID, SAT_FACE_A, SAT_FACE_B, SAT_EDGE_PAIR,
+    compute, reserve_scratch, lanes_native
+)
+
+// The axis an early return stopped on.
+const SAT_INVALID = 0
+const SAT_FACE_A = 1
+const SAT_FACE_B = 2
+const SAT_EDGE_PAIR = 3
+
+const NULL_INDEX = 0 - 1
+
+// An axis: its normal in A's frame, pointing from A to B; its separation;
+// A's face and B's vertex, A's vertex and B's face, or the two half-edges.
+struct SatAxis {
+    normal: Vec3
+    separation: float
+    index_a: int
+    index_b: int
+}
+
+struct SatQuery {
+    face_a: SatAxis
+    face_b: SatAxis
+    edge: SatAxis
+    separated: int
+}
+
+// A face's separation and the other hull's vertex that gives it.
+struct FaceSeparation {
+    separation: f32
+    vertex: int
+}
+
+const PARALLEL_EDGE_TOL = 0.005
+// An edge's arc this close to degenerate is kept as a candidate (B3_PARALLEL_TOL).
+const PARALLEL_TOL = 0.0001
+// The edge pair tests that pay for the probe's second cull (B3_EDGE_PROBE_MIN_TESTS).
+const EDGE_PROBE_MIN_TESTS = 10
+// A vertex index fits in seven mantissa bits: a hull has at most 128 (B3_HULL_BIT_COUNT).
+const HULL_BIT_MASK = 127
+
+// --- scratch ----------------------------------------------------------------
+
+// Each worker's arrays, in elements of four bytes: Box3D's stack arrays, NF
+// faces, NE edges and NV vertices with a lane's tail each (hull.MAX_HULL_FACES,
+// MAX_HULL_EDGES and MAX_HULL_VERTICES are 128).
+const NF = 136
+const NE = 136
+const NV = 136
+const DOT_A = 0                 // dot(normal, centre line) of A's faces
+const DOT_B = 136               // of B's
+const PLANE_A = 272             // plane separations of a point of B from A's faces
+const PLANE_B = 408             // of a point of A from B's
+const BFN_X = 544               // B's face normals in A's frame, negated
+const BFN_Y = 680
+const BFN_Z = 816
+const BW_X = 952                // B's vertices in A's frame, negated
+const BW_Y = 1088
+const BW_Z = 1224
+const AN0_X = 1360              // A's candidate edges: the two face normals,
+const AN0_Y = 1496
+const AN0_Z = 1632
+const AN1_X = 1768
+const AN1_Y = 1904
+const AN1_Z = 2040
+const AD_X = 2176               // the edge's direction,
+const AD_Y = 2312
+const AD_Z = 2448
+const AV0_X = 2584              // its first vertex,
+const AV0_Y = 2720
+const AV0_Z = 2856
+const ATOL = 2992               // and its parallel tolerance
+const EDGES_A = 3128            // the candidates' half-edge indices (ints)
+const EDGES_B = 3264
+const LANE_SEP = 3400           // eight lanes stored for the reduction
+const LANE_NX = 3408
+const LANE_NY = 3416
+const LANE_NZ = 3424
+const SCRATCH_BYTES = 13728     // 3432 elements
+
+var g_scratch: ptr = null
+
+scratch_ready() {
+    if g_scratch == null { g_scratch = basics.alloc(native.MAX_WORKERS * SCRATCH_BYTES) }
+}
+
+// The scratch allocated now, on the calling thread, before a step can reach
+// it from several workers at once (a world's creation reserves it).
+reserve_scratch() { scratch_ready() }
+
+block() -> ptr { return native.scratch(g_scratch, SCRATCH_BYTES) }
+
+// Whether this copy holds an f32x8 in one register (true in the @target("avx2") copy on x86).
+lanes_native() -> bool { return lanes.native8() }
+
+// --- the pieces ---------------------------------------------------------------
+
+round_up8(count: int) -> int { return (count + 7) & (0 - 8) }
+
+// The row stream `in` (x, y, z rows of `stride`) taken by out = -(R v (+ p)),
+// `n` of them, into the scratch rows at ox, oy, oz (b3NegativeTransformFromSoA).
+negative_transform(r: Matrix3f, p: Vec3f, rows: ptr, stride: int, n: int, out: ptr, ox: int, oy: int, oz: int, is_point: bool) {
+    r00 = lanes.splat8(r.cx.x)
+    r01 = lanes.splat8(r.cy.x)
+    r02 = lanes.splat8(r.cz.x)
+    r10 = lanes.splat8(r.cx.y)
+    r11 = lanes.splat8(r.cy.y)
+    r12 = lanes.splat8(r.cz.y)
+    r20 = lanes.splat8(r.cx.z)
+    r21 = lanes.splat8(r.cy.z)
+    r22 = lanes.splat8(r.cz.z)
+    zero = lanes.splat8(0.0)
+    tx = zero
+    ty = zero
+    tz = zero
+    if is_point {
+        tx = lanes.splat8(p.x)
+        ty = lanes.splat8(p.y)
+        tz = lanes.splat8(p.z)
+    }
+    i = 0
+    while i < n {
+        x = lanes.load8(rows, i as long)
+        y = lanes.load8(rows, (stride + i) as long)
+        z = lanes.load8(rows, (2 * stride + i) as long)
+        wx = r00 * x + r01 * y + r02 * z
+        wy = r10 * x + r11 * y + r12 * z
+        wz = r20 * x + r21 * y + r22 * z
+        if is_point {
+            wx = wx + tx
+            wy = wy + ty
+            wz = wz + tz
+        }
+        lanes.store8(out, (ox + i) as long, -wx)
+        lanes.store8(out, (oy + i) as long, -wy)
+        lanes.store8(out, (oz + i) as long, -wz)
+        i = i + 8
+    }
+}
+
+// The vertex of the rows minimising bias - dot(normal, v), the bias being big
+// enough to keep that positive (b3GetSupportWide). The index rides in the low
+// seven mantissa bits of each value, so the padding (vertex 0 again, at an
+// index past the count) never wins and a tie keeps the lower index.
+support_wide(normal: Vec3f, rows: ptr, stride: int, n: int, bias: f32) -> int {
+    nx = lanes.splat8(normal.x)
+    ny = lanes.splat8(normal.y)
+    nz = lanes.splat8(normal.z)
+    b = lanes.splat8(bias)
+    least = lanes.splat8(math.infinity_f32())
+    clear = lanes.i32splat8(0 - 128)
+    lane_index = lanes.i32x8(0, 1, 2, 3, 4, 5, 6, 7)
+    i = 0
+    while i < n {
+        d = nx * lanes.load8(rows, i as long) + ny * lanes.load8(rows, (stride + i) as long) + nz * lanes.load8(rows, (2 * stride + i) as long)
+        value = b - d
+        tagged = lanes.from_bits8(lanes.mask8_or(lanes.mask8_and(lanes.bits8(value), clear), lane_index + lanes.i32splat8(i)))
+        least = lanes.min8(least, tagged)
+        i = i + 8
+    }
+    bits = lanes.mask8_lane(lanes.bits8(lanes.splat8(lanes.reduce_min8(least))), 0 as long)
+    return (bits & (HULL_BIT_MASK as long)) as int
+}
+
+// A face's separation: its plane's offset from the other hull's support along
+// `direction`, the support measured exactly for the vertex the search chose
+// (b3GetFaceSeparation). The bias is the hull's box's reach along it.
+face_separation(direction: Vec3f, plane_separation: f32, rows: ptr, stride: int, n: int, center: Vec3f, extents: Vec3f) -> FaceSeparation {
+    f32 reach = 1.0625
+    magnitude = math.vec3f(math.abs_f32(direction.x), math.abs_f32(direction.y), math.abs_f32(direction.z))
+    bias = math.dotf(direction, center) + reach * math.dotf(magnitude, extents)
+    vi = support_wide(direction, rows, stride, n, bias)
+    v = rows as f32[]
+    support = direction.x * v[vi] + direction.y * v[stride + vi] + direction.z * v[2 * stride + vi]
+    return FaceSeparation { separation: plane_separation - support, vertex: vi }
+}
+
+// dot(n, d) for every face normal of the hull, eight a pass, into the scratch
+// from `at` (b3GetFaceDots); the padding normals are zero.
+face_dots(h: *HullData, d: Vec3f, out: ptr, at: int) {
+    stride = hull.soa_stride(h.face_count)
+    rows = hull.soa_normals(h)
+    dx = lanes.splat8(d.x)
+    dy = lanes.splat8(d.y)
+    dz = lanes.splat8(d.z)
+    n = round_up8(h.face_count)
+    i = 0
+    while i < n {
+        m = lanes.load8(rows, i as long) * dx + lanes.load8(rows, (stride + i) as long) * dy + lanes.load8(rows, (2 * stride + i) as long) * dz
+        lanes.store8(out, (at + i) as long, m)
+        i = i + 8
+    }
+}
+
+// The plane separations of `point` from every face (b3GetFacePlaneSeparations).
+plane_separations(h: *HullData, point: Vec3f, out: ptr, at: int) {
+    face_dots(h, point, out, at)
+    s = out as f32[]
+    planes = hull.planes(h)
+    i = 0
+    while i < h.face_count {
+        s[at + i] = s[at + i] - (planes[i].offset as f32)
+        i = i + 1
+    }
+}
+
+// Whether an edge whose faces' normals meet at cosine c, with the other
+// hull's centre at plane separations a1 and a2 from them, can reach `bound`
+// anywhere on its Gauss-map arc (b3TestEdgeCandidateSorted, the inscribed
+// sphere edge test, https://box2d.org/posts/2026/09/inscribed-spheres/): the
+// larger endpoint, or the interior maximum of dot(d, nlerp(n1, n2, t)) when
+// there is one; a nearly degenerate arc is kept. 1 or 0.
+edge_candidate(a1: f32, a2: f32, c: f32, bound: f32) -> int {
+    hi = math.max_f32(a1, a2)
+    lo = math.min_f32(a1, a2)
+    if hi >= bound { return 1 }
+    f32 one = 1.0
+    u = lo - c * hi
+    if u < (0.0 as f32) { return 0 }
+    s = one - c * c
+    if s < (PARALLEL_TOL as f32) { return 1 }
+    bound_term = (bound - hi) * (bound + hi)
+    if u * u >= bound_term * s { return 1 }
+    return 0
+}
+
+// The candidates of a list (edge indices at `at` in the scratch, `count` of
+// them) that can still reach `bound` from a probe point's plane separations,
+// kept in order at the front; how many (b3FilterEdgeCandidates).
+filter_edge_candidates(h: *HullData, s: f32[], planes_at: int, bound: f32, lists: int[], at: int, count: int) -> int {
+    edges = hull.edges(h)
+    cosines = hull.edge_cosines(h)
+    kept = 0
+    k = 0
+    while k < count {
+        i = lists[at + k]
+        lists[at + kept] = i
+        kept = kept + edge_candidate(s[planes_at + edges[i].face], s[planes_at + edges[i + 1].face], cosines[i >> 1], bound)
+        k = k + 1
+    }
+    return kept
+}
+
+empty_axis() -> SatAxis {
+    return SatAxis { normal: math.vec3_zero(), separation: 0.0 - math.infinity(), index_a: NULL_INDEX, index_b: NULL_INDEX }
+}
+
+// --- the test -------------------------------------------------------------------
+
+// The separating axis test of hull B, at xf_b in A's frame, against hull A:
+// A's faces against B's vertices, B's faces against A's, then the edge pairs
+// whose Gauss-map arcs cross (Gregorius), the axis from the arcs'
+// intersection. With early_return the test stops at the first axis past
+// `speculative`, which it reports in `separated`.
+compute(hull_a: *HullData, hull_b: *HullData, xf_b: Transform, early_return: bool, speculative: float) -> SatQuery {
+    scratch_ready()
+    s = block()
+    f = s as f32[]
+    lists = s as int[]
+    r = math.narrow_mat3(math.make_matrix_from_quat(xf_b.q))
+    inv_r = math.transposef(r)
+    p = math.narrow3(xf_b.p)
+    f32 spec = speculative as f32
+    f32 slop = math.LINEAR_SLOP as f32
+    f32 one_thousandth = 0.001
+    f32 a_tenth = 0.1
+    res = SatQuery { face_a: empty_axis(), face_b: empty_axis(), edge: empty_axis(), separated: SAT_INVALID }
+    f32 best_a = 0.0 - math.infinity_f32()
+    f32 best_b = 0.0 - math.infinity_f32()
+    f32 best_edge = 0.0 - math.infinity_f32()
+    f32 no_floor = 0.0 - math.infinity_f32()
+
+    face_count_a = hull_a.face_count
+    planes_a = hull.planes(hull_a)
+    normals_a = hull.soa_normals(hull_a) as f32[]
+    face_stride_a = hull.soa_stride(face_count_a)
+    vertex_stride_b = hull.soa_stride(hull_b.vertex_count)
+    rows_b = hull.soa_vertices(hull_b)
+    wide_vertex_count_b = round_up8(hull_b.vertex_count)
+    lower_b = math.narrow3(hull_b.aabb.lower)
+    upper_b = math.narrow3(hull_b.aabb.upper)
+    f32 half = 0.5
+    c_b = math.mul_svf(half, math.addf(lower_b, upper_b))
+    h_b = math.mul_svf(half, math.subf(upper_b, lower_b))
+
+    // No axis separates the hulls by more than dot(axis, centre line) less
+    // their inner radii: a face whose bound is under the best separation so
+    // far needs no support search. The slack keeps the best face from being
+    // skipped.
+    center_a = math.narrow3(hull_a.center)
+    center_b = math.narrow3(hull_b.center)
+    delta_center = math.subf(math.addf(math.mul_mvf(r, center_b), p), center_a)
+    center_distance = math.lengthf(delta_center)
+    radius = (hull_a.inner_radius as f32) + (hull_b.inner_radius as f32)
+    radius_bound = radius - (slop + one_thousandth * (center_distance + radius))
+
+    face_dots(hull_a, delta_center, s, DOT_A)
+    // The face of A most aligned with the centre line: the seed.
+    seed_a = 0
+    max_dot = f[DOT_A]
+    i = 1
+    while i < face_count_a {
+        if f[DOT_A + i] > max_dot {
+            max_dot = f[DOT_A + i]
+            seed_a = i
+        }
+        i = i + 1
+    }
+    floor_a = no_floor
+    seed_separation_a = no_floor
+    seed_vertex_b = 0
+    if early_return {
+        n = math.vec3f(normals_a[seed_a], normals_a[face_stride_a + seed_a], normals_a[2 * face_stride_a + seed_a])
+        direction = math.negf(math.mul_mvf(inv_r, n))
+        plane_separation = math.dotf(n, p) - (planes_a[seed_a].offset as f32)
+        seed = face_separation(direction, plane_separation, rows_b, vertex_stride_b, wide_vertex_count_b, c_b, h_b)
+        seed_separation_a = seed.separation
+        seed_vertex_b = seed.vertex
+        floor_a = math.min_f32(seed_separation_a, spec)
+    }
+
+    // A's face planes against B's vertices.
+    i = 0
+    while i < face_count_a {
+        if f[DOT_A + i] - radius_bound >= math.max_f32(floor_a, best_a) {
+            n = math.vec3f(normals_a[i], normals_a[face_stride_a + i], normals_a[2 * face_stride_a + i])
+            vertex_index = seed_vertex_b
+            separation = seed_separation_a
+            if early_return == false || i != seed_a {
+                direction = math.negf(math.mul_mvf(inv_r, n))
+                plane_separation = math.dotf(n, p) - (planes_a[i].offset as f32)
+                fs = face_separation(direction, plane_separation, rows_b, vertex_stride_b, wide_vertex_count_b, c_b, h_b)
+                separation = fs.separation
+                vertex_index = fs.vertex
+            }
+            if separation > best_a {
+                best_a = separation
+                res.face_a = SatAxis { normal: math.widen3(n), separation: separation as float, index_a: i, index_b: vertex_index }
+                if separation > spec && early_return {
+                    res.separated = SAT_FACE_A
+                    return res
+                }
+            }
+        }
+        i = i + 1
+    }
+
+    face_count_b = hull_b.face_count
+    planes_b = hull.planes(hull_b)
+    normals_b = hull.soa_normals(hull_b) as f32[]
+    face_stride_b = hull.soa_stride(face_count_b)
+    vertex_stride_a = hull.soa_stride(hull_a.vertex_count)
+    rows_a = hull.soa_vertices(hull_a)
+    wide_vertex_count_a = round_up8(hull_a.vertex_count)
+    lower_a = math.narrow3(hull_a.aabb.lower)
+    upper_a = math.narrow3(hull_a.aabb.upper)
+    c_a = math.mul_svf(half, math.addf(lower_a, upper_a))
+    h_a = math.mul_svf(half, math.subf(upper_a, lower_a))
+
+    // The same for B, from the centre line taken into B's frame and reversed.
+    face_dots(hull_b, math.negf(math.mul_mvf(inv_r, delta_center)), s, DOT_B)
+    seed_b = 0
+    max_dot = f[DOT_B]
+    i = 1
+    while i < face_count_b {
+        if f[DOT_B + i] > max_dot {
+            max_dot = f[DOT_B + i]
+            seed_b = i
+        }
+        i = i + 1
+    }
+    floor_b = no_floor
+    seed_separation_b = no_floor
+    seed_vertex_a = 0
+    if early_return {
+        n = math.vec3f(normals_b[seed_b], normals_b[face_stride_b + seed_b], normals_b[2 * face_stride_b + seed_b])
+        direction = math.negf(math.mul_mvf(r, n))
+        plane_separation = math.dotf(direction, p) - (planes_b[seed_b].offset as f32)
+        seed = face_separation(direction, plane_separation, rows_a, vertex_stride_a, wide_vertex_count_a, c_a, h_a)
+        seed_separation_b = seed.separation
+        seed_vertex_a = seed.vertex
+        // A's faces have set a floor of their own.
+        floor_b = math.min_f32(math.max_f32(seed_separation_b, best_a), spec)
+    }
+
+    // B's face planes against A's vertices.
+    i = 0
+    while i < face_count_b {
+        if f[DOT_B + i] - radius_bound >= math.max_f32(floor_b, best_b) {
+            n = math.vec3f(normals_b[i], normals_b[face_stride_b + i], normals_b[2 * face_stride_b + i])
+            direction = math.negf(math.mul_mvf(r, n))
+            vertex_index = seed_vertex_a
+            separation = seed_separation_b
+            if early_return == false || i != seed_b {
+                plane_separation = math.dotf(direction, p) - (planes_b[i].offset as f32)
+                fs = face_separation(direction, plane_separation, rows_a, vertex_stride_a, wide_vertex_count_a, c_a, h_a)
+                separation = fs.separation
+                vertex_index = fs.vertex
+            }
+            if separation > best_b {
+                best_b = separation
+                res.face_b = SatAxis { normal: math.widen3(direction), separation: separation as float, index_a: vertex_index, index_b: i }
+                if separation > spec && early_return {
+                    res.separated = SAT_FACE_B
+                    return res
+                }
+            }
+        }
+        i = i + 1
+    }
+
+    // The edges that can still beat the best face, by the inscribed-sphere
+    // test of each edge's arc against the other hull's centre. Every edge
+    // without an early return.
+    edges_a = hull.edges(hull_a)
+    edges_b = hull.edges(hull_b)
+    max_face_separation = math.max_f32(best_a, best_b)
+    bound_slack = radius - radius_bound
+    threshold_a = no_floor
+    threshold_b = no_floor
+    if early_return {
+        threshold_a = max_face_separation + (hull_b.inner_radius as f32) - bound_slack
+        threshold_b = max_face_separation + (hull_a.inner_radius as f32) - bound_slack
+    }
+    center_b_in_a = math.addf(math.mul_mvf(r, center_b), p)
+    center_a_in_b = math.mul_mvf(inv_r, math.subf(center_a, p))
+    plane_separations(hull_a, center_b_in_a, s, PLANE_A)
+    plane_separations(hull_b, center_a_in_b, s, PLANE_B)
+    cosines_a = hull.edge_cosines(hull_a)
+    cosines_b = hull.edge_cosines(hull_b)
+    na = 0
+    i = 0
+    while i < hull_a.edge_count {
+        lists[EDGES_A + na] = i
+        na = na + edge_candidate(f[PLANE_A + edges_a[i].face], f[PLANE_A + edges_a[i + 1].face], cosines_a[i >> 1], threshold_a)
+        i = i + 2
+    }
+    nb = 0
+    i = 0
+    while i < hull_b.edge_count {
+        lists[EDGES_B + nb] = i
+        nb = nb + edge_candidate(f[PLANE_B + edges_b[i].face], f[PLANE_B + edges_b[i + 1].face], cosines_b[i >> 1], threshold_b)
+        i = i + 2
+    }
+
+    // The best faces' support vertices are points of the other hull, so no
+    // edge pair's axis separates by more than such a point's plane
+    // separations over the arc: with enough pairs left to pay for it, each
+    // list is culled again against them.
+    if early_return && nb * ((na + 3) >> 2) >= EDGE_PROBE_MIN_TESTS {
+        probe_bound = max_face_separation - (a_tenth * slop + one_thousandth * math.abs_f32(center_distance + radius))
+        rb = rows_b as f32[]
+        vertex_b = seed_vertex_b
+        if res.face_a.index_b != NULL_INDEX { vertex_b = res.face_a.index_b }
+        probe_b = math.vec3f(rb[vertex_b], rb[vertex_stride_b + vertex_b], rb[2 * vertex_stride_b + vertex_b])
+        plane_separations(hull_a, math.addf(math.mul_mvf(r, probe_b), p), s, PLANE_A)
+        na = filter_edge_candidates(hull_a, f, PLANE_A, probe_bound, lists, EDGES_A, na)
+        ra = rows_a as f32[]
+        vertex_a = seed_vertex_a
+        if res.face_b.index_a != NULL_INDEX { vertex_a = res.face_b.index_a }
+        probe_a = math.vec3f(ra[vertex_a], ra[vertex_stride_a + vertex_a], ra[2 * vertex_stride_a + vertex_a])
+        plane_separations(hull_b, math.mul_mvf(inv_r, math.subf(probe_a, p)), s, PLANE_B)
+        nb = filter_edge_candidates(hull_b, f, PLANE_B, probe_bound, lists, EDGES_B, nb)
+    }
+    if na == 0 || nb == 0 { return res }
+
+    // B's face normals and vertices into A's frame, negated, as rows.
+    negative_transform(r, p, hull.soa_normals(hull_b), face_stride_b, round_up8(face_count_b), s, BFN_X, BFN_Y, BFN_Z, false)
+    negative_transform(r, p, rows_b, vertex_stride_b, wide_vertex_count_b, s, BW_X, BW_Y, BW_Z, true)
+
+    // A's candidate edges as rows: the two face normals, the direction
+    // v1 - v0, the first vertex, and the parallel tolerance scaled by the
+    // edge's length.
+    ra = rows_a as f32[]
+    f32 tol = PARALLEL_EDGE_TOL as f32
+    squared_tol = tol * tol
+    k = 0
+    while k < na {
+        e = lists[EDGES_A + k]
+        twin = e + 1
+        f0 = edges_a[e].face
+        f1 = edges_a[twin].face
+        f[AN0_X + k] = normals_a[f0]
+        f[AN0_Y + k] = normals_a[face_stride_a + f0]
+        f[AN0_Z + k] = normals_a[2 * face_stride_a + f0]
+        f[AN1_X + k] = normals_a[f1]
+        f[AN1_Y + k] = normals_a[face_stride_a + f1]
+        f[AN1_Z + k] = normals_a[2 * face_stride_a + f1]
+        v0 = edges_a[e].origin
+        v1 = edges_a[twin].origin
+        dx = ra[v1] - ra[v0]
+        dy = ra[vertex_stride_a + v1] - ra[vertex_stride_a + v0]
+        dz = ra[2 * vertex_stride_a + v1] - ra[2 * vertex_stride_a + v0]
+        f[AD_X + k] = dx
+        f[AD_Y + k] = dy
+        f[AD_Z + k] = dz
+        f[AV0_X + k] = ra[v0]
+        f[AV0_Y + k] = ra[vertex_stride_a + v0]
+        f[AV0_Z + k] = ra[2 * vertex_stride_a + v0]
+        f[ATOL + k] = squared_tol * (dx * dx + dy * dy + dz * dz)
+        k = k + 1
+    }
+    // The tail lanes zero: a zero direction and zero normals fail the arc
+    // test, so a lane past the count never wins.
+    zero = lanes.splat8(0.0)
+    lanes.store8(s, (AN0_X + na) as long, zero)
+    lanes.store8(s, (AN0_Y + na) as long, zero)
+    lanes.store8(s, (AN0_Z + na) as long, zero)
+    lanes.store8(s, (AN1_X + na) as long, zero)
+    lanes.store8(s, (AN1_Y + na) as long, zero)
+    lanes.store8(s, (AN1_Z + na) as long, zero)
+    lanes.store8(s, (AD_X + na) as long, zero)
+    lanes.store8(s, (AD_Y + na) as long, zero)
+    lanes.store8(s, (AD_Z + na) as long, zero)
+    lanes.store8(s, (AV0_X + na) as long, zero)
+    lanes.store8(s, (AV0_Y + na) as long, zero)
+    lanes.store8(s, (AV0_Z + na) as long, zero)
+    lanes.store8(s, (ATOL + na) as long, zero)
+
+    // Every candidate of B against eight of A's a pass. This tolerance skips
+    // edges shorter than about a centimetre.
+    eps = lanes.splat8(0.0 - slop * slop)
+    inf = lanes.splat8(math.infinity_f32())
+    one = lanes.splat8(1.0)
+    m = 0
+    while m < nb {
+        e = lists[EDGES_B + m]
+        twin = e + 1
+        f0 = edges_b[e].face
+        f1 = edges_b[twin].face
+        v0 = edges_b[e].origin
+        v1 = edges_b[twin].origin
+        cx = lanes.splat8(f[BFN_X + f0])
+        cy = lanes.splat8(f[BFN_Y + f0])
+        cz = lanes.splat8(f[BFN_Z + f0])
+        nd_x = lanes.splat8(f[BFN_X + f1])
+        nd_y = lanes.splat8(f[BFN_Y + f1])
+        nd_z = lanes.splat8(f[BFN_Z + f1])
+        pbx = f[BW_X + v0]
+        pby = f[BW_Y + v0]
+        pbz = f[BW_Z + v0]
+        dcx = lanes.splat8(f[BW_X + v1] - pbx)
+        dcy = lanes.splat8(f[BW_Y + v1] - pby)
+        dcz = lanes.splat8(f[BW_Z + v1] - pbz)
+        bvx = lanes.splat8(pbx)
+        bvy = lanes.splat8(pby)
+        bvz = lanes.splat8(pbz)
+        i = 0
+        while i < na {
+            ix = i as long
+            ax = lanes.load8(s, AD_X as long + ix)
+            ay = lanes.load8(s, AD_Y as long + ix)
+            az = lanes.load8(s, AD_Z as long + ix)
+            n0x = lanes.load8(s, AN0_X as long + ix)
+            n0y = lanes.load8(s, AN0_Y as long + ix)
+            n0z = lanes.load8(s, AN0_Z as long + ix)
+            n1x = lanes.load8(s, AN1_X as long + ix)
+            n1y = lanes.load8(s, AN1_Y as long + ix)
+            n1z = lanes.load8(s, AN1_Z as long + ix)
+            cba = cx * ax + cy * ay + cz * az
+            dba = nd_x * ax + nd_y * ay + nd_z * az
+            adc = n0x * dcx + n0y * dcy + n0z * dcz
+            bdc = n1x * dcx + n1y * dcy + n1z * dcz
+            // The Gauss-map arcs cross, and the edges are not near parallel
+            // (the arc's lerp is ill conditioned when both of B's normals are
+            // nearly perpendicular to A's edge).
+            m1 = lanes.lt8(cba * dba, eps)
+            m2 = lanes.lt8(adc * bdc, eps)
+            m3 = lanes.lt8(cba * bdc, eps)
+            not_parallel = lanes.gt8(lanes.max8(cba * cba, dba * dba), lanes.load8(s, ATOL as long + ix))
+            mask = lanes.mask8_and(lanes.mask8_and(m1, m2), lanes.mask8_and(m3, not_parallel))
+            // Most of A's edges fail it: then no divide, square root or support.
+            if lanes.any8(mask) {
+                t = (-cba) / (dba - cba)
+                nx = cx + t * (nd_x - cx)
+                ny = cy + t * (nd_y - cy)
+                nz = cz + t * (nd_z - cz)
+                inv = one / lanes.sqrt8(nx * nx + ny * ny + nz * nz)
+                nx = inv * nx
+                ny = inv * ny
+                nz = inv * nz
+                support = (lanes.load8(s, AV0_X as long + ix) + bvx) * nx + (lanes.load8(s, AV0_Y as long + ix) + bvy) * ny + (lanes.load8(s, AV0_Z as long + ix) + bvz) * nz
+                // A lane that fails the arc test can never win.
+                lane_separation = -lanes.select8(mask, support, inf)
+                if lanes.any8(lanes.gt8(lane_separation, lanes.splat8(best_edge))) {
+                    lanes.store8(s, LANE_SEP as long, lane_separation)
+                    lanes.store8(s, LANE_NX as long, nx)
+                    lanes.store8(s, LANE_NY as long, ny)
+                    lanes.store8(s, LANE_NZ as long, nz)
+                    // In lane order, so a tie keeps the first edge and an early
+                    // return takes the first improving lane past the distance.
+                    lane = 0
+                    while lane < 8 {
+                        sl = f[LANE_SEP + lane]
+                        if sl > best_edge {
+                            best_edge = sl
+                            res.edge = SatAxis { normal: math.vec3(f[LANE_NX + lane] as float, f[LANE_NY + lane] as float, f[LANE_NZ + lane] as float),
+                                                 separation: sl as float, index_a: lists[EDGES_A + i + lane], index_b: e }
+                            if sl > spec && early_return {
+                                res.separated = SAT_EDGE_PAIR
+                                return res
+                            }
+                        }
+                        lane = lane + 1
+                    }
+                }
+            }
+            i = i + 8
+        }
+        m = m + 1
+    }
+    return res
+}

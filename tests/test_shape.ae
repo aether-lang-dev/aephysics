@@ -655,7 +655,7 @@ test_dispatch() {
         surface = 21.0
         if k == 1 { surface = 23.0 }
         point[0] = world_origin
-        out = shape.shape_cast_shape(&sh, t, proxy, world_translation, 1.0, false)
+        out = shape.cast_shape(&sh, t, proxy, world_translation, 1.0, false)
         ensure("dispatch shape cast ${k} hit", out.hit)
         small("dispatch shape cast ${k} fraction", out.fraction - (24.0 - surface - 0.5) / 8.0, 0.001)
         small("dispatch shape cast ${k} normal", out.normal.y - 1.0, 0.001)
@@ -666,7 +666,7 @@ test_dispatch() {
     while k < 5 {
         sh = shapes[k]
         point[0] = math.vec3(7.0, 21.0, 31.0)
-        out = shape.shape_cast_shape(&sh, t, proxy, math.vec3(8.0, 0.0, 0.0), 1.0, false)
+        out = shape.cast_shape(&sh, t, proxy, math.vec3(8.0, 0.0, 0.0), 1.0, false)
         ensure("dispatch shape cast ${k} hit", out.hit)
         small("dispatch shape cast ${k} fraction", out.fraction - 2.5 / 8.0, 0.01)
         small("dispatch shape cast ${k} normal", out.normal.x + 1.0, 0.001)

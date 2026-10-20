@@ -183,7 +183,7 @@ load_recording_from_file(path: string) -> *Recording {
         return null
     }
     r = create_recording()
-    dynamics.rec_raw(r, string.aether_string_raw_ptr(data), length)
+    dynamics.rec_raw(r, (string.bytes(data) as ptr), length)
     string.free(data)
     return r
 }
@@ -406,9 +406,9 @@ load_geometry(p: *Player, offset: int, byte_count: int) -> bool {
         g.byte_count = n
         g.block = block
         valid = false
-        if kind == shape.SHAPE_HULL { valid = hull.hull_bytes_valid(block as *HullData, n) && (block as *HullData).byte_count == n }
-        else if kind == shape.SHAPE_MESH { valid = mesh.mesh_bytes_valid(block as *MeshData, n) && (block as *MeshData).byte_count == n }
-        else if kind == shape.SHAPE_HEIGHT_FIELD { valid = height_field.height_field_bytes_valid(block as *HeightFieldData, n) && (block as *HeightFieldData).byte_count == n }
+        if kind == shape.SHAPE_HULL { valid = hull.bytes_valid(block as *HullData, n) && (block as *HullData).byte_count == n }
+        else if kind == shape.SHAPE_MESH { valid = mesh.bytes_valid(block as *MeshData, n) && (block as *MeshData).byte_count == n }
+        else if kind == shape.SHAPE_HEIGHT_FIELD { valid = height_field.bytes_valid(block as *HeightFieldData, n) && (block as *HeightFieldData).byte_count == n }
         else if kind == shape.SHAPE_COMPOUND { valid = compound.convert_bytes_to_compound(block, n) != null }
         if valid == false { return false }
         i = i + 1

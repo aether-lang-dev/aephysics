@@ -558,7 +558,7 @@ test_many_mesh_materials() {
     ensure("six materials in the table", c.material_count == 6)
     child = compound.get_compound_child(c, 0)
     ensure("the child carries all six", child.material_count == 6)
-    triangle_materials = mesh.mesh_material_indices(md)
+    triangle_materials = mesh.material_indices(md)
     seen_block = calloc(6, 4)
     seen = seen_block as int[]
     all_match = true
@@ -806,7 +806,7 @@ test_through_shape() {
     ensure("compound ray sphere material", compound.get_compound_material(c, out.material_index).user_material_id == (6 as long))
     // A shape cast of a small sphere down onto the hull.
     point_block = calloc(1, sizeof(Vec3))
-    out = shape.shape_cast_shape(&sh, t, point_proxy(point_block, math.vec3(10.0, 30.0, 30.0), 0.5), math.vec3(0.0, 0.0 - 8.0, 0.0), 1.0, false)
+    out = shape.cast_shape(&sh, t, point_proxy(point_block, math.vec3(10.0, 30.0, 30.0), 0.5), math.vec3(0.0, 0.0 - 8.0, 0.0), 1.0, false)
     ensure("compound shape cast hit", out.hit && out.child_index == 0)
     small("compound shape cast fraction", out.fraction - 3.5 / 8.0, 0.001)
     small("compound shape cast normal", out.normal.y - 1.0, 0.001)
@@ -1133,7 +1133,7 @@ test_serialize_big_hulls() {
         return
     }
     ensure("big hulls: past 128 half-edges (${cylinder.edge_count}, ${complex.edge_count})", cylinder.edge_count > 128 && complex.edge_count > 128)
-    ensure("big hulls: each valid as bytes", hull.hull_bytes_valid(cylinder, cylinder.byte_count) && hull.hull_bytes_valid(complex, complex.byte_count))
+    ensure("big hulls: each valid as bytes", hull.bytes_valid(cylinder, cylinder.byte_count) && hull.bytes_valid(complex, complex.byte_count))
     mat = material.default_surface_material()
     hulls_block = calloc(2, sizeof(CompoundHullDef))
     defs = hulls_block as CompoundHullDef[]
@@ -1176,7 +1176,7 @@ corrupt_refused(good: ptr, byte_count: int, what: int) -> bool {
     else if what == 4 {
         instances = (copy + c.hull_offset) as HullInstance[]
         h = (copy + instances[0].hull_offset) as *HullData
-        edges = hull.hull_edges(h)
+        edges = hull.edges(h)
         edges[3].twin = h.edge_count + 5
     }
     else if what == 5 {

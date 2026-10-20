@@ -267,9 +267,35 @@ main() {
     version = physics_world.get_version()
     ensure("version: the reference's 0.2.0", version.major == 0 && version.minor == 2 && version.revision == 0)
     ensure("precision: world positions are double", physics_world.is_double_precision())
-    ensure("avx2: the CPU's", physics_world.is_avx2_available() == native.has_avx2())
-    ensure("hash: the reference's b3Hash of 13 bytes", basics.djb2_hash(basics.HASH_INIT as long, string.aether_string_raw_ptr("hello physics"), 13) == (4027293447 as long))
-    ensure("hash: of 16 bytes", basics.djb2_hash(basics.HASH_INIT as long, string.aether_string_raw_ptr("0123456789abcdef"), 16) == (1204685188 as long))
+    // The lane width (b3SetSIMDWidth, b3World_EnableSSE2Fallback): what the
+    // CPU runs by default, 4 or 8 when asked (8 only with AVX2), another
+    // number ignored, and a world keeps the width it was created with.
+    avx2 = physics_world.is_avx2_available()
+    native_width = 4
+    if avx2 { native_width = 8 }
+    ensure("simd width: the CPU's by default", basics.get_simd_width() == native_width)
+    basics.set_simd_width(4)
+    ensure("simd width: 4 when asked", basics.get_simd_width() == 4)
+    wdef4 = dynamics.default_world_def()
+    narrow_id = dynamics.create_world(&wdef4)
+    basics.set_simd_width(8)
+    ensure("simd width: 8 when asked, with AVX2 only", basics.get_simd_width() == native_width)
+    basics.set_simd_width(5)
+    ensure("simd width: another number leaves it", basics.get_simd_width() == native_width)
+    basics.set_simd_width(0)
+    ensure("simd width: 0 is the CPU's", basics.get_simd_width() == native_width)
+    wdef8 = dynamics.default_world_def()
+    wide_id = dynamics.create_world(&wdef8)
+    ensure("simd width: a world keeps the width it was made with", dynamics.get_world(narrow_id.index1 - 1).simd_width == 4)
+    ensure("simd width: a new world takes the CPU's", dynamics.get_world(wide_id.index1 - 1).simd_width == native_width)
+    physics_world.enable_sse2_fallback(wide_id, true)
+    ensure("sse2 fallback: on, the world runs 4", dynamics.get_world(wide_id.index1 - 1).simd_width == 4)
+    physics_world.enable_sse2_fallback(wide_id, false)
+    ensure("sse2 fallback: off, the CPU's again", dynamics.get_world(wide_id.index1 - 1).simd_width == native_width)
+    dynamics.destroy_world(wide_id)
+    dynamics.destroy_world(narrow_id)
+    ensure("hash: the reference's b3Hash of 13 bytes", basics.djb2_hash(basics.HASH_INIT as long, (string.bytes("hello physics") as ptr), 13) == (4027293447 as long))
+    ensure("hash: of 16 bytes", basics.djb2_hash(basics.HASH_INIT as long, (string.bytes("0123456789abcdef") as ptr), 16) == (1204685188 as long))
     ensure("hash: of none", basics.djb2_hash(basics.HASH_INIT as long, null, 0) == (5381 as long))
 
     println("host api: ${checks} checks")

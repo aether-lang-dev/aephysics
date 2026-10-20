@@ -434,8 +434,8 @@ test_sets_and_shapes() {
     ensure("static shape in the static tree", broad_phase.proxy_type(static_shape.proxy_key) == broad_phase.BODY_STATIC)
     awake_shape = dynamics.get_shape_full_id(w, s2)
     ensure("dynamic shape in the dynamic tree", broad_phase.proxy_type(awake_shape.proxy_key) == broad_phase.BODY_DYNAMIC)
-    ensure("dynamic tree holds three", dynamic_tree.tree_get_proxy_count(broad_phase.broad_phase_tree(&w.broad_phase, broad_phase.BODY_DYNAMIC)) == 3)
-    ensure("kinematic tree holds one", dynamic_tree.tree_get_proxy_count(broad_phase.broad_phase_tree(&w.broad_phase, broad_phase.BODY_KINEMATIC)) == 1)
+    ensure("dynamic tree holds three", dynamic_tree.tree_get_proxy_count(broad_phase.tree(&w.broad_phase, broad_phase.BODY_DYNAMIC)) == 3)
+    ensure("kinematic tree holds one", dynamic_tree.tree_get_proxy_count(broad_phase.tree(&w.broad_phase, broad_phase.BODY_KINEMATIC)) == 1)
     // The awake body's mass came from both shapes (water density by default).
     small("awake body mass", dynamics.body_get_mass(awake_id) - 1000.0 * (1.0 + (4.0 / 3.0) * math.PI * 0.015625), 0.001)
     ensure("shape bounds hold the sphere", dynamics.shape_get_aabb(s2).upper.x > 1.24 && dynamics.shape_get_aabb(s2).lower.x < 0.76)
@@ -510,7 +510,7 @@ test_sets_and_shapes() {
     ensure("valid after the disabled", valid(world_id))
     dynamics.destroy_body(awake_id)
     ensure("valid after the awake", valid(world_id))
-    ensure("proxies gone with the bodies", dynamic_tree.tree_get_proxy_count(broad_phase.broad_phase_tree(&w.broad_phase, broad_phase.BODY_DYNAMIC)) == 1)
+    ensure("proxies gone with the bodies", dynamic_tree.tree_get_proxy_count(broad_phase.tree(&w.broad_phase, broad_phase.BODY_DYNAMIC)) == 1)
     dynamics.destroy_body(static_id)
     dynamics.destroy_body(asleep_id)
     ensure("no bodies, no islands", dynamics.world_body_count(w) == 0 && dynamics.world_island_count(w) == 0 && dynamics.world_shape_count(w) == 0)
@@ -1213,7 +1213,7 @@ test_shape_filter() {
     ensure("filter: no pair under the new filter (${dynamics.world_contact_count(w)})", dynamics.world_contact_count(w) == 1)
     g_tree_hits = 0
     box = AABB { lower: math.vec3(0.0 - 5.0, 0.0 - 5.0, 0.0 - 5.0), upper: math.vec3(5.0, 5.0, 5.0) }
-    dynamic_tree.tree_query(broad_phase.broad_phase_tree(&w.broad_phase, dynamics.BODY_DYNAMIC), box, 2 as long, false, count_tree_hit, null)
+    dynamic_tree.tree_query(broad_phase.tree(&w.broad_phase, dynamics.BODY_DYNAMIC), box, 2 as long, false, count_tree_hit, null)
     ensure("filter: the tree queries it under its new category (${g_tree_hits})", g_tree_hits == 1)
     ensure("filter: valid", all_valid(world_id))
     dynamics.shape_set_filter(shapes[0], old)

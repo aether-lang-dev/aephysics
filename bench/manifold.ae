@@ -30,7 +30,7 @@ sum_separations(m: *LocalManifold) -> float {
     s = 0.0
     k = 0
     while k < m.point_count {
-        s = s + manifold.manifold_point(m, k).separation
+        s = s + manifold.point(m, k).separation
         k = k + 1
     }
     return s

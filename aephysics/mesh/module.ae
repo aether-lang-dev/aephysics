@@ -1663,7 +1663,7 @@ collide_mover_and_hull(planes: PlaneResult[], h: *HullData, mover: Capsule) -> i
     segment = local_points() as Vec3[]
     segment[0] = mover.center1
     segment[1] = mover.center2
-    input = DistanceInput { proxy_a: hull.hull_proxy(h), proxy_b: distance.shape_proxy(local_points(), 2, mover.radius),
+    input = DistanceInput { proxy_a: hull.proxy(h), proxy_b: distance.shape_proxy(local_points(), 2, mover.radius),
                             transform: math.transform_identity(), use_radii: false }
     cache = distance.empty_cache()
     output = distance.shape_distance(&input, &cache, null, 0)

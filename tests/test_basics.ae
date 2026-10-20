@@ -59,8 +59,8 @@ name_cache_unit() {
     ensure("names: the same name, the same id, one entry", basics.name_cache_add(&c, "crate") == crate && basics.name_cache_count(&c) == 2)
     // The id is the reference's b3Hash32 of the bytes (FNV-1a, Murmur3's
     // finish), its values from the reference's own function compiled in C.
-    ensure("names: the reference's hash of crate", basics.name_hash32(string.aether_string_raw_ptr("crate"), 5) == (3832558763 as long) && crate == 0 - 462408533)
-    ensure("names: the reference's hash of barrel", basics.name_hash32(string.aether_string_raw_ptr("barrel"), 6) == (2907559280 as long) && barrel == 0 - 1387408016)
+    ensure("names: the reference's hash of crate", basics.name_hash32((string.bytes("crate") as ptr), 5) == (3832558763 as long) && crate == 0 - 462408533)
+    ensure("names: the reference's hash of barrel", basics.name_hash32((string.bytes("barrel") as ptr), 6) == (2907559280 as long) && barrel == 0 - 1387408016)
     long_block = calloc(4096, 1)
     long_bytes = long_block as byte[]
     i = 0
@@ -76,7 +76,7 @@ name_cache_unit() {
     // Another name on a taken id: loaded under crate's id first, "crate"
     // itself then probes past it.
     d = basics.name_cache_create()
-    other = string.aether_string_raw_ptr("other")
+    other = (string.bytes("other") as ptr)
     ensure("names: loaded with its id", basics.name_cache_load(&d, crate, other, 5))
     moved = basics.name_cache_add(&d, "crate")
     ensure("names: a collision takes the next id", moved == crate + 1 && string.equals(basics.name_cache_text(&d, crate), "other") == 1 && string.equals(basics.name_cache_text(&d, moved), "crate") == 1)
@@ -84,7 +84,7 @@ name_cache_unit() {
     ensure("names: a taken id refused", basics.name_cache_load(&d, crate, other, 5) == false)
     ensure("names: the null id refused", basics.name_cache_load(&d, basics.NULL_NAME, other, 5) == false)
     ensure("names: an empty name refused", basics.name_cache_load(&d, 77, other, 0) == false)
-    ensure("names: a zero inside refused", basics.name_cache_load(&d, 78, string.aether_string_raw_ptr("crate"), 6) == false)
+    ensure("names: a zero inside refused", basics.name_cache_load(&d, 78, (string.bytes("crate") as ptr), 6) == false)
     basics.name_cache_destroy(&d)
     basics.name_cache_destroy(&c)
     ensure("names: nothing left (${basics.alloc_count() - before} blocks, ${basics.bytes_in_use() - before_bytes} bytes)", basics.alloc_count() == before && basics.bytes_in_use() == before_bytes)

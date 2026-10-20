@@ -147,7 +147,7 @@ main() {
             ws = dynamics.get_shape_full_id(w, shapes[j])
             bt = dynamics.get_body_transform(w, ws.body_id)
             rel = Transform { p: math.sub(bt.p, origin), q: bt.q }
-            out = shape.shape_cast_shape(&ws.geometry, rel, proxy, translation, 1.0, false)
+            out = shape.cast_shape(&ws.geometry, rel, proxy, translation, 1.0, false)
             if out.hit && out.fraction > 0.0 && out.fraction < best { best = out.fraction }
             j = j + 1
         }
