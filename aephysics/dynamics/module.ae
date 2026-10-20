@@ -1908,7 +1908,7 @@ sleep_body_sim_index(encoded: int) -> int {
 
 // A contact's body sim from its encoding, through the body when the body
 // is neither awake nor static (b3ResolveContactBodySim).
-resolve_contact_body_sim(w: *World, awake_sims: ptr, static_sims: ptr, encoded: int, body_id: int) -> *BodySim {
+resolve_contact_body_sim(w: *World, awake_sims: @into ptr, static_sims: @into ptr, encoded: int, body_id: int) -> *BodySim {
     if encoded >= 0 { return (awake_sims + encoded * sizeof(BodySim)) as *BodySim }
     if encoded < NULL_INDEX { return (static_sims + (0 - encoded - 2) * sizeof(BodySim)) as *BodySim }
     return get_body_sim(w, body_at(w, body_id))

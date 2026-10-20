@@ -226,7 +226,7 @@ struct WideConstraint {
     point3: WideConstraintPoint
 }
 
-wide_constraint_at(base: ptr, index: int) -> *WideConstraint { return (base + index * sizeof(WideConstraint)) as *WideConstraint }
+wide_constraint_at(base: @into ptr, index: int) -> *WideConstraint { return (base + index * sizeof(WideConstraint)) as *WideConstraint }
 wide_point_at(c: *WideConstraint, index: int) -> *WideConstraintPoint {
     return ((&c.point0) as ptr + index * sizeof(WideConstraintPoint)) as *WideConstraintPoint
 }
@@ -261,7 +261,7 @@ struct BodyStateW {
     dq: QuatW
 }
 
-state_or_identity(states: ptr, index1: int) -> *BodyState {
+state_or_identity(states: @into ptr, index1: int) -> *BodyState {
     if index1 == 0 { return contact_solver.dummy_state() }
     return (states + (index1 - 1) * sizeof(BodyState)) as *BodyState
 }

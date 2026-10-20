@@ -120,4 +120,4 @@ semaphore_signal(s: ptr, count: int) { aephysics_semaphore_signal(s, count) }
 // MAX_WORKERS blocks of `bytes`: what the reference keeps on the stack
 // of each thread, kept here as one block per worker since Aether has
 // neither stack arrays nor thread-local variables.
-scratch(blocks: ptr, bytes: int) -> ptr { return blocks + aephysics_worker_index() * bytes }
+scratch(blocks: @into ptr, bytes: int) -> ptr { return blocks + aephysics_worker_index() * bytes }

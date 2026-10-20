@@ -7,13 +7,14 @@ on:
       - main
   pull_request:
 
-# Pin: 0.835.0, the latest release: its lane moves (aether#2550), bit
-# casts and reductions (#2603) and `@target("avx2") import` (#2607) are
-# what the wide gather, the wide separating axis test and the run-time
-# width are written with. A reproducible bootstrap version: the floor
-# this code needs, verified by every job below.
+# Pin: 0.836.0, the latest release. The accessors that hand back a
+# pointer into their argument declare it `@into` (aether#2990), which
+# 0.836.0 checks; the lane moves (aether#2550), bit casts and reductions
+# (#2603) and `@target("avx2") import` (#2607) are 0.835.0's. A
+# reproducible bootstrap version: the floor this code needs, verified by
+# every job below.
 env:
-  AE_PIN: 0.835.0
+  AE_PIN: 0.836.0
   AEB_REF: v0.328
 
 jobs:
