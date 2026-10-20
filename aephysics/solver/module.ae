@@ -149,8 +149,12 @@ integrate_velocities_range(ctx: *StepContext, start: int, end: int) {
         state = state_at(ctx.states, i)
         v = math.widen3(state.v)
         wv = math.widen3(state.w)
-        linear_damping = 1.0 / (1.0 + h * sim.linear_damping)
-        angular_damping = 1.0 / (1.0 + h * sim.angular_damping)
+        // 1 / (1 + h c) is 1 exactly when c is 0 (or -0), as most bodies
+        // have it: the divide is skipped then, with the same bits.
+        linear_damping = 1.0
+        if sim.linear_damping != 0.0 { linear_damping = 1.0 / (1.0 + h * sim.linear_damping) }
+        angular_damping = 1.0
+        if sim.angular_damping != 0.0 { angular_damping = 1.0 / (1.0 + h * sim.angular_damping) }
         gravity_scale = 0.0
         if sim.inv_mass > 0.0 { gravity_scale = sim.gravity_scale }
         linear_delta = math.blend2(h * sim.inv_mass, math.widen3(sim.force), h * gravity_scale, gravity)
@@ -159,15 +163,42 @@ integrate_velocities_range(ctx: *StepContext, start: int, end: int) {
         wv = math.mul_add(angular_delta, angular_damping, wv)
         // Gyroscopic: I (w2 - w1) + h w2 x (I w2) = 0, solved for w2 in the body's frame.
         q = math.mul_quat(math.widen_quat(state.dq), sim.transform.q)
-        inertia = math.invert_matrix(math.widen_mat3(sim.inv_inertia_local))
         omega1 = math.inv_rotate_vector(q, wv)
         omega2 = omega1
-        i00 = inertia.cx.x
-        i01 = inertia.cy.x
-        i02 = inertia.cz.x
-        i11 = inertia.cy.y
-        i12 = inertia.cz.y
-        i22 = inertia.cz.z
+        // The local inertia does not change over a step: inverted on the
+        // first sub-step and kept for the rest, the same doubles (Box3D
+        // inverts it every sub-step, its own "todo wasteful computation").
+        i00 = 0.0
+        i01 = 0.0
+        i02 = 0.0
+        i11 = 0.0
+        i12 = 0.0
+        i22 = 0.0
+        kept = ctx.body_inertias as float[]
+        if ctx.body_inertias != null && ctx.sub_step_index > 0 {
+            i00 = kept[i * 6]
+            i01 = kept[i * 6 + 1]
+            i02 = kept[i * 6 + 2]
+            i11 = kept[i * 6 + 3]
+            i12 = kept[i * 6 + 4]
+            i22 = kept[i * 6 + 5]
+        } else {
+            inertia = math.invert_matrix(math.widen_mat3(sim.inv_inertia_local))
+            i00 = inertia.cx.x
+            i01 = inertia.cy.x
+            i02 = inertia.cz.x
+            i11 = inertia.cy.y
+            i12 = inertia.cz.y
+            i22 = inertia.cz.z
+            if ctx.body_inertias != null {
+                kept[i * 6] = i00
+                kept[i * 6 + 1] = i01
+                kept[i * 6 + 2] = i02
+                kept[i * 6 + 3] = i11
+                kept[i * 6 + 4] = i12
+                kept[i * 6 + 5] = i22
+            }
+        }
         iteration = 0
         while iteration < GYROSCOPIC_ITERATIONS {
             w1 = omega2.x
@@ -1012,6 +1043,7 @@ orchestrate(sc: *SolverContext) {
 
     sub = 0
     while sub < ctx.sub_step_count {
+        ctx.sub_step_index = sub   // before the stage starts the workers
         // The stage index restarts each sub-step; the sync indices keep growing.
         iteration_stage = stage_index
         execute_main_stage(stage_at(stages, iteration_stage), sc, sync_bits(body_sync, iteration_stage))
@@ -1110,6 +1142,8 @@ solve_step(w: *World, ctx: *StepContext) {
     stack = &w.stack
     ctx.bullet_body_count = 0
     ctx.bullet_bodies = basics.stack_alloc(stack, awake_body_count * 4)
+    ctx.body_inertias = basics.stack_alloc(stack, awake_body_count * 6 * 8)
+    ctx.sub_step_index = 0
     ctx.sims = awake.body_sims.data
     ctx.states = awake.body_states.data
     resize_move_events(w, awake_body_count)
@@ -1323,6 +1357,8 @@ solve_step(w: *World, ctx: *StepContext) {
     basics.stack_free(stack, manifold_block)
     basics.stack_free(stack, contact_block)
     basics.stack_free(stack, wide_block)
+    basics.stack_free(stack, ctx.body_inertias)
+    ctx.body_inertias = null
     c = 0
     while c < dynamics.GRAPH_COLOR_COUNT {
         color = dynamics.graph_color(w, c)

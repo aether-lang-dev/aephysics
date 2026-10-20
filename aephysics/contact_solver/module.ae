@@ -62,6 +62,8 @@ struct StepContext {
     active_color_count: int
     enable_warm_starting: bool
     any_restitution: int           // set by a prepare that met a contact with restitution
+    sub_step_index: int            // the sub-step the stages are running, 0 first
+    body_inertias: ptr             // float[6] per awake body: its local inertia, kept from sub-step 0; null to compute it each time
 }
 
 default_step_context(w: *World) -> StepContext {
@@ -70,7 +72,7 @@ default_step_context(w: *World) -> StepContext {
                          restitution_threshold: w.restitution_threshold, max_linear_velocity: w.max_linear_speed, world: w,
                          states: null, sims: null, enlarged_shapes: null, enlarged_shape_count: 0, bullet_bodies: null, bullet_body_count: 0,
                          awake_contact_indices: null, awake_contact_count: 0, active_color_count: 0, enable_warm_starting: w.enable_warm_starting,
-                         any_restitution: 0 }
+                         any_restitution: 0, sub_step_index: 0, body_inertias: null }
 }
 
 // One manifold point's constraint: the anchors relative to the centres
