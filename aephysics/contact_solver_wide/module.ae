@@ -265,49 +265,85 @@ state_or_identity(states: ptr, index1: int) -> *BodyState {
     return (states + (index1 - 1) * sizeof(BodyState)) as *BodyState
 }
 
-gather_bodies(states: ptr, indices: *IntW) -> BodyStateW {
-    s0 = state_or_identity(states, indices.l0)
-    s1 = state_or_identity(states, indices.l1)
-    s2 = state_or_identity(states, indices.l2)
-    s3 = state_or_identity(states, indices.l3)
-    s4 = state_or_identity(states, indices.l4)
-    s5 = state_or_identity(states, indices.l5)
-    s6 = state_or_identity(states, indices.l6)
-    s7 = state_or_identity(states, indices.l7)
-    v = Vec3W { x: lanes.f32x8(s0.v.x, s1.v.x, s2.v.x, s3.v.x, s4.v.x, s5.v.x, s6.v.x, s7.v.x),
-          y: lanes.f32x8(s0.v.y, s1.v.y, s2.v.y, s3.v.y, s4.v.y, s5.v.y, s6.v.y, s7.v.y),
-          z: lanes.f32x8(s0.v.z, s1.v.z, s2.v.z, s3.v.z, s4.v.z, s5.v.z, s6.v.z, s7.v.z) }
-    w = Vec3W { x: lanes.f32x8(s0.w.x, s1.w.x, s2.w.x, s3.w.x, s4.w.x, s5.w.x, s6.w.x, s7.w.x),
-          y: lanes.f32x8(s0.w.y, s1.w.y, s2.w.y, s3.w.y, s4.w.y, s5.w.y, s6.w.y, s7.w.y),
-          z: lanes.f32x8(s0.w.z, s1.w.z, s2.w.z, s3.w.z, s4.w.z, s5.w.z, s6.w.z, s7.w.z) }
-    dp = Vec3W { x: lanes.f32x8(s0.dp.x, s1.dp.x, s2.dp.x, s3.dp.x, s4.dp.x, s5.dp.x, s6.dp.x, s7.dp.x),
-          y: lanes.f32x8(s0.dp.y, s1.dp.y, s2.dp.y, s3.dp.y, s4.dp.y, s5.dp.y, s6.dp.y, s7.dp.y),
-          z: lanes.f32x8(s0.dp.z, s1.dp.z, s2.dp.z, s3.dp.z, s4.dp.z, s5.dp.z, s6.dp.z, s7.dp.z) }
-    dqv = Vec3W { x: lanes.f32x8(s0.dq.x, s1.dq.x, s2.dq.x, s3.dq.x, s4.dq.x, s5.dq.x, s6.dq.x, s7.dq.x),
-          y: lanes.f32x8(s0.dq.y, s1.dq.y, s2.dq.y, s3.dq.y, s4.dq.y, s5.dq.y, s6.dq.y, s7.dq.y),
-          z: lanes.f32x8(s0.dq.z, s1.dq.z, s2.dq.z, s3.dq.z, s4.dq.z, s5.dq.z, s6.dq.z, s7.dq.z) }
-    dqs = lanes.f32x8(s0.dq.w, s1.dq.w, s2.dq.w, s3.dq.w, s4.dq.w, s5.dq.w, s6.dq.w, s7.dq.w)
-    return BodyStateW { v: v, w: w, dp: dp, dq: QuatW { v: dqv, s: dqs } }
+// Eight rows of eight lanes, transposed: row k of the result is lane k of
+// every input (b3TransposeW8). 24 register moves; no lane is read or
+// written on its own.
+struct Rows8 {
+    r0: f32x8
+    r1: f32x8
+    r2: f32x8
+    r3: f32x8
+    r4: f32x8
+    r5: f32x8
+    r6: f32x8
+    r7: f32x8
 }
 
-// The velocities back to the dynamic bodies of the lanes.
-scatter_lane(states: ptr, index1: int, body: *BodyStateW, l: int) {
+transpose8(a0: f32x8, a1: f32x8, a2: f32x8, a3: f32x8, a4: f32x8, a5: f32x8, a6: f32x8, a7: f32x8) -> Rows8 {
+    t0 = lanes.unpacklo8(a0, a1)
+    t1 = lanes.unpackhi8(a0, a1)
+    t2 = lanes.unpacklo8(a2, a3)
+    t3 = lanes.unpackhi8(a2, a3)
+    t4 = lanes.unpacklo8(a4, a5)
+    t5 = lanes.unpackhi8(a4, a5)
+    t6 = lanes.unpacklo8(a6, a7)
+    t7 = lanes.unpackhi8(a6, a7)
+    u0 = lanes.pairs_lo8(t0, t2)
+    u1 = lanes.pairs_hi8(t0, t2)
+    u2 = lanes.pairs_lo8(t1, t3)
+    u3 = lanes.pairs_hi8(t1, t3)
+    u4 = lanes.pairs_lo8(t4, t6)
+    u5 = lanes.pairs_hi8(t4, t6)
+    u6 = lanes.pairs_lo8(t5, t7)
+    u7 = lanes.pairs_hi8(t5, t7)
+    return Rows8 { r0: lanes.halves_lo8(u0, u4), r1: lanes.halves_lo8(u1, u5), r2: lanes.halves_lo8(u2, u6), r3: lanes.halves_lo8(u3, u7),
+                   r4: lanes.halves_hi8(u0, u4), r5: lanes.halves_hi8(u1, u5), r6: lanes.halves_hi8(u2, u6), r7: lanes.halves_hi8(u3, u7) }
+}
+
+// Eight bodies' states in lanes, as Box3D's b3GatherBodies does it: a body
+// state is two rows of eight floats, [v, pad, w, pad] and [dp, flags, dq],
+// so each body is two loads and the lanes come out of two transposes. A
+// static body or a spare lane reads the identity state.
+gather_bodies(states: ptr, indices: *IntW) -> BodyStateW {
+    p0 = state_or_identity(states, indices.l0) as ptr
+    p1 = state_or_identity(states, indices.l1) as ptr
+    p2 = state_or_identity(states, indices.l2) as ptr
+    p3 = state_or_identity(states, indices.l3) as ptr
+    p4 = state_or_identity(states, indices.l4) as ptr
+    p5 = state_or_identity(states, indices.l5) as ptr
+    p6 = state_or_identity(states, indices.l6) as ptr
+    p7 = state_or_identity(states, indices.l7) as ptr
+    a = transpose8(lanes.load8(p0, 0), lanes.load8(p1, 0), lanes.load8(p2, 0), lanes.load8(p3, 0),
+                   lanes.load8(p4, 0), lanes.load8(p5, 0), lanes.load8(p6, 0), lanes.load8(p7, 0))
+    b = transpose8(lanes.load8(p0, 8), lanes.load8(p1, 8), lanes.load8(p2, 8), lanes.load8(p3, 8),
+                   lanes.load8(p4, 8), lanes.load8(p5, 8), lanes.load8(p6, 8), lanes.load8(p7, 8))
+    return BodyStateW { v: Vec3W { x: a.r0, y: a.r1, z: a.r2 }, w: Vec3W { x: a.r4, y: a.r5, z: a.r6 },
+                        dp: Vec3W { x: b.r0, y: b.r1, z: b.r2 }, dq: QuatW { v: Vec3W { x: b.r4, y: b.r5, z: b.r6 }, s: b.r7 } }
+}
+
+// A lane's velocities back to its body's first row, [v, 0, w, 0], when the
+// body is dynamic (b3StoreBodyVelocity). The pads are written 0; nothing
+// reads them.
+store_velocity(states: ptr, index1: int, row: f32x8) {
     if index1 == 0 { return }
     state = (states + (index1 - 1) * sizeof(BodyState)) as *BodyState
     if (state.flags & dynamics.DYNAMIC_FLAG) == 0 { return }
-    state.v = Vec3f { x: lanes.lane8(body.v.x, l as long), y: lanes.lane8(body.v.y, l as long), z: lanes.lane8(body.v.z, l as long) }
-    state.w = Vec3f { x: lanes.lane8(body.w.x, l as long), y: lanes.lane8(body.w.y, l as long), z: lanes.lane8(body.w.z, l as long) }
+    lanes.store8(state as ptr, 0, row)
 }
 
+// The velocities back to the dynamic bodies of the lanes: one transpose
+// turns the lanes into the eight bodies' rows (b3ScatterBodies).
 scatter_bodies(states: ptr, indices: *IntW, body: *BodyStateW) {
-    scatter_lane(states, indices.l0, body, 0)
-    scatter_lane(states, indices.l1, body, 1)
-    scatter_lane(states, indices.l2, body, 2)
-    scatter_lane(states, indices.l3, body, 3)
-    scatter_lane(states, indices.l4, body, 4)
-    scatter_lane(states, indices.l5, body, 5)
-    scatter_lane(states, indices.l6, body, 6)
-    scatter_lane(states, indices.l7, body, 7)
+    zero = zero_w()
+    rows = transpose8(body.v.x, body.v.y, body.v.z, zero, body.w.x, body.w.y, body.w.z, zero)
+    store_velocity(states, indices.l0, rows.r0)
+    store_velocity(states, indices.l1, rows.r1)
+    store_velocity(states, indices.l2, rows.r2)
+    store_velocity(states, indices.l3, rows.r3)
+    store_velocity(states, indices.l4, rows.r4)
+    store_velocity(states, indices.l5, rows.r5)
+    store_velocity(states, indices.l6, rows.r6)
+    store_velocity(states, indices.l7, rows.r7)
 }
 
 // --- the stages ----------------------------------------------------------------------------------------------
