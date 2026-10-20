@@ -130,8 +130,8 @@ set_wide_contacts(enabled: bool) { g_wide_contacts = enabled }
 wide_contacts_enabled() -> bool { return g_wide_contacts }
 const MAX_CONTINUOUS_SENSOR_HITS = 8
 
-state_at(base: ptr, index: int) -> *BodyState { return (base + index * sizeof(BodyState)) as *BodyState }
-sim_at(base: ptr, index: int) -> *BodySim { return (base + index * sizeof(BodySim)) as *BodySim }
+state_at(base: @into ptr, index: int) -> *BodyState { return (base + index * sizeof(BodyState)) as *BodyState }
+sim_at(base: @into ptr, index: int) -> *BodySim { return (base + index * sizeof(BodySim)) as *BodySim }
 
 // --- the body stages -------------------------------------------------------------------------------------------
 
@@ -816,9 +816,9 @@ block_dim(item_count: int, min_size: int, max_block_count: int) -> BlockDim {
     return BlockDim { size: size, count: (item_count + size - 1) / size }
 }
 
-block_at(blocks: ptr, index: int) -> *SolverBlock { return (blocks + index * sizeof(SolverBlock)) as *SolverBlock }
-stage_at(stages: ptr, index: int) -> *SolverStage { return (stages + index * sizeof(SolverStage)) as *SolverStage }
-color_blocks_at(base: ptr, index: int) -> *ColorBlocks { return (base + index * sizeof(ColorBlocks)) as *ColorBlocks }
+block_at(blocks: @into ptr, index: int) -> *SolverBlock { return (blocks + index * sizeof(SolverBlock)) as *SolverBlock }
+stage_at(stages: @into ptr, index: int) -> *SolverStage { return (stages + index * sizeof(SolverStage)) as *SolverStage }
+color_blocks_at(base: @into ptr, index: int) -> *ColorBlocks { return (base + index * sizeof(ColorBlocks)) as *ColorBlocks }
 
 // The blocks of one item range, the last one short; claims at zero so
 // the first stage over them swaps 0 for 1.

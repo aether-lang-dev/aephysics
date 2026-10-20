@@ -703,7 +703,6 @@ player_step_frame(p: *Player) -> bool {
             stepped = true
         }
     }
-    return stepped
 }
 
 // The next frame played in two calls when it makes a body

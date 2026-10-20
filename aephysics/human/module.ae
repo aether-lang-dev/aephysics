@@ -175,7 +175,7 @@ struct BoneSpec {
 // allocator: the reference's from human_reference_shape, a rig's once
 // human_fit_shape has fitted it, and create_human_shaped builds either.
 // The caller frees it with destroy_shape.
-spec_at(shape: ptr, index: int) -> *BoneSpec { return (shape + index * sizeof(BoneSpec)) as *BoneSpec }
+spec_at(shape: @into ptr, index: int) -> *BoneSpec { return (shape + index * sizeof(BoneSpec)) as *BoneSpec }
 set_spec(shape: ptr, index: int, spec: BoneSpec) { (shape as BoneSpec[])[index] = spec }
 
 no_foot() -> Capsule { return manifold.capsule(math.vec3(0.0, 0.0, 0.0), math.vec3(0.0, 0.0, 0.0), 0.0) }
