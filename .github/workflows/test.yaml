@@ -81,12 +81,14 @@ jobs:
         uses: actions/checkout@v4
 
       # UCRT64: the release's libaether.a links the Universal CRT, and does
-      # not link against an msvcrt gcc.
+      # not link against an msvcrt gcc. diffutils for the golden trace's
+      # diff, which MSYS2's base install lacks.
       - name: Set up MSYS2
         uses: msys2/setup-msys2@v2
         with:
           msystem: UCRT64
           install: >-
+            diffutils
             unzip
             mingw-w64-ucrt-x86_64-gcc
 
