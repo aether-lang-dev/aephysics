@@ -1,0 +1,6 @@
+# LF on every checkout, Windows' included, where git turns text into CRLF
+# by default. scripts/golden_trace.sh compares the golden trace line by
+# line with what the tests print, and every line differed on the Windows
+# runner (#184); the scripts run under bash.
+tests/golden/*.txt text eol=lf
+*.sh text eol=lf
