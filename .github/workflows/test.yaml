@@ -66,9 +66,12 @@ jobs:
 
   # Windows, where ae3d and Siltreach run, and -O0, which ae3d builds its
   # suites at. Neither was built here, and two bugs reached ae3d first
-  # (#184): GCC on Win64 crashing on the AVX2 copies at -O0
-  # (aether#3023), and four workers parting at -O0 because MinGW's
-  # library sqrt rounds twice on the main thread's x87 setting.
+  # (#184): four workers parting at -O0, because MinGW's library sqrt
+  # rounds twice at the main thread's x87 precision (the engine now takes
+  # std.math's), and GCC on Win64 crashing on the AVX2 copies at -O0
+  # (aether#3023). This leg cannot see the crash: `ae build` passes
+  # -fstack-protector-strong, which keeps GCC clear of it, and a build
+  # that calls gcc itself without it (ae3d's) is where it shows.
   windows:
     name: aephysics tests (Windows x86-64)
     runs-on: windows-latest
@@ -110,9 +113,9 @@ jobs:
           export PATH="$HOME/aether/bin:$PATH"
           scripts/test.sh
 
-      # Unoptimized, every sqrt is a library call and every function holds
-      # its lanes on the stack: the scenes keep their bits over four
-      # workers, and the trace matches the golden one.
+      # Unoptimized, every maths function is a library call and every
+      # function holds its lanes on the stack: the scenes keep their bits
+      # over four workers, and the trace matches the golden one.
       - name: The determinism scenes at -O0
         env:
           AETHER_AEPHYSICS_CFLAGS: -O0
