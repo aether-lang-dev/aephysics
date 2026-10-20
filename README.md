@@ -170,7 +170,7 @@ compared bit for bit; the query spawn sleeps a step after the
 reference's with its 59 query hits, the mesh drop two; and its rolling
 mix of spheres, capsules and boxes with rolling resistance, whose trace
 folds the manifolds' impulses in, the scene of its SIMD width test, which here steps every scene at width
-4 and at the AVX2 copy's 8 in one process, bit for bit; 30 checks) and `test_large_world.ae` (a stack, a bullet and the
+4 and at the AVX2 copy's 8 in one process, bit for bit; 29 checks) and `test_large_world.ae` (a stack, a bullet and the
 origin-relative queries at x = 0 and at x = 1e7 agree, the whole
 engine being in doubles; 43 checks), `test_collision.ae` (the reference's
 test_collision.c: boxes valid and not, a ray against a box in its twelve

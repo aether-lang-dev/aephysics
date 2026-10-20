@@ -651,7 +651,10 @@ rolling_mix(workers: int) -> Outcome {
 // Box3D's SIMDWidthTest: every scene stepped by the wide stages' copy for
 // AVX2 and by the build's own copy, in one process, gives the same sleep
 // step, checksum and query results. Where the CPU has no AVX2 there is
-// one width and nothing to compare.
+// one width and nothing to compare. Some builds compile the copy as plain
+// code (GCC on Windows at -O0, aether#3023, and the AETHER_GCC_COMPAT=0
+// path): it still has to give the same bits, so the scenes are compared
+// there too (#184).
 test_simd_widths() {
     basics.set_simd_width(0)
     native_width = basics.get_simd_width()
@@ -659,7 +662,9 @@ test_simd_widths() {
         println("determinism: simd widths skipped, this CPU runs one width")
         return
     }
-    ensure("simd widths: the AVX2 copy holds eight lanes a register", contact_solver_wide8.lanes_native())
+    if contact_solver_wide8.lanes_native() == false {
+        println("determinism: simd widths: this build compiles the AVX2 copy as plain code")
+    }
     basics.set_simd_width(4)
     a4 = falling_ragdolls(1)
     b4 = wave_pile(1)
