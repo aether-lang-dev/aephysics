@@ -1,5 +1,6 @@
 // aephysics.joint_solver: each kind's accessors as test_joint.c
-// exercises them, then each kind solved by hand between a static
+// exercises them, every accessor asked of another kind or of a stale
+// id (a zero value, no crash), then each kind solved by hand between a static
 // ground and a unit cube (mass 1, inertia 1/6) with the step's numbers
 // (four sub-steps of 1/60, the constraint hertz clamped to 60): the
 // velocities a rigid joint removes and leaves, the springs' pull, the
@@ -328,6 +329,139 @@ test_accessors() {
     ensure("wheel steering torque at rest", joint_solver.wheel_joint_get_steering_torque(whid) == 0.0)
     dynamics.destroy_joint(whid, true)
     ensure("all destroyed", dynamics.world_joint_count(f.w) == 0 && dynamics.validate_joints(f.w))
+    dynamics.destroy_world(f.world_id)
+}
+
+// --- another kind's accessors, and a stale id's (#181) ------------------------------------------------------------
+
+zero_vec3(v: Vec3) -> bool { return v.x == 0.0 && v.y == 0.0 && v.z == 0.0 }
+identity_quat(q: Quat) -> bool { return q.x == 0.0 && q.y == 0.0 && q.z == 0.0 && q.w == 1.0 }
+
+// Every getter of the kinds other than the motor joint, asked of `id`.
+other_kinds_read_zero(id: JointId, what: string) {
+    ensure("${what}: distance_joint_get_length", joint_solver.distance_joint_get_length(id) == 0.0)
+    ensure("${what}: distance_joint_is_limit_enabled", joint_solver.distance_joint_is_limit_enabled(id) == false)
+    ensure("${what}: distance_joint_get_min_length", joint_solver.distance_joint_get_min_length(id) == 0.0)
+    ensure("${what}: distance_joint_get_max_length", joint_solver.distance_joint_get_max_length(id) == 0.0)
+    ensure("${what}: distance_joint_get_current_length", joint_solver.distance_joint_get_current_length(id) == 0.0)
+    ensure("${what}: distance_joint_is_spring_enabled", joint_solver.distance_joint_is_spring_enabled(id) == false)
+    ensure("${what}: distance_joint_get_lower_spring_force", joint_solver.distance_joint_get_lower_spring_force(id) == 0.0)
+    ensure("${what}: distance_joint_get_upper_spring_force", joint_solver.distance_joint_get_upper_spring_force(id) == 0.0)
+    ensure("${what}: distance_joint_get_spring_hertz", joint_solver.distance_joint_get_spring_hertz(id) == 0.0)
+    ensure("${what}: distance_joint_get_spring_damping_ratio", joint_solver.distance_joint_get_spring_damping_ratio(id) == 0.0)
+    ensure("${what}: distance_joint_is_motor_enabled", joint_solver.distance_joint_is_motor_enabled(id) == false)
+    ensure("${what}: distance_joint_get_motor_speed", joint_solver.distance_joint_get_motor_speed(id) == 0.0)
+    ensure("${what}: distance_joint_get_motor_force", joint_solver.distance_joint_get_motor_force(id) == 0.0)
+    ensure("${what}: distance_joint_get_max_motor_force", joint_solver.distance_joint_get_max_motor_force(id) == 0.0)
+    ensure("${what}: parallel_joint_get_spring_hertz", joint_solver.parallel_joint_get_spring_hertz(id) == 0.0)
+    ensure("${what}: parallel_joint_get_spring_damping_ratio", joint_solver.parallel_joint_get_spring_damping_ratio(id) == 0.0)
+    ensure("${what}: parallel_joint_get_max_torque", joint_solver.parallel_joint_get_max_torque(id) == 0.0)
+    ensure("${what}: prismatic_joint_is_spring_enabled", joint_solver.prismatic_joint_is_spring_enabled(id) == false)
+    ensure("${what}: prismatic_joint_get_spring_hertz", joint_solver.prismatic_joint_get_spring_hertz(id) == 0.0)
+    ensure("${what}: prismatic_joint_get_spring_damping_ratio", joint_solver.prismatic_joint_get_spring_damping_ratio(id) == 0.0)
+    ensure("${what}: prismatic_joint_get_target_translation", joint_solver.prismatic_joint_get_target_translation(id) == 0.0)
+    ensure("${what}: prismatic_joint_is_limit_enabled", joint_solver.prismatic_joint_is_limit_enabled(id) == false)
+    ensure("${what}: prismatic_joint_get_lower_limit", joint_solver.prismatic_joint_get_lower_limit(id) == 0.0)
+    ensure("${what}: prismatic_joint_get_upper_limit", joint_solver.prismatic_joint_get_upper_limit(id) == 0.0)
+    ensure("${what}: prismatic_joint_get_translation", joint_solver.prismatic_joint_get_translation(id) == 0.0)
+    ensure("${what}: prismatic_joint_is_motor_enabled", joint_solver.prismatic_joint_is_motor_enabled(id) == false)
+    ensure("${what}: prismatic_joint_get_motor_speed", joint_solver.prismatic_joint_get_motor_speed(id) == 0.0)
+    ensure("${what}: prismatic_joint_get_max_motor_force", joint_solver.prismatic_joint_get_max_motor_force(id) == 0.0)
+    ensure("${what}: prismatic_joint_get_motor_force", joint_solver.prismatic_joint_get_motor_force(id) == 0.0)
+    ensure("${what}: prismatic_joint_get_speed", joint_solver.prismatic_joint_get_speed(id) == 0.0)
+    ensure("${what}: revolute_joint_is_limit_enabled", joint_solver.revolute_joint_is_limit_enabled(id) == false)
+    ensure("${what}: revolute_joint_get_lower_limit", joint_solver.revolute_joint_get_lower_limit(id) == 0.0)
+    ensure("${what}: revolute_joint_get_upper_limit", joint_solver.revolute_joint_get_upper_limit(id) == 0.0)
+    ensure("${what}: revolute_joint_get_angle", joint_solver.revolute_joint_get_angle(id) == 0.0)
+    ensure("${what}: revolute_joint_is_spring_enabled", joint_solver.revolute_joint_is_spring_enabled(id) == false)
+    ensure("${what}: revolute_joint_get_target_angle", joint_solver.revolute_joint_get_target_angle(id) == 0.0)
+    ensure("${what}: revolute_joint_get_spring_hertz", joint_solver.revolute_joint_get_spring_hertz(id) == 0.0)
+    ensure("${what}: revolute_joint_get_spring_damping_ratio", joint_solver.revolute_joint_get_spring_damping_ratio(id) == 0.0)
+    ensure("${what}: revolute_joint_is_motor_enabled", joint_solver.revolute_joint_is_motor_enabled(id) == false)
+    ensure("${what}: revolute_joint_get_motor_speed", joint_solver.revolute_joint_get_motor_speed(id) == 0.0)
+    ensure("${what}: revolute_joint_get_max_motor_torque", joint_solver.revolute_joint_get_max_motor_torque(id) == 0.0)
+    ensure("${what}: revolute_joint_get_motor_torque", joint_solver.revolute_joint_get_motor_torque(id) == 0.0)
+    ensure("${what}: spherical_joint_is_cone_limit_enabled", joint_solver.spherical_joint_is_cone_limit_enabled(id) == false)
+    ensure("${what}: spherical_joint_get_cone_limit", joint_solver.spherical_joint_get_cone_limit(id) == 0.0)
+    ensure("${what}: spherical_joint_get_cone_angle", joint_solver.spherical_joint_get_cone_angle(id) == 0.0)
+    ensure("${what}: spherical_joint_get_cone_axis", zero_vec3(joint_solver.spherical_joint_get_cone_axis(id)))
+    ensure("${what}: spherical_joint_get_cone_minor_angle", joint_solver.spherical_joint_get_cone_minor_angle(id) == 0.0)
+    ensure("${what}: spherical_joint_get_cone_major_axis", zero_vec3(joint_solver.spherical_joint_get_cone_major_axis(id)))
+    ensure("${what}: spherical_joint_is_twist_limit_enabled", joint_solver.spherical_joint_is_twist_limit_enabled(id) == false)
+    ensure("${what}: spherical_joint_get_lower_twist_limit", joint_solver.spherical_joint_get_lower_twist_limit(id) == 0.0)
+    ensure("${what}: spherical_joint_get_upper_twist_limit", joint_solver.spherical_joint_get_upper_twist_limit(id) == 0.0)
+    ensure("${what}: spherical_joint_get_twist_angle", joint_solver.spherical_joint_get_twist_angle(id) == 0.0)
+    ensure("${what}: spherical_joint_is_spring_enabled", joint_solver.spherical_joint_is_spring_enabled(id) == false)
+    ensure("${what}: spherical_joint_get_target_rotation", identity_quat(joint_solver.spherical_joint_get_target_rotation(id)))
+    ensure("${what}: spherical_joint_get_spring_hertz", joint_solver.spherical_joint_get_spring_hertz(id) == 0.0)
+    ensure("${what}: spherical_joint_get_spring_damping_ratio", joint_solver.spherical_joint_get_spring_damping_ratio(id) == 0.0)
+    ensure("${what}: spherical_joint_is_motor_enabled", joint_solver.spherical_joint_is_motor_enabled(id) == false)
+    ensure("${what}: spherical_joint_get_motor_velocity", zero_vec3(joint_solver.spherical_joint_get_motor_velocity(id)))
+    ensure("${what}: spherical_joint_get_max_motor_torque", joint_solver.spherical_joint_get_max_motor_torque(id) == 0.0)
+    ensure("${what}: spherical_joint_get_motor_torque", zero_vec3(joint_solver.spherical_joint_get_motor_torque(id)))
+    ensure("${what}: weld_joint_get_linear_hertz", joint_solver.weld_joint_get_linear_hertz(id) == 0.0)
+    ensure("${what}: weld_joint_get_linear_damping_ratio", joint_solver.weld_joint_get_linear_damping_ratio(id) == 0.0)
+    ensure("${what}: weld_joint_get_angular_hertz", joint_solver.weld_joint_get_angular_hertz(id) == 0.0)
+    ensure("${what}: weld_joint_get_angular_damping_ratio", joint_solver.weld_joint_get_angular_damping_ratio(id) == 0.0)
+    ensure("${what}: wheel_joint_is_suspension_enabled", joint_solver.wheel_joint_is_suspension_enabled(id) == false)
+    ensure("${what}: wheel_joint_get_suspension_hertz", joint_solver.wheel_joint_get_suspension_hertz(id) == 0.0)
+    ensure("${what}: wheel_joint_get_suspension_damping_ratio", joint_solver.wheel_joint_get_suspension_damping_ratio(id) == 0.0)
+    ensure("${what}: wheel_joint_is_suspension_limit_enabled", joint_solver.wheel_joint_is_suspension_limit_enabled(id) == false)
+    ensure("${what}: wheel_joint_get_lower_suspension_limit", joint_solver.wheel_joint_get_lower_suspension_limit(id) == 0.0)
+    ensure("${what}: wheel_joint_get_upper_suspension_limit", joint_solver.wheel_joint_get_upper_suspension_limit(id) == 0.0)
+    ensure("${what}: wheel_joint_is_spin_motor_enabled", joint_solver.wheel_joint_is_spin_motor_enabled(id) == false)
+    ensure("${what}: wheel_joint_get_spin_motor_speed", joint_solver.wheel_joint_get_spin_motor_speed(id) == 0.0)
+    ensure("${what}: wheel_joint_get_max_spin_torque", joint_solver.wheel_joint_get_max_spin_torque(id) == 0.0)
+    ensure("${what}: wheel_joint_is_steering_enabled", joint_solver.wheel_joint_is_steering_enabled(id) == false)
+    ensure("${what}: wheel_joint_get_steering_hertz", joint_solver.wheel_joint_get_steering_hertz(id) == 0.0)
+    ensure("${what}: wheel_joint_get_steering_damping_ratio", joint_solver.wheel_joint_get_steering_damping_ratio(id) == 0.0)
+    ensure("${what}: wheel_joint_get_max_steering_torque", joint_solver.wheel_joint_get_max_steering_torque(id) == 0.0)
+    ensure("${what}: wheel_joint_is_steering_limit_enabled", joint_solver.wheel_joint_is_steering_limit_enabled(id) == false)
+    ensure("${what}: wheel_joint_get_lower_steering_limit", joint_solver.wheel_joint_get_lower_steering_limit(id) == 0.0)
+    ensure("${what}: wheel_joint_get_upper_steering_limit", joint_solver.wheel_joint_get_upper_steering_limit(id) == 0.0)
+    ensure("${what}: wheel_joint_get_target_steering_angle", joint_solver.wheel_joint_get_target_steering_angle(id) == 0.0)
+    ensure("${what}: wheel_joint_get_spin_speed", joint_solver.wheel_joint_get_spin_speed(id) == 0.0)
+    ensure("${what}: wheel_joint_get_spin_torque", joint_solver.wheel_joint_get_spin_torque(id) == 0.0)
+    ensure("${what}: wheel_joint_get_steering_angle", joint_solver.wheel_joint_get_steering_angle(id) == 0.0)
+    ensure("${what}: wheel_joint_get_steering_torque", joint_solver.wheel_joint_get_steering_torque(id) == 0.0)
+}
+
+// The motor joint's getters, asked of `id`.
+motor_reads_zero(id: JointId, what: string) {
+    ensure("${what}: motor_joint_get_linear_velocity", zero_vec3(joint_solver.motor_joint_get_linear_velocity(id)))
+    ensure("${what}: motor_joint_get_angular_velocity", zero_vec3(joint_solver.motor_joint_get_angular_velocity(id)))
+    ensure("${what}: motor_joint_get_max_velocity_torque", joint_solver.motor_joint_get_max_velocity_torque(id) == 0.0)
+    ensure("${what}: motor_joint_get_max_velocity_force", joint_solver.motor_joint_get_max_velocity_force(id) == 0.0)
+    ensure("${what}: motor_joint_get_linear_hertz", joint_solver.motor_joint_get_linear_hertz(id) == 0.0)
+    ensure("${what}: motor_joint_get_linear_damping_ratio", joint_solver.motor_joint_get_linear_damping_ratio(id) == 0.0)
+    ensure("${what}: motor_joint_get_angular_hertz", joint_solver.motor_joint_get_angular_hertz(id) == 0.0)
+    ensure("${what}: motor_joint_get_angular_damping_ratio", joint_solver.motor_joint_get_angular_damping_ratio(id) == 0.0)
+    ensure("${what}: motor_joint_get_max_spring_force", joint_solver.motor_joint_get_max_spring_force(id) == 0.0)
+    ensure("${what}: motor_joint_get_max_spring_torque", joint_solver.motor_joint_get_max_spring_torque(id) == 0.0)
+}
+
+// Box3D asserts a joint's kind in its accessors (b3GetJointSimCheckType).
+// Here an accessor of another kind, or of a stale id, is no crash: a getter
+// gives its type's zero value and a setter does nothing. ae3d asked a
+// parallel joint's maximum torque of a ragdoll's motor joint while the
+// figure got up, and the read dereferenced a null sim.
+test_wrong_kind_and_stale_ids() {
+    f = fixture()
+    mdef = dynamics.default_motor_joint_def()
+    common_frames(&f, &mdef.base)
+    mid = dynamics.create_motor_joint(f.world_id, &mdef)
+    joint_solver.motor_joint_set_max_velocity_force(mid, 500.0)
+    other_kinds_read_zero(mid, "another kind")
+    joint_solver.parallel_joint_set_max_torque(mid, 250.0)
+    joint_solver.spherical_joint_set_cone_ellipse(mid, 0.5, 0.25, math.vec3(1.0, 0.0, 0.0))
+    joint_solver.distance_joint_set_length(mid, 3.0)
+    ensure("another kind's setters leave the motor joint as it was", joint_solver.motor_joint_get_max_velocity_force(mid) == 500.0)
+    dynamics.destroy_joint(mid, true)
+    other_kinds_read_zero(mid, "a stale id")
+    motor_reads_zero(mid, "a stale id")
+    joint_solver.motor_joint_set_max_velocity_force(mid, 500.0)
+    joint_solver.spherical_joint_set_cone_ellipse(mid, 0.5, 0.25, math.vec3(1.0, 0.0, 0.0))
+    ensure("a stale id's setters create nothing", dynamics.world_joint_count(f.w) == 0 && dynamics.validate_joints(f.w))
     dynamics.destroy_world(f.world_id)
 }
 
@@ -790,6 +924,7 @@ main() {
     dynamics.reserve_scratch()
     before = basics.alloc_count()
     test_accessors()
+    test_wrong_kind_and_stale_ids()
     test_distance()
     test_revolute()
     test_weld()
