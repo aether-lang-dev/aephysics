@@ -708,7 +708,8 @@ brute_edge_separation(a: *HullData, b: *HullData, xf: Transform) -> float {
     points_b = hull.points(b)
     edges_b = hull.edges(b)
     tol = manifold.PARALLEL_EDGE_TOL * manifold.PARALLEL_EDGE_TOL
-    eps = 0.0 - 0.0001
+    // The reference's arc tolerance (e77352c), -LINEAR_SLOP squared.
+    eps = 0.0 - math.LINEAR_SLOP * math.LINEAR_SLOP
     best = 0.0 - math.MAX_FLOAT
     i = 0
     while i < a.edge_count {
@@ -995,11 +996,11 @@ main() {
     test_hull_capsule_edge_deep()
     test_sphere_hull_seam()
     test_rounded_pairs()
-    // The module's scratch stays allocated: each worker's speculative
-    // distance, the two clip polygons, the unreduced points, the edge axes
-    // the separating-axis test gathers A's edges into, its two hulls'
-    // candidate edge lists, and the support search's lanes.
-    ensure("every other counted allocation was freed (${basics.alloc_count() - before})", basics.alloc_count() == before + 7)
+    // The modules' scratch stays allocated: each worker's speculative
+    // distance, the two clip polygons, the unreduced points, the edge
+    // contact's point, and the separating axis test's arrays (of the copy the
+    // SIMD width runs; nothing here reserves the other).
+    ensure("every other counted allocation was freed (${basics.alloc_count() - before})", basics.alloc_count() == before + 6)
 
     println("manifold: ${checks} checks")
     if failures == 0 {

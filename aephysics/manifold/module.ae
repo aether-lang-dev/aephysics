@@ -27,6 +27,9 @@ import aephysics.native
 import aephysics.basics
 import aephysics.distance
 import aephysics.hull
+import aephysics.sat
+// The separating axis test a second time, compiled for AVX2 (#150, #156).
+@target("avx2") import aephysics.sat as sat8
 
 exports (
     reserve_scratch,
@@ -224,17 +227,9 @@ var g_clip2: ptr = null
 clip2() -> ptr { return native.scratch(g_clip2, CLIP_CAPACITY * sizeof(ClipVertex)) }
 var g_clip_points: ptr = null
 clip_points() -> ptr { return native.scratch(g_clip_points, MAX_CLIP_POINTS * sizeof(LocalManifoldPoint)) }
-// A's edges, gathered once before the edge-pair loop reads them a
-// hundred times (see edge_axes).
-var g_edge_axes: ptr = null
-edge_axes() -> ptr { return native.scratch(g_edge_axes, EDGE_SCRATCH_BYTES) }
-// The two hulls' candidate half-edges: A's first, B's from EDGE_LIST_B.
-var g_edge_lists: ptr = null
-edge_lists() -> ptr { return native.scratch(g_edge_lists, EDGE_LIST_BYTES) }
-// Sixteen lanes stored for a reduction: a support search's best dots and their indices.
-var g_lane_scratch: ptr = null
-lane_scratch() -> ptr { return native.scratch(g_lane_scratch, 64) }
-b_frame_scratch() -> ptr { return edge_axes() + AXIS_FIELDS * AXIS_SLOTS * 4 }
+// The edge contact's point, built apart before it may replace a face contact's.
+var g_edge_point: ptr = null
+edge_point() -> ptr { return native.scratch(g_edge_point, 2 * sizeof(LocalManifoldPoint)) }
 
 // Each worker's speculative distance: how far apart two shapes keep
 // points, SPECULATIVE_DISTANCE but while the collide pass reaches out for
@@ -268,73 +263,19 @@ scratch_ready() {
         g_clip1 = basics.alloc(native.MAX_WORKERS * (CLIP_CAPACITY * sizeof(ClipVertex)))
         g_clip2 = basics.alloc(native.MAX_WORKERS * (CLIP_CAPACITY * sizeof(ClipVertex)))
         g_clip_points = basics.alloc(native.MAX_WORKERS * (MAX_CLIP_POINTS * sizeof(LocalManifoldPoint)))
-        g_edge_axes = basics.alloc(native.MAX_WORKERS * EDGE_SCRATCH_BYTES)
-        g_edge_lists = basics.alloc(native.MAX_WORKERS * EDGE_LIST_BYTES)
-        g_lane_scratch = basics.alloc(native.MAX_WORKERS * 64)
+        g_edge_point = basics.alloc(native.MAX_WORKERS * (2 * sizeof(LocalManifoldPoint)))
     }
 }
 
 // Every scratch block of the module allocated now, on the calling
 // thread: a world's creation reserves every module's before a step can
 // reach them from several workers at once.
-reserve_scratch() { scratch_ready() }
+reserve_scratch() {
+    scratch_ready()
+    sat.reserve_scratch()
+    sat8.reserve_scratch()
+}
 
-// Hull A's edges, as the edge-pair test reads them: the edge's
-// direction, its two faces' normals, its first vertex and the tolerance
-// that rejects a near-parallel pair. The inner loop below runs over
-// every edge of A for every edge of B -- a hundred and forty-four times
-// for two boxes, and MAX_HULL_EDGES squared over four for two hulls --
-// and reading them through the half-edge structure each time (a face
-// index into the planes, an origin index into the points) is a pointer
-// chase per pair. The reference gathers the same values first; this is
-// that gather, in single precision, since a separating axis is a
-// direction and the reference finds it in floats.
-//
-// Thirteen flat arrays over one block rather than a record per edge, so
-// four edges of A are one load per field and the whole first test --
-// two dot products, two more, a maximum and four comparisons -- is four
-// edges at a time (std.lanes, Aether 0.706). Each lane computes what the
-// edge computed on its own, in the same order, so the axis a pair
-// chooses is the axis it chose before: the tests hold the traces.
-// A hull has up to MAX_HULL_EDGES full edges (2 * MAX_HULL_EDGES half-edges,
-// the builder's limit), so the table holds that many, a multiple of four.
-const AXIS_SLOTS = 128
-// A hull has at most MAX_HULL_EDGES full edges: each list holds them all.
-const EDGE_LIST_B = 128
-const EDGE_LIST_BYTES = 2 * 128 * 4
-// The pairs left that pay for the probe's second cull (B3_EDGE_PROBE_MIN_TESTS).
-const EDGE_PROBE_MIN_TESTS = 10
-// The hulls at or under this many vertices are searched one vertex at a time.
-const WIDE_SUPPORT_MIN_VERTICES = 16
-
-// How far under the best edge separation a lane's single-precision
-// separation may fall and still be measured in double: well past a float's
-// rounding at the hulls' scale (the test runs in A's frame, the hulls
-// touching), so the double alone decides which edge wins.
-const EDGE_LANE_SLACK = 0.0001
-const AXIS_FIELDS = 14
-// Where each array starts, in elements: x, y, z of the direction, of
-// both face normals and of the origin, then the tolerance.
-const AXIS_DIR_X = 0 * AXIS_SLOTS
-const AXIS_DIR_Y = 1 * AXIS_SLOTS
-const AXIS_DIR_Z = 2 * AXIS_SLOTS
-const AXIS_N0_X = 3 * AXIS_SLOTS
-const AXIS_N0_Y = 4 * AXIS_SLOTS
-const AXIS_N0_Z = 5 * AXIS_SLOTS
-const AXIS_N1_X = 6 * AXIS_SLOTS
-const AXIS_N1_Y = 7 * AXIS_SLOTS
-const AXIS_N1_Z = 8 * AXIS_SLOTS
-const AXIS_V0_X = 9 * AXIS_SLOTS
-const AXIS_V0_Y = 10 * AXIS_SLOTS
-const AXIS_V0_Z = 11 * AXIS_SLOTS
-const AXIS_TOL = 12 * AXIS_SLOTS
-const AXIS_EDGE = 13 * AXIS_SLOTS               // the candidate's half-edge index (exact in an f32)
-// The table, then room for B's face normals and vertices taken into A's frame
-// after it: hull.MAX_HULL_FACES + hull.MAX_HULL_VERTICES of them, written out
-// (a constant naming another module's is expanded where this module is
-// imported, and not every importer imports the hull).
-const B_FRAME_SLOTS = 256
-const EDGE_SCRATCH_BYTES = AXIS_FIELDS * AXIS_SLOTS * 4 + B_FRAME_SLOTS * 24
 
 // --- the incident face and clipping ----------------------------------------------------
 
@@ -943,472 +884,25 @@ collide_hull_and_capsule(m: *LocalManifold, capacity: int, hull_a: *HullData, ca
 // against A's, then the edge pairs whose Gauss-map arcs cross (Gregorius),
 // with the axis from the arc intersection. Normals point from A to B in
 // frame A. With early_return the scan stops at the first axis past the
-// speculative distance. The reference's scalar path, exactly.
+// speculative distance. Box3D's wide test (aephysics.sat), on the copy the
+// SIMD width names: compiled for AVX2 at 8 (basics.set_simd_width), the
+// build's own at 4, the same bits either way (#150, #156).
 compute_separating_axis(hull_a: *HullData, hull_b: *HullData, xf_b: Transform, early_return: bool) -> AxisQuery {
-    reach = speculative_distance()
-    r = math.make_matrix_from_quat(xf_b.q)
-    inv_r = math.transpose(r)
-    res = AxisQuery {
-        face_a: SeparatingAxis { normal: math.vec3_zero(), separation: 0.0 - math.MAX_FLOAT, index_a: NULL_INDEX, index_b: NULL_INDEX, kind: AXIS_FACE_A },
-        face_b: SeparatingAxis { normal: math.vec3_zero(), separation: 0.0 - math.MAX_FLOAT, index_a: NULL_INDEX, index_b: NULL_INDEX, kind: AXIS_FACE_B },
-        edge: SeparatingAxis { normal: math.vec3_zero(), separation: 0.0 - math.MAX_FLOAT, index_a: NULL_INDEX, index_b: NULL_INDEX, kind: AXIS_EDGE_PAIR },
-        separated_feature: AXIS_INVALID
-    }
-    planes_a = hull.planes(hull_a)
-    points_a = hull.points(hull_a)
-    planes_b = hull.planes(hull_b)
-    points_b = hull.points(hull_b)
-    edges_a = hull.edges(hull_a)
-    edges_b = hull.edges(hull_b)
-
-    // No face can separate the hulls by more than its normal's reach along
-    // the line between their centres less their inner spheres' radii
-    // (Box3D adec25b): a face whose bound is under the best separation so
-    // far -- or under the seed's, the face most aligned with that line,
-    // taken first when an early return can use it -- needs no support
-    // search. The slack keeps the best face from being skipped; a skipped
-    // face could not have won, so the result is the full scan's.
-    delta_center = math.sub(math.add(math.mul_mv(r, hull_b.center), xf_b.p), hull_a.center)
-    center_distance = math.length(delta_center)
-    radius = hull_a.inner_radius + hull_b.inner_radius
-    radius_bound = radius - (math.LINEAR_SLOP + 0.001 * (center_distance + radius))
-
-    // A's face planes against B's vertices.
-    seed_a = 0
-    max_dot = math.dot(planes_a[0].normal, delta_center)
-    i = 1
-    while i < hull_a.face_count {
-        dot_i = math.dot(planes_a[i].normal, delta_center)
-        if dot_i > max_dot {
-            max_dot = dot_i
-            seed_a = i
-        }
-        i = i + 1
-    }
-    floor_a = 0.0 - math.MAX_FLOAT
-    seed_separation = 0.0 - math.MAX_FLOAT
-    seed_vertex = 0
-    if early_return {
-        plane = planes_a[seed_a]
-        direction = math.neg(math.mul_mv(inv_r, plane.normal))
-        seed_vertex = support_index_wide(hull_b, direction)
-        seed_separation = math.dot(plane.normal, xf_b.p) - plane.offset - math.dot(direction, points_b[seed_vertex])
-        floor_a = math.min_float(seed_separation, reach)
-    }
-    i = 0
-    while i < hull_a.face_count {
-        plane = planes_a[i]
-        if math.dot(plane.normal, delta_center) - radius_bound >= math.max_float(floor_a, res.face_a.separation) {
-            vertex_index = seed_vertex
-            separation = seed_separation
-            if early_return == false || i != seed_a {
-                direction = math.neg(math.mul_mv(inv_r, plane.normal))
-                plane_separation = math.dot(plane.normal, xf_b.p) - plane.offset
-                vertex_index = support_index_wide(hull_b, direction)
-                separation = plane_separation - math.dot(direction, points_b[vertex_index])
-            }
-            if separation > res.face_a.separation {
-                res.face_a.normal = plane.normal
-                res.face_a.separation = separation
-                res.face_a.index_a = i
-                res.face_a.index_b = vertex_index
-                if separation > reach && early_return {
-                    res.separated_feature = AXIS_FACE_A
-                    return res
-                }
-            }
-        }
-        i = i + 1
-    }
-
-    // B's face planes against A's vertices, the line between the centres
-    // taken into B's frame and reversed.
-    delta_b = math.neg(math.mul_mv(inv_r, delta_center))
-    seed_b = 0
-    max_dot = math.dot(planes_b[0].normal, delta_b)
-    i = 1
-    while i < hull_b.face_count {
-        dot_i = math.dot(planes_b[i].normal, delta_b)
-        if dot_i > max_dot {
-            max_dot = dot_i
-            seed_b = i
-        }
-        i = i + 1
-    }
-    floor_b = 0.0 - math.MAX_FLOAT
-    seed_separation = 0.0 - math.MAX_FLOAT
-    seed_vertex = 0
-    if early_return {
-        plane = planes_b[seed_b]
-        direction = math.neg(math.mul_mv(r, plane.normal))
-        seed_vertex = support_index_wide(hull_a, direction)
-        seed_separation = math.dot(direction, xf_b.p) - plane.offset - math.dot(direction, points_a[seed_vertex])
-        // A's faces have set a floor of their own.
-        floor_b = math.min_float(math.max_float(seed_separation, res.face_a.separation), reach)
-    }
-    i = 0
-    while i < hull_b.face_count {
-        plane = planes_b[i]
-        if math.dot(plane.normal, delta_b) - radius_bound >= math.max_float(floor_b, res.face_b.separation) {
-            direction = math.neg(math.mul_mv(r, plane.normal))
-            vertex_index = seed_vertex
-            separation = seed_separation
-            if early_return == false || i != seed_b {
-                plane_separation = math.dot(direction, xf_b.p) - plane.offset
-                vertex_index = support_index_wide(hull_a, direction)
-                separation = plane_separation - math.dot(direction, points_a[vertex_index])
-            }
-            if separation > res.face_b.separation {
-                res.face_b.normal = direction
-                res.face_b.separation = separation
-                res.face_b.index_a = vertex_index
-                res.face_b.index_b = i
-                if separation > reach && early_return {
-                    res.separated_feature = AXIS_FACE_B
-                    return res
-                }
-            }
-        }
-        i = i + 1
-    }
-
-    // The edge pairs. Only the edges that can still beat the best face take
-    // part (Box3D's inscribed-sphere test, b3TestEdgeCandidateSorted): an
-    // edge pair's axis lies on both edges' arcs, and no axis on an edge's
-    // arc separates by more than the other hull's centre reaches along it
-    // less that hull's inner radius. The cosine between an edge's faces is
-    // the hull's own (hull_edge_cosines). Without an early return every
-    // edge is kept.
-    squared_tol = PARALLEL_EDGE_TOL * PARALLEL_EDGE_TOL
-    eps = 0.0 - 0.0001
-    max_face_separation = math.max_float(res.face_a.separation, res.face_b.separation)
-    bound_slack = radius - radius_bound
-    threshold_a = 0.0 - math.MAX_FLOAT
-    threshold_b = 0.0 - math.MAX_FLOAT
-    if early_return {
-        threshold_a = max_face_separation + hull_b.inner_radius - bound_slack
-        threshold_b = max_face_separation + hull_a.inner_radius - bound_slack
-    }
-    center_b_in_a = math.add(math.mul_mv(r, hull_b.center), xf_b.p)
-    center_a_in_b = math.mul_mv(inv_r, math.sub(hull_a.center, xf_b.p))
-    scratch_ready()
-    lists = edge_lists() as int[]
-    cosines_a = hull.edge_cosines(hull_a)
-    cosines_b = hull.edge_cosines(hull_b)
-    na = 0
-    i = 0
-    while i < hull_a.edge_count {
-        if edge_can_reach(math.plane_separation(planes_a[edges_a[i].face], center_b_in_a), math.plane_separation(planes_a[edges_a[i + 1].face], center_b_in_a),
-                          cosines_a[i >> 1] as float, threshold_a) {
-            lists[na] = i
-            na = na + 1
-        }
-        i = i + 2
-    }
-    nb = 0
-    j = 0
-    while j < hull_b.edge_count {
-        if edge_can_reach(math.plane_separation(planes_b[edges_b[j].face], center_a_in_b), math.plane_separation(planes_b[edges_b[j + 1].face], center_a_in_b),
-                          cosines_b[j >> 1] as float, threshold_b) {
-            lists[EDGE_LIST_B + nb] = j
-            nb = nb + 1
-        }
-        j = j + 2
-    }
-    // The best faces' support vertices are points of the other hull, so no
-    // edge pair's axis separates by more than such a point's plane
-    // separations over the edge's arc: with enough pairs left to pay for
-    // it, each list is culled again against them (b3FilterEdgeCandidates).
-    if early_return && nb * ((na + 3) >> 2) >= EDGE_PROBE_MIN_TESTS {
-        probe_bound = max_face_separation - (0.1 * math.LINEAR_SLOP + 0.001 * math.abs_float(center_distance + radius))
-        vertex_b = res.face_a.index_b
-        if vertex_b == NULL_INDEX { vertex_b = 0 }
-        probe_b = math.add(math.mul_mv(r, points_b[vertex_b]), xf_b.p)
-        na = filter_edge_candidates(planes_a, edges_a, cosines_a, probe_b, probe_bound, lists, 0, na)
-        vertex_a = res.face_b.index_a
-        if vertex_a == NULL_INDEX { vertex_a = 0 }
-        probe_a = math.mul_mv(inv_r, math.sub(points_a[vertex_a], xf_b.p))
-        nb = filter_edge_candidates(planes_b, edges_b, cosines_b, probe_a, probe_bound, lists, EDGE_LIST_B, nb)
-    }
-    if na == 0 || nb == 0 { return res }
-
-    // A's candidate edges, gathered once into flat single-precision rows:
-    // what the inner loop reads for every edge of B. A separating axis is a
-    // direction, and the reference finds it in floats.
-    axes = edge_axes()
-    slots = axes as f32[]
-    k = 0
-    while k < na {
-        i = lists[k]
-        twin_a = i + 1
-        av0 = points_a[edges_a[i].origin]
-        ad = math.sub(points_a[edges_a[twin_a].origin], av0)
-        dir32 = math.narrow3(ad)
-        n0_32 = math.narrow3(planes_a[edges_a[i].face].normal)
-        n1_32 = math.narrow3(planes_a[edges_a[twin_a].face].normal)
-        v0_32 = math.narrow3(av0)
-        slots[AXIS_DIR_X + k] = dir32.x
-        slots[AXIS_DIR_Y + k] = dir32.y
-        slots[AXIS_DIR_Z + k] = dir32.z
-        slots[AXIS_N0_X + k] = n0_32.x
-        slots[AXIS_N0_Y + k] = n0_32.y
-        slots[AXIS_N0_Z + k] = n0_32.z
-        slots[AXIS_N1_X + k] = n1_32.x
-        slots[AXIS_N1_Y + k] = n1_32.y
-        slots[AXIS_N1_Z + k] = n1_32.z
-        slots[AXIS_V0_X + k] = v0_32.x
-        slots[AXIS_V0_Y + k] = v0_32.y
-        slots[AXIS_V0_Z + k] = v0_32.z
-        slots[AXIS_TOL + k] = (squared_tol * math.length_squared(ad)) as f32
-        slots[AXIS_EDGE + k] = i as f32
-        k = k + 1
-    }
-    // The tail of the last eight. A zero direction answers zero to both of
-    // the first dot products, and zero is not under eps, so a lane past the
-    // count decides nothing.
-    padded = na
-    while padded % 8 != 0 {
-        slots[AXIS_DIR_X + padded] = 0.0
-        slots[AXIS_DIR_Y + padded] = 0.0
-        slots[AXIS_DIR_Z + padded] = 0.0
-        padded = padded + 1
-    }
-    f32 eps32 = eps
-    // B's face normals and vertices into A's frame, negated, once (Box3D
-    // adec25b) rather than four products for every B edge, into the room
-    // after the edge table.
-    b_in_a = b_frame_scratch() as Vec3[]
-    k = 0
-    while k < hull_b.face_count {
-        b_in_a[k] = math.neg(math.mul_mv(r, planes_b[k].normal))
-        k = k + 1
-    }
-    k = 0
-    while k < hull_b.vertex_count {
-        b_in_a[hull_b.face_count + k] = math.neg(math.add(math.mul_mv(r, points_b[k]), xf_b.p))
-        k = k + 1
-    }
-    // Every candidate of B against A's, eight of A's a pass (the reference's
-    // f32x8 loop); the lanes only choose, the axis and its separation are
-    // computed again in double for the pairs that pass.
-    eps_lane = lanes.splat8(eps32)
-    zero_lane = lanes.splat8(0.0)
-    one_lane = lanes.splat8(1.0)
-    m = 0
-    while m < nb {
-        j = lists[EDGE_LIST_B + m]
-        m = m + 1
-        twin_b = j + 1
-        c = b_in_a[edges_b[j].face]
-        d = b_in_a[edges_b[twin_b].face]
-        bv0 = b_in_a[hull_b.face_count + edges_b[j].origin]
-        bv1 = b_in_a[hull_b.face_count + edges_b[twin_b].origin]
-        dc = math.sub(bv1, bv0)
-        c32 = math.narrow3(c)
-        d32 = math.narrow3(d)
-        dc32 = math.narrow3(dc)
-        cx = lanes.splat8(c32.x)
-        cy = lanes.splat8(c32.y)
-        cz = lanes.splat8(c32.z)
-        dx = lanes.splat8(d32.x)
-        dy = lanes.splat8(d32.y)
-        dz = lanes.splat8(d32.z)
-        dcx = lanes.splat8(dc32.x)
-        dcy = lanes.splat8(dc32.y)
-        dcz = lanes.splat8(dc32.z)
-        bv0_32 = math.narrow3(bv0)
-        bvx = lanes.splat8(bv0_32.x)
-        bvy = lanes.splat8(bv0_32.y)
-        bvz = lanes.splat8(bv0_32.z)
-        k = 0
-        while k < padded {
-            dir_x = lanes.load8(axes, (AXIS_DIR_X + k) as long)
-            dir_y = lanes.load8(axes, (AXIS_DIR_Y + k) as long)
-            dir_z = lanes.load8(axes, (AXIS_DIR_Z + k) as long)
-            cba = cx * dir_x + cy * dir_y + cz * dir_z
-            dba = dx * dir_x + dy * dir_y + dz * dir_z
-            live = lanes.lt8(cba * dba, eps_lane)
-            if lanes.any8(live) {
-                n0_x = lanes.load8(axes, (AXIS_N0_X + k) as long)
-                n0_y = lanes.load8(axes, (AXIS_N0_Y + k) as long)
-                n0_z = lanes.load8(axes, (AXIS_N0_Z + k) as long)
-                n1_x = lanes.load8(axes, (AXIS_N1_X + k) as long)
-                n1_y = lanes.load8(axes, (AXIS_N1_Y + k) as long)
-                n1_z = lanes.load8(axes, (AXIS_N1_Z + k) as long)
-                adc = n0_x * dcx + n0_y * dcy + n0_z * dcz
-                bdc = n1_x * dcx + n1_y * dcy + n1_z * dcz
-                live = lanes.mask8_and(live, lanes.lt8(adc * bdc, eps_lane))
-                live = lanes.mask8_and(live, lanes.lt8(cba * bdc, eps_lane))
-                // Near-parallel edges are not an axis.
-                max_cd = lanes.max8(cba * cba, dba * dba)
-                live = lanes.mask8_and(live, lanes.gt8(max_cd, lanes.load8(axes, (AXIS_TOL + k) as long)))
-                // The axis and its separation for all eight in lanes, as the
-                // reference finds them: t = -CBA / (DBA - CBA), the normal
-                // C + t (D - C) normalised, the separation -dot(av0 + bv0, n).
-                // Only a lane that comes within EDGE_LANE_SLACK of the best so
-                // far is measured again in double, which decides: no lane the
-                // double would have kept is lost to the float's rounding.
-                lane_t = (zero_lane - cba) / (dba - cba)
-                lane_nx = cx + lane_t * (dx - cx)
-                lane_ny = cy + lane_t * (dy - cy)
-                lane_nz = cz + lane_t * (dz - cz)
-                lane_inv = one_lane / lanes.sqrt8(lane_nx * lane_nx + lane_ny * lane_ny + lane_nz * lane_nz)
-                lane_nx = lane_nx * lane_inv
-                lane_ny = lane_ny * lane_inv
-                lane_nz = lane_nz * lane_inv
-                v0x = lanes.load8(axes, (AXIS_V0_X + k) as long) + bvx
-                v0y = lanes.load8(axes, (AXIS_V0_Y + k) as long) + bvy
-                v0z = lanes.load8(axes, (AXIS_V0_Z + k) as long) + bvz
-                sep = zero_lane - (v0x * lane_nx + v0y * lane_ny + v0z * lane_nz)
-                f32 floor32 = res.edge.separation - EDGE_LANE_SLACK
-                live = lanes.mask8_and(live, lanes.gt8(sep, lanes.splat8(floor32)))
-                if lanes.any8(live) {
-                    lane = 0
-                    while lane < 8 {
-                        if lanes.mask8_lane(live, lane as long) != 0 {
-                            // The axis itself is worth a double: it is the
-                            // normal a contact is built on, and the
-                            // separation is compared against the others'.
-                            at = k + lane
-                            edge_dir = math.vec3(slots[AXIS_DIR_X + at] as float,
-                                                 slots[AXIS_DIR_Y + at] as float,
-                                                 slots[AXIS_DIR_Z + at] as float)
-                            edge_v0 = math.vec3(slots[AXIS_V0_X + at] as float,
-                                                slots[AXIS_V0_Y + at] as float,
-                                                slots[AXIS_V0_Z + at] as float)
-                            cbad = math.dot(c, edge_dir)
-                            dbad = math.dot(d, edge_dir)
-                            t = (0.0 - cbad) / (dbad - cbad)
-                            n = math.normalize(math.add(c, math.mul_sv(t, math.sub(d, c))))
-                            separation = 0.0 - math.dot(math.add(edge_v0, bv0), n)
-                            if separation > res.edge.separation {
-                                res.edge.normal = n
-                                res.edge.separation = separation
-                                res.edge.index_a = slots[AXIS_EDGE + at] as int
-                                res.edge.index_b = j
-                                if separation > reach && early_return {
-                                    res.separated_feature = AXIS_EDGE_PAIR
-                                    return res
-                                }
-                            }
-                        }
-                        lane = lane + 1
-                    }
-                }
-            }
-            k = k + 8
-        }
-    }
-    return res
+    if basics.get_simd_width() == 8 { return axis_query_of(sat8.compute(hull_a, hull_b, xf_b, early_return, speculative_distance())) }
+    return axis_query_of(sat.compute(hull_a, hull_b, xf_b, early_return, speculative_distance()))
 }
 
-// Whether an edge between faces whose normals meet at cosine c, with the
-// other hull's centre at plane separations a1 and a2 from them, can reach
-// `bound` anywhere along its Gauss-map arc (Box3D's inscribed-sphere edge
-// test, b3TestEdgeCandidateSorted): the larger endpoint, or the interior
-// maximum of dot(d, nlerp(n1, n2, t)) when there is one; a nearly
-// degenerate arc is kept.
-edge_can_reach(a1: float, a2: float, c: float, bound: float) -> bool {
-    hi = math.max_float(a1, a2)
-    lo = math.min_float(a1, a2)
-    if hi >= bound { return true }
-    u = lo - c * hi
-    if u < 0.0 { return false }
-    s = 1.0 - c * c
-    if s < 0.0001 { return true }
-    return u * u >= (bound - hi) * (bound + hi) * s
+separating_axis_of(a: SatAxis, kind: int) -> SeparatingAxis {
+    return SeparatingAxis { normal: a.normal, separation: a.separation, index_a: a.index_a, index_b: a.index_b, kind: kind }
 }
 
-// The candidates of one hull's list (from `offset`, `count` of them) that
-// can still reach `bound` from the probe point's plane separations, kept
-// in order at the front; how many (b3FilterEdgeCandidates).
-filter_edge_candidates(planes: Plane[], edges: HalfEdge[], cosines: f32[], probe: Vec3, bound: float, lists: int[], offset: int, count: int) -> int {
-    kept = 0
-    k = 0
-    while k < count {
-        i = lists[offset + k]
-        if edge_can_reach(math.plane_separation(planes[edges[i].face], probe), math.plane_separation(planes[edges[i + 1].face], probe),
-                          cosines[i >> 1] as float, bound) {
-            lists[offset + kept] = i
-            kept = kept + 1
-        }
-        k = k + 1
-    }
-    return kept
-}
-
-// The vertex farthest along the direction, eight vertices a pass over the
-// hull's single-precision rows (the reference's b3GetSupportWide). Each
-// lane keeps its best dot and that vertex's index; the lanes are then
-// reduced in order, the larger dot winning and the lower index on a tie,
-// so the padding (vertex 0 again, past the count) never wins and the
-// answer is the scalar search's first maximum. The reference embeds the
-// index in each value's low mantissa bits instead (b3EmbedIndexW), which
-// std.lanes cannot express yet (aether#2603); the compare here is exact
-// where that one ties values within 2^-16 of each other. The caller
-// measures the separation of the chosen vertex in double.
-support_index_wide(h: *HullData, direction: Vec3) -> int {
-    // A small hull is searched in double, one vertex at a time: the lanes'
-    // reduction costs more than eight or sixteen dot products (measured on
-    // the reference's rocks, ten vertices, and boxes and six-sided
-    // cylinders), and the answer is the same first maximum.
-    if h.vertex_count <= WIDE_SUPPORT_MIN_VERTICES { return support_index(hull.points(h), h.vertex_count, direction) }
-    scratch_ready()
-    stride = hull.soa_stride(h.vertex_count)
-    rows = hull.soa_vertices(h)
-    d = math.narrow3(direction)
-    dx = lanes.splat8(d.x)
-    dy = lanes.splat8(d.y)
-    dz = lanes.splat8(d.z)
-    best = lanes.splat8(0.0 - math.infinity_f32())
-    best_index = lanes.splat8(0.0 - 1.0)
-    index = lanes.f32x8(0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0)
-    eight = lanes.splat8(8.0)
-    i = 0
-    while i < stride {
-        x = lanes.load8(rows, i as long)
-        y = lanes.load8(rows, (stride + i) as long)
-        z = lanes.load8(rows, (2 * stride + i) as long)
-        dot = dx * x + dy * y + dz * z
-        better = lanes.gt8(dot, best)
-        best = lanes.select8(better, dot, best)
-        best_index = lanes.select8(better, index, best_index)
-        index = index + eight
-        i = i + 8
-    }
-    // The lanes stored once and reduced in order.
-    out = lane_scratch()
-    lanes.store8(out, 0 as long, best)
-    lanes.store8(out, 8 as long, best_index)
-    values = out as f32[]
-    winner = values[8]
-    winner_dot = values[0]
-    lane = 1
-    while lane < 8 {
-        v = values[lane]
-        if v > winner_dot || (v == winner_dot && values[8 + lane] < winner) {
-            winner_dot = v
-            winner = values[8 + lane]
-        }
-        lane = lane + 1
-    }
-    return winner as int
-}
-
-// The vertex farthest along the direction.
-support_index(points: Vec3[], count: int, direction: Vec3) -> int {
-    best = 0
-    best_dot = math.dot(direction, points[0])
-    i = 1
-    while i < count {
-        d = math.dot(direction, points[i])
-        if d > best_dot {
-            best = i
-            best_dot = d
-        }
-        i = i + 1
-    }
-    return best
+axis_query_of(q: SatQuery) -> AxisQuery {
+    separated = AXIS_INVALID
+    if q.separated == sat.SAT_FACE_A { separated = AXIS_FACE_A }
+    if q.separated == sat.SAT_FACE_B { separated = AXIS_FACE_B }
+    if q.separated == sat.SAT_EDGE_PAIR { separated = AXIS_EDGE_PAIR }
+    return AxisQuery { face_a: separating_axis_of(q.face_a, AXIS_FACE_A), face_b: separating_axis_of(q.face_b, AXIS_FACE_B),
+                       edge: separating_axis_of(q.edge, AXIS_EDGE_PAIR), separated_feature: separated }
 }
 
 // The axis of least penetration among the three.
@@ -1770,11 +1264,9 @@ collide_hulls(m: *LocalManifold, capacity: int, hull_a: *HullData, hull_b: *Hull
     face_separation = math.max_float(axis_query.face_a.separation, axis_query.face_b.separation)
     clip_separation = cache.separation
     if (m.point_count == 0 && edge_query.separation > face_separation) || edge_query.separation > clip_separation + math.LINEAR_SLOP {
-        // The edge contact into its own point, kept only if it built one;
-        // the point lives in the edge axes' scratch, done with by now.
+        // The edge contact into its own point, kept only if it built one.
         scratch_ready()
-        edge_block = edge_axes()
-        edge_manifold = local_manifold(edge_block)
+        edge_manifold = local_manifold(edge_point())
         edge_cache = empty_sat_cache()
         build_edge_contact(&edge_manifold, hull_a, hull_b, transform_b_to_a, edge_query, &edge_cache)
         if edge_manifold.point_count == 1 {
