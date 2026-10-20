@@ -18,9 +18,11 @@
 // hold. The allocation counters the original keeps (b3Alloc, b3Free with
 // sizes) are kept so a leak is a number.
 import std.string
+import std.lanes
 import aephysics.native
 
 exports (
+    set_simd_width, get_simd_width,
     BitSet, IdPool, HashSet, Ints, Buffer, Stack, Arena, BlockAllocator, BLOCK_SIZE,
     block_allocator_create, block_allocator_destroy, block_allocate, block_free,
     alloc, free_bytes, alloc_count, bytes_in_use, sort_ints, set_allocator, clear_allocator, set_log_fn, set_assert_fn, log,
@@ -131,6 +133,24 @@ set_log_fn(log: fn(string)) { hooks().log = log }
 // b3SetAssertFcn). The engine checks what it is given and returns instead
 // of asserting; the one such failure is the scheduler's tasks overflowing.
 set_assert_fn(failed: fn(string, string, int) -> int) { hooks().failed = failed }
+
+// The lane width the wide stages run at, Box3D's b3SetSIMDWidth: 8 the copy of
+// the wide contact solver and separating axis test compiled for AVX2
+// (`@target("avx2") import`), 4 the build's own, 0 whatever this CPU runs
+// (8 where it has AVX2). 8 on a CPU without AVX2 is 4. Another number leaves
+// the width as it was. Both widths compute the same bits. A world takes the
+// width when it is created (physics_world.enable_sse2_fallback forces it to
+// 4); the separating axis test reads it on each call.
+var g_simd_width = 0
+set_simd_width(width: int) {
+    if width == 8 && lanes.cpu_has_avx2() == false { g_simd_width = 4; return }
+    if width == 0 || width == 4 || width == 8 { g_simd_width = width }
+}
+get_simd_width() -> int {
+    if g_simd_width != 0 { return g_simd_width }
+    if lanes.cpu_has_avx2() { return 8 }
+    return 4
+}
 
 // A message for the host.
 log(text: string) {

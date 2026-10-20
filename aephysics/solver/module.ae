@@ -33,6 +33,10 @@ import aephysics.dynamics
 import aephysics.parallel
 import aephysics.contact_solver
 import aephysics.contact_solver_wide
+// #156: the wide stages a second time, compiled for AVX2, chosen per world by
+// its simd_width (basics.set_simd_width, b3SetSIMDWidth): one binary runs
+// eight lanes to a register where the CPU has AVX2 and anywhere else.
+@target("avx2") import aephysics.contact_solver_wide as contact_solver_wide8
 import aephysics.joint_solver
 
 exports (
@@ -892,14 +896,26 @@ execute_block(stage: *SolverStage, sc: *SolverContext, b: *SolverBlock, worker: 
         slots = color.wide_constraints + start * sizeof(WideConstraint)
         first = start * contact_solver_wide.WIDTH
         last = math.min_int(end * contact_solver_wide.WIDTH, color.convex_contacts.count)
-        if kind == STAGE_PREPARE_WIDE {
-            contact_solver_wide.prepare_wide_range(ctx, color, first, last)
-        } else if kind == STAGE_WARM_START { contact_solver_wide.warm_start_wide_contacts(ctx, slots, count) }
-        else if kind == STAGE_SOLVE { contact_solver_wide.solve_wide_contacts(ctx, slots, count, true) }
-        else if kind == STAGE_RELAX { contact_solver_wide.solve_wide_contacts(ctx, slots, count, false) }
-        else if kind == STAGE_RESTITUTION { contact_solver_wide.apply_wide_restitution(ctx, slots, count) }
-        else if kind == STAGE_STORE_WIDE {
-            if contact_solver_wide.store_wide_range(ctx, color, first, last, &tc.hit_event_bits) { tc.has_hit_events = true }
+        if w.simd_width == 8 {
+            if kind == STAGE_PREPARE_WIDE {
+                contact_solver_wide8.prepare_wide_range(ctx, color, first, last)
+            } else if kind == STAGE_WARM_START { contact_solver_wide8.warm_start_wide_contacts(ctx, slots, count) }
+            else if kind == STAGE_SOLVE { contact_solver_wide8.solve_wide_contacts(ctx, slots, count, true) }
+            else if kind == STAGE_RELAX { contact_solver_wide8.solve_wide_contacts(ctx, slots, count, false) }
+            else if kind == STAGE_RESTITUTION { contact_solver_wide8.apply_wide_restitution(ctx, slots, count) }
+            else if kind == STAGE_STORE_WIDE {
+                if contact_solver_wide8.store_wide_range(ctx, color, first, last, &tc.hit_event_bits) { tc.has_hit_events = true }
+            }
+        } else {
+            if kind == STAGE_PREPARE_WIDE {
+                contact_solver_wide.prepare_wide_range(ctx, color, first, last)
+            } else if kind == STAGE_WARM_START { contact_solver_wide.warm_start_wide_contacts(ctx, slots, count) }
+            else if kind == STAGE_SOLVE { contact_solver_wide.solve_wide_contacts(ctx, slots, count, true) }
+            else if kind == STAGE_RELAX { contact_solver_wide.solve_wide_contacts(ctx, slots, count, false) }
+            else if kind == STAGE_RESTITUTION { contact_solver_wide.apply_wide_restitution(ctx, slots, count) }
+            else if kind == STAGE_STORE_WIDE {
+                if contact_solver_wide.store_wide_range(ctx, color, first, last, &tc.hit_event_bits) { tc.has_hit_events = true }
+            }
         }
         if timed { stage_note(kind, at) }
         return
@@ -1190,7 +1206,9 @@ solve_step(w: *World, ctx: *StepContext) {
         wide_base = wide_base + color.wide_constraint_count
         contact_base = contact_base + color.contact_constraint_count
         manifold_base = manifold_base + color.manifold_constraint_count
-        if wide { contact_solver_wide.zero_wide_tail(color) }
+        // The copy that runs the stages makes its zero record, here on one thread.
+        if wide && w.simd_width == 8 { contact_solver_wide8.zero_wide_tail(color) }
+        if wide && w.simd_width != 8 { contact_solver_wide.zero_wide_tail(color) }
         c = c + 1
     }
     overflow = dynamics.graph_color(w, dynamics.OVERFLOW_INDEX)

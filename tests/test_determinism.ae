@@ -28,6 +28,7 @@ import aephysics.dynamics
 import aephysics.human
 import aephysics.physics_world
 import aephysics.parallel
+@target("avx2") import aephysics.contact_solver_wide as contact_solver_wide8
 
 extern calloc(count: int, size: int) -> ptr
 extern exit(code: int)
@@ -647,6 +648,38 @@ rolling_mix(workers: int) -> Outcome {
     return Outcome { sleep_step: 120, hash: total, query_hits: 0, query_hash: 0.0 }
 }
 
+// Box3D's SIMDWidthTest: every scene stepped by the wide stages' copy for
+// AVX2 and by the build's own copy, in one process, gives the same sleep
+// step, checksum and query results. Where the CPU has no AVX2 there is
+// one width and nothing to compare.
+test_simd_widths() {
+    basics.set_simd_width(0)
+    native_width = basics.get_simd_width()
+    if native_width == 4 {
+        println("determinism: simd widths skipped, this CPU runs one width")
+        return
+    }
+    ensure("simd widths: the AVX2 copy holds eight lanes a register", contact_solver_wide8.lanes_native())
+    basics.set_simd_width(4)
+    a4 = falling_ragdolls(1)
+    b4 = wave_pile(1)
+    c4 = query_spawn(1)
+    d4 = mesh_drop(1)
+    e4 = rolling_mix(1)
+    basics.set_simd_width(native_width)
+    a8 = falling_ragdolls(1)
+    b8 = wave_pile(1)
+    c8 = query_spawn(1)
+    d8 = mesh_drop(1)
+    e8 = rolling_mix(1)
+    basics.set_simd_width(0)
+    ensure("simd widths: falling ragdolls at 4 and ${native_width}, bit for bit", same_outcome(a4, a8))
+    ensure("simd widths: wave pile at 4 and ${native_width}, bit for bit", same_outcome(b4, b8))
+    ensure("simd widths: query spawn at 4 and ${native_width}, bit for bit", same_outcome(c4, c8))
+    ensure("simd widths: mesh drop at 4 and ${native_width}, bit for bit", same_outcome(d4, d8))
+    ensure("simd widths: rolling mix at 4 and ${native_width}, bit for bit", same_outcome(e4, e8))
+}
+
 main() {
     test_concurrent_worlds()
     value = os.getenv("AEPHYSICS_TRACE")
@@ -706,6 +739,8 @@ main() {
     println("determinism: rolling mix checksum ${first.hash}")
     ensure("rolling mix: the same scene twice, bit for bit", same_outcome(first, second))
     ensure("rolling mix: the same over four workers, bit for bit", same_outcome(first, four))
+
+    test_simd_widths()
 
     println("determinism: ${checks} checks")
     if failures == 0 {

@@ -31,7 +31,8 @@ import aephysics.contact_solver
 exports (
     WIDTH, Vec3W, IntW, WideConstraintPoint, WideConstraint,
     wide_constraint_at, wide_constraint_count, wide_point_at, lane, int_lane,
-    prepare_wide_contacts, prepare_wide_range, zero_wide_tail, warm_start_wide_contacts, solve_wide_contacts, apply_wide_restitution, store_wide_impulses, store_wide_range
+    prepare_wide_contacts, prepare_wide_range, zero_wide_tail, warm_start_wide_contacts, solve_wide_contacts, apply_wide_restitution, store_wide_impulses, store_wide_range,
+    lanes_native
 )
 
 const WIDTH = 8
@@ -363,6 +364,11 @@ zero_record() -> ptr {
     }
     return g_zero_record
 }
+
+// Whether this copy of the module holds an f32x8 in one register: the
+// build's answer in the plain import, true in the solver's @target("avx2")
+// copy on x86 (#156).
+lanes_native() -> bool { return lanes.native8() }
 
 f8(a0: float, a1: float, a2: float, a3: float, a4: float, a5: float, a6: float, a7: float) -> f32x8 { return lanes.f32x8(a0 as f32, a1 as f32, a2 as f32, a3 as f32, a4 as f32, a5 as f32, a6 as f32, a7 as f32) }
 

@@ -16,6 +16,7 @@
 // reference does.
 import std.string
 import std.os
+import std.lanes
 import aephysics.math
 import aephysics.native
 import aephysics.basics
@@ -38,7 +39,7 @@ exports (
     body_event_count, body_event, contact_begin_event_count, contact_begin_event, contact_end_event_count, contact_end_event,
     contact_hit_event_count, contact_hit_event, sensor_begin_event_count, sensor_begin_event, sensor_end_event_count, sensor_end_event,
     joint_event_count, joint_event,
-    enable_sleeping, is_sleeping_enabled, enable_warm_starting, is_warm_starting_enabled, enable_continuous, is_continuous_enabled,
+    enable_sleeping, is_sleeping_enabled, enable_warm_starting, is_warm_starting_enabled, enable_sse2_fallback, enable_continuous, is_continuous_enabled,
     enable_speculative, set_restitution_threshold, get_restitution_threshold, set_restitution_iterations, get_restitution_iterations,
     enable_restitution_propagation, is_restitution_propagation_enabled, enable_kinematic_static_softness, is_kinematic_static_softness_enabled, enable_kinematic_speculation, is_kinematic_speculation_enabled, enable_travel_speculation, is_travel_speculation_enabled, set_hit_event_threshold, get_hit_event_threshold,
     set_contact_tuning, set_contact_recycle_distance, get_contact_recycle_distance, set_maximum_linear_speed, get_maximum_linear_speed,
@@ -115,9 +116,9 @@ get_version() -> Version { return Version { major: 0, minor: 2, revision: 0 } }
 // (b3IsDoublePrecision); the rest single where the reference has it.
 is_double_precision() -> bool { return true }
 
-// Whether this CPU runs AVX2 (b3IsAVX2Available). The wide contact solver's
-// width is still the build's (-mavx2), #156.
-is_avx2_available() -> bool { return native.has_avx2() }
+// Whether this CPU runs AVX2 (b3IsAVX2Available): where it does, a world's
+// wide stages run their copy compiled for AVX2 (basics.set_simd_width).
+is_avx2_available() -> bool { return lanes.cpu_has_avx2() }
 
 // The worlds there are, and the most there have been at once.
 get_world_count() -> int { return dynamics.get_world_count() }
@@ -350,6 +351,14 @@ enable_warm_starting(id: WorldId, flag: bool) {
     if w != null { w.enable_warm_starting = flag }
 }
 is_warm_starting_enabled(id: WorldId) -> bool { return dynamics.get_world(id.index1 - 1).enable_warm_starting }
+// Run the world's wide stages on the build's own lanes even where the CPU has
+// AVX2 (b3World_EnableSSE2Fallback, "for testing"): the same bits either
+// way. Off, the world goes back to basics.get_simd_width().
+enable_sse2_fallback(id: WorldId, flag: bool) {
+    w = world_of(id)
+    if w == null { return }
+    if flag { w.simd_width = 4 } else { w.simd_width = basics.get_simd_width() }
+}
 enable_continuous(id: WorldId, flag: bool) {
     if dynamics.recording_on(id.index1 - 1) { recorder = dynamics.rec_begin(id.index1 - 1, dynamics.OP_ENABLE_CONTINUOUS); dynamics.rec_bool(recorder, flag); dynamics.rec_end(recorder) }
     w = world_of(id)

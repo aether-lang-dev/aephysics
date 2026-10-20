@@ -1349,6 +1349,7 @@ struct World {
     enable_warm_starting: bool
     enable_continuous: bool
     enable_speculative: bool
+    simd_width: int                // 8: the wide stages run their AVX2 copy; 4: the build's (basics.get_simd_width at creation)
     in_use: bool
     user_data: ptr
     recording: ptr                 // *Recording while the world records (aephysics.recording), else null
@@ -1638,6 +1639,7 @@ init_world_contents(w: *World, def: *WorldDef) {
     w.enable_warm_starting = true
     w.enable_continuous = def.enable_continuous
     w.enable_speculative = true
+    w.simd_width = basics.get_simd_width()
 }
 
 // Everything the world holds is freed; ids into it die with its generation.

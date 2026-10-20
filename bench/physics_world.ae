@@ -111,6 +111,14 @@ wanted(scene: string) -> bool {
 }
 
 main() {
+    // AEPHYSICS_SIMD_WIDTH=4|8 runs the wide stages on the build's own lanes
+    // or on their AVX2 copy (basics.set_simd_width); unset, the CPU's.
+    width = os.getenv("AEPHYSICS_SIMD_WIDTH")
+    if width != null {
+        asked, err = string.to_int(width)
+        if err == "" { basics.set_simd_width(asked) }
+    }
+    println("aephysics physics_world: simd width ${basics.get_simd_width()}")
     g_box = hull.make_box_hull(0.5, 0.5, 0.5) as ptr
     g_slabs = calloc(8, 8)
     wdef = dynamics.default_world_def()
