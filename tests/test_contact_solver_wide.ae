@@ -1,14 +1,12 @@
-// aephysics.contact_solver_wide's checks: the native lanes' layout is
-// the module's; one scene stepped three ways (the convex contacts
-// solved one at a time, four at a time in Aether's lanes, four at a
-// time in the native lanes) lands in the same place: a stack of boxes
-// (contacts in colours with a tail slot, dynamic pairs and static
-// ones), a bouncing ball with restitution and hit events, a rolling
-// sphere with rolling resistance, a box on a conveyor's tangent
-// velocity, a box sliding to rest under friction. The lanes are the
-// scalar solve's arithmetic in another order and (natively) in single
-// precision, so the paths agree to a tolerance, not to the bit; the
-// same path twice agrees to the bit.
+// aephysics.contact_solver_wide's checks: one scene stepped two ways (the
+// convex contacts solved one at a time by the scalar solver, and eight at
+// a time in Aether's lanes) lands in the same place: a stack of boxes
+// (contacts in colours with a tail slot, dynamic pairs and static ones),
+// a bouncing ball with restitution and hit events, a rolling sphere with
+// rolling resistance, a box on a conveyor's tangent velocity, a box
+// sliding to rest under friction. The lanes are the scalar solve's
+// arithmetic in another order and in single precision, so the two paths
+// agree to a tolerance, not to the bit; the lanes twice agree to the bit.
 import std.string
 import aephysics.math
 import aephysics.basics

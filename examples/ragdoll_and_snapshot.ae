@@ -1,0 +1,74 @@
+// A ragdoll shoved over, its world saved mid-fall, and the save loaded
+// into a second world: the two step on to the same bits.
+//
+//   ae build examples/ragdoll_and_snapshot.ae -o target/ragdoll_and_snapshot && target/ragdoll_and_snapshot
+import aephysics.math
+import aephysics.hull
+import aephysics.dynamics
+import aephysics.physics_world
+import aephysics.human
+import aephysics.snapshot
+
+step_for(world: WorldId, steps: int) {
+    i = 0
+    while i < steps {
+        physics_world.step(world, 1.0 / 60.0, 4)
+        i = i + 1
+    }
+}
+
+// Every body's state in one number, the hash the determinism tests use.
+state_hash(world: WorldId) -> long { return dynamics.hash_world_state(physics_world.world_of(world)) }
+
+main() {
+    world_def = dynamics.default_world_def()
+    world_def.gravity = math.vec3(0.0, 0.0 - 10.0, 0.0)
+    world = dynamics.create_world(&world_def)
+
+    ground_def = dynamics.default_body_def()
+    ground_def.position = math.vec3(0.0, 0.0 - 1.0, 0.0)
+    ground = dynamics.create_body(world, &ground_def)
+    slab = hull.make_box_hull(20.0, 1.0, 20.0)
+    ground_shape_def = dynamics.default_shape_def()
+    dynamics.create_hull_shape(ground, &ground_shape_def, slab)
+
+    // Twelve capsule bones on spherical and revolute joints with a
+    // person's ranges, its feet 1 m up. The joints' friction is 5 N m,
+    // their springs toward the standing pose 1 Hz at a damping ratio of
+    // 0.7. Filter group 1 keeps its lower spine and thighs out of each
+    // other; a second figure would take group 2.
+    figure = Human { bones: null, filter_joints: null, filter_joint_count: 0, friction_torque: 0.0, is_spawned: false, ankles: false, bone_count: 0 }
+    human.create_human(&figure, world, math.vec3(0.0, 1.0, 0.0), 5.0, 1.0, 0.7, 1, null)
+    human.human_apply_angular_impulse(&figure, math.vec3(0.0, 0.0, 30.0))
+
+    step_for(world, 30)
+    pelvis = dynamics.body_get_position(human.bone_at(&figure, human.BONE_PELVIS).body_id)
+    println("after half a second the pelvis is at y = ${pelvis.y}")
+
+    // The whole world as bytes: bodies, shapes, contacts with their warm
+    // starts, joints, islands, the broad phase.
+    data, size = snapshot.save_world(world)
+    println("snapshot: ${size} bytes")
+    copy = snapshot.load_world(&world_def, data, size)
+    snapshot.free_snapshot(data, size)
+
+    // Both worlds two more seconds on.
+    step_for(world, 120)
+    step_for(copy, 120)
+    a = state_hash(world)
+    b = state_hash(copy)
+    println("the original's hash ${a}, the copy's ${b}")
+    if a == b {
+        println("the same, bit for bit")
+    } else {
+        println("they differ")
+        exit(1)
+    }
+
+    human.destroy_human(&figure)
+    dynamics.destroy_world(copy)
+    dynamics.destroy_world(world)
+    hull.destroy_hull(slab)
+}
+
+extern exit(code: int)

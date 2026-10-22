@@ -1,0 +1,110 @@
+// Joints, events and queries: a chain of capsules hung from a static
+// anchor swings down, a ball bounces beside it and reports its hits,
+// then a ray and a box ask the world what is where.
+//
+//   ae build examples/events_and_queries.ae -o target/events_and_queries && target/events_and_queries
+import aephysics.math
+import aephysics.hull
+import aephysics.manifold
+import aephysics.shape
+import aephysics.dynamics
+import aephysics.physics_world
+
+const LINK_COUNT = 6
+const LINK_HALF_LENGTH = 0.25
+
+// The box query's visitor: count every shape it is shown and keep going
+// (return false to stop the query).
+count_shape(id: ShapeId, context: ptr) -> bool {
+    count = context as int[]
+    count[0] = count[0] + 1
+    return true
+}
+
+main() {
+    world_def = dynamics.default_world_def()
+    world_def.gravity = math.vec3(0.0, 0.0 - 10.0, 0.0)
+    world = dynamics.create_world(&world_def)
+
+    // The ground, its top face at y = 0.
+    ground_def = dynamics.default_body_def()
+    ground_def.position = math.vec3(0.0, 0.0 - 1.0, 0.0)
+    ground = dynamics.create_body(world, &ground_def)
+    slab = hull.make_box_hull(20.0, 1.0, 20.0)
+    ground_shape_def = dynamics.default_shape_def()
+    dynamics.create_hull_shape(ground, &ground_shape_def, slab)
+
+    // A chain held out level from an anchor 6 m up: each link a capsule
+    // along x, joined to the one before at its end by a spherical joint.
+    // A joint's frames are in each body's own frame.
+    anchor_def = dynamics.default_body_def()
+    anchor_def.position = math.vec3(0.0, 6.0, 0.0)
+    previous = dynamics.create_body(world, &anchor_def)
+    previous_end = math.vec3_zero()
+    link = manifold.capsule(math.vec3(0.0 - LINK_HALF_LENGTH, 0.0, 0.0), math.vec3(LINK_HALF_LENGTH, 0.0, 0.0), 0.08)
+    link_shape_def = dynamics.default_shape_def()
+    i = 0
+    while i < LINK_COUNT {
+        link_def = dynamics.default_body_def()
+        link_def.kind = dynamics.BODY_DYNAMIC
+        link_def.position = math.vec3(LINK_HALF_LENGTH * ((2 * i + 1) as float), 6.0, 0.0)
+        body = dynamics.create_body(world, &link_def)
+        dynamics.create_capsule_shape(body, &link_shape_def, link)
+        joint_def = dynamics.default_spherical_joint_def()
+        joint_def.base.body_id_a = previous
+        joint_def.base.body_id_b = body
+        joint_def.base.local_frame_a.p = previous_end
+        joint_def.base.local_frame_b.p = math.vec3(0.0 - LINK_HALF_LENGTH, 0.0, 0.0)
+        dynamics.create_spherical_joint(world, &joint_def)
+        previous = body
+        previous_end = math.vec3(LINK_HALF_LENGTH, 0.0, 0.0)
+        i = i + 1
+    }
+
+    // A ball dropped 5 m. Its shape asks for contact and hit events,
+    // which are off by default.
+    ball_def = dynamics.default_body_def()
+    ball_def.kind = dynamics.BODY_DYNAMIC
+    ball_def.position = math.vec3(0.0 - 3.0, 5.0, 0.0)
+    ball = dynamics.create_body(world, &ball_def)
+    ball_shape_def = dynamics.default_shape_def()
+    ball_shape_def.base_material.restitution = 0.5
+    ball_shape_def.enable_contact_events = true
+    ball_shape_def.enable_hit_events = true
+    dynamics.create_sphere_shape(ball, &ball_shape_def, manifold.sphere(math.vec3_zero(), 0.5))
+
+    // Three seconds. A step's events are read after it and last until the
+    // next step.
+    began = 0
+    step = 0
+    while step < 180 {
+        physics_world.step(world, 1.0 / 60.0, 4)
+        began = began + physics_world.contact_begin_event_count(world)
+        k = 0
+        while k < physics_world.contact_hit_event_count(world) {
+            hit = physics_world.contact_hit_event(world, k)
+            println("step ${step}: the ball hit the ground at ${hit.approach_speed} m/s")
+            k = k + 1
+        }
+        step = step + 1
+    }
+    println("${began} contacts began touching")
+    tip = dynamics.body_get_position(previous)
+    println("the chain's last link hangs at (${tip.x}, ${tip.y})")
+
+    // The closest shape along a ray straight down from above the ball.
+    filter = shape.default_query_filter()
+    ray = physics_world.cast_ray_closest(world, math.vec3(0.0 - 3.0, 10.0, 0.0), math.vec3(0.0, 0.0 - 20.0, 0.0), filter)
+    if ray.hit {
+        println("the ray hit y = ${ray.point.y}, ${ray.fraction} of the way along")
+    }
+
+    // Every shape whose bounds touch a box around the chain.
+    found = 0
+    box = math.aabb(math.vec3(0.0 - 1.0, 2.0, 0.0 - 1.0), math.vec3(1.0, 7.0, 1.0))
+    physics_world.overlap_aabb(world, box, filter, count_shape, (&found) as ptr)
+    println("${found} shapes in the box around the chain")
+
+    dynamics.destroy_world(world)
+    hull.destroy_hull(slab)
+}
