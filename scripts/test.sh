@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Build and run every test in tests/ with ae: what CI runs through aeb,
-# runnable anywhere ae is.
+# Build and run every test in tests/ and every program in examples/ with
+# ae: what CI runs, runnable anywhere ae is.
 #
 #   scripts/test.sh
 set -uo pipefail
@@ -50,6 +50,26 @@ for test in tests/test_*.ae; do
         echo "ok    $name"
     else
         echo "FAIL  $name"
+        failures=$((failures + 1))
+    fi
+done
+# The examples the README and docs/guide.md point to, built and run, so
+# the documentation's programs keep working.
+for example in examples/*.ae; do
+    name="$(basename "$example" .ae)"
+    if ! AETHER_LIB_DIR="$root" ae build "$example" -o "target/example_$name" >"target/example_$name.log" 2>&1; then
+        echo "FAIL  example $name (build)"
+        grep -i "error" "target/example_$name.log" | head -5
+        failures=$((failures + 1))
+        continue
+    fi
+    exe="target/example_$name"
+    [ -x "$exe" ] || exe="$exe.exe"
+    if "$exe" >"target/example_$name.out" 2>&1; then
+        echo "ok    example $name"
+    else
+        echo "FAIL  example $name"
+        tail -5 "target/example_$name.out"
         failures=$((failures + 1))
     fi
 done

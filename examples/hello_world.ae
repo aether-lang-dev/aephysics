@@ -1,0 +1,54 @@
+// A box dropped on the ground: Box3D's HelloWorld.
+//
+//   ae build examples/hello_world.ae -o target/hello_world && target/hello_world
+import aephysics.math
+import aephysics.hull
+import aephysics.dynamics
+import aephysics.physics_world
+
+main() {
+    // A world with gravity along -y.
+    world_def = dynamics.default_world_def()
+    world_def.gravity = math.vec3(0.0, 0.0 - 10.0, 0.0)
+    world = dynamics.create_world(&world_def)
+
+    // The ground: a static body (the default kind) holding a box 100 m
+    // wide and 20 m tall, its top face at y = 0.
+    ground_def = dynamics.default_body_def()
+    ground_def.position = math.vec3(0.0, 0.0 - 10.0, 0.0)
+    ground = dynamics.create_body(world, &ground_def)
+    ground_box = hull.make_box_hull(50.0, 10.0, 50.0)
+    ground_shape_def = dynamics.default_shape_def()
+    dynamics.create_hull_shape(ground, &ground_shape_def, ground_box)
+
+    // A dynamic body holding a 2 m cube, 4 m up.
+    body_def = dynamics.default_body_def()
+    body_def.kind = dynamics.BODY_DYNAMIC
+    body_def.position = math.vec3(0.0, 4.0, 0.0)
+    body = dynamics.create_body(world, &body_def)
+    cube = hull.make_box_hull(1.0, 1.0, 1.0)
+    shape_def = dynamics.default_shape_def()
+    shape_def.density = 1.0
+    shape_def.base_material.friction = 0.3
+    dynamics.create_hull_shape(body, &shape_def, cube)
+
+    // A second and a half at 60 Hz, four sub-steps a step.
+    step = 0
+    while step < 90 {
+        physics_world.step(world, 1.0 / 60.0, 4)
+        if step % 15 == 0 {
+            p = dynamics.body_get_position(body)
+            println("step ${step}: the cube's centre at y = ${p.y}")
+        }
+        step = step + 1
+    }
+    p = dynamics.body_get_position(body)
+    println("at rest: y = ${p.y} (the cube's half height above the ground)")
+
+    // The world frees its bodies and shapes. A hull shape keeps the
+    // world's own copy of its hull, so ours could have gone as soon as
+    // the shapes were made.
+    dynamics.destroy_world(world)
+    hull.destroy_hull(ground_box)
+    hull.destroy_hull(cube)
+}

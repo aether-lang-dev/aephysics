@@ -1,3 +1,50 @@
+# Benchmark record
+
+Every measurement aephysics has been held to, in the order it was taken,
+each with its date, machine and builds. A section is a record of its day,
+and is not rewritten when later work changes the numbers; a later section
+says what moved. Read a ratio within one table: a table comes from one
+session, and the machine's speed wanders between sessions while the ratios
+do not. [docs/testing.md](../docs/testing.md#benchmarks) says how to run
+each pair.
+
+## Where it stands
+
+Box3D's own benchmark scenes, one thread, both engines built with AVX2 on
+the same machine, aephysics' time per step over Box3D's (`e77352c`):
+
+| scene | aephysics / Box3D | from |
+|---|---|---|
+| large pyramid: 5,050 boxes | 1.20x | [2026-10-09](#the-collide-pass-as-the-reference-keeps-it-2026-10-09-121) |
+| many pyramids: 10,780 boxes | 1.16x | [2026-10-09](#the-collide-pass-as-the-reference-keeps-it-2026-10-09-121) |
+| joint grid: 10,000 spheres on 19,800 joints | 1.05x | [2026-10-09](#the-collide-pass-as-the-reference-keeps-it-2026-10-09-121) |
+| junkyard, washer, spinner, sleep, trees, large world | 1.04x to 1.21x | [the suite](#suite-the-references-benchmark-suite) |
+| convex pile: 5,120 hulls | 1.21x, then 1.19x with the wide separating axis test | [the suite](#suite-the-references-benchmark-suite), [2026-10-20](#the-references-wide-sat-the-lanes-transposed-the-width-at-run-time-2026-10-20-150-121-156) |
+| rain: 300 ragdolls on meshes | 1.05x | [human](#human) |
+
+## Contents
+
+- [The bake-off](#the-bake-off): Box3D and Jolt on identical scenes, and
+  why aephysics follows Box3D.
+- [Layer by layer](#layer-by-layer): each module against the same code in
+  Box3D: [dynamic_tree](#dynamic_tree), [hull](#hull),
+  [distance](#distance), [lanes](#lanes), [manifold](#manifold),
+  [triangle_manifold](#triangle_manifold), [mesh](#mesh),
+  [height_field](#height_field), [shape](#shape), [compound](#compound),
+  [mover](#mover), [broad_phase](#broad_phase),
+  [mesh_contact](#mesh_contact),
+  [dynamics](#dynamics-bookkeeping-contacts-joints-sensors),
+  [contact_solver](#contact_solver), [joint_solver](#joint_solver),
+  [solver](#solver).
+- [physics_world](#physics_world): the whole step against Box3D's
+  benchmark scenes, and every round of work on it, dated.
+- [parallel](#parallel): the step by worker count against Box3D's scaling.
+- [human](#human): the ragdoll rain.
+- [soak](#soak-a-mixed-pile): a mixed pile, both engines on the same dice.
+- [suite](#suite-the-references-benchmark-suite): the rest of Box3D's
+  benchmark suite and its separating axis runs, with the rounds after.
+- [Build flags](#build-flags-inlining): why `-O3` and the inlining budget.
+
 # The bake-off
 
 The reference engines on identical scenes, on one machine, one thread, each
