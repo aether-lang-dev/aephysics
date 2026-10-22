@@ -123,7 +123,7 @@ create_broad_phase(bp: *BroadPhase, capacity: Capacity) {
     bp.candidate_hashes = basics.alloc(CANDIDATE_BATCH * 4)
 }
 
-copy_tree(dst: *DynamicTree, src: DynamicTree) {
+copy_tree(dst: *DynamicTree, src: @keep DynamicTree) {
     dst.nodes = src.nodes
     dst.parents = src.parents
     dst.proxies = src.proxies

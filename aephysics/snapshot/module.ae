@@ -1011,7 +1011,7 @@ fill_world(w: *World, rd: *SnapReader) -> bool {
 }
 
 // The fresh world's pool given way to the loaded one.
-replace_pool(dst: *IdPool, src: IdPool) {
+replace_pool(dst: *IdPool, src: @keep IdPool) {
     basics.idpool_destroy(dst)
     dst.free_ids = src.free_ids
     dst.next_index = src.next_index
