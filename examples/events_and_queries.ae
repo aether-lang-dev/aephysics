@@ -74,8 +74,10 @@ main() {
     dynamics.create_sphere_shape(ball, &ball_shape_def, manifold.sphere(math.vec3_zero(), 0.5))
 
     // Three seconds. A step's events are read after it and last until the
-    // next step.
+    // next step. The chain swings from level; nothing damps it, so its tip
+    // comes back up near level a period later.
     began = 0
+    lowest = 6.0
     step = 0
     while step < 180 {
         physics_world.step(world, 1.0 / 60.0, 4)
@@ -86,11 +88,13 @@ main() {
             println("step ${step}: the ball hit the ground at ${hit.approach_speed} m/s")
             k = k + 1
         }
+        tip = dynamics.body_get_position(previous)
+        if tip.y < lowest { lowest = tip.y }
         step = step + 1
     }
     println("${began} contacts began touching")
     tip = dynamics.body_get_position(previous)
-    println("the chain's last link hangs at (${tip.x}, ${tip.y})")
+    println("the chain's tip swung down to y = ${lowest}, and is back at y = ${tip.y}")
 
     // The closest shape along a ray straight down from above the ball.
     filter = shape.default_query_filter()
@@ -99,11 +103,11 @@ main() {
         println("the ray hit y = ${ray.point.y}, ${ray.fraction} of the way along")
     }
 
-    // Every shape whose bounds touch a box around the chain.
+    // Every shape whose bounds touch a box around the anchor.
     found = 0
     box = math.aabb(math.vec3(0.0 - 1.0, 2.0, 0.0 - 1.0), math.vec3(1.0, 7.0, 1.0))
     physics_world.overlap_aabb(world, box, filter, count_shape, (&found) as ptr)
-    println("${found} shapes in the box around the chain")
+    println("${found} shapes in the box around the anchor")
 
     dynamics.destroy_world(world)
     hull.destroy_hull(slab)
