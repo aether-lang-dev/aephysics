@@ -1916,7 +1916,6 @@ toi_random_direction() -> Vec3 {
         len = math.length(v)
         if 0.1 < len && len < 1.0 { return math.mul_sv(1.0 / len, v) }
     }
-    return math.vec3_axis_x()
 }
 
 test_mover_time_of_impact() {
