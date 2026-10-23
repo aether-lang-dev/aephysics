@@ -7,7 +7,13 @@ on:
       - main
   pull_request:
 
-# Pin: 0.839.0, the latest release. The two functions that take over a
+# Pin: 0.841.0, the latest release, and aeb v0.333. The move from 0.839.0
+# is evidence-based, not a tracking bump: 0.840.0 and 0.841.0 add the
+# ownership rules (0.840: a borrowed ptr put into a list or map is
+# E0902 without @keep) and E0202 / E0305, and every module, test,
+# benchmark and example checks clean on them with no source change, the
+# golden trace bit for bit. aeb v0.333 is the one whose @keep session
+# handle the family moved to together. The two functions that take over a
 # struct's buffers declare it `@keep`, which 0.838.0 checks; the
 # accessors that hand back a pointer into their argument declare it
 # `@into` (aether#2990), which 0.836.0 checks; the lane moves
@@ -16,8 +22,8 @@ on:
 # bootstrap version: the floor this code needs, verified by every job
 # below.
 env:
-  AE_PIN: 0.839.0
-  AEB_REF: v0.330
+  AE_PIN: 0.841.0
+  AEB_REF: v0.333
 
 jobs:
   test:

@@ -54,7 +54,7 @@ Install Aether with the version-pinned installer (it puts `ae` and `aeb` in
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/aether-lang-dev/aeb/main/get.sh \
-  | AE_PIN=0.839.0 AEB_REF=v0.330 sh
+  | AE_PIN=0.841.0 AEB_REF=v0.333 sh
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
@@ -180,7 +180,7 @@ scripts/profile.sh file.ae       # a sampling profile on Windows
 ```
 
 CI runs the suite on Linux, on Linux with AVX2 and FMA, on macOS arm64, and
-on Windows at `-O3` and `-O0`. It pins one Aether release, 0.839.0; older
+on Windows at `-O3` and `-O0`. It pins one Aether release, 0.841.0; older
 ones are not tested.
 
 ## Credits
