@@ -5173,9 +5173,13 @@ update_mesh_contact(w: *World, c: *Contact, mesh_geometry: *Shape, mesh_shape: *
     }
     consumed_block = null
     consumed = null as int[]
-    if old_count > 0 {
-        consumed_block = basics.arena_bump(&tc.arena, old_count * 4)
-        memset(consumed_block, 0, old_count * 4)
+    // The guard is on the bytes, not the count: gcc 15 at -O2 (with -fwrapv)
+    // reads a positive count times 4 as possibly negative, and so memset's
+    // size as possibly past the largest object (-Wstringop-overflow, ae3d#901).
+    consumed_bytes = old_count * 4
+    if consumed_bytes > 0 {
+        consumed_block = basics.arena_bump(&tc.arena, consumed_bytes)
+        memset(consumed_block, 0, consumed_bytes)
         consumed = consumed_block as int[]
     }
     matrix_b = math.make_matrix_from_quat(xf_b.q)
