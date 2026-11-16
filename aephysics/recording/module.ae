@@ -2890,6 +2890,12 @@ dispatch_call(p: *Player, op: int) -> bool {
         if p.ok { joint_solver.spherical_joint_enable_twist_limit(a_joint_id_id, a_bool_flag) }
         return true
     }
+    if op == dynamics.OP_SPHERICAL_JOINT_LOCK_CONE_MINOR {
+        a_joint_id_id = read_joint_id(p)
+        a_bool_flag = read_bool(p)
+        if p.ok { joint_solver.spherical_joint_lock_cone_minor(a_joint_id_id, a_bool_flag) }
+        return true
+    }
     if op == dynamics.OP_SPHERICAL_JOINT_SET_TWIST_LIMITS {
         a_joint_id_id = read_joint_id(p)
         a_float_lower = read_float(p)

@@ -15,6 +15,13 @@
 // straight) unless human_tight_limits puts back the reference's, and its
 // soles grip the ground.
 //
+// Past the reference's twelve, each optional as the ankles are (#152,
+// #190): a head on its own body above the neck, clavicles between the
+// chest and the upper arms, hands below the forearms, a spine_02 between
+// the two spine bodies, and elbows and knees that twist about the bone
+// as they bend. Each is a flag on Human, set before the figure is made;
+// left off, the figure is built as before, bit for bit.
+//
 // This is Box3D's shared/human.c (Erin Catto, MIT): CreateHuman is
 // create_human, Human_SetJointFrictionTorque is
 // set_joint_friction_torque. Beyond the reference's sample it is the
@@ -35,9 +42,14 @@ exports (
     BONE_PELVIS, BONE_SPINE_01, BONE_SPINE_03, BONE_NECK, BONE_THIGH_L, BONE_CALF_L, BONE_THIGH_R, BONE_CALF_R,
     BONE_UPPER_ARM_L, BONE_LOWER_ARM_L, BONE_UPPER_ARM_R, BONE_LOWER_ARM_R, BONE_COUNT, FILTER_JOINT_COUNT,
     BONE_FOOT_L, BONE_FOOT_R, MAX_BONE_COUNT, ANKLE_PLANTAR_DEGREES, ANKLE_DORSAL_DEGREES, ANKLE_SIDE_DEGREES, ANKLE_ROLL_DEGREES,
+    BONE_HEAD, BONE_CLAVICLE_L, BONE_CLAVICLE_R, BONE_HAND_L, BONE_HAND_R, BONE_SPINE_02, ANKLED_BONE_COUNT, MAX_FILTER_JOINT_COUNT,
+    HEAD_FLEXION_DEGREES, HEAD_EXTENSION_DEGREES, HEAD_TILT_DEGREES, HEAD_TURN_DEGREES,
+    CLAVICLE_ELEVATION_DEGREES, CLAVICLE_DEPRESSION_DEGREES, CLAVICLE_PROTRACTION_DEGREES, CLAVICLE_ROTATION_DEGREES,
+    WRIST_FLEXION_DEGREES, WRIST_EXTENSION_DEGREES, WRIST_DEVIATION_DEGREES, WRIST_TWIST_DEGREES,
+    ELBOW_TWIST_DEGREES, KNEE_TWIST_DEGREES,
     HumanBone, Human, BoneSpec, bone_at, filter_joint_at, spec_at,
     human_reference_shape, human_anatomical_limits, human_tight_limits, human_chain_child, human_shape_head, human_shape_tail, human_shape_toe, human_fit_shape, destroy_shape, create_human_shaped,
-    human_bone_far_end,
+    human_fit_bone, human_has_bone, human_bone_far_end,
     create_human, destroy_human, human_set_velocity, human_apply_angular_impulse, human_set_joint_friction_torque,
     human_set_joint_spring_hertz, human_set_joint_damping_ratio, human_align_spring, human_release_align_spring, human_create_motor_anchors,
     human_create_parallel_anchors, human_destroy_anchors, human_has_anchors, human_set_anchor_target, human_set_bullet
@@ -65,7 +77,51 @@ const FILTER_JOINT_COUNT = 3
 // its calf; without, the reference's twelve, the foot a shape on the calf.
 const BONE_FOOT_L = 12
 const BONE_FOOT_R = 13
-const MAX_BONE_COUNT = 14
+const ANKLED_BONE_COUNT = 14
+// The bones past the reference's figure and its feet (#190), at fixed
+// indices: a figure with any of them has MAX_BONE_COUNT bones, and those
+// it was not given (the feet too, without ankles) have no body: see
+// human_has_bone. MAX_BONE_COUNT is the most bones a figure has.
+const BONE_HEAD = 14
+const BONE_CLAVICLE_L = 15
+const BONE_CLAVICLE_R = 16
+const BONE_HAND_L = 17
+const BONE_HAND_R = 18
+const BONE_SPINE_02 = 19
+const MAX_BONE_COUNT = 20
+// The reference's three filter joints, and room for the ones the extra
+// bones bring: the head off the chest, the clavicles and the upper arms,
+// the clavicles off each other and the neck, and each bone off the one
+// it no longer hangs from or that it was set between (the upper arms off
+// the chest, the chest off the lumbar, spine_02 off the pelvis).
+const MAX_FILTER_JOINT_COUNT = 15
+// A person's ranges for the extra joints, in degrees. The head nods
+// forward and back and tilts to the side on the neck, beyond what the
+// neck's own joint gives, and turns on it (the atlas): with the neck's
+// cone of 30 and twist of 17.5, the cervical spine's 55 / 65 / 50 / 77.
+const HEAD_FLEXION_DEGREES = 25.0
+const HEAD_EXTENSION_DEGREES = 35.0
+const HEAD_TILT_DEGREES = 20.0
+const HEAD_TURN_DEGREES = 60.0
+// The shoulder girdle: the clavicle lifts 40 and drops 10, swings 20
+// forward and back (protraction, retraction) and turns 20 about itself.
+const CLAVICLE_ELEVATION_DEGREES = 40.0
+const CLAVICLE_DEPRESSION_DEGREES = 10.0
+const CLAVICLE_PROTRACTION_DEGREES = 20.0
+const CLAVICLE_ROTATION_DEGREES = 20.0
+// A clavicle body's density against the default: the girdle's mass.
+const CLAVICLE_DENSITY = 2.0
+// The wrist: 75 toward the palm, 65 back, 27.5 to either side between the
+// radial 20 and ulnar 35, and little turn of its own (the forearm turns).
+const WRIST_FLEXION_DEGREES = 75.0
+const WRIST_EXTENSION_DEGREES = 65.0
+const WRIST_DEVIATION_DEGREES = 27.5
+const WRIST_TWIST_DEGREES = 10.0
+// A twisting hinge (#190): the forearm turns 80 either way about itself
+// (pronation, supination), the shin 10 (the knee's axial turn); either
+// bends as its hinge did, and neither bends sideways.
+const ELBOW_TWIST_DEGREES = 80.0
+const KNEE_TWIST_DEGREES = 10.0
 // The ankle's range, a loaded one's: the toes down 50 degrees and up 35 (an
 // elliptical cone about a centre tipped toward the toes), 15 to either
 // side, and the sole rolled 15 either way about the foot's line.
@@ -103,21 +159,51 @@ struct HumanBone {
 }
 
 // The ragdoll: a heap block of bones and filter joints (create allocates,
-// destroy frees). `ankles`, set before it is made, gives the feet bones of
-// their own (bone_count MAX_BONE_COUNT); left false it is the reference's
-// figure of BONE_COUNT bones.
+// destroy frees). The flags, set before it is made, add bones past the
+// reference's figure of BONE_COUNT: `ankles` the feet (bone_count
+// ANKLED_BONE_COUNT); `head`, `clavicles`, `hands` and `spine_02` those
+// bones (bone_count MAX_BONE_COUNT, the ones not asked for left without a
+// body); `twist` makes the elbows and knees twisting hinges.
 struct Human {
     bones: ptr                     // HumanBone[bone_count]
-    filter_joints: ptr             // JointId[FILTER_JOINT_COUNT]
+    filter_joints: ptr             // JointId[MAX_FILTER_JOINT_COUNT]
     filter_joint_count: int
     friction_torque: float
     is_spawned: bool
     ankles: bool
     bone_count: int
+    head: bool
+    clavicles: bool
+    hands: bool
+    spine_02: bool
+    twist: bool
 }
 
 bone_at(h: *Human, index: int) -> *HumanBone { return (h.bones + index * sizeof(HumanBone)) as *HumanBone }
 filter_joint_at(h: *Human, index: int) -> JointId { return (h.filter_joints as JointId[])[index] }
+
+// Whether a figure was given a bone (the reference's twelve always; a
+// foot with ankles; an extra bone with its flag), whatever it is spawned.
+asks_for_bone(h: *Human, index: int) -> bool {
+    if index < 0 || index >= MAX_BONE_COUNT { return false }
+    if index < BONE_COUNT { return true }
+    if index == BONE_FOOT_L || index == BONE_FOOT_R { return h.ankles }
+    if index == BONE_HEAD { return h.head }
+    if index == BONE_CLAVICLE_L || index == BONE_CLAVICLE_R { return h.clavicles }
+    if index == BONE_HAND_L || index == BONE_HAND_R { return h.hands }
+    return h.spine_02
+}
+
+// Whether a spawned figure has the bone: a body, a joint to its parent.
+// The slots past the reference's twelve that its flags did not ask for
+// hold no body, so a loop to bone_count asks here first.
+human_has_bone(h: *Human, index: int) -> bool {
+    if h.is_spawned == false || index < 0 || index >= h.bone_count { return false }
+    return asks_for_bone(h, index)
+}
+
+// Whether any flag asks for a bone past the feet.
+has_extras(h: *Human) -> bool { return h.head || h.clavicles || h.hands || h.spine_02 }
 
 // A built bone's far end in its body's frame: the end of its own capsule
 // farther from its joint (a forearm's past the wrist, a foot's at the
@@ -125,7 +211,7 @@ filter_joint_at(h: *Human, index: int) -> JointId { return (h.filter_joints as J
 // its shin stops short of by a radius (#174). A figure not spawned, or an
 // index past its bones, has none: zero.
 human_bone_far_end(h: *Human, index: int) -> Vec3 {
-    if h.is_spawned == false || index < 0 || index >= h.bone_count { return math.vec3_zero() }
+    if human_has_bone(h, index) == false { return math.vec3_zero() }
     if h.ankles && (index == BONE_CALF_L || index == BONE_CALF_R) {
         foot = BONE_FOOT_L
         if index == BONE_CALF_R { foot = BONE_FOOT_R }
@@ -171,10 +257,14 @@ struct BoneSpec {
     cone_major_axis: Vec3
 }
 
-// A figure's shape is BONE_COUNT BoneSpecs in one block from the engine's
-// allocator: the reference's from human_reference_shape, a rig's once
-// human_fit_shape has fitted it, and create_human_shaped builds either.
-// The caller frees it with destroy_shape.
+// A figure's shape is MAX_BONE_COUNT BoneSpecs in one block from the
+// engine's allocator: the reference's from human_reference_shape, a rig's
+// once human_fit_shape has fitted it, and create_human_shaped builds
+// either. The first BONE_COUNT are the reference's bones; the feet's two
+// slots are unused (a foot is built from its calf's spec); the extra
+// bones' specs follow, made from the twelve (extra_specs) and fitted to a
+// rig with them or bone by bone (human_fit_bone). The caller frees it
+// with destroy_shape.
 spec_at(shape: @into ptr, index: int) -> *BoneSpec { return (shape + index * sizeof(BoneSpec)) as *BoneSpec }
 set_spec(shape: ptr, index: int, spec: BoneSpec) { (shape as BoneSpec[])[index] = spec }
 
@@ -199,7 +289,7 @@ const FOOT_FRICTION = 0.9
 // The reference's figure, bone by bone (its frames measured from the rig,
 // its limits the reference's: cones about the rest, hinges either side of it).
 reference_tight_shape() -> ptr {
-    shape = basics.alloc(BONE_COUNT * sizeof(BoneSpec))
+    shape = basics.alloc(MAX_BONE_COUNT * sizeof(BoneSpec))
     no_joint = math.transform_identity()
     on_axis = math.vec3_axis_z()
     set_spec(shape, BONE_PELVIS, BoneSpec {
@@ -287,8 +377,154 @@ reference_tight_shape() -> ptr {
         frame_a: transform_of(0.0 - 0.297979, 0.0 - 0.000361, 0.0, 0.0 - 0.405444, 0.914059, 0.010541, 0.000852),
         frame_b: transform_of(0.0, 0.0, 0.0, 0.0 - 0.002794, 0.999936, 0.010042, 0.004364),
         swing_degrees: 0.0, lower_degrees: 0.0 - 35.0, upper_degrees: 35.0, joint_friction: 0.06, density: 1.0, has_foot: false, foot: no_foot(), foot_friction: 0.0, cone_axis: on_axis, swing_minor_degrees: 0.0, cone_major_axis: math.vec3_zero() })
+    set_spec(shape, BONE_FOOT_L, unused_spec())
+    set_spec(shape, BONE_FOOT_R, unused_spec())
+    extra_specs(shape)
     return shape
 }
+
+// The feet's slots: a foot is built from its calf's spec.
+unused_spec() -> BoneSpec {
+    no_joint = math.transform_identity()
+    return BoneSpec {
+        parent: 0 - 1, reference: no_joint, group: 0, friction: 0.0, capsule: no_foot(),
+        joint_kind: dynamics.JOINT_PARALLEL, frame_a: no_joint, frame_b: no_joint, swing_degrees: 0.0, lower_degrees: 0.0, upper_degrees: 0.0, joint_friction: 0.0,
+        density: 0.0, has_foot: false, foot: no_foot(), foot_friction: 0.0, cone_axis: math.vec3_axis_z(), swing_minor_degrees: 0.0, cone_major_axis: math.vec3_zero() }
+}
+
+// --- the extra bones' shapes (#190) ------------------------------------------------------------------------
+
+// An extra bone's spec: its frame `reference` looks down the bone (its z
+// from the joint along the bone, its x the way the joint's main range
+// reaches), so the joint's frames are the bone's own, one at rest. Its
+// cone is an ellipse about a centre tipped `tilt` degrees toward x,
+// reaching `major` degrees either side of it along x and `minor` across
+// (a circle when minor is 0), and it turns `twist` degrees either way.
+extra_spec(parent: int, reference: Transform, capsule: Capsule, group: int, friction: float, joint_friction: float,
+           tilt: float, major: float, minor: float, twist: float) -> BoneSpec {
+    t = tilt * math.DEG_TO_RAD
+    return BoneSpec {
+        parent: parent, reference: reference, group: group, friction: friction, capsule: capsule,
+        joint_kind: dynamics.JOINT_SPHERICAL, frame_a: math.transform_identity(), frame_b: math.transform_identity(),
+        swing_degrees: major, lower_degrees: 0.0 - twist, upper_degrees: twist, joint_friction: joint_friction,
+        density: 1.0, has_foot: false, foot: no_foot(), foot_friction: 0.0, cone_axis: math.vec3(sin(t), 0.0, cos(t)),
+        swing_minor_degrees: minor, cone_major_axis: math.vec3_zero() }
+}
+
+// A rotation looking down `line` (its z), its x the part of `hint` across it.
+line_frame(line: Vec3, hint: Vec3) -> Quat {
+    z = math.normalize(line)
+    x = math.normalize(across(hint, z))
+    return math.make_quat_from_matrix(Matrix3 { cx: x, cy: math.cross(z, x), cz: z })
+}
+
+// The figure's up (the pelvis's joint to the neck's) and forward (the
+// way its toes point, across the up), measured on the shape as it stands.
+figure_up(shape: ptr) -> Vec3 { return math.normalize(math.sub(human_shape_head(shape, BONE_NECK), human_shape_head(shape, BONE_PELVIS))) }
+
+figure_forward(shape: ptr, up: Vec3) -> Vec3 {
+    toes = math.add(math.sub(human_shape_toe(shape, BONE_CALF_L), human_shape_tail(shape, BONE_CALF_L)),
+                    math.sub(human_shape_toe(shape, BONE_CALF_R), human_shape_tail(shape, BONE_CALF_R)))
+    return math.normalize(across(toes, up))
+}
+
+// Away from the figure's middle line at `point`, across its up and forward.
+out_from_middle(shape: ptr, point: Vec3, up: Vec3, forward: Vec3) -> Vec3 {
+    return across(across(math.sub(point, human_shape_head(shape, BONE_PELVIS)), up), forward)
+}
+
+// A capsule's end nearer its body's origin, and the farther.
+near_end(c: Capsule) -> Vec3 {
+    if math.length(c.center2) < math.length(c.center1) { return c.center2 }
+    return c.center1
+}
+
+far_end(c: Capsule) -> Vec3 {
+    if math.length(c.center2) > math.length(c.center1) { return c.center2 }
+    return c.center1
+}
+
+// The extra bones made from the twelve, where a person has them:
+//   the head above the neck, its joint at the near end of the neck's
+//   capsule (which carries the head on the reference's figure), its own
+//   capsule the head's part of it;
+//   each clavicle from the sternoclavicular joint (in from the shoulder,
+//   a little below and ahead of it, in proportion to the shoulders'
+//   width) to the shoulder;
+//   each hand from the wrist, four fifths along the forearm's capsule
+//   line, as long as a hand is to a forearm of that length;
+//   spine_02 halfway between the spine bodies' joints, as wide as the
+//   lumbar body it splits with spine_01.
+extra_specs(shape: ptr) {
+    up = figure_up(shape)
+    forward = figure_forward(shape, up)
+    neck = spec_at(shape, BONE_NECK)
+    near = near_end(neck.capsule)
+    far = far_end(neck.capsule)
+    length = math.length(math.sub(far, near))
+    head_frame = Transform { p: math.transform_point(neck.reference, near), q: line_frame(math.rotate_vector(neck.reference.q, math.sub(far, near)), forward) }
+    set_spec(shape, BONE_HEAD, extra_spec(BONE_NECK, head_frame,
+        manifold.capsule(math.vec3(0.0, 0.0, 0.24 * length), math.vec3(0.0, 0.0, length), 0.91 * neck.capsule.radius), 0, neck.friction, 1.0,
+        0.5 * (HEAD_FLEXION_DEGREES - HEAD_EXTENSION_DEGREES), 0.5 * (HEAD_FLEXION_DEGREES + HEAD_EXTENSION_DEGREES), HEAD_TILT_DEGREES, HEAD_TURN_DEGREES))
+    clavicle_spec(shape, BONE_CLAVICLE_L, BONE_UPPER_ARM_L, up, forward)
+    clavicle_spec(shape, BONE_CLAVICLE_R, BONE_UPPER_ARM_R, up, forward)
+    hand_spec(shape, BONE_HAND_L, BONE_LOWER_ARM_L, up, forward)
+    hand_spec(shape, BONE_HAND_R, BONE_LOWER_ARM_R, up, forward)
+    lumbar = spec_at(shape, BONE_SPINE_01)
+    chest = spec_at(shape, BONE_SPINE_03)
+    line = math.sub(chest.reference.p, lumbar.reference.p)
+    span = math.length(line)
+    middle = Transform { p: math.mul_add(lumbar.reference.p, 0.5, line), q: line_frame(line, forward) }
+    set_spec(shape, BONE_SPINE_02, extra_spec(BONE_SPINE_01, middle,
+        manifold.capsule(math.vec3(0.0, 0.12 * span, 0.32 * span), math.vec3(0.0, 0.0 - 0.12 * span, 0.32 * span), 0.45 * span), lumbar.group, lumbar.friction, 1.0,
+        0.0, 0.5 * chest.swing_degrees, 0.0, 0.5 * chest.upper_degrees))
+    i = BONE_HEAD
+    while i < MAX_BONE_COUNT {
+        rest_frames(shape, i)
+        i = i + 1
+    }
+}
+
+clavicle_spec(shape: ptr, index: int, arm_index: int, up: Vec3, forward: Vec3) {
+    shoulder = human_shape_head(shape, arm_index)
+    out = out_from_middle(shape, shoulder, up, forward)
+    half_width = math.length(out)
+    side = math.mul_sv(1.0 / half_width, out)
+    joint = math.add(math.sub(math.sub(shoulder, math.mul_sv(0.84 * half_width, side)), math.mul_sv(0.21 * half_width, up)), math.mul_sv(0.27 * half_width, forward))
+    line = math.sub(shoulder, joint)
+    length = math.length(line)
+    set_spec(shape, index, extra_spec(BONE_SPINE_03, Transform { p: joint, q: line_frame(line, up) },
+        manifold.capsule(math.vec3(0.0, 0.0, 0.12 * length), math.vec3(0.0, 0.0, 0.82 * length), 0.3 * length), 0, spec_at(shape, arm_index).friction, 1.0,
+        0.5 * (CLAVICLE_ELEVATION_DEGREES - CLAVICLE_DEPRESSION_DEGREES), 0.5 * (CLAVICLE_ELEVATION_DEGREES + CLAVICLE_DEPRESSION_DEGREES),
+        CLAVICLE_PROTRACTION_DEGREES, CLAVICLE_ROTATION_DEGREES))
+    // The shoulder girdle it stands for (the clavicle, the scapula and the
+    // muscles over them), not the bone alone: a body light against the arm
+    // it carries leaves the solver too little to hold the shoulder by.
+    spec_at(shape, index).density = CLAVICLE_DENSITY
+}
+
+hand_spec(shape: ptr, index: int, forearm_index: int, up: Vec3, forward: Vec3) {
+    forearm = spec_at(shape, forearm_index)
+    far = far_end(forearm.capsule)
+    reach = math.length(far)
+    wrist = math.transform_point(forearm.reference, math.mul_sv(0.8, far))
+    palm = math.neg(out_from_middle(shape, wrist, up, forward))
+    set_spec(shape, index, extra_spec(forearm_index, Transform { p: wrist, q: line_frame(math.rotate_vector(forearm.reference.q, far), palm) },
+        manifold.capsule(math.vec3(0.0, 0.0, 0.096 * reach), math.vec3(0.0, 0.0, 0.35 * reach), 0.67 * forearm.capsule.radius), 0, forearm.friction, forearm.joint_friction,
+        0.5 * (WRIST_FLEXION_DEGREES - WRIST_EXTENSION_DEGREES), 0.5 * (WRIST_FLEXION_DEGREES + WRIST_EXTENSION_DEGREES), WRIST_DEVIATION_DEGREES, WRIST_TWIST_DEGREES))
+}
+
+// An extra bone's joint frames from its frame and its parent's: the
+// bone's own frame on both sides, so the joint is one at rest and its
+// cone and twist read from there.
+rest_frames(shape: ptr, index: int) {
+    spec = spec_at(shape, index)
+    spec.frame_b = math.transform_identity()
+    spec.frame_a = math.inv_mul_transforms(spec_at(shape, spec.parent).reference, spec.reference)
+}
+
+// Whether a bone index is one of the extra bones.
+is_extra(index: int) -> bool { return index >= BONE_HEAD && index < MAX_BONE_COUNT }
 
 // --- a shape's landmarks, and a shape fitted to a rig's --------------------------------------------
 
@@ -313,7 +549,18 @@ human_shape_head(shape: ptr, index: int) -> Vec3 { return spec_at(shape, index).
 // joint along the chain, or for a bone that ends one the end of its own
 // capsule farther from its joint: a calf's at the ankle, a forearm's
 // past the wrist (it carries the hand), the neck's at the head's middle.
+// An extra bone's: a clavicle's at the shoulder, spine_02's at the
+// chest's joint, the head's at its crown and a hand's at its tip (its
+// capsule's far end and cap).
 human_shape_tail(shape: ptr, index: int) -> Vec3 {
+    if index == BONE_CLAVICLE_L { return spec_at(shape, BONE_UPPER_ARM_L).reference.p }
+    if index == BONE_CLAVICLE_R { return spec_at(shape, BONE_UPPER_ARM_R).reference.p }
+    if index == BONE_SPINE_02 { return spec_at(shape, BONE_SPINE_03).reference.p }
+    if index == BONE_HEAD || index == BONE_HAND_L || index == BONE_HAND_R {
+        extra = spec_at(shape, index)
+        end = far_end(extra.capsule)
+        return math.transform_point(extra.reference, math.mul_add(end, extra.capsule.radius, math.normalize(end)))
+    }
     child = human_chain_child(index)
     if child >= 0 { return spec_at(shape, child).reference.p }
     spec = spec_at(shape, index)
@@ -362,7 +609,24 @@ const LINE_MIN = 0.005
 // about the shin so its toe points the rig's way. Each joint's frame on
 // the parent turns with the bone, so the joint's rest angle -- what its
 // spring and its limits are taken from -- is what it was.
+//
+// The extra bones ride their parents: each keeps its place and turn on
+// its parent, its offsets scaled as the parent's line was, its radius as
+// the figure was; a clavicle then reaches to the fitted shoulder and
+// spine_02 sits halfway up the fitted spine. A rig that has those bones
+// puts each on its own with human_fit_bone, after this.
 human_fit_shape(shape: ptr, heads: ptr, tails: ptr, toes: ptr) {
+    on_parents = basics.alloc(MAX_BONE_COUNT * sizeof(Transform))
+    on_parent = on_parents as Transform[]
+    extra_lengths = basics.alloc(MAX_BONE_COUNT * 8)
+    extra_length = extra_lengths as float[]
+    e = BONE_HEAD
+    while e < MAX_BONE_COUNT {
+        extra = spec_at(shape, e)
+        on_parent[e] = math.inv_mul_transforms(spec_at(shape, extra.parent).reference, extra.reference)
+        extra_length[e] = math.length(math.sub(human_shape_tail(shape, e), extra.reference.p))
+        e = e + 1
+    }
     head_at = heads as Vec3[]
     tail_at = tails as Vec3[]
     turns = basics.alloc(BONE_COUNT * sizeof(Quat))
@@ -449,6 +713,27 @@ human_fit_shape(shape: ptr, heads: ptr, tails: ptr, toes: ptr) {
         }
         i = i + 1
     }
+    e = BONE_HEAD
+    while e < MAX_BONE_COUNT {
+        extra = spec_at(shape, e)
+        held = on_parent[e]
+        extra.reference = math.mul_transforms(spec_at(shape, extra.parent).reference, Transform { p: math.mul_sv(scale[extra.parent], held.p), q: held.q })
+        extra.capsule = manifold.capsule(math.mul_sv(scale[extra.parent], extra.capsule.center1), math.mul_sv(scale[extra.parent], extra.capsule.center2), extra.capsule.radius * figure)
+        e = e + 1
+    }
+    aim_extra(shape, BONE_CLAVICLE_L, human_shape_head(shape, BONE_CLAVICLE_L), human_shape_head(shape, BONE_UPPER_ARM_L),
+              extra_length[BONE_CLAVICLE_L] * scale[BONE_SPINE_03])
+    aim_extra(shape, BONE_CLAVICLE_R, human_shape_head(shape, BONE_CLAVICLE_R), human_shape_head(shape, BONE_UPPER_ARM_R),
+              extra_length[BONE_CLAVICLE_R] * scale[BONE_SPINE_03])
+    aim_extra(shape, BONE_SPINE_02, math.mul_sv(0.5, math.add(human_shape_head(shape, BONE_SPINE_01), human_shape_head(shape, BONE_SPINE_03))),
+              human_shape_head(shape, BONE_SPINE_03), extra_length[BONE_SPINE_02] * scale[BONE_SPINE_01])
+    e = BONE_HEAD
+    while e < MAX_BONE_COUNT {
+        rest_frames(shape, e)
+        e = e + 1
+    }
+    basics.free_bytes(on_parents, MAX_BONE_COUNT * sizeof(Transform))
+    basics.free_bytes(extra_lengths, MAX_BONE_COUNT * 8)
     basics.free_bytes(turns, BONE_COUNT * sizeof(Quat))
     basics.free_bytes(olds, BONE_COUNT * sizeof(Quat))
     basics.free_bytes(units, BONE_COUNT * sizeof(Vec3))
@@ -456,8 +741,35 @@ human_fit_shape(shape: ptr, heads: ptr, tails: ptr, toes: ptr) {
     basics.free_bytes(bends, BONE_COUNT * 8)
 }
 
+// An extra bone put on a rig's: its joint at `head` and its line turned to
+// run to `tail` (in the figure's space, landmarks as human_shape_head and
+// human_shape_tail name them: a clavicle's tail is the shoulder, a hand's
+// its tip), its capsule stretched along the line to the rig's length.
+// Its joint's frames follow; its limits are held against its rest, so
+// they turn with it. Nothing happens for the reference's bones (fitted by
+// human_fit_shape, which is called first: it moves the extras with their
+// parents) or for lines too short to have a direction.
+human_fit_bone(shape: ptr, index: int, head: Vec3, tail: Vec3) {
+    if is_extra(index) == false { return }
+    aim_extra(shape, index, head, tail, math.length(math.sub(human_shape_tail(shape, index), human_shape_head(shape, index))))
+}
+
+// An extra bone's line is its frame's z, `length` long as it stands (a
+// clavicle's or spine_02's tail is another bone's joint, which a fit may
+// have moved already, so the caller says how long the bone is).
+aim_extra(shape: ptr, index: int, head: Vec3, tail: Vec3, length: float) {
+    spec = spec_at(shape, index)
+    fitted = math.sub(tail, head)
+    fitted_length = math.length(fitted)
+    if length <= LINE_MIN || fitted_length <= LINE_MIN { return }
+    turn = math.compute_quat_between_unit_vectors(math.rotate_vector(spec.reference.q, math.vec3_axis_z()), math.mul_sv(1.0 / fitted_length, fitted))
+    spec.capsule = stretch(spec.capsule, math.vec3_axis_z(), fitted_length / length, 1.0)
+    spec.reference = Transform { p: head, q: math.normalize_quat(math.mul_quat(turn, spec.reference.q)) }
+    rest_frames(shape, index)
+}
+
 // A figure's shape given back (human_reference_shape's block).
-destroy_shape(shape: ptr) { basics.free_bytes(shape, BONE_COUNT * sizeof(BoneSpec)) }
+destroy_shape(shape: ptr) { basics.free_bytes(shape, MAX_BONE_COUNT * sizeof(BoneSpec)) }
 
 cone_off_axis(axis: Vec3) -> bool { return axis.x != 0.0 || axis.y != 0.0 || axis.z <= 0.0 }
 
@@ -774,9 +1086,10 @@ create_human_shaped(h: *Human, world_id: WorldId, placement: Transform, shape: p
     // Ankles need a foot on each calf to stand on.
     if h.ankles && (spec_at(shape, BONE_CALF_L).has_foot == false || spec_at(shape, BONE_CALF_R).has_foot == false) { return }
     h.bone_count = BONE_COUNT
-    if h.ankles { h.bone_count = MAX_BONE_COUNT }
+    if h.ankles { h.bone_count = ANKLED_BONE_COUNT }
+    if has_extras(h) { h.bone_count = MAX_BONE_COUNT }
     h.bones = basics.alloc(h.bone_count * sizeof(HumanBone))
-    h.filter_joints = basics.alloc(FILTER_JOINT_COUNT * sizeof(JointId))
+    h.filter_joints = basics.alloc(MAX_FILTER_JOINT_COUNT * sizeof(JointId))
     h.filter_joint_count = 0
     i = 0
     while i < h.bone_count {
@@ -796,83 +1109,210 @@ create_human_shaped(h: *Human, world_id: WorldId, placement: Transform, shape: p
     }
     filters = h.filter_joints as JointId[]
     i = 0
-    while i < FILTER_JOINT_COUNT {
+    while i < MAX_FILTER_JOINT_COUNT {
         filters[i] = dynamics.null_joint_id()
         i = i + 1
     }
     h.friction_torque = friction_torque
+    specs = shape as BoneSpec[]
     i = 0
     while i < BONE_COUNT {
-        place_bone(h, world_id, i, placement, spec_at(shape, i), user_data, group_index, h.ankles == false)
+        spec = specs[i]
+        spec.capsule = given_up_capsule(h, i, spec.capsule)
+        place_bone(h, world_id, i, placement, &spec, user_data, group_index, h.ankles == false)
         i = i + 1
     }
     if h.ankles {
         place_foot(h, world_id, BONE_FOOT_L, BONE_CALF_L, placement, spec_at(shape, BONE_CALF_L), user_data, group_index)
         place_foot(h, world_id, BONE_FOOT_R, BONE_CALF_R, placement, spec_at(shape, BONE_CALF_R), user_data, group_index)
     }
+    i = BONE_HEAD
+    while i < MAX_BONE_COUNT {
+        if asks_for_bone(h, i) { place_bone(h, world_id, i, placement, spec_at(shape, i), user_data, group_index, true) }
+        i = i + 1
+    }
     // A bone the world refused (a full world, a shape spec out of range)
     // would leave a figure missing a limb that every later call reaches
     // for: what was made is taken down and the figure stays unspawned.
     i = 0
     while i < h.bone_count {
-        if dynamics.body_is_valid(bone_at(h, i).body_id) == false {
+        if asks_for_bone(h, i) && dynamics.body_is_valid(bone_at(h, i).body_id) == false {
             take_down(h)
             return
         }
         i = i + 1
+    }
+    // The extra bones between the reference's: the upper arms hang from
+    // the clavicles, the chest rides spine_02 (the two sharing the chest
+    // joint's range), and the twisting hinges take the elbows and knees.
+    if h.clavicles {
+        hang_from(h, shape, BONE_UPPER_ARM_L, BONE_CLAVICLE_L)
+        hang_from(h, shape, BONE_UPPER_ARM_R, BONE_CLAVICLE_R)
+    }
+    if h.spine_02 {
+        hang_from(h, shape, BONE_SPINE_03, BONE_SPINE_02)
+        chest = bone_at(h, BONE_SPINE_03)
+        chest.swing_limit = 0.5 * chest.swing_limit
+        chest.swing_minor_limit = 0.5 * chest.swing_minor_limit
+        chest.twist_limit = Vec2 { x: 0.5 * chest.twist_limit.x, y: 0.5 * chest.twist_limit.y }
+    }
+    if h.twist {
+        twisting_hinge(h, shape, BONE_LOWER_ARM_L, ELBOW_TWIST_DEGREES)
+        twisting_hinge(h, shape, BONE_LOWER_ARM_R, ELBOW_TWIST_DEGREES)
+        twisting_hinge(h, shape, BONE_CALF_L, KNEE_TWIST_DEGREES)
+        twisting_hinge(h, shape, BONE_CALF_R, KNEE_TWIST_DEGREES)
     }
 
     // The joints: a spring toward the reference pose when asked, the
     // motor's torque limit as friction, the limits as the rig allows.
     i = 1
     while i < h.bone_count {
-        bone = bone_at(h, i)
-        parent = bone_at(h, bone.parent_index)
-        bone.local_frame_a.q = math.normalize_quat(bone.local_frame_a.q)
-        bone.local_frame_b.q = math.normalize_quat(bone.local_frame_b.q)
-        if bone.joint_kind == dynamics.JOINT_REVOLUTE {
-            rdef = dynamics.default_revolute_joint_def()
-            rdef.base.body_id_a = parent.body_id
-            rdef.base.body_id_b = bone.body_id
-            rdef.base.local_frame_a = bone.local_frame_a
-            rdef.base.local_frame_b = bone.local_frame_b
-            rdef.enable_limit = true
-            rdef.lower_angle = bone.twist_limit.x
-            rdef.upper_angle = bone.twist_limit.y
-            rdef.enable_spring = hertz > 0.0
-            rdef.hertz = hertz
-            rdef.damping_ratio = damping_ratio
-            rdef.enable_motor = true
-            rdef.max_motor_torque = bone.joint_friction * friction_torque
-            bone.joint_id = dynamics.create_revolute_joint(world_id, &rdef)
-        } else {
-            sdef = dynamics.default_spherical_joint_def()
-            sdef.base.body_id_a = parent.body_id
-            sdef.base.body_id_b = bone.body_id
-            sdef.base.local_frame_a = bone.local_frame_a
-            sdef.base.local_frame_b = bone.local_frame_b
-            sdef.enable_cone_limit = true
-            sdef.cone_angle = bone.swing_limit
-            sdef.cone_axis = bone.cone_axis
-            sdef.cone_minor_angle = bone.swing_minor_limit
-            sdef.cone_major_axis = bone.cone_major_axis
-            sdef.enable_twist_limit = true
-            sdef.lower_twist_angle = bone.twist_limit.x
-            sdef.upper_twist_angle = bone.twist_limit.y
-            sdef.enable_spring = hertz > 0.0
-            sdef.hertz = hertz
-            sdef.damping_ratio = damping_ratio
-            sdef.enable_motor = true
-            sdef.max_motor_torque = bone.joint_friction * friction_torque
-            bone.joint_id = dynamics.create_spherical_joint(world_id, &sdef)
-        }
+        if asks_for_bone(h, i) { make_joint(h, world_id, i, hertz, damping_ratio, friction_torque) }
         i = i + 1
     }
-    // The thighs pass each other and the head the shoulders.
+    // The thighs pass each other and the head the shoulders; with the
+    // extra bones, the head the chest and the shoulders, the clavicles
+    // each other and the neck, and each bone the one it no longer hangs
+    // from or was set between (hang_from).
     add_filter(h, world_id, BONE_THIGH_L, BONE_THIGH_R)
     add_filter(h, world_id, BONE_NECK, BONE_UPPER_ARM_L)
     add_filter(h, world_id, BONE_NECK, BONE_UPPER_ARM_R)
+    if h.head {
+        add_filter(h, world_id, BONE_HEAD, BONE_SPINE_03)
+        add_filter(h, world_id, BONE_HEAD, BONE_UPPER_ARM_L)
+        add_filter(h, world_id, BONE_HEAD, BONE_UPPER_ARM_R)
+    }
+    if h.clavicles {
+        add_filter(h, world_id, BONE_CLAVICLE_L, BONE_CLAVICLE_R)
+        add_filter(h, world_id, BONE_CLAVICLE_L, BONE_NECK)
+        add_filter(h, world_id, BONE_CLAVICLE_R, BONE_NECK)
+        add_filter(h, world_id, BONE_UPPER_ARM_L, BONE_SPINE_03)
+        add_filter(h, world_id, BONE_UPPER_ARM_R, BONE_SPINE_03)
+        if h.head {
+            add_filter(h, world_id, BONE_HEAD, BONE_CLAVICLE_L)
+            add_filter(h, world_id, BONE_HEAD, BONE_CLAVICLE_R)
+        }
+    }
+    if h.spine_02 {
+        add_filter(h, world_id, BONE_SPINE_01, BONE_SPINE_03)
+        add_filter(h, world_id, BONE_PELVIS, BONE_SPINE_02)
+    }
     h.is_spawned = true
+}
+
+// A bone's capsule as built: the reference's, but the neck gives the head
+// to a head bone (keeping a short neck below it, three quarters of the
+// head's girth: a person's neck carries the head, so it is no twig),
+// a forearm the hand to a hand bone (ending at the wrist's side of the
+// hand), and spine_01 the upper lumbar to spine_02 (keeping the lower,
+// of a girth that holds the trunk's mass).
+given_up_capsule(h: *Human, index: int, c: Capsule) -> Capsule {
+    if h.head && index == BONE_NECK {
+        near = near_end(c)
+        return manifold.capsule(math.mul_sv(0.2, near), math.mul_sv(0.7, near), 0.75 * c.radius)
+    }
+    if h.hands && (index == BONE_LOWER_ARM_L || index == BONE_LOWER_ARM_R) {
+        if math.length(c.center2) > math.length(c.center1) { return manifold.capsule(c.center1, math.mul_sv(0.67, c.center2), c.radius) }
+        return manifold.capsule(math.mul_sv(0.67, c.center1), c.center2, c.radius)
+    }
+    if h.spine_02 && index == BONE_SPINE_01 {
+        return manifold.capsule(math.mul_sv(0.48, c.center1), math.mul_sv(0.48, c.center2), 0.79 * c.radius)
+    }
+    return c
+}
+
+// A bone's joint moved to a new parent between it and its old one: its
+// frame on the parent re-read on the new one, the same frame in the
+// figure, so its rest, cone and twist are what they were.
+hang_from(h: *Human, shape: ptr, index: int, parent_index: int) {
+    bone = bone_at(h, index)
+    in_figure = math.mul_transforms(spec_at(shape, bone.parent_index).reference, bone.local_frame_a)
+    bone.local_frame_a = math.inv_mul_transforms(spec_at(shape, parent_index).reference, in_figure)
+    bone.parent_index = parent_index
+}
+
+// A hinge that twists (#190): the elbow or knee as a spherical joint whose
+// cone is the hinge's range of bend -- a circle about the middle of the
+// bend from its lower angle to its upper, its minor locked so the bone
+// swings only along the bend's arc (joint_solver.spherical_joint_lock_cone_minor,
+// as UE5's locked swing; an ellipse that narrow chatters) -- and whose
+// twist is the bone turning about itself, `twist_degrees` either way.
+// The joint's frames are one at rest: z the bone's line across the hinge's
+// axis (so bending sweeps z along a great circle), y the hinge's axis.
+twisting_hinge(h: *Human, shape: ptr, index: int, twist_degrees: float) {
+    spec = spec_at(shape, index)
+    parent = spec_at(shape, spec.parent)
+    axis = hinge_axis(shape, index)
+    z = math.normalize(across(math.sub(human_shape_tail(shape, index), human_shape_head(shape, index)), axis))
+    frame = math.make_quat_from_matrix(Matrix3 { cx: math.cross(axis, z), cy: axis, cz: z })
+    // The hinge's limits are joint angles, and the reference's frames do
+    // not meet at the rest: the range against the rest is the limits less
+    // the angle there.
+    at_rest = math.get_twist_angle(math.inv_mul_quat(math.mul_quat(parent.reference.q, math.normalize_quat(spec.frame_a.q)),
+                                                     math.mul_quat(spec.reference.q, math.normalize_quat(spec.frame_b.q))))
+    lower = spec.lower_degrees * math.DEG_TO_RAD
+    upper = spec.upper_degrees * math.DEG_TO_RAD
+    middle = 0.5 * (lower + upper) - at_rest
+    bone = bone_at(h, index)
+    bone.joint_kind = dynamics.JOINT_SPHERICAL
+    bone.local_frame_a = Transform { p: spec.frame_a.p, q: math.inv_mul_quat(parent.reference.q, frame) }
+    bone.local_frame_b = Transform { p: spec.frame_b.p, q: math.inv_mul_quat(spec.reference.q, frame) }
+    bone.cone_axis = math.vec3(sin(middle), 0.0, cos(middle))
+    bone.cone_major_axis = math.vec3(cos(middle), 0.0, 0.0 - sin(middle))
+    bone.swing_limit = 0.5 * (upper - lower)
+    bone.swing_minor_limit = 0.0
+    bone.twist_limit = Vec2 { x: 0.0 - twist_degrees * math.DEG_TO_RAD, y: twist_degrees * math.DEG_TO_RAD }
+}
+
+// A bone's joint to its parent: a spring toward the reference pose when
+// asked, the motor's torque limit as friction, the limits as the rig allows.
+make_joint(h: *Human, world_id: WorldId, i: int, hertz: float, damping_ratio: float, friction_torque: float) {
+    bone = bone_at(h, i)
+    parent = bone_at(h, bone.parent_index)
+    bone.local_frame_a.q = math.normalize_quat(bone.local_frame_a.q)
+    bone.local_frame_b.q = math.normalize_quat(bone.local_frame_b.q)
+    if bone.joint_kind == dynamics.JOINT_REVOLUTE {
+        rdef = dynamics.default_revolute_joint_def()
+        rdef.base.body_id_a = parent.body_id
+        rdef.base.body_id_b = bone.body_id
+        rdef.base.local_frame_a = bone.local_frame_a
+        rdef.base.local_frame_b = bone.local_frame_b
+        rdef.enable_limit = true
+        rdef.lower_angle = bone.twist_limit.x
+        rdef.upper_angle = bone.twist_limit.y
+        rdef.enable_spring = hertz > 0.0
+        rdef.hertz = hertz
+        rdef.damping_ratio = damping_ratio
+        rdef.enable_motor = true
+        rdef.max_motor_torque = bone.joint_friction * friction_torque
+        bone.joint_id = dynamics.create_revolute_joint(world_id, &rdef)
+    } else {
+        sdef = dynamics.default_spherical_joint_def()
+        sdef.base.body_id_a = parent.body_id
+        sdef.base.body_id_b = bone.body_id
+        sdef.base.local_frame_a = bone.local_frame_a
+        sdef.base.local_frame_b = bone.local_frame_b
+        sdef.enable_cone_limit = true
+        sdef.cone_angle = bone.swing_limit
+        sdef.cone_axis = bone.cone_axis
+        sdef.cone_minor_angle = bone.swing_minor_limit
+        sdef.cone_major_axis = bone.cone_major_axis
+        sdef.enable_twist_limit = true
+        sdef.lower_twist_angle = bone.twist_limit.x
+        sdef.upper_twist_angle = bone.twist_limit.y
+        sdef.enable_spring = hertz > 0.0
+        sdef.hertz = hertz
+        sdef.damping_ratio = damping_ratio
+        sdef.enable_motor = true
+        sdef.max_motor_torque = bone.joint_friction * friction_torque
+        bone.joint_id = dynamics.create_spherical_joint(world_id, &sdef)
+        if h.twist && is_hinge_bone(i) { joint_solver.spherical_joint_lock_cone_minor(bone.joint_id, true) }
+    }
+}
+
+// The elbows and knees, the hinges a twisting figure turns into twisting hinges.
+is_hinge_bone(index: int) -> bool {
+    return index == BONE_LOWER_ARM_L || index == BONE_LOWER_ARM_R || index == BONE_CALF_L || index == BONE_CALF_R
 }
 
 add_filter(h: *Human, world_id: WorldId, a: int, b: int) {
@@ -915,7 +1355,7 @@ take_down(h: *Human) {
         i = i + 1
     }
     basics.free_bytes(h.bones, h.bone_count * sizeof(HumanBone))
-    basics.free_bytes(h.filter_joints, FILTER_JOINT_COUNT * sizeof(JointId))
+    basics.free_bytes(h.filter_joints, MAX_FILTER_JOINT_COUNT * sizeof(JointId))
     h.bones = null
     h.filter_joints = null
     h.filter_joint_count = 0
@@ -944,9 +1384,9 @@ human_set_joint_friction_torque(h: *Human, torque: float) {
     i = 1
     while i < h.bone_count {
         bone = bone_at(h, i)
-        if bone.joint_kind == dynamics.JOINT_REVOLUTE {
+        if human_has_bone(h, i) && bone.joint_kind == dynamics.JOINT_REVOLUTE {
             joint_solver.revolute_joint_set_max_motor_torque(bone.joint_id, bone.joint_friction * torque)
-        } else {
+        } else if human_has_bone(h, i) {
             joint_solver.spherical_joint_set_max_motor_torque(bone.joint_id, bone.joint_friction * torque)
         }
         i = i + 1
@@ -958,9 +1398,9 @@ human_set_joint_spring_hertz(h: *Human, hertz: float) {
     i = 1
     while i < h.bone_count {
         bone = bone_at(h, i)
-        if bone.joint_kind == dynamics.JOINT_REVOLUTE {
+        if human_has_bone(h, i) && bone.joint_kind == dynamics.JOINT_REVOLUTE {
             joint_solver.revolute_joint_set_spring_hertz(bone.joint_id, hertz)
-        } else {
+        } else if human_has_bone(h, i) {
             joint_solver.spherical_joint_set_spring_hertz(bone.joint_id, hertz)
         }
         i = i + 1
@@ -972,9 +1412,9 @@ human_set_joint_damping_ratio(h: *Human, damping_ratio: float) {
     i = 1
     while i < h.bone_count {
         bone = bone_at(h, i)
-        if bone.joint_kind == dynamics.JOINT_REVOLUTE {
+        if human_has_bone(h, i) && bone.joint_kind == dynamics.JOINT_REVOLUTE {
             joint_solver.revolute_joint_set_spring_damping_ratio(bone.joint_id, damping_ratio)
-        } else {
+        } else if human_has_bone(h, i) {
             joint_solver.spherical_joint_set_spring_damping_ratio(bone.joint_id, damping_ratio)
         }
         i = i + 1
@@ -1028,14 +1468,16 @@ human_create_motor_anchors(h: *Human, world_id: WorldId) {
     mdef.max_spring_torque = math.MAX_FLOAT
     i = 0
     while i < h.bone_count {
-        bone = bone_at(h, i)
-        xf = dynamics.body_get_transform(bone.body_id)
-        adef.position = xf.p
-        adef.rotation = xf.q
-        bone.anchor_id = dynamics.create_body(world_id, &adef)
-        mdef.base.body_id_a = bone.anchor_id
-        mdef.base.body_id_b = bone.body_id
-        bone.anchor_joint_id = dynamics.create_motor_joint(world_id, &mdef)
+        if human_has_bone(h, i) {
+            bone = bone_at(h, i)
+            xf = dynamics.body_get_transform(bone.body_id)
+            adef.position = xf.p
+            adef.rotation = xf.q
+            bone.anchor_id = dynamics.create_body(world_id, &adef)
+            mdef.base.body_id_a = bone.anchor_id
+            mdef.base.body_id_b = bone.body_id
+            bone.anchor_joint_id = dynamics.create_motor_joint(world_id, &mdef)
+        }
         i = i + 1
     }
 }
@@ -1054,17 +1496,19 @@ human_create_parallel_anchors(h: *Human, world_id: WorldId) {
     pdef.max_torque = 800.0
     i = 0
     while i < h.bone_count {
-        bone = bone_at(h, i)
-        xf = dynamics.body_get_transform(bone.body_id)
-        adef.position = xf.p
-        adef.rotation = xf.q
-        bone.anchor_id = dynamics.create_body(world_id, &adef)
-        pdef.base.body_id_a = bone.anchor_id
-        pdef.base.body_id_b = bone.body_id
-        frame_q = math.inv_mul_quat(xf.q, q_frame_world)
-        pdef.base.local_frame_a.q = frame_q
-        pdef.base.local_frame_b.q = frame_q
-        bone.anchor_joint_id = dynamics.create_parallel_joint(world_id, &pdef)
+        if human_has_bone(h, i) {
+            bone = bone_at(h, i)
+            xf = dynamics.body_get_transform(bone.body_id)
+            adef.position = xf.p
+            adef.rotation = xf.q
+            bone.anchor_id = dynamics.create_body(world_id, &adef)
+            pdef.base.body_id_a = bone.anchor_id
+            pdef.base.body_id_b = bone.body_id
+            frame_q = math.inv_mul_quat(xf.q, q_frame_world)
+            pdef.base.local_frame_a.q = frame_q
+            pdef.base.local_frame_b.q = frame_q
+            bone.anchor_joint_id = dynamics.create_parallel_joint(world_id, &pdef)
+        }
         i = i + 1
     }
 }
@@ -1107,7 +1551,7 @@ human_set_bullet(h: *Human, flag: bool) {
     if h.is_spawned == false { return }
     i = 0
     while i < h.bone_count {
-        dynamics.body_set_bullet(bone_at(h, i).body_id, flag)
+        if human_has_bone(h, i) { dynamics.body_set_bullet(bone_at(h, i).body_id, flag) }
         i = i + 1
     }
 }
