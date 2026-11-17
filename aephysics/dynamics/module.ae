@@ -122,7 +122,7 @@ exports (
     world_contact_count, get_contact, contact_is_valid, make_contact_id, make_shape_id,
     world_contact_begin_event_count, world_contact_begin_event, world_contact_end_event_count, world_contact_end_event, swap_end_events,
     create_graph, destroy_graph, add_contact_to_graph, remove_contact_from_graph, add_joint_to_graph, remove_joint_from_graph,
-    assign_wanted_color, recolor_joints, touch_restored_contact, find_contact,
+    assign_wanted_color, recolor_joints, touch_restored_contact, find_contact, contact_kind_for,
     create_contact, destroy_contact, update_contact, contact_edge_next, invalidate_body_contacts,
     merge_islands, link_contact, unlink_contact, link_joint, unlink_joint, split_island, try_sleep_island,
     update_pairs, collide, validate_contacts,
@@ -4720,6 +4720,8 @@ assign_color(g: *ConstraintGraph, body_id_a: int, body_id_b: int, kind_a: int, k
 // world rebuilt in another order solves a set of bodies' constraints in
 // the order the first did only if they sit in the same colours.
 assign_wanted_color(g: *ConstraintGraph, body_id_a: int, body_id_b: int, kind_a: int, kind_b: int, wanted: int) -> int {
+    // The overflow takes any pair, and marks no body.
+    if wanted == OVERFLOW_INDEX { return OVERFLOW_INDEX }
     dynamic_a = kind_a == BODY_DYNAMIC
     dynamic_b = kind_b == BODY_DYNAMIC
     allowed = false
@@ -5903,6 +5905,24 @@ touch_restored_contact(w: *World, c: *Contact, wanted: int) {
     body_b = body_at(w, c.edge_b.body_id)
     place_contact_in_color(w, c, assign_wanted_color(&w.constraint_graph, body_a.id, body_b.id, body_a.kind, body_b.kind, wanted))
     remove_non_touching_contact(w, AWAKE_SET, old_local_index)
+}
+
+// The contact create_contact makes of two shapes as given (a compound's
+// child named): 1 a mesh contact, 0 a convex one, -1 none (a pair that does
+// not collide, a child that is not there, or the pair in the order
+// create_contact would turn round).
+contact_kind_for(w: *World, shape_id_a: int, shape_id_b: int, child_index: int) -> int {
+    shape_a = world_shape_at(w, shape_id_a)
+    shape_b = world_shape_at(w, shape_id_b)
+    kind_a = shape_a.geometry.kind
+    kind_b = shape_b.geometry.kind
+    if contact_pair_supported(kind_a, kind_b) == false || contact_pair_primary(kind_a, kind_b) == false { return 0 - 1 }
+    if kind_a == KIND_MESH || kind_a == KIND_HEIGHT_FIELD { return 1 }
+    if kind_a == KIND_COMPOUND {
+        if child_index < 0 || child_index >= compound.child_count(shape_a.geometry.compound) { return 0 - 1 }
+        if compound.get_compound_child(shape_a.geometry.compound, child_index).kind == KIND_MESH { return 1 }
+    }
+    return 0
 }
 
 // The contact between two shapes (a compound's child named), as the pair
@@ -7509,12 +7529,13 @@ get_joint_reaction(w: *World, sim: *JointSim, inv_time_step: float) -> JointReac
         angular_impulse = math.length(math.vec3(r.perp_impulse.x, r.perp_impulse.y, r.spring_impulse + r.motor_impulse + r.lower_impulse - r.upper_impulse))
     } else if kind == JOINT_SPHERICAL {
         // As the warm start applies it: the cone limit along -swing_axis,
-        // the twist limits along the twist's Jacobian.
+        // the twist limits along the twist's Jacobian, a locked minor along its row.
         s = spherical_joint_of(sim)
         linear_impulse = math.length(s.linear_impulse)
         impulse = math.add(s.spring_impulse, s.motor_impulse)
         impulse = math.mul_sub(impulse, s.swing_impulse, s.swing_axis)
         impulse = math.mul_add(impulse, s.lower_twist_impulse - s.upper_twist_impulse, s.twist_jacobian)
+        if s.lock_cone_minor { impulse = math.mul_add(impulse, s.lock_impulse, s.lock_axis) }
         angular_impulse = math.length(impulse)
     } else if kind == JOINT_WELD {
         weld = weld_joint_of(sim)

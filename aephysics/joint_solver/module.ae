@@ -2930,6 +2930,9 @@ joint_get_impulses(id: JointId, out: ptr) -> int {
 // of them): the joint's next warm start starts from them. A count that is
 // not the kind's, a value not finite, or a stale id changes nothing.
 joint_set_impulses(id: JointId, values: ptr, count: int) {
+    // A count past what any kind has is refused before it is recorded: the
+    // record reads `count` values from the caller's block.
+    if count < 0 || count > JOINT_IMPULSE_COUNT || values == null { return }
     if dynamics.recording_on(id.world0) {
         recorder = dynamics.rec_begin(id.world0, dynamics.OP_JOINT_SET_IMPULSES)
         dynamics.rec_id(recorder, id.index1, id.generation)

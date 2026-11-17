@@ -681,6 +681,8 @@ join_at(at: int, layout: int) {
     restored = snapshot.restore_body_set(world_b, bodies_b, b.bone_count, map_block, 1, block, size)
     ensure("join at ${at}, layout ${layout}: restored", restored)
     ensure("join at ${at}, layout ${layout}: the same at once", same_figures(&a, &b))
+    asleep_a = physics_world.get_awake_body_count(world_a) == 0
+    ensure("join at ${at}, layout ${layout}: asleep here as there", asleep_a == false || dynamics.body_is_awake(human.bone_at(&b, 0).body_id) == false)
     parted = 0 - 1
     s = 0
     while s < 600 {
@@ -741,6 +743,40 @@ cold_join_apart(at: int) -> float {
     return apart
 }
 
+// A block that does not fit the world it is written into is refused whole:
+// the world as it was, bit for bit (a shape mapped onto one of the set's
+// own, a block cut short, a different count of bodies).
+refused_restores() {
+    a = Human { bones: null, filter_joints: null, filter_joint_count: 0, friction_torque: 0.0, is_spawned: false }
+    slab_a = join_world(&a, 0)
+    world_a = dynamics.body_get_world(human.bone_at(&a, 0).body_id)
+    steps(world_a, 40)
+    bodies_a = figure_bodies(&a)
+    block, size = snapshot.save_body_set(world_a, bodies_a, a.bone_count)
+    b = Human { bones: null, filter_joints: null, filter_joint_count: 0, friction_torque: 0.0, is_spawned: false }
+    join_world(&b, 1)
+    world_b = dynamics.body_get_world(human.bone_at(&b, 0).body_id)
+    steps(world_b, 20)
+    bodies_b = figure_bodies(&b)
+    before = state_hash(world_b)
+    map_block = calloc(2, sizeof(ShapeId))
+    map = map_block as ShapeId[]
+    map[0] = slab_a
+    dynamics.body_get_shapes(human.bone_at(&b, human.BONE_PELVIS).body_id, (map_block + sizeof(ShapeId)) as ShapeId[], 1)
+    ensure("refused: the ground mapped onto the figure's own shape", snapshot.restore_body_set(world_b, bodies_b, b.bone_count, map_block, 1, block, size) == false)
+    ensure("refused: a block cut short", snapshot.restore_body_set(world_b, bodies_b, b.bone_count, null, 0, block, size - 8) == false)
+    ensure("refused: a different count of bodies", snapshot.restore_body_set(world_b, bodies_b, b.bone_count - 1, null, 0, block, size) == false)
+    ensure("refused: the world as it was, bit for bit", state_hash(world_b) == before)
+    snapshot.free_snapshot(block, size)
+    free(map_block)
+    free(bodies_a)
+    free(bodies_b)
+    human.destroy_human(&a)
+    human.destroy_human(&b)
+    dynamics.destroy_world(world_a)
+    dynamics.destroy_world(world_b)
+}
+
 body_set_join() {
     g_join_slab = hull.make_box_hull(20.0, 1.0, 20.0) as ptr
     g_join_crate = hull.make_box_hull(0.5, 0.5, 0.5) as ptr
@@ -753,6 +789,7 @@ body_set_join() {
         join_at(seeds[k], 3)
         k = k + 1
     }
+    refused_restores()
     println("snapshot: into a world with a history, ${g_history_exact} of ${g_history_joins} joins bit for bit for 600 steps")
     println("snapshot: a cold join (pose and motion only) parts by ${cold_join_apart(40)} m after 600 steps")
     hull.destroy_hull(g_join_slab as *HullData)

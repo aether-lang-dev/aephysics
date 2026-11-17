@@ -1176,6 +1176,7 @@ save_body_set(world_id: WorldId, bodies: ptr, count: int) -> (ptr, int) {
     w_bool(&wr, asleep)
     no_state = basics.alloc(sizeof(BodyState))
     memset(no_state, 0, sizeof(BodyState))
+    (no_state as *BodyState).dq = Quatf { x: 0.0, y: 0.0, z: 0.0, w: 1.0 }
 
     // The bodies, and their shapes' bounds.
     i = 0
@@ -1354,7 +1355,10 @@ r_shape_ref(rd: *SnapReader, w: *World, local: int[], count: int, shape_map: ptr
     first = r_int(rd)
     second = r_int(rd)
     if rd.ok == false || at >= count { return NULL_INDEX }
-    if at >= 0 { return nth_shape(w, dynamics.body_at(w, local[at]), first) }
+    if at >= 0 {
+        if first < 0 { return NULL_INDEX }
+        return nth_shape(w, dynamics.body_at(w, local[at]), first)
+    }
     index1 = first
     generation = second
     if map_count > 0 {
@@ -1385,12 +1389,26 @@ apply_body_set(w: *World, local: int[], count: int, shape_map: ptr, map_count: i
     rd = SnapReader { data: data, size: size, at: 0, ok: true }
     if r_int(&rd) != BODY_SET_MAGIC || r_int(&rd) != BODY_SET_VERSION || r_long(&rd) != snapshot_layout() || r_int(&rd) != count || rd.ok == false { return false }
     asleep = r_bool(&rd)
+    // Asleep, the set goes to sleep here as one island: its bodies must be one.
+    if asleep {
+        island_id = dynamics.body_at(w, local[0]).island_id
+        i = 1
+        while i < count {
+            if dynamics.body_at(w, local[i]).island_id != island_id { return false }
+            i = i + 1
+        }
+    }
     if apply {
-        // The world's own contacts of the set make way for the block's.
+        // The world's own contacts of the set make way for the block's,
+        // with no end events: the block's come back touching, with none.
         i = 0
         while i < count {
             body = dynamics.body_at(w, local[i])
-            while body.head_contact_key != NULL_INDEX { dynamics.destroy_contact(w, dynamics.contact_at(w, body.head_contact_key >> 1), false) }
+            while body.head_contact_key != NULL_INDEX {
+                gone = dynamics.contact_at(w, body.head_contact_key >> 1)
+                gone.flags = gone.flags & (0 - 1 - dynamics.CONTACT_ENABLE_CONTACT_EVENTS)
+                dynamics.destroy_contact(w, gone, false)
+            }
             i = i + 1
         }
     }
@@ -1471,6 +1489,12 @@ apply_body_set(w: *World, local: int[], count: int, shape_map: ptr, map_count: i
             }
             key = joint_key_next(w, key)
         }
+        // A joint named twice is refused: it would be coloured twice.
+        twice = 0
+        while twice < k && found != NULL_INDEX {
+            if joint_ids[twice] == found { found = NULL_INDEX }
+            twice = twice + 1
+        }
         if found == NULL_INDEX || rd.ok == false {
             ok = false
             break
@@ -1495,7 +1519,12 @@ apply_body_set(w: *World, local: int[], count: int, shape_map: ptr, map_count: i
     // The contacts, made again in the order the world saved made them.
     contact_count = 0
     if ok { contact_count = r_int(&rd) }
-    if rd.ok == false || contact_count < 0 { ok = false }
+    if rd.ok == false || contact_count < 0 || basics.section_fits(rd.at, contact_count, 32, rd.size) == false { ok = false }
+    if ok == false { contact_count = 0 }
+    pairs_block = basics.alloc(math.max_int(contact_count, 1) * 12)
+    pair_a = pairs_block as int[]
+    pair_b = (pairs_block + math.max_int(contact_count, 1) * 4) as int[]
+    pair_child = (pairs_block + math.max_int(contact_count, 1) * 8) as int[]
     state_flags = body_set_contact_state()
     k = 0
     while k < contact_count && ok {
@@ -1510,6 +1539,24 @@ apply_body_set(w: *World, local: int[], count: int, shape_map: ptr, map_count: i
             ok = false
             break
         }
+        // A contact the world makes as the block's was made (a pair that
+        // collides, in that order, mesh or convex as recorded), reaching the
+        // set, and named once: what the check passes, the write does.
+        contact_kind = dynamics.contact_kind_for(w, shape_a, shape_b, child_index)
+        in_set = local_index_of(local, count, dynamics.world_shape_at(w, shape_a).body_id) >= 0 ||
+                 local_index_of(local, count, dynamics.world_shape_at(w, shape_b).body_id) >= 0
+        named = 0
+        while named < k && contact_kind >= 0 {
+            if pair_a[named] == shape_a && pair_b[named] == shape_b && pair_child[named] == child_index { contact_kind = 0 - 1 }
+            named = named + 1
+        }
+        if contact_kind < 0 || in_set == false {
+            ok = false
+            break
+        }
+        pair_a[k] = shape_a
+        pair_b[k] = shape_b
+        pair_child[k] = child_index
         made = NULL_INDEX
         if apply {
             dynamics.create_contact(w, dynamics.world_shape_at(w, shape_a), dynamics.world_shape_at(w, shape_b), child_index)
@@ -1526,6 +1573,10 @@ apply_body_set(w: *World, local: int[], count: int, shape_map: ptr, map_count: i
             rd.at = rd.at + manifold_count * sizeof(Manifold)
         }
         is_mesh = r_bool(&rd)
+        if is_mesh != (contact_kind == 1) {
+            ok = false
+            break
+        }
         if is_mesh {
             if apply {
                 r_bytes(&rd, (&dynamics.mesh_cache_of(dynamics.contact_at(w, made)).query_bounds) as ptr, sizeof(AABB))
@@ -1573,13 +1624,27 @@ apply_body_set(w: *World, local: int[], count: int, shape_map: ptr, map_count: i
         if rd.ok == false || rd.at > size { ok = false }
         k = k + 1
     }
+    basics.free_bytes(pairs_block, math.max_int(contact_count, 1) * 12)
     removed = 0
     if ok { removed = r_int(&rd) }
     if apply && ok && removed >= 0 {
         island_id = dynamics.body_at(w, local[0]).island_id
-        if island_id != NULL_INDEX { dynamics.island_at(w, island_id).constraint_remove_count = removed }
-        // Read asleep, the set sleeps here too, as one island.
-        if asleep && island_id != NULL_INDEX { dynamics.try_sleep_island(w, island_id) }
+        if island_id != NULL_INDEX {
+            island = dynamics.island_at(w, island_id)
+            // The saved island's count, but an island that also holds bodies
+            // outside the set (a contact this world had merged it through,
+            // destroyed above) keeps its own removals, so it still splits.
+            if island.bodies.count > count { island.constraint_remove_count = island.constraint_remove_count + removed }
+            else { island.constraint_remove_count = removed }
+            // Read asleep, the set sleeps here too, as one island: put to
+            // sleep with no split pending, then given its count back, which
+            // the sleeping island keeps until it wakes.
+            if asleep {
+                island.constraint_remove_count = 0
+                dynamics.try_sleep_island(w, island_id)
+                dynamics.island_at(w, island_id).constraint_remove_count = removed
+            }
+        }
     }
     basics.free_bytes(hold, hold_size)
     return ok && rd.ok && rd.at == size
