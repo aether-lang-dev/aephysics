@@ -27,6 +27,7 @@ import aephysics.contact_solver
 exports (
     prepare_joint, warm_start_joint, solve_joint, dummy_state, point_mass_matrix, prepare_joints, warm_start_joints, solve_joints, prepare_joints_range, warm_start_joints_range, solve_joints_range,
     joint_get_constraint_force, joint_get_constraint_torque, get_joint_constraint_force, get_joint_constraint_torque,
+    JOINT_IMPULSE_COUNT, joint_get_impulses, joint_set_impulses, joint_impulses_io,
     prepare_distance_joint, warm_start_distance_joint, solve_distance_joint,
     prepare_motor_joint, warm_start_motor_joint, solve_motor_joint,
     prepare_parallel_joint, warm_start_parallel_joint, solve_parallel_joint,
@@ -64,7 +65,7 @@ exports (
     revolute_joint_get_max_motor_torque, revolute_joint_get_motor_torque,
     spherical_joint_enable_cone_limit, spherical_joint_is_cone_limit_enabled, spherical_joint_get_cone_limit, spherical_joint_set_cone_limit,
     spherical_joint_get_cone_angle, spherical_joint_set_cone_axis, spherical_joint_get_cone_axis,
-    spherical_joint_set_cone_ellipse, spherical_joint_get_cone_minor_angle, spherical_joint_get_cone_major_axis, spherical_joint_enable_twist_limit, spherical_joint_is_twist_limit_enabled,
+    spherical_joint_set_cone_ellipse, spherical_joint_lock_cone_minor, spherical_joint_is_cone_minor_locked, spherical_joint_get_cone_minor_angle, spherical_joint_get_cone_major_axis, spherical_joint_enable_twist_limit, spherical_joint_is_twist_limit_enabled,
     spherical_joint_get_lower_twist_limit, spherical_joint_get_upper_twist_limit, spherical_joint_set_twist_limits,
     spherical_joint_get_twist_angle, spherical_joint_enable_spring, spherical_joint_is_spring_enabled, spherical_joint_set_target_rotation,
     spherical_joint_get_target_rotation, spherical_joint_set_spring_hertz, spherical_joint_get_spring_hertz,
@@ -1668,6 +1669,15 @@ prepare_spherical_joint(base: *JointSim, ctx: *StepContext) {
         if k > 0.0 { j.twist_mass = 1.0 / k }
         j.twist_jacobian = jacobian
     }
+    // The minor lock: C = B's z along the cone's minor axis on A, whose
+    // rate is (w_b - w_a) along B's z crossed with that axis.
+    if j.lock_cone_minor {
+        lock_axis = math.cross(twist_axis, math.rotate_vector(j.frame_a.q, dynamics.spherical_cone_minor_axis(j)))
+        k = math.dot(lock_axis, math.mul_mv(inertia_sum, lock_axis))
+        j.lock_mass = 0.0
+        if k > 0.0 { j.lock_mass = 1.0 / k }
+        j.lock_axis = lock_axis
+    }
     if base.fixed_rotation == false { j.rotation_mass = math.invert_matrix(inertia_sum) } else { j.rotation_mass = math.mat3_zero() }
     j.spring_softness = dynamics.make_soft(j.hertz, j.damping_ratio, ctx.h)
     // A spring off or of no stiffness computes no impulse; its last one is
@@ -1680,6 +1690,7 @@ prepare_spherical_joint(base: *JointSim, ctx: *StepContext) {
         j.swing_impulse = 0.0
         j.lower_twist_impulse = 0.0
         j.upper_twist_impulse = 0.0
+        j.lock_impulse = 0.0
     }
 }
 
@@ -1692,7 +1703,7 @@ warm_start_spherical_joint(base: *JointSim, ctx: *StepContext) {
     // The angular impulses are each zeroed when their part is off, so a
     // plain point (no spring, motor or limit) has none to give back.
     angular = math.vec3_zero()
-    if j.enable_spring || j.enable_motor || j.enable_cone_limit || j.enable_twist_limit { angular = spherical_angular_impulse(j) }
+    if j.enable_spring || j.enable_motor || j.enable_cone_limit || j.enable_twist_limit || j.lock_cone_minor { angular = spherical_angular_impulse(j) }
     v_a = math.mul_sub(math.widen3(state_a.v), base.inv_mass_a, j.linear_impulse)
     w_a = math.sub(math.widen3(state_a.w), math.mul_mv(math.widen_mat3(base.inv_inertia_a), math.add(math.cross(r_a, j.linear_impulse), angular)))
     v_b = math.mul_add(math.widen3(state_b.v), base.inv_mass_b, j.linear_impulse)
@@ -1774,6 +1785,23 @@ solve_spherical_joint(base: *JointSim, ctx: *StepContext, use_bias: bool) {
         w_a = math.mul_add(w_a, delta, math.mul_mv(i_a, swing_axis))
         w_b = math.mul_sub(w_b, delta, math.mul_mv(i_b, swing_axis))
     }
+    // The minor lock, an equality softened as the point is.
+    if j.lock_cone_minor && fixed_rotation == false {
+        lock_axis = j.lock_axis
+        cdot = math.dot(math.sub(w_b, w_a), lock_axis)
+        bias = 0.0
+        mass_scale = 1.0
+        impulse_scale = 0.0
+        if use_bias {
+            bias = base.constraint_softness.bias_rate * dynamics.spherical_lock_error(j, quat_a, quat_b)
+            mass_scale = base.constraint_softness.mass_scale
+            impulse_scale = base.constraint_softness.impulse_scale
+        }
+        delta = 0.0 - mass_scale * j.lock_mass * (cdot + bias) - impulse_scale * j.lock_impulse
+        j.lock_impulse = j.lock_impulse + delta
+        w_a = math.mul_sub(w_a, delta, math.mul_mv(i_a, lock_axis))
+        w_b = math.mul_add(w_b, delta, math.mul_mv(i_b, lock_axis))
+    }
     // The point.
     r_a = math.rotate_vector(math.widen_quat(state_a.dq), j.frame_a.p)
     r_b = math.rotate_vector(math.widen_quat(state_b.dq), j.frame_b.p)
@@ -1811,7 +1839,9 @@ get_spherical_joint_torque(w: *World, base: *JointSim) -> Vec3 {
 spherical_angular_impulse(j: *SphericalJoint) -> Vec3 {
     angular = math.add(j.spring_impulse, j.motor_impulse)
     angular = math.mul_sub(angular, j.swing_impulse, j.swing_axis)
-    return math.mul_add(angular, j.lower_twist_impulse - j.upper_twist_impulse, j.twist_jacobian)
+    angular = math.mul_add(angular, j.lower_twist_impulse - j.upper_twist_impulse, j.twist_jacobian)
+    if j.lock_cone_minor { angular = math.mul_add(angular, j.lock_impulse, j.lock_axis) }
+    return angular
 }
 
 // The relative rotation of the frames, B's polarity matched to A's.
@@ -1888,6 +1918,29 @@ spherical_joint_set_cone_ellipse(id: JointId, major_angle: float, minor_angle: f
     j.cone_angle = dynamics.clamp_spherical_cone(j, major_angle)
     j.cone_minor_angle = dynamics.spherical_cone_minor(j, minor_angle)
     j.cone_major_axis = math.narrow3(major_axis)
+}
+// A hinge that twists (#190): the cone's minor half-angle locked at zero,
+// so frame B's z stays in the plane of the cone's centre and its major
+// axis (an equality, as a revolute holds its axis) and swings along it as
+// far as the circle of cone_angle about the centre; the twist about B's z
+// is still the twist limit's. An elbow is one: it bends along its arc,
+// its forearm turns about itself, and it never bends sideways. Locking
+// drops an ellipse's minor angle; unlocked, the cone is a circle until an
+// ellipse is set again.
+spherical_joint_lock_cone_minor(id: JointId, flag: bool) {
+    if dynamics.recording_on(id.world0) { recorder = dynamics.rec_begin(id.world0, dynamics.OP_SPHERICAL_JOINT_LOCK_CONE_MINOR); dynamics.rec_id(recorder, id.index1, id.generation); dynamics.rec_bool(recorder, flag); dynamics.rec_end(recorder) }
+    base = sim_of(id, dynamics.JOINT_SPHERICAL)
+    if base == null { return }
+    j = dynamics.spherical_joint_of(base)
+    if flag == j.lock_cone_minor { return }
+    j.lock_cone_minor = flag
+    j.cone_minor_angle = 0.0
+    j.lock_impulse = 0.0
+}
+spherical_joint_is_cone_minor_locked(id: JointId) -> bool {
+    base = sim_of(id, dynamics.JOINT_SPHERICAL)
+    if base == null { return false }
+    return dynamics.spherical_joint_of(base).lock_cone_minor
 }
 spherical_joint_get_cone_minor_angle(id: JointId) -> float {
     base = sim_of(id, dynamics.JOINT_SPHERICAL)
@@ -2844,6 +2897,144 @@ get_joint_constraint_torque(w: *World, j: *Joint) -> Vec3 {
     if kind == dynamics.JOINT_WELD { return get_weld_joint_torque(w, base) }
     if kind == dynamics.JOINT_WHEEL { return get_wheel_joint_torque(w, base) }
     return math.vec3_zero()
+}
+
+// --- warm-start impulses (#189) ---------------------------------------------------------------------------------
+
+// A joint's warm-start impulses: what its solver carries from one step to
+// the next, so a world that is given them steps on as the one they were
+// read from. Box3D has no such call; a late-joining peer needs it (a
+// ragdoll's joints sent cold drift a settled body by centimetres). In each
+// kind's order:
+//   distance: impulse, lower, upper, motor
+//   motor: linear velocity xyz, angular velocity xyz, linear spring xyz, angular spring xyz
+//   parallel: perpendicular xy
+//   prismatic: perpendicular xy, angular xyz, spring, motor, lower, upper
+//   revolute: linear xyz, perpendicular xy, spring, motor, lower, upper
+//   spherical: linear xyz, spring xyz, motor xyz, lower twist, upper twist, swing, minor lock
+//   weld: linear xyz, angular xyz
+//   wheel: linear xy, angular xy, spin, suspension spring, lower suspension, upper suspension,
+//          steering spring, lower steering, upper steering
+// A filter joint has none.
+const JOINT_IMPULSE_COUNT = 13
+
+// The impulses into `out` (float[JOINT_IMPULSE_COUNT]); how many, 0 for a
+// filter joint or a stale id.
+joint_get_impulses(id: JointId, out: ptr) -> int {
+    if dynamics.joint_is_valid(id) == false { return 0 }
+    kind = dynamics.joint_get_type(id)
+    return joint_impulses_io(sim_of(id, kind), kind, out as float[], false)
+}
+
+// The impulses from `values` (as joint_get_impulses gives them, `count`
+// of them): the joint's next warm start starts from them. A count that is
+// not the kind's, a value not finite, or a stale id changes nothing.
+joint_set_impulses(id: JointId, values: ptr, count: int) {
+    // A count past what any kind has is refused before it is recorded: the
+    // record reads `count` values from the caller's block.
+    if count < 0 || count > JOINT_IMPULSE_COUNT || values == null { return }
+    if dynamics.recording_on(id.world0) {
+        recorder = dynamics.rec_begin(id.world0, dynamics.OP_JOINT_SET_IMPULSES)
+        dynamics.rec_id(recorder, id.index1, id.generation)
+        dynamics.rec_int(recorder, count)
+        k = 0
+        while k < count {
+            dynamics.rec_float(recorder, (values as float[])[k])
+            k = k + 1
+        }
+        dynamics.rec_end(recorder)
+    }
+    if dynamics.joint_is_valid(id) == false || count < 0 || count > JOINT_IMPULSE_COUNT { return }
+    kind = dynamics.joint_get_type(id)
+    base = sim_of(id, kind)
+    if base == null { return }
+    given = values as float[]
+    k = 0
+    while k < count {
+        if math.is_valid_float(given[k]) == false { return }
+        k = k + 1
+    }
+    probe = basics.alloc(JOINT_IMPULSE_COUNT * 8)
+    expected = joint_impulses_io(base, kind, probe as float[], false)
+    basics.free_bytes(probe, JOINT_IMPULSE_COUNT * 8)
+    if count != expected { return }
+    joint_impulses_io(base, kind, given, true)
+}
+
+// Each impulse field of a kind, read into `values` or written from it, in
+// the order above; the count.
+joint_impulses_io(base: *JointSim, kind: int, values: float[], write: bool) -> int {
+    if base == null { return 0 }
+    i = 0
+    if kind == dynamics.JOINT_DISTANCE {
+        d = dynamics.distance_joint_of(base)
+        i = io_floats((&d.impulse) as ptr, 1, values, i, write)
+        i = io_floats((&d.lower_impulse) as ptr, 1, values, i, write)
+        i = io_floats((&d.upper_impulse) as ptr, 1, values, i, write)
+        i = io_floats((&d.motor_impulse) as ptr, 1, values, i, write)
+    } else if kind == dynamics.JOINT_MOTOR {
+        m = dynamics.motor_joint_of(base)
+        i = io_floats((&m.linear_velocity_impulse) as ptr, 3, values, i, write)
+        i = io_floats((&m.angular_velocity_impulse) as ptr, 3, values, i, write)
+        i = io_floats((&m.linear_spring_impulse) as ptr, 3, values, i, write)
+        i = io_floats((&m.angular_spring_impulse) as ptr, 3, values, i, write)
+    } else if kind == dynamics.JOINT_PARALLEL {
+        pj = dynamics.parallel_joint_of(base)
+        i = io_floats((&pj.perp_impulse) as ptr, 2, values, i, write)
+    } else if kind == dynamics.JOINT_PRISMATIC {
+        pr = dynamics.prismatic_joint_of(base)
+        i = io_floats((&pr.perp_impulse) as ptr, 2, values, i, write)
+        i = io_floats((&pr.angular_impulse) as ptr, 3, values, i, write)
+        i = io_floats((&pr.spring_impulse) as ptr, 1, values, i, write)
+        i = io_floats((&pr.motor_impulse) as ptr, 1, values, i, write)
+        i = io_floats((&pr.lower_impulse) as ptr, 1, values, i, write)
+        i = io_floats((&pr.upper_impulse) as ptr, 1, values, i, write)
+    } else if kind == dynamics.JOINT_REVOLUTE {
+        r = dynamics.revolute_joint_of(base)
+        i = io_floats((&r.linear_impulse) as ptr, 3, values, i, write)
+        i = io_floats((&r.perp_impulse) as ptr, 2, values, i, write)
+        i = io_floats((&r.spring_impulse) as ptr, 1, values, i, write)
+        i = io_floats((&r.motor_impulse) as ptr, 1, values, i, write)
+        i = io_floats((&r.lower_impulse) as ptr, 1, values, i, write)
+        i = io_floats((&r.upper_impulse) as ptr, 1, values, i, write)
+    } else if kind == dynamics.JOINT_SPHERICAL {
+        s = dynamics.spherical_joint_of(base)
+        i = io_floats((&s.linear_impulse) as ptr, 3, values, i, write)
+        i = io_floats((&s.spring_impulse) as ptr, 3, values, i, write)
+        i = io_floats((&s.motor_impulse) as ptr, 3, values, i, write)
+        i = io_floats((&s.lower_twist_impulse) as ptr, 1, values, i, write)
+        i = io_floats((&s.upper_twist_impulse) as ptr, 1, values, i, write)
+        i = io_floats((&s.swing_impulse) as ptr, 1, values, i, write)
+        i = io_floats((&s.lock_impulse) as ptr, 1, values, i, write)
+    } else if kind == dynamics.JOINT_WELD {
+        wj = dynamics.weld_joint_of(base)
+        i = io_floats((&wj.linear_impulse) as ptr, 3, values, i, write)
+        i = io_floats((&wj.angular_impulse) as ptr, 3, values, i, write)
+    } else if kind == dynamics.JOINT_WHEEL {
+        wh = dynamics.wheel_joint_of(base)
+        i = io_floats((&wh.linear_impulse) as ptr, 2, values, i, write)
+        i = io_floats((&wh.angular_impulse) as ptr, 2, values, i, write)
+        i = io_floats((&wh.spin_impulse) as ptr, 1, values, i, write)
+        i = io_floats((&wh.suspension_spring_impulse) as ptr, 1, values, i, write)
+        i = io_floats((&wh.lower_suspension_impulse) as ptr, 1, values, i, write)
+        i = io_floats((&wh.upper_suspension_impulse) as ptr, 1, values, i, write)
+        i = io_floats((&wh.steering_spring_impulse) as ptr, 1, values, i, write)
+        i = io_floats((&wh.lower_steering_impulse) as ptr, 1, values, i, write)
+        i = io_floats((&wh.upper_steering_impulse) as ptr, 1, values, i, write)
+    }
+    return i
+}
+
+// `n` doubles at `field` (a float, or a Vec2's or Vec3's), read into
+// values[at..] or written from it; the index after them.
+io_floats(field: ptr, n: int, values: float[], at: int, write: bool) -> int {
+    f = field as float[]
+    k = 0
+    while k < n {
+        if write { f[k] = values[at + k] } else { values[at + k] = f[k] }
+        k = k + 1
+    }
+    return at + n
 }
 
 joint_get_constraint_force(id: JointId) -> Vec3 {

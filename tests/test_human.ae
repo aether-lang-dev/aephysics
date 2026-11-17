@@ -873,7 +873,7 @@ test_ankles() {
     h = Human { bones: null, filter_joints: null, filter_joint_count: 0, friction_torque: 0.0, is_spawned: false }
     h.ankles = true
     human.create_human(&h, world_id, math.vec3(0.0, 1.0, 0.0), 5.0, 1.0, 0.7, 1, null)
-    ensure("ankles: spawned with 14 bones", h.is_spawned && h.bone_count == human.MAX_BONE_COUNT)
+    ensure("ankles: spawned with 14 bones", h.is_spawned && h.bone_count == human.ANKLED_BONE_COUNT)
     counters = physics_world.get_counters(world_id)
     ensure("ankles: 15 bodies, 16 joints (${counters.body_count}, ${counters.joint_count})", counters.body_count == 15 && counters.joint_count == 16)
     shapes_block = calloc(4, sizeof(ShapeId))
@@ -1185,6 +1185,457 @@ test_ankle_shins() {
     ensure("shins: and the shins nothing (${ankled.x})", ankled.x < 0.001)
 }
 
+// --- the extra bones (#190) ------------------------------------------------------------------------------
+
+// The figures as main built them before #190, each hashed after a kicked
+// fall: the reference's, with ankles, and fitted to a figure a tenth
+// larger on tight limits with ankles. The hashes were taken from main's
+// module (ad0cae2) before the extra bones were added: every flag off, the
+// figure is built and steps as it did, bit for bit.
+const UNCHANGED_REFERENCE = 0 - 1845097547785975894
+const UNCHANGED_ANKLES = 6625657960679933986
+const UNCHANGED_FITTED = 0 - 3497850239973562386
+
+unchanged_hash(kind: int) -> long {
+    world_id = world_with_ground()
+    h = Human { bones: null, filter_joints: null, filter_joint_count: 0, friction_torque: 0.0, is_spawned: false }
+    shape = human.human_reference_shape()
+    if kind == 2 {
+        block = calloc(2 * human.BONE_COUNT + 2, sizeof(Vec3))
+        v = block as Vec3[]
+        i = 0
+        while i < human.BONE_COUNT {
+            v[i] = math.mul_sv(1.1, human.human_shape_head(shape, i))
+            v[human.BONE_COUNT + i] = math.mul_sv(1.1, human.human_shape_tail(shape, i))
+            i = i + 1
+        }
+        v[2 * human.BONE_COUNT] = math.mul_sv(1.1, human.human_shape_toe(shape, human.BONE_CALF_L))
+        v[2 * human.BONE_COUNT + 1] = math.mul_sv(1.1, human.human_shape_toe(shape, human.BONE_CALF_R))
+        human.human_fit_shape(shape, block, block + human.BONE_COUNT * sizeof(Vec3), block + 2 * human.BONE_COUNT * sizeof(Vec3))
+        human.human_tight_limits(shape)
+        free(block)
+    }
+    h.ankles = kind >= 1
+    human.create_human_shaped(&h, world_id, Transform { p: math.vec3(0.0, 1.2, 0.0), q: math.quat_identity() }, shape, 5.0, 1.0, 0.7, 1, null)
+    human.destroy_shape(shape)
+    human.human_apply_angular_impulse(&h, math.vec3(1.0, 2.0, 3.0))
+    steps(world_id, 300)
+    hash = dynamics.hash_world_state(dynamics.get_world(world_id.index1 - 1))
+    human.destroy_human(&h)
+    dynamics.destroy_world(world_id)
+    return hash
+}
+
+test_unchanged() {
+    ensure("unchanged: the reference's figure, bit for bit", unchanged_hash(0) == UNCHANGED_REFERENCE)
+    ensure("unchanged: with ankles, bit for bit", unchanged_hash(1) == UNCHANGED_ANKLES)
+    ensure("unchanged: fitted on tight limits with ankles, bit for bit", unchanged_hash(2) == UNCHANGED_FITTED)
+}
+
+// The flags as bits, for building every option alone and together.
+const WITH_HEAD = 1
+const WITH_CLAVICLES = 2
+const WITH_HANDS = 4
+const WITH_SPINE_02 = 8
+const WITH_TWIST = 16
+const WITH_ANKLES = 32
+
+set_flags(h: *Human, flags: int) {
+    h.head = (flags & WITH_HEAD) != 0
+    h.clavicles = (flags & WITH_CLAVICLES) != 0
+    h.hands = (flags & WITH_HANDS) != 0
+    h.spine_02 = (flags & WITH_SPINE_02) != 0
+    h.twist = (flags & WITH_TWIST) != 0
+    h.ankles = (flags & WITH_ANKLES) != 0
+}
+
+bones_for(flags: int) -> int {
+    count = human.BONE_COUNT
+    if (flags & WITH_HEAD) != 0 { count = count + 1 }
+    if (flags & WITH_CLAVICLES) != 0 { count = count + 2 }
+    if (flags & WITH_HANDS) != 0 { count = count + 2 }
+    if (flags & WITH_SPINE_02) != 0 { count = count + 1 }
+    if (flags & WITH_ANKLES) != 0 { count = count + 2 }
+    return count
+}
+
+filters_for(flags: int) -> int {
+    count = human.FILTER_JOINT_COUNT
+    if (flags & WITH_HEAD) != 0 { count = count + 3 }
+    if (flags & WITH_CLAVICLES) != 0 { count = count + 5 }
+    if (flags & WITH_HEAD) != 0 && (flags & WITH_CLAVICLES) != 0 { count = count + 2 }
+    if (flags & WITH_SPINE_02) != 0 { count = count + 2 }
+    return count
+}
+
+// The deepest two of the figure's own bones press into each other (a
+// negative separation, metres; 0 when none touch): bones that may touch
+// must not start inside each other, or contact and joint fight for good.
+deepest_bone_overlap(h: *Human) -> float {
+    block = calloc(16, sizeof(ContactData))
+    data = block as ContactData[]
+    deepest = 0.0
+    i = 0
+    while i < h.bone_count {
+        if human.human_has_bone(h, i) {
+            count = dynamics.body_get_contact_data(human.bone_at(h, i).body_id, data, 16)
+            c = 0
+            while c < count {
+                other_a = dynamics.shape_get_body(data[c].shape_id_a)
+                other_b = dynamics.shape_get_body(data[c].shape_id_b)
+                if is_bone_body(h, other_a) && is_bone_body(h, other_b) {
+                    m = 0
+                    while m < data[c].manifold_count {
+                        manifold = (data[c].manifolds + m * sizeof(Manifold)) as *Manifold
+                        if manifold.point_count > 0 { deepest = math.min_float(deepest, manifold.point0.separation as float) }
+                        m = m + 1
+                    }
+                }
+                c = c + 1
+            }
+        }
+        i = i + 1
+    }
+    free(block)
+    return deepest
+}
+
+is_bone_body(h: *Human, id: BodyId) -> bool {
+    i = 0
+    while i < h.bone_count {
+        bone_id = human.bone_at(h, i).body_id
+        if human.human_has_bone(h, i) && bone_id.index1 == id.index1 && bone_id.world0 == id.world0 && bone_id.generation == id.generation { return true }
+        i = i + 1
+    }
+    return false
+}
+
+// The worst of every present joint's limit excursion and separation.
+struct JointWorst {
+    angular: float
+    linear: float
+    settled_angular: float         // the worst once settled, after the drop and after the throw
+    settled_linear: float
+}
+
+joint_worst(h: *Human) -> JointWorst {
+    worst = JointWorst { angular: 0.0, linear: 0.0, settled_angular: 0.0, settled_linear: 0.0 }
+    i = 1
+    while i < h.bone_count {
+        if human.human_has_bone(h, i) {
+            id = human.bone_at(h, i).joint_id
+            worst.angular = math.max_float(worst.angular, dynamics.joint_get_angular_separation(id))
+            worst.linear = math.max_float(worst.linear, dynamics.joint_get_linear_separation(id))
+        }
+        i = i + 1
+    }
+    return worst
+}
+
+// The figure moving as one body: every bone at `velocity` plus `spin`
+// about the pelvis. A kick or a throw given so moves figures alike
+// however their mass is split (an impulse on one bone would kick a
+// lighter bone harder).
+move_rigidly(h: *Human, velocity: Vec3, spin: Vec3) {
+    centre = dynamics.body_get_position(human.bone_at(h, human.BONE_PELVIS).body_id)
+    i = 0
+    while i < h.bone_count {
+        if human.human_has_bone(h, i) {
+            id = human.bone_at(h, i).body_id
+            dynamics.body_set_linear_velocity(id, math.add(velocity, math.cross(spin, math.sub(dynamics.body_get_position(id), centre))))
+            dynamics.body_set_angular_velocity(id, spin)
+        }
+        i = i + 1
+    }
+}
+
+// A figure with `flags` dropped from standing with a kick, then thrown
+// (flung up and spun hard), stepping 600 steps in all: the worst limit
+// excursion and joint separation over the whole of it. `variant` picks
+// one of four kicks and throws: a fall is chaotic, so one throw's worst
+// says little, and figures are compared by their worst over the four.
+drop_and_throw(flags: int, variant: int) -> JointWorst {
+    world_id = world_with_ground()
+    h = Human { bones: null, filter_joints: null, filter_joint_count: 0, friction_torque: 0.0, is_spawned: false }
+    set_flags(&h, flags)
+    shape = human.human_reference_shape()
+    human.create_human_shaped(&h, world_id, Transform { p: math.vec3(0.0, 1.2, 0.0), q: math.quat_identity() }, shape, 5.0, 1.0, 0.7, 1, null)
+    human.destroy_shape(shape)
+    sign = 1.0
+    if variant % 2 == 1 { sign = 0.0 - 1.0 }
+    lean = 1.0 + 0.5 * (variant / 2)
+    move_rigidly(&h, math.vec3_zero(), math.vec3(0.4 * sign * lean, 0.3, 0.6 * sign))
+    worst = JointWorst { angular: 0.0, linear: 0.0, settled_angular: 0.0, settled_linear: 0.0 }
+    s = 0
+    while s < 600 {
+        if s == 300 { move_rigidly(&h, math.vec3(2.0 * sign, 6.0, lean), math.vec3(0.0 - 3.0 * lean, 4.0 * sign, 2.0)) }
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        now = joint_worst(&h)
+        worst.angular = math.max_float(worst.angular, now.angular)
+        worst.linear = math.max_float(worst.linear, now.linear)
+        if s == 299 || s == 599 {
+            worst.settled_angular = math.max_float(worst.settled_angular, now.angular)
+            worst.settled_linear = math.max_float(worst.settled_linear, now.linear)
+        }
+        s = s + 1
+    }
+    human.destroy_human(&h)
+    dynamics.destroy_world(world_id)
+    return worst
+}
+
+// The worst of the four throws.
+worst_of_throws(flags: int) -> JointWorst {
+    worst = JointWorst { angular: 0.0, linear: 0.0, settled_angular: 0.0, settled_linear: 0.0 }
+    variant = 0
+    while variant < 4 {
+        one = drop_and_throw(flags, variant)
+        worst.angular = math.max_float(worst.angular, one.angular)
+        worst.linear = math.max_float(worst.linear, one.linear)
+        worst.settled_angular = math.max_float(worst.settled_angular, one.settled_angular)
+        worst.settled_linear = math.max_float(worst.settled_linear, one.settled_linear)
+        variant = variant + 1
+    }
+    return worst
+}
+
+// A soft joint gives on an impact and comes back: Box3D's joints are soft
+// constraints at a quarter of the sub-step rate, and a light body struck
+// between the ground and a heavy one (a hand under the figure, a head on
+// its neck in a spin) overruns its limit for a few steps, more than the
+// reference's heavier bones do (at four sub-steps; eight halve it). What
+// holds is the limit itself: every joint back at it once the figure
+// settles, and no joint ever turned through it. A soft joint is a spring
+// whose stiffness goes with the mass it moves, so a light bone pressed to
+// its limit by the figure's weight (a wrist under the body, a shoulder
+// hanging from a clavicle) settles a little past it: within 3.5 degrees,
+// where the reference's heavier bones settle within 0.3.
+const SETTLED_ANGLE = 0.06
+const SETTLED_SEPARATION = 0.005
+const NEVER_THROUGH = 1.2
+
+test_extras_build() {
+    baseline = worst_of_throws(0)
+    println("human: the reference's figure, dropped and thrown four ways: worst limit excursion ${baseline.angular} rad, worst separation ${baseline.linear} m, settled ${baseline.settled_angular} rad and ${baseline.settled_linear} m")
+    options = [WITH_HEAD, WITH_CLAVICLES, WITH_HANDS, WITH_SPINE_02, WITH_TWIST, WITH_HEAD | WITH_CLAVICLES | WITH_HANDS | WITH_SPINE_02 | WITH_TWIST,
+               WITH_HEAD | WITH_CLAVICLES | WITH_HANDS | WITH_SPINE_02 | WITH_TWIST | WITH_ANKLES]
+    k = 0
+    while k < 7 {
+        flags = options[k]
+        world_id = world_with_ground()
+        h = Human { bones: null, filter_joints: null, filter_joint_count: 0, friction_torque: 0.0, is_spawned: false }
+        set_flags(&h, flags)
+        shape = human.human_reference_shape()
+        placement = Transform { p: math.vec3(0.5, 1.2, 0.0 - 0.25), q: math.quat_identity() }
+        human.create_human_shaped(&h, world_id, placement, shape, 5.0, 1.0, 0.7, 1, null)
+        bones = bones_for(flags)
+        filters = filters_for(flags)
+        counters = physics_world.get_counters(world_id)
+        ensure("extras ${flags}: spawned with ${bones} bodies and ${filters} filter joints (${counters.body_count - 1}, ${h.filter_joint_count})",
+               h.is_spawned && counters.body_count == bones + 1 && counters.joint_count == bones - 1 + filters && h.filter_joint_count == filters)
+        present = 0
+        i = 0
+        while i < human.MAX_BONE_COUNT {
+            if human.human_has_bone(&h, i) {
+                present = present + 1
+                bone = human.bone_at(&h, i)
+                ok = dynamics.body_is_valid(bone.body_id) && (i == human.BONE_PELVIS || dynamics.joint_is_valid(bone.joint_id))
+                ensure("extras ${flags}: bone ${i} has its body and joint", ok)
+            } else if i < h.bone_count {
+                ensure("extras ${flags}: bone ${i}, not asked for, has no body", dynamics.body_is_valid(human.bone_at(&h, i).body_id) == false)
+            }
+            i = i + 1
+        }
+        ensure("extras ${flags}: human_has_bone names the ${bones} bones (${present})", present == bones)
+        // Each extra bone sits on its spec at rest, and its joint is closed
+        // and inside its limits; every other joint too.
+        e = human.BONE_HEAD
+        while e < human.MAX_BONE_COUNT {
+            if human.human_has_bone(&h, e) {
+                spec = human.spec_at(shape, e)
+                xf = dynamics.body_get_transform(human.bone_at(&h, e).body_id)
+                at = math.transform_point(placement, spec.reference.p)
+                ensure("extras ${flags}: bone ${e} sits on its spec (${math.length(math.sub(xf.p, at))} m)", near_vec(xf.p, at, 0.000000001) && same_rotation(xf.q, spec.reference.q))
+            }
+            e = e + 1
+        }
+        rest = joint_worst(&h)
+        ensure("extras ${flags}: every joint closed and inside its limits at rest (${rest.angular} rad, ${rest.linear} m)", rest.angular < 0.001 && rest.linear < 0.001)
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        overlap = deepest_bone_overlap(&h)
+        ensure("extras ${flags}: no two bones that may touch start inside each other (${overlap} m)", overlap > 0.0 - 0.005)
+        twisted = (flags & WITH_TWIST) != 0
+        elbow = dynamics.joint_get_type(human.bone_at(&h, human.BONE_LOWER_ARM_L).joint_id)
+        knee = dynamics.joint_get_type(human.bone_at(&h, human.BONE_CALF_R).joint_id)
+        if twisted {
+            ensure("extras ${flags}: the elbows and knees are twisting hinges", elbow == dynamics.JOINT_SPHERICAL && knee == dynamics.JOINT_SPHERICAL)
+        } else {
+            ensure("extras ${flags}: the elbows and knees stay hinges", elbow == dynamics.JOINT_REVOLUTE && knee == dynamics.JOINT_REVOLUTE)
+        }
+        human.destroy_human(&h)
+        ensure("extras ${flags}: destroyed, nothing left but the ground", physics_world.get_counters(world_id).body_count == 1 && physics_world.get_counters(world_id).joint_count == 0)
+        human.destroy_shape(shape)
+        dynamics.destroy_world(world_id)
+        // Dropped from standing and thrown, its joints hold and stay within
+        // their limits as the reference's figure's do.
+        worst = worst_of_throws(flags)
+        println("human: extras ${flags}, dropped and thrown four ways: worst limit excursion ${worst.angular} rad, worst separation ${worst.linear} m, settled ${worst.settled_angular} rad and ${worst.settled_linear} m")
+        ensure("extras ${flags}: settled, every joint inside its limits after each drop and throw (${worst.settled_angular} rad)", worst.settled_angular < SETTLED_ANGLE)
+        ensure("extras ${flags}: settled, every joint closed (${worst.settled_linear} m)", worst.settled_linear < SETTLED_SEPARATION)
+        ensure("extras ${flags}: no joint turned through its limit on an impact (${worst.angular} rad)", worst.angular < NEVER_THROUGH)
+        ensure("extras ${flags}: the joints stretch no more than half again the reference's (${worst.linear} against ${baseline.linear} m)", worst.linear <= 1.5 * baseline.linear + 0.01)
+        // The twisting hinges alone are held to the reference's own figure:
+        // locked sideways, they give no more than its hinges do.
+        if flags == WITH_TWIST {
+            ensure("extras ${flags}: within the limits as the reference's figure is (${worst.angular} against ${baseline.angular} rad)", worst.angular <= 1.25 * baseline.angular)
+        }
+        k = k + 1
+    }
+}
+
+// The bodies' masses: the extra bones take a person's share, and the
+// figure weighs about what it did.
+figure_mass(h: *Human) -> float {
+    total = 0.0
+    i = 0
+    while i < h.bone_count {
+        if human.human_has_bone(h, i) { total = total + dynamics.body_get_mass(human.bone_at(h, i).body_id) }
+        i = i + 1
+    }
+    return total
+}
+
+test_extras_masses() {
+    world_id = world_with_ground()
+    plain = Human { bones: null, filter_joints: null, filter_joint_count: 0, friction_torque: 0.0, is_spawned: false }
+    human.create_human(&plain, world_id, math.vec3(0.0, 1.0, 0.0), 5.0, 1.0, 0.7, 1, null)
+    h = Human { bones: null, filter_joints: null, filter_joint_count: 0, friction_torque: 0.0, is_spawned: false }
+    set_flags(&h, WITH_HEAD | WITH_CLAVICLES | WITH_HANDS | WITH_SPINE_02)
+    shape = human.human_reference_shape()
+    human.create_human_shaped(&h, world_id, Transform { p: math.vec3(3.0, 1.0, 0.0), q: math.quat_identity() }, shape, 5.0, 1.0, 0.7, 2, null)
+    human.destroy_shape(shape)
+    before = figure_mass(&plain)
+    after = figure_mass(&h)
+    head = dynamics.body_get_mass(human.bone_at(&h, human.BONE_HEAD).body_id) / after
+    neck = dynamics.body_get_mass(human.bone_at(&h, human.BONE_NECK).body_id) / after
+    hand = dynamics.body_get_mass(human.bone_at(&h, human.BONE_HAND_L).body_id) / after
+    clavicle = dynamics.body_get_mass(human.bone_at(&h, human.BONE_CLAVICLE_L).body_id) / after
+    spine = dynamics.body_get_mass(human.bone_at(&h, human.BONE_SPINE_02).body_id) / after
+    println("human: masses: the figure ${before} kg, with the extra bones ${after} kg; shares: head ${head}, neck ${neck}, hand ${hand}, clavicle ${clavicle}, spine_02 ${spine}")
+    ensure("masses: the figure weighs within a tenth of the reference's (${after} against ${before} kg)", math.abs_float(after - before) < 0.1 * before)
+    ensure("masses: the head about a person's share, 5 to 9 percent (${head})", head > 0.05 && head < 0.09)
+    ensure("masses: a hand about a person's share, 0.4 to 1.2 percent (${hand})", hand > 0.004 && hand < 0.012)
+    human.destroy_human(&h)
+    human.destroy_human(&plain)
+    dynamics.destroy_world(world_id)
+}
+
+// A rig's figure: the reference's bones fitted to landmarks a tenth larger,
+// then each extra bone put on a rig bone of its own (moved off where the
+// fit put it): each body's joint sits on the rig bone's head and its line
+// runs to the rig bone's tail.
+test_extras_fit() {
+    shape = human.human_reference_shape()
+    block = landmarks(shape)
+    v = block as Vec3[]
+    i = 0
+    while i < 2 * human.BONE_COUNT + 2 {
+        v[i] = math.mul_sv(1.1, v[i])
+        i = i + 1
+    }
+    human.human_fit_shape(shape, block, block + human.BONE_COUNT * sizeof(Vec3), block + 2 * human.BONE_COUNT * sizeof(Vec3))
+    heads = calloc(human.MAX_BONE_COUNT, sizeof(Vec3))
+    tails = calloc(human.MAX_BONE_COUNT, sizeof(Vec3))
+    head_at = heads as Vec3[]
+    tail_at = tails as Vec3[]
+    nudge = math.vec3(0.004, 0.0 - 0.006, 0.01)
+    e = human.BONE_HEAD
+    while e < human.MAX_BONE_COUNT {
+        head_at[e] = math.add(human.human_shape_head(shape, e), nudge)
+        tail_at[e] = math.add(human.human_shape_tail(shape, e), math.mul_sv(0.5, nudge))
+        // A clavicle reaches the shoulder and spine_02 the chest's joint.
+        if e == human.BONE_CLAVICLE_L { tail_at[e] = human.human_shape_head(shape, human.BONE_UPPER_ARM_L) }
+        if e == human.BONE_CLAVICLE_R { tail_at[e] = human.human_shape_head(shape, human.BONE_UPPER_ARM_R) }
+        if e == human.BONE_SPINE_02 { tail_at[e] = human.human_shape_head(shape, human.BONE_SPINE_03) }
+        human.human_fit_bone(shape, e, head_at[e], tail_at[e])
+        e = e + 1
+    }
+    world_id = world_with_ground()
+    h = Human { bones: null, filter_joints: null, filter_joint_count: 0, friction_torque: 0.0, is_spawned: false }
+    set_flags(&h, WITH_HEAD | WITH_CLAVICLES | WITH_HANDS | WITH_SPINE_02 | WITH_TWIST)
+    placement = Transform { p: math.vec3(0.0, 1.3, 0.0), q: math.quat_identity() }
+    human.create_human_shaped(&h, world_id, placement, shape, 5.0, 1.0, 0.7, 1, null)
+    ensure("fit extras: spawned", h.is_spawned)
+    e = human.BONE_HEAD
+    while e < human.MAX_BONE_COUNT {
+        xf = dynamics.body_get_transform(human.bone_at(&h, e).body_id)
+        at = math.transform_point(placement, head_at[e])
+        line = math.normalize(math.sub(tail_at[e], head_at[e]))
+        along = math.rotate_vector(xf.q, math.vec3_axis_z())
+        ensure("fit extras: bone ${e}'s joint on its rig bone (${math.length(math.sub(xf.p, at))} m) and its line to the tail (${angle_between(along, line)} rad)",
+               near_vec(xf.p, at, 0.000001) && angle_between(along, line) < 0.000001)
+        e = e + 1
+    }
+    rest = joint_worst(&h)
+    ensure("fit extras: every joint closed and inside its limits at rest (${rest.angular} rad, ${rest.linear} m)", rest.angular < 0.001 && rest.linear < 0.001)
+    human.destroy_human(&h)
+    dynamics.destroy_world(world_id)
+    free(heads)
+    free(tails)
+    free(block)
+    human.destroy_shape(shape)
+}
+
+// How far a bone has turned about its own line against its parent since
+// `rest` (the bone's rotation in its parent's frame then).
+turn_about_line(h: *Human, index: int, rest: Quat) -> float {
+    bone = human.bone_at(h, index)
+    now = math.inv_mul_quat(dynamics.body_get_rotation(human.bone_at(h, bone.parent_index).body_id), dynamics.body_get_rotation(bone.body_id))
+    delta = math.inv_mul_quat(rest, now)
+    line = math.normalize(human.human_bone_far_end(h, index))
+    along = delta.x * line.x + delta.y * line.y + delta.z * line.z
+    return 2.0 * atan2(along, delta.w)
+}
+
+// A forearm spun about itself, in a world without gravity: a twisting
+// elbow lets it turn (pronation, supination) up to its range and no
+// further; a hinge does not let it turn at all.
+forearm_turn(twist: bool, speed: float) -> float {
+    world_id = world_with_ground()
+    dynamics.world_set_gravity(dynamics.get_world(world_id.index1 - 1), math.vec3_zero())
+    h = Human { bones: null, filter_joints: null, filter_joint_count: 0, friction_torque: 0.0, is_spawned: false }
+    h.twist = twist
+    shape = human.human_reference_shape()
+    human.create_human_shaped(&h, world_id, Transform { p: math.vec3(0.0, 1.5, 0.0), q: math.quat_identity() }, shape, 0.0, 0.0, 0.0, 1, null)
+    human.destroy_shape(shape)
+    index = human.BONE_LOWER_ARM_L
+    bone = human.bone_at(&h, index)
+    rest = math.inv_mul_quat(dynamics.body_get_rotation(human.bone_at(&h, bone.parent_index).body_id), dynamics.body_get_rotation(bone.body_id))
+    axis = math.rotate_vector(dynamics.body_get_rotation(bone.body_id), math.normalize(human.human_bone_far_end(&h, index)))
+    most = 0.0
+    s = 0
+    while s < 90 {
+        dynamics.body_set_angular_velocity(bone.body_id, math.mul_sv(speed, axis))
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        turned = math.abs_float(turn_about_line(&h, index, rest))
+        if turned > most { most = turned }
+        s = s + 1
+    }
+    human.destroy_human(&h)
+    dynamics.destroy_world(world_id)
+    return most
+}
+
+test_twist() {
+    hinge = forearm_turn(false, 3.0)
+    twisting = forearm_turn(true, 3.0)
+    hard = forearm_turn(true, 30.0)
+    println("human: a forearm spun about itself turns ${hinge} rad on a hinge, ${twisting} on a twisting elbow, ${hard} spun hard (range ${human.ELBOW_TWIST_DEGREES * math.DEG_TO_RAD})")
+    ensure("twist: a hinge does not let the forearm turn about itself (${hinge} rad)", hinge < 0.05)
+    ensure("twist: a twisting elbow does, as a person's forearm turns (${twisting} rad)", twisting > 0.5)
+    ensure("twist: and no further than its range (${hard} rad)", hard < (human.ELBOW_TWIST_DEGREES + 5.0) * math.DEG_TO_RAD)
+}
+
 main() {
     g_slab = hull.make_box_hull(20.0, 1.0, 20.0) as ptr
     test_build_and_fall()
@@ -1201,6 +1652,11 @@ main() {
     test_ankles()
     test_ankle_crouch()
     test_ankle_shins()
+    test_unchanged()
+    test_extras_build()
+    test_extras_masses()
+    test_extras_fit()
+    test_twist()
     hull.destroy_hull(g_slab as *HullData)
     println("human: ${checks} checks")
     if failures == 0 {

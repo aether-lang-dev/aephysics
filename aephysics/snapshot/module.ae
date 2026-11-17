@@ -33,9 +33,11 @@ import aephysics.shape
 import aephysics.broad_phase
 import aephysics.mesh_contact
 import aephysics.dynamics
+import aephysics.joint_solver
 
 exports (
-    SNAPSHOT_MAGIC, SNAPSHOT_VERSION, snapshot_layout, save_world, load_world, restore_world, free_snapshot
+    SNAPSHOT_MAGIC, SNAPSHOT_VERSION, snapshot_layout, save_world, load_world, restore_world, free_snapshot,
+    BODY_SET_MAGIC, BODY_SET_VERSION, save_body_set, restore_body_set
 )
 
 extern memcpy(dst: ptr, src: ptr, size: int) -> ptr
@@ -1015,4 +1017,635 @@ replace_pool(dst: *IdPool, src: @keep IdPool) {
     basics.idpool_destroy(dst)
     dst.free_ids = src.free_ids
     dst.next_index = src.next_index
+}
+
+// --- a set of bodies' solver state (#189) ----------------------------------------------------------------
+
+// What a late-joining peer needs to step a ragdoll on as the world it joins
+// does: the solver's state of one set of bodies as bytes, ids local to the
+// set, written into another world that holds the same bodies (the same
+// shapes, the same joints between them) however that world was built. Per
+// body its sim and state (pose, velocities, the step's bookkeeping), its
+// sleep timer and its shapes' bounds as the broad phase holds them; per
+// joint between two of the bodies its warm-start impulses and graph colour;
+// per contact of theirs its manifolds, narrow-phase cache, recycling pose
+// and colour, made again in the order the first world made them; and their
+// island's count of removed constraints. Box3D has no such call: its
+// snapshot (save_world here) copies a whole world between worlds built
+// alike, which two peers' worlds are not.
+//
+// The set is read awake or asleep as one (a settled ragdoll sleeps whole,
+// the case a late joiner meets most): asleep, the world it is written into
+// puts it to sleep too once it is written, so the two lie alike. It is
+// written into bodies that are awake. A contact's shape outside the set
+// (the ground) is named by its shape id, which restore_body_set translates
+// through its shape map.
+const BODY_SET_MAGIC = 0x53425041    // "APBS", little-endian
+const BODY_SET_VERSION = 1
+
+// The flags a contact carries as its state; the rest are its shapes' and
+// bodies' settings, which the world it is made again in gives it.
+body_set_contact_state() -> int {
+    return dynamics.CONTACT_TOUCHING | dynamics.CONTACT_HIT_EVENT | dynamics.SIM_TOUCHING | dynamics.SIM_ENABLE_HIT_EVENT | dynamics.RELATIVE_TRANSFORM_VALID
+}
+
+// The set's world body ids from its BodyId[count], each valid and all in
+// one solver set, awake or asleep (`sleeping_too`); with the set's index.
+// Null (and the block freed) when one is not.
+set_bodies(w: *World, bodies: ptr, count: int, sleeping_too: bool) -> (ptr, int) {
+    local_block = basics.alloc(count * 4)
+    local = local_block as int[]
+    ids = bodies as BodyId[]
+    set_index = NULL_INDEX
+    i = 0
+    while i < count {
+        fits = dynamics.body_is_valid(ids[i]) && ids[i].world0 == w.world_id
+        if fits {
+            body = dynamics.get_body_full_id(w, ids[i])
+            if i == 0 { set_index = body.set_index }
+            fits = body.set_index == set_index &&
+                   (set_index == dynamics.AWAKE_SET || sleeping_too && set_index >= dynamics.FIRST_SLEEPING_SET)
+            local[i] = body.id
+        }
+        if fits == false {
+            basics.free_bytes(local_block, count * 4)
+            return null, NULL_INDEX
+        }
+        i = i + 1
+    }
+    return local_block, set_index
+}
+
+// A world body id's place in the set, or -1.
+local_index_of(local: int[], count: int, body_id: int) -> int {
+    i = 0
+    while i < count {
+        if local[i] == body_id { return i }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+// A shape's place in its body's list, and the shape at a place (NULL_INDEX past the end).
+shape_ordinal(w: *World, body: *Body, shape_id: int) -> int {
+    n = 0
+    id = body.head_shape_id
+    while id != NULL_INDEX && id != shape_id {
+        n = n + 1
+        id = dynamics.world_shape_at(w, id).next_shape_id
+    }
+    return n
+}
+
+nth_shape(w: *World, body: *Body, n: int) -> int {
+    id = body.head_shape_id
+    k = 0
+    while id != NULL_INDEX && k < n {
+        id = dynamics.world_shape_at(w, id).next_shape_id
+        k = k + 1
+    }
+    return id
+}
+
+// A joint key's next on its body's list, and the body at its other end.
+joint_key_next(w: *World, key: int) -> int {
+    j = dynamics.joint_at(w, key >> 1)
+    if (key & 1) == 0 { return j.edge_a.next_key }
+    return j.edge_b.next_key
+}
+
+joint_key_other(w: *World, key: int) -> int {
+    j = dynamics.joint_at(w, key >> 1)
+    if (key & 1) == 0 { return j.edge_b.body_id }
+    return j.edge_a.body_id
+}
+
+// A joint's place among the joints on `body_id`'s list that reach the same
+// body, of the same kind, from the same side.
+joint_ordinal(w: *World, body_id: int, key: int) -> int {
+    j = dynamics.joint_at(w, key >> 1)
+    other = joint_key_other(w, key)
+    n = 0
+    k = dynamics.body_at(w, body_id).head_joint_key
+    while k != NULL_INDEX && k != key {
+        if joint_key_other(w, k) == other && dynamics.joint_at(w, k >> 1).kind == j.kind && (k & 1) == (key & 1) { n = n + 1 }
+        k = joint_key_next(w, k)
+    }
+    return n
+}
+
+// A contact key's body at the other end.
+contact_key_other(w: *World, key: int) -> int {
+    c = dynamics.contact_at(w, key >> 1)
+    if (key & 1) == 0 { return c.edge_b.body_id }
+    return c.edge_a.body_id
+}
+
+// A contact's shape: the set's (its body's place and the shape's place on
+// it) or one outside it (its shape id and generation).
+w_shape_ref(wr: *SnapWriter, w: *World, shape_id: int, local: int[], count: int) {
+    s = dynamics.world_shape_at(w, shape_id)
+    at = local_index_of(local, count, s.body_id)
+    w_int(wr, at)
+    if at >= 0 {
+        w_int(wr, shape_ordinal(w, dynamics.body_at(w, s.body_id), shape_id))
+        w_int(wr, 0)
+    } else {
+        w_int(wr, shape_id + 1)
+        w_int(wr, s.generation)
+    }
+}
+
+// The set's solver state as bytes: a heap block of the engine's allocator
+// and its size (free_snapshot gives it back); null and 0 when the world or
+// a body is not valid, the bodies are not all awake or all asleep in one
+// island's set, or the world is stepping.
+save_body_set(world_id: WorldId, bodies: ptr, count: int) -> (ptr, int) {
+    if count <= 0 || bodies == null || dynamics.world_is_valid(world_id) == false { return null, 0 }
+    w = dynamics.get_world(world_id.index1 - 1)
+    if w.locked { return null, 0 }
+    local_block, set_index = set_bodies(w, bodies, count, true)
+    if local_block == null { return null, 0 }
+    local = local_block as int[]
+    wr = SnapWriter { data: null, size: 0, capacity: 0 }
+    w_int(&wr, BODY_SET_MAGIC)
+    w_int(&wr, BODY_SET_VERSION)
+    w_long(&wr, snapshot_layout())
+    w_int(&wr, count)
+    asleep = set_index != dynamics.AWAKE_SET
+    w_bool(&wr, asleep)
+    no_state = basics.alloc(sizeof(BodyState))
+    memset(no_state, 0, sizeof(BodyState))
+    (no_state as *BodyState).dq = Quatf { x: 0.0, y: 0.0, z: 0.0, w: 1.0 }
+
+    // The bodies, and their shapes' bounds.
+    i = 0
+    while i < count {
+        body = dynamics.body_at(w, local[i])
+        w_bytes(&wr, dynamics.get_body_sim(w, body) as ptr, sizeof(BodySim))
+        // A sleeping body keeps no state: it is at rest.
+        if asleep { w_bytes(&wr, no_state, sizeof(BodyState)) } else { w_bytes(&wr, dynamics.get_body_state(w, body) as ptr, sizeof(BodyState)) }
+        w_float(&wr, body.sleep_time)
+        w_int(&wr, body.shape_count)
+        shape_id = body.head_shape_id
+        while shape_id != NULL_INDEX {
+            s = dynamics.world_shape_at(w, shape_id)
+            w_bytes(&wr, (&s.aabb) as ptr, sizeof(AABB))
+            fat = dynamics.shape_fat_aabb(w, shape_id)
+            w_bytes(&wr, (&fat) as ptr, sizeof(AABBf))
+            shape_id = s.next_shape_id
+        }
+        i = i + 1
+    }
+
+    // The joints between two of them, each once (from the body earlier in the set).
+    joint_count = 0
+    i = 0
+    while i < count {
+        key = dynamics.body_at(w, local[i]).head_joint_key
+        while key != NULL_INDEX {
+            if local_index_of(local, count, joint_key_other(w, key)) > i { joint_count = joint_count + 1 }
+            key = joint_key_next(w, key)
+        }
+        i = i + 1
+    }
+    w_int(&wr, joint_count)
+    impulses = basics.alloc(joint_solver.JOINT_IMPULSE_COUNT * 8)
+    i = 0
+    while i < count {
+        key = dynamics.body_at(w, local[i]).head_joint_key
+        while key != NULL_INDEX {
+            other = local_index_of(local, count, joint_key_other(w, key))
+            if other > i {
+                j = dynamics.joint_at(w, key >> 1)
+                w_int(&wr, i)
+                w_int(&wr, other)
+                w_int(&wr, key & 1)
+                w_int(&wr, j.kind)
+                w_int(&wr, joint_ordinal(w, local[i], key))
+                w_int(&wr, j.color_index)
+                n = joint_solver.joint_impulses_io(dynamics.get_joint_sim(w, j), j.kind, impulses as float[], false)
+                w_int(&wr, n)
+                k = 0
+                while k < n {
+                    w_float(&wr, (impulses as float[])[k])
+                    k = k + 1
+                }
+            }
+            key = joint_key_next(w, key)
+        }
+        i = i + 1
+    }
+    basics.free_bytes(impulses, joint_solver.JOINT_IMPULSE_COUNT * 8)
+
+    // The contacts of any of them, each once, in the order the world made them.
+    total = 0
+    i = 0
+    while i < count {
+        total = total + dynamics.body_at(w, local[i]).contact_count
+        i = i + 1
+    }
+    found_block = basics.alloc(math.max_int(total, 1) * 4)
+    found = found_block as int[]
+    found_count = 0
+    i = 0
+    while i < count {
+        key = dynamics.body_at(w, local[i]).head_contact_key
+        while key != NULL_INDEX {
+            other = local_index_of(local, count, contact_key_other(w, key))
+            if other < 0 || other > i {
+                found[found_count] = key >> 1
+                found_count = found_count + 1
+            }
+            key = dynamics.contact_edge_next(w, key)
+        }
+        i = i + 1
+    }
+    sort_ints(found, found_count)
+    w_int(&wr, found_count)
+    state_flags = body_set_contact_state()
+    i = 0
+    while i < found_count {
+        c = dynamics.contact_at(w, found[i])
+        w_shape_ref(&wr, w, c.shape_id_a, local, count)
+        w_shape_ref(&wr, w, c.shape_id_b, local, count)
+        w_int(&wr, c.child_index)
+        w_int(&wr, c.flags & state_flags)
+        color = NULL_INDEX
+        if (c.flags & dynamics.CONTACT_TOUCHING) != 0 { color = c.color_index }
+        w_int(&wr, color)
+        w_int(&wr, c.manifold_count)
+        w_bytes(&wr, c.manifolds, c.manifold_count * sizeof(Manifold))
+        is_mesh = (c.flags & dynamics.SIM_MESH_CONTACT) != 0
+        w_bool(&wr, is_mesh)
+        if is_mesh {
+            cache = dynamics.mesh_cache_of(c)
+            w_bytes(&wr, (&cache.query_bounds) as ptr, sizeof(AABB))
+            w_int(&wr, cache.count)
+            w_bytes(&wr, cache.triangles, cache.count * sizeof(TriangleCache))
+        } else {
+            w_bytes(&wr, (&c.caches) as ptr, dynamics.CONTACT_CACHE_WORDS * 8)
+        }
+        w_bytes(&wr, (&c.cached_rotation_a) as ptr, sizeof(Quatf))
+        w_bytes(&wr, (&c.cached_rotation_b) as ptr, sizeof(Quatf))
+        w_bytes(&wr, (&c.cached_relative_p) as ptr, sizeof(Vec3f))
+        w_bytes(&wr, (&c.cached_relative_q) as ptr, sizeof(Quatf))
+        w_float(&wr, c.friction as float)
+        w_float(&wr, c.restitution as float)
+        w_float(&wr, c.rolling_resistance as float)
+        w_bytes(&wr, (&c.tangent_velocity) as ptr, sizeof(Vec3f))
+        i = i + 1
+    }
+    basics.free_bytes(found_block, math.max_int(total, 1) * 4)
+
+    // Their island's removed constraints (when to split it before it sleeps).
+    island_id = dynamics.body_at(w, local[0]).island_id
+    removed = 0 - 1
+    if island_id != NULL_INDEX { removed = dynamics.island_at(w, island_id).constraint_remove_count }
+    w_int(&wr, removed)
+    basics.free_bytes(no_state, sizeof(BodyState))
+    basics.free_bytes(local_block, count * 4)
+    return wr.data, wr.size
+}
+
+sort_ints(a: int[], n: int) {
+    i = 1
+    while i < n {
+        v = a[i]
+        k = i - 1
+        while k >= 0 && a[k] > v {
+            a[k + 1] = a[k]
+            k = k - 1
+        }
+        a[k + 1] = v
+        i = i + 1
+    }
+}
+
+// The set's solver state from save_body_set's bytes into `world_id`, whose
+// bodies `bodies` (BodyId[count]) are the saved set's in the same order:
+// each body's shapes as many, each joint between two of them found again
+// (the same kind between the same bodies), each contact's shapes resolved
+// (a shape outside the set through `shape_map`, ShapeId[2 * map_count] of
+// pairs: the id in the world saved, then the id here; one not in the map is
+// taken as it is). The world's own contacts of the set are destroyed and
+// the block's made in their place, touching ones linked and coloured as
+// they were (a colour taken by a constraint outside the set gives way to
+// the one the world picks). The whole block is checked before anything is
+// written: false, and the world as it was, when it does not fit, a body
+// is not awake, or the world is stepping or recording.
+restore_body_set(world_id: WorldId, bodies: ptr, count: int, shape_map: ptr, map_count: int, data: ptr, size: int) -> bool {
+    if count <= 0 || bodies == null || data == null || size <= 0 || map_count < 0 || dynamics.world_is_valid(world_id) == false { return false }
+    if map_count > 0 && shape_map == null { return false }
+    w = dynamics.get_world(world_id.index1 - 1)
+    if w.locked || w.recording != null { return false }
+    local_block, _set_index = set_bodies(w, bodies, count, false)
+    if local_block == null { return false }
+    local = local_block as int[]
+    fits = apply_body_set(w, local, count, shape_map, map_count, data, size, false)
+    if fits { apply_body_set(w, local, count, shape_map, map_count, data, size, true) }
+    basics.free_bytes(local_block, count * 4)
+    return fits
+}
+
+// A contact's shape from the block: the set's, or one outside it through
+// the map; NULL_INDEX when it is not one here.
+r_shape_ref(rd: *SnapReader, w: *World, local: int[], count: int, shape_map: ptr, map_count: int) -> int {
+    at = r_int(rd)
+    first = r_int(rd)
+    second = r_int(rd)
+    if rd.ok == false || at >= count { return NULL_INDEX }
+    if at >= 0 {
+        if first < 0 { return NULL_INDEX }
+        return nth_shape(w, dynamics.body_at(w, local[at]), first)
+    }
+    index1 = first
+    generation = second
+    if map_count > 0 {
+        pairs = shape_map as ShapeId[]
+        m = 0
+        while m < map_count {
+            if pairs[2 * m].index1 == first && pairs[2 * m].generation == second {
+                index1 = pairs[2 * m + 1].index1
+                generation = pairs[2 * m + 1].generation
+            }
+            m = m + 1
+        }
+    }
+    id = ShapeId { index1: index1, world0: w.world_id, generation: generation }
+    if dynamics.shape_is_valid(id) == false { return NULL_INDEX }
+    if local_index_of(local, count, dynamics.world_shape_at(w, index1 - 1).body_id) >= 0 { return NULL_INDEX }
+    return index1 - 1
+}
+
+same_box(a: AABBf, b: AABBf) -> bool {
+    return a.lower.x == b.lower.x && a.lower.y == b.lower.y && a.lower.z == b.lower.z &&
+           a.upper.x == b.upper.x && a.upper.y == b.upper.y && a.upper.z == b.upper.z
+}
+
+// One pass over the block: checking it (apply false) or writing it (apply
+// true, once the check passed). Every read is checked in both passes.
+apply_body_set(w: *World, local: int[], count: int, shape_map: ptr, map_count: int, data: ptr, size: int, apply: bool) -> bool {
+    rd = SnapReader { data: data, size: size, at: 0, ok: true }
+    if r_int(&rd) != BODY_SET_MAGIC || r_int(&rd) != BODY_SET_VERSION || r_long(&rd) != snapshot_layout() || r_int(&rd) != count || rd.ok == false { return false }
+    asleep = r_bool(&rd)
+    // Asleep, the set goes to sleep here as one island: its bodies must be one.
+    if asleep {
+        island_id = dynamics.body_at(w, local[0]).island_id
+        i = 1
+        while i < count {
+            if dynamics.body_at(w, local[i]).island_id != island_id { return false }
+            i = i + 1
+        }
+    }
+    if apply {
+        // The world's own contacts of the set make way for the block's,
+        // with no end events: the block's come back touching, with none.
+        i = 0
+        while i < count {
+            body = dynamics.body_at(w, local[i])
+            while body.head_contact_key != NULL_INDEX {
+                gone = dynamics.contact_at(w, body.head_contact_key >> 1)
+                gone.flags = gone.flags & (0 - 1 - dynamics.CONTACT_ENABLE_CONTACT_EVENTS)
+                dynamics.destroy_contact(w, gone, false)
+            }
+            i = i + 1
+        }
+    }
+    ok = true
+    hold_size = math.max_int(math.max_int(sizeof(BodySim), sizeof(BodyState)), math.max_int(sizeof(AABB), dynamics.CONTACT_CACHE_WORDS * 8))
+    hold = basics.alloc(hold_size)
+
+    // The bodies and their shapes' bounds.
+    i = 0
+    while i < count && ok {
+        body = dynamics.body_at(w, local[i])
+        if apply {
+            sim = dynamics.get_body_sim(w, body)
+            keep = sim.body_id
+            r_bytes(&rd, sim as ptr, sizeof(BodySim))
+            sim.body_id = keep
+            r_bytes(&rd, dynamics.get_body_state(w, body) as ptr, sizeof(BodyState))
+            body.sleep_time = r_float(&rd)
+        } else {
+            r_bytes(&rd, hold, sizeof(BodySim))
+            r_bytes(&rd, hold, sizeof(BodyState))
+            r_float(&rd)
+        }
+        shape_count = r_int(&rd)
+        if rd.ok == false || shape_count != body.shape_count { ok = false }
+        shape_id = body.head_shape_id
+        while ok && shape_id != NULL_INDEX {
+            s = dynamics.world_shape_at(w, shape_id)
+            fat = AABBf { lower: Vec3f { x: 0.0, y: 0.0, z: 0.0 }, upper: Vec3f { x: 0.0, y: 0.0, z: 0.0 } }
+            if apply { r_bytes(&rd, (&s.aabb) as ptr, sizeof(AABB)) } else { r_bytes(&rd, hold, sizeof(AABB)) }
+            r_bytes(&rd, (&fat) as ptr, sizeof(AABBf))
+            if apply {
+                dynamics.set_shape_fat_aabb(w, shape_id, fat)
+                if s.proxy_key != NULL_INDEX && same_box(broad_phase.get_aabb(&w.broad_phase, s.proxy_key), fat) == false {
+                    broad_phase.move_proxy(&w.broad_phase, s.proxy_key, fat)
+                }
+            }
+            shape_id = s.next_shape_id
+        }
+        i = i + 1
+    }
+
+    // The joints: each found again, its impulses written, then all coloured.
+    joint_count = 0
+    if ok { joint_count = r_int(&rd) }
+    if rd.ok == false || joint_count < 0 || joint_count > 4096 { ok = false }
+    ids_block = basics.alloc(math.max_int(joint_count, 1) * 4)
+    colors_block = basics.alloc(math.max_int(joint_count, 1) * 4)
+    joint_ids = ids_block as int[]
+    joint_colors = colors_block as int[]
+    impulses = basics.alloc(joint_solver.JOINT_IMPULSE_COUNT * 8)
+    probe = basics.alloc(joint_solver.JOINT_IMPULSE_COUNT * 8)
+    k = 0
+    while k < joint_count && ok {
+        from = r_int(&rd)
+        to = r_int(&rd)
+        side = r_int(&rd)
+        kind = r_int(&rd)
+        ordinal = r_int(&rd)
+        color = r_int(&rd)
+        n = r_int(&rd)
+        if rd.ok == false || from < 0 || from >= count || to < 0 || to >= count || n < 0 || n > joint_solver.JOINT_IMPULSE_COUNT {
+            ok = false
+            break
+        }
+        m = 0
+        while m < n {
+            (impulses as float[])[m] = r_float(&rd)
+            m = m + 1
+        }
+        found = NULL_INDEX
+        seen = 0
+        key = dynamics.body_at(w, local[from]).head_joint_key
+        while key != NULL_INDEX && found == NULL_INDEX {
+            if joint_key_other(w, key) == local[to] && dynamics.joint_at(w, key >> 1).kind == kind && (key & 1) == side {
+                if seen == ordinal { found = key >> 1 }
+                seen = seen + 1
+            }
+            key = joint_key_next(w, key)
+        }
+        // A joint named twice is refused: it would be coloured twice.
+        twice = 0
+        while twice < k && found != NULL_INDEX {
+            if joint_ids[twice] == found { found = NULL_INDEX }
+            twice = twice + 1
+        }
+        if found == NULL_INDEX || rd.ok == false {
+            ok = false
+            break
+        }
+        j = dynamics.joint_at(w, found)
+        joint_sim = dynamics.get_joint_sim(w, j)
+        if joint_solver.joint_impulses_io(joint_sim, kind, probe as float[], false) != n {
+            ok = false
+            break
+        }
+        if apply { joint_solver.joint_impulses_io(joint_sim, kind, impulses as float[], true) }
+        joint_ids[k] = found
+        joint_colors[k] = color
+        k = k + 1
+    }
+    if apply && ok { dynamics.recolor_joints(w, ids_block, colors_block, joint_count) }
+    basics.free_bytes(ids_block, math.max_int(joint_count, 1) * 4)
+    basics.free_bytes(colors_block, math.max_int(joint_count, 1) * 4)
+    basics.free_bytes(impulses, joint_solver.JOINT_IMPULSE_COUNT * 8)
+    basics.free_bytes(probe, joint_solver.JOINT_IMPULSE_COUNT * 8)
+
+    // The contacts, made again in the order the world saved made them.
+    contact_count = 0
+    if ok { contact_count = r_int(&rd) }
+    if rd.ok == false || contact_count < 0 || basics.section_fits(rd.at, contact_count, 32, rd.size) == false { ok = false }
+    if ok == false { contact_count = 0 }
+    pairs_block = basics.alloc(math.max_int(contact_count, 1) * 12)
+    pair_a = pairs_block as int[]
+    pair_b = (pairs_block + math.max_int(contact_count, 1) * 4) as int[]
+    pair_child = (pairs_block + math.max_int(contact_count, 1) * 8) as int[]
+    state_flags = body_set_contact_state()
+    k = 0
+    while k < contact_count && ok {
+        shape_a = r_shape_ref(&rd, w, local, count, shape_map, map_count)
+        shape_b = r_shape_ref(&rd, w, local, count, shape_map, map_count)
+        child_index = r_int(&rd)
+        flags = r_int(&rd)
+        contact_color = r_int(&rd)
+        manifold_count = r_int(&rd)
+        if rd.ok == false || shape_a == NULL_INDEX || shape_b == NULL_INDEX || manifold_count < 0 ||
+           basics.section_fits(rd.at, manifold_count, sizeof(Manifold), rd.size) == false {
+            ok = false
+            break
+        }
+        // A contact the world makes as the block's was made (a pair that
+        // collides, in that order, mesh or convex as recorded), reaching the
+        // set, and named once: what the check passes, the write does.
+        contact_kind = dynamics.contact_kind_for(w, shape_a, shape_b, child_index)
+        in_set = local_index_of(local, count, dynamics.world_shape_at(w, shape_a).body_id) >= 0 ||
+                 local_index_of(local, count, dynamics.world_shape_at(w, shape_b).body_id) >= 0
+        named = 0
+        while named < k && contact_kind >= 0 {
+            if pair_a[named] == shape_a && pair_b[named] == shape_b && pair_child[named] == child_index { contact_kind = 0 - 1 }
+            named = named + 1
+        }
+        if contact_kind < 0 || in_set == false {
+            ok = false
+            break
+        }
+        pair_a[k] = shape_a
+        pair_b[k] = shape_b
+        pair_child[k] = child_index
+        made = NULL_INDEX
+        if apply {
+            dynamics.create_contact(w, dynamics.world_shape_at(w, shape_a), dynamics.world_shape_at(w, shape_b), child_index)
+            made = dynamics.find_contact(w, shape_a, shape_b, child_index)
+            if made == NULL_INDEX {
+                ok = false
+                break
+            }
+            c = dynamics.contact_at(w, made)
+            c.flags = (c.flags & (0 - 1 - state_flags)) | (flags & state_flags & (0 - 1 - dynamics.CONTACT_TOUCHING))
+            dynamics.allocate_manifolds(w, c, manifold_count)
+            r_bytes(&rd, c.manifolds, manifold_count * sizeof(Manifold))
+        } else {
+            rd.at = rd.at + manifold_count * sizeof(Manifold)
+        }
+        is_mesh = r_bool(&rd)
+        if is_mesh != (contact_kind == 1) {
+            ok = false
+            break
+        }
+        if is_mesh {
+            if apply {
+                r_bytes(&rd, (&dynamics.mesh_cache_of(dynamics.contact_at(w, made)).query_bounds) as ptr, sizeof(AABB))
+            } else {
+                r_bytes(&rd, hold, sizeof(AABB))
+            }
+            triangle_count = r_count(&rd, sizeof(TriangleCache))
+            if rd.ok == false {
+                ok = false
+                break
+            }
+            if apply {
+                cache = dynamics.mesh_cache_of(dynamics.contact_at(w, made))
+                mesh_contact.cache_destroy(cache)
+                cache.triangles = basics.alloc(math.max_int(triangle_count, 1) * sizeof(TriangleCache))
+                cache.capacity = math.max_int(triangle_count, 1)
+                r_bytes(&rd, cache.triangles, triangle_count * sizeof(TriangleCache))
+                cache.count = triangle_count
+            } else {
+                rd.at = rd.at + triangle_count * sizeof(TriangleCache)
+            }
+        } else if apply {
+            r_bytes(&rd, (&dynamics.contact_at(w, made).caches) as ptr, dynamics.CONTACT_CACHE_WORDS * 8)
+        } else {
+            r_bytes(&rd, hold, dynamics.CONTACT_CACHE_WORDS * 8)
+        }
+        if apply {
+            c = dynamics.contact_at(w, made)
+            r_bytes(&rd, (&c.cached_rotation_a) as ptr, sizeof(Quatf))
+            r_bytes(&rd, (&c.cached_rotation_b) as ptr, sizeof(Quatf))
+            r_bytes(&rd, (&c.cached_relative_p) as ptr, sizeof(Vec3f))
+            r_bytes(&rd, (&c.cached_relative_q) as ptr, sizeof(Quatf))
+            c.friction = r_float(&rd) as f32
+            c.restitution = r_float(&rd) as f32
+            c.rolling_resistance = r_float(&rd) as f32
+            r_bytes(&rd, (&c.tangent_velocity) as ptr, sizeof(Vec3f))
+            if (flags & dynamics.CONTACT_TOUCHING) != 0 { dynamics.touch_restored_contact(w, c, contact_color) }
+        } else {
+            r_bytes(&rd, hold, 3 * sizeof(Quatf) + sizeof(Vec3f))
+            r_float(&rd)
+            r_float(&rd)
+            r_float(&rd)
+            r_bytes(&rd, hold, sizeof(Vec3f))
+        }
+        if rd.ok == false || rd.at > size { ok = false }
+        k = k + 1
+    }
+    basics.free_bytes(pairs_block, math.max_int(contact_count, 1) * 12)
+    removed = 0
+    if ok { removed = r_int(&rd) }
+    if apply && ok && removed >= 0 {
+        island_id = dynamics.body_at(w, local[0]).island_id
+        if island_id != NULL_INDEX {
+            island = dynamics.island_at(w, island_id)
+            // The saved island's count, but an island that also holds bodies
+            // outside the set (a contact this world had merged it through,
+            // destroyed above) keeps its own removals, so it still splits.
+            if island.bodies.count > count { island.constraint_remove_count = island.constraint_remove_count + removed }
+            else { island.constraint_remove_count = removed }
+            // Read asleep, the set sleeps here too, as one island: put to
+            // sleep with no split pending, then given its count back, which
+            // the sleeping island keeps until it wakes.
+            if asleep {
+                island.constraint_remove_count = 0
+                dynamics.try_sleep_island(w, island_id)
+                dynamics.island_at(w, island_id).constraint_remove_count = removed
+            }
+        }
+    }
+    basics.free_bytes(hold, hold_size)
+    return ok && rd.ok && rd.at == size
 }

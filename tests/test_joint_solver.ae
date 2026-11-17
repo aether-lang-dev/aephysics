@@ -18,6 +18,8 @@ import aephysics.contact_solver
 import aephysics.joint_solver
 
 extern exit(code: int)
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
 
 var failures = 0
 var checks = 0
@@ -920,6 +922,102 @@ test_point_mass_matrix() {
     ensure("the point mass matrix is the full skew product to the bit (${mismatches} of 2000 differ)", mismatches == 0)
 }
 
+// A hinge that twists (#190): a spherical joint whose cone's minor is
+// locked. Its cone a circle of 0.6 about frame A's z, its major axis x, so
+// frame B's z stays in the x-z plane: bending about y is free inside the
+// cone, twisting about z is free, and turning about x (out of the plane)
+// is held as a revolute holds its axis.
+test_spherical_lock() {
+    f = fixture()
+    sdef = dynamics.default_spherical_joint_def()
+    common_frames(&f, &sdef.base)
+    sdef.enable_cone_limit = true
+    sdef.cone_angle = 0.6
+    sdef.cone_minor_angle = 0.3
+    id = dynamics.create_spherical_joint(f.world_id, &sdef)
+    ensure("lock: off by default", joint_solver.spherical_joint_is_cone_minor_locked(id) == false)
+    joint_solver.spherical_joint_lock_cone_minor(id, true)
+    ensure("lock: on", joint_solver.spherical_joint_is_cone_minor_locked(id))
+    ensure("lock: an ellipse's minor dropped for the circle", joint_solver.spherical_joint_get_cone_minor_angle(id) == 0.0)
+    state = cube_state(&f)
+    set_velocity(&f, math.vec3_zero(), math.vec3(1.0, 2.0, 3.0))
+    solve_step(&f, id)
+    w = math.widen3(state.w)
+    small("lock: turning out of the plane removed", w.x, 0.000001)
+    small("lock: bending in the plane kept", w.y - 2.0, 0.000001)
+    small("lock: twisting kept", w.z - 3.0, 0.000001)
+    // Turned out of the plane by 0.2: the biased solve turns it back, the
+    // separation reads the lean, the torque reported is the lock's.
+    dynamics.body_set_transform(f.cube_id, math.vec3(0.0, 4.0, 0.0), math.make_quat_from_axis_angle(math.vec3_axis_x(), 0.2))
+    small("lock: the lean read as separation (atan2_approx)", dynamics.joint_get_angular_separation(id) - 0.2, 0.005)
+    set_velocity(&f, math.vec3_zero(), math.vec3_zero())
+    solve_biased(&f, id)
+    ensure("lock: turned back into the plane (${math.widen3(state.w).x})", math.widen3(state.w).x < 0.0 - 0.1)
+    j = dynamics.spherical_joint_of(sim(&f, id))
+    ensure("lock: the torque reported turns it back (${joint_solver.joint_get_constraint_torque(id).x})", joint_solver.joint_get_constraint_torque(id).x < 0.0 - 1.0)
+    // Bent in the plane by 0.4 (inside the cone): no lean, nothing to do.
+    dynamics.body_set_transform(f.cube_id, math.vec3(0.0, 4.0, 0.0), math.make_quat_from_axis_angle(math.vec3_axis_y(), 0.4))
+    small("lock: bent in the plane, no separation", dynamics.joint_get_angular_separation(id), 0.000001)
+    // Warm starting off drops the lock's impulse; unlocking drops it too.
+    j.lock_impulse = 1.0
+    f.ctx.enable_warm_starting = false
+    joint_solver.prepare_joint(sim(&f, id), &f.ctx)
+    ensure("lock: no warm start when disabled", j.lock_impulse == 0.0)
+    f.ctx.enable_warm_starting = true
+    j.lock_impulse = 1.0
+    joint_solver.spherical_joint_lock_cone_minor(id, false)
+    ensure("lock: off again, its impulse gone", joint_solver.spherical_joint_is_cone_minor_locked(id) == false && j.lock_impulse == 0.0)
+    set_velocity(&f, math.vec3_zero(), math.vec3(1.0, 0.0, 0.0))
+    dynamics.body_set_transform(f.cube_id, math.vec3(0.0, 4.0, 0.0), math.quat_identity())
+    solve_step(&f, id)
+    small("lock: off, turning about x is free", math.widen3(state.w).x - 1.0, 0.000001)
+    dynamics.destroy_world(f.world_id)
+}
+
+// A joint's warm-start impulses read and written (#189): a revolute's nine
+// after a solve read back as the joint holds them, written values are what
+// the next warm start applies, and a count not the kind's, a value not
+// finite, a filter joint or a stale id change nothing.
+test_impulses() {
+    f = fixture()
+    rdef = dynamics.default_revolute_joint_def()
+    common_frames(&f, &rdef.base)
+    id = dynamics.create_revolute_joint(f.world_id, &rdef)
+    set_velocity(&f, math.vec3(1.0, 2.0, 3.0), math.vec3(0.5, 0.5, 0.5))
+    solve_step(&f, id)
+    block = calloc(joint_solver.JOINT_IMPULSE_COUNT, 8)
+    values = block as float[]
+    n = joint_solver.joint_get_impulses(id, block)
+    r = dynamics.revolute_joint_of(sim(&f, id))
+    ensure("impulses: a revolute has nine (${n})", n == 9)
+    ensure("impulses: read as the joint holds them", values[0] == r.linear_impulse.x && values[2] == r.linear_impulse.z && values[3] == r.perp_impulse.x && values[4] == r.perp_impulse.y)
+    k = 0
+    while k < n {
+        values[k] = 0.25 * (k + 1)
+        k = k + 1
+    }
+    joint_solver.joint_set_impulses(id, block, n)
+    ensure("impulses: written", r.linear_impulse.y == 0.5 && r.perp_impulse.y == 1.25 && r.upper_impulse == 2.25)
+    set_velocity(&f, math.vec3_zero(), math.vec3_zero())
+    joint_solver.prepare_joint(sim(&f, id), &f.ctx)
+    joint_solver.warm_start_joint(sim(&f, id), &f.ctx)
+    small("impulses: the warm start applies them (cube mass 1)", math.widen3(cube_state(&f).v).x - 0.25, 0.000001)
+    joint_solver.joint_set_impulses(id, block, n - 1)
+    ensure("impulses: a short count changes nothing", r.linear_impulse.x == 0.25)
+    zero = 0.0
+    values[1] = zero / zero
+    joint_solver.joint_set_impulses(id, block, n)
+    ensure("impulses: a value not finite changes nothing", r.linear_impulse.y == 0.5)
+    fdef = dynamics.default_filter_joint_def()
+    common_frames(&f, &fdef.base)
+    filter_id = dynamics.create_filter_joint(f.world_id, &fdef)
+    ensure("impulses: a filter joint has none", joint_solver.joint_get_impulses(filter_id, block) == 0)
+    dynamics.destroy_joint(id, true)
+    ensure("impulses: a stale id has none", joint_solver.joint_get_impulses(id, block) == 0)
+    free(block)
+    dynamics.destroy_world(f.world_id)
+}
+
 main() {
     dynamics.reserve_scratch()
     before = basics.alloc_count()
@@ -930,6 +1028,8 @@ main() {
     test_weld()
     test_prismatic()
     test_spherical()
+    test_spherical_lock()
+    test_impulses()
     test_parallel_motor_wheel()
     test_point_mass_matrix()
     hull.destroy_hull(g_cube as *HullData)
