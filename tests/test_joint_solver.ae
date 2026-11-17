@@ -18,6 +18,8 @@ import aephysics.contact_solver
 import aephysics.joint_solver
 
 extern exit(code: int)
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
 
 var failures = 0
 var checks = 0
@@ -972,6 +974,50 @@ test_spherical_lock() {
     dynamics.destroy_world(f.world_id)
 }
 
+// A joint's warm-start impulses read and written (#189): a revolute's nine
+// after a solve read back as the joint holds them, written values are what
+// the next warm start applies, and a count not the kind's, a value not
+// finite, a filter joint or a stale id change nothing.
+test_impulses() {
+    f = fixture()
+    rdef = dynamics.default_revolute_joint_def()
+    common_frames(&f, &rdef.base)
+    id = dynamics.create_revolute_joint(f.world_id, &rdef)
+    set_velocity(&f, math.vec3(1.0, 2.0, 3.0), math.vec3(0.5, 0.5, 0.5))
+    solve_step(&f, id)
+    block = calloc(joint_solver.JOINT_IMPULSE_COUNT, 8)
+    values = block as float[]
+    n = joint_solver.joint_get_impulses(id, block)
+    r = dynamics.revolute_joint_of(sim(&f, id))
+    ensure("impulses: a revolute has nine (${n})", n == 9)
+    ensure("impulses: read as the joint holds them", values[0] == r.linear_impulse.x && values[2] == r.linear_impulse.z && values[3] == r.perp_impulse.x && values[4] == r.perp_impulse.y)
+    k = 0
+    while k < n {
+        values[k] = 0.25 * (k + 1)
+        k = k + 1
+    }
+    joint_solver.joint_set_impulses(id, block, n)
+    ensure("impulses: written", r.linear_impulse.y == 0.5 && r.perp_impulse.y == 1.25 && r.upper_impulse == 2.25)
+    set_velocity(&f, math.vec3_zero(), math.vec3_zero())
+    joint_solver.prepare_joint(sim(&f, id), &f.ctx)
+    joint_solver.warm_start_joint(sim(&f, id), &f.ctx)
+    small("impulses: the warm start applies them (cube mass 1)", math.widen3(cube_state(&f).v).x - 0.25, 0.000001)
+    joint_solver.joint_set_impulses(id, block, n - 1)
+    ensure("impulses: a short count changes nothing", r.linear_impulse.x == 0.25)
+    zero = 0.0
+    values[1] = zero / zero
+    joint_solver.joint_set_impulses(id, block, n)
+    ensure("impulses: a value not finite changes nothing", r.linear_impulse.y == 0.5)
+    fdef = dynamics.default_filter_joint_def()
+    common_frames(&f, &fdef.base)
+    filter_id = dynamics.create_filter_joint(f.world_id, &fdef)
+    ensure("impulses: a filter joint has none", joint_solver.joint_get_impulses(filter_id, block) == 0)
+    dynamics.destroy_joint(id, true)
+    ensure("impulses: a stale id has none", joint_solver.joint_get_impulses(id, block) == 0)
+    free(block)
+    dynamics.destroy_world(f.world_id)
+}
+
 main() {
     dynamics.reserve_scratch()
     before = basics.alloc_count()
@@ -983,6 +1029,7 @@ main() {
     test_prismatic()
     test_spherical()
     test_spherical_lock()
+    test_impulses()
     test_parallel_motor_wheel()
     test_point_mass_matrix()
     hull.destroy_hull(g_cube as *HullData)

@@ -431,7 +431,7 @@ golden trace.
 arms) on spherical and revolute joints.
 
 ```aether
-figure = Human { bones: null, filter_joints: null, filter_joint_count: 0, friction_torque: 0.0, is_spawned: false, ankles: false, bone_count: 0 }
+figure = Human { bones: null, filter_joints: null, filter_joint_count: 0, friction_torque: 0.0, is_spawned: false }
 human.create_human(&figure, world, feet_position, 5.0, 1.0, 0.7, 1, null)
 // joint friction 5 N m, springs toward the standing pose at 1 Hz and a
 // damping ratio of 0.7, and filter group 1 (see below)
@@ -451,6 +451,23 @@ human.destroy_human(&figure)
 - **Feet.** With `figure.ankles = true` before creation, the feet are bones
   of their own on elliptical ankle cones, so a crouched figure's soles lie
   flat.
+- **Head, clavicles, hands, spine_02.** `figure.head`, `figure.clavicles`,
+  `figure.hands` and `figure.spine_02`, set before creation, add those
+  bones at fixed indices (`BONE_HEAD` 14 to `BONE_SPINE_02` 19), each on a
+  joint with a person's range. A figure with any of them has
+  `MAX_BONE_COUNT` bones; a slot it was not given has no body, so a loop
+  over `bone_count` asks `human_has_bone` first. They are made from the
+  twelve and ride them through `human_fit_shape`; `human_fit_bone` puts
+  one on a rig bone of its own.
+- **Twisting elbows and knees.** `figure.twist = true` makes each a hinge
+  that also turns about the bone: the forearm 80 degrees either way
+  (pronation, supination), the shin 10. Its sideways swing is locked.
+- **Light bones give on impacts.** Box3D's joints are soft, with a
+  stiffness that goes with the mass they move. A hand pinned under the
+  figure, or a head on its neck in a hard spin, overruns its limit for a
+  few steps by up to half a radian at four sub-steps (eight halve it), and
+  settles back within a few degrees.
+- Every flag off, the figure is built and steps as before, bit for bit.
 - **Pose drive.** Every joint has a spring toward a target
   (`human_set_joint_spring_hertz`, `human_set_joint_damping_ratio`) and a
   motor whose torque limit is the joint's friction
@@ -480,6 +497,27 @@ snapshot.free_snapshot(data, size)
 ```
 
 A snapshot of another layout, or one damaged in any byte, loads no world.
+
+A snapshot only fits a world built the same way. For a peer that joins a
+networked game late, `save_body_set` takes one set of bodies (a ragdoll's)
+as bytes with ids local to the set: their sims and states, sleep timers,
+the broad phase's bounds, the joints' warm-start impulses and colours, and
+their contacts with manifolds and caches. `restore_body_set` writes them
+into another world that holds the same bodies, however it was built. A
+shape outside the set, such as the ground, is translated through a map of
+shape ids.
+
+```aether
+data, size = snapshot.save_body_set(world, bones, bone_count)
+ok = snapshot.restore_body_set(other_world, other_bones, bone_count, shape_map, map_count, data, size)
+```
+
+The two worlds then step on alike, bit for bit, unless the joining world
+has a history of its own and two contacts on one body start touching in
+the same step. Those take their colours in contact-id order, as Box3D's
+do, and each world numbers contacts from its own history. A sleeping set
+is saved asleep and goes back to sleep. One joint's impulses alone are
+`joint_get_impulses` and `joint_set_impulses`.
 
 A recording keeps every call that changes a world, field by field, with a
 state hash after each step and every query with its answers.
@@ -569,5 +607,9 @@ it changes results, so Box3D's own scenes give Box3D's checksums.
 - **Elliptical and off-axis cones** on spherical joints
   (`spherical_joint_set_cone_ellipse`, `spherical_joint_set_cone_axis`),
   for hips and shoulders. A circle about z stays the default, bit for bit.
+- **A locked minor on a cone** (`spherical_joint_lock_cone_minor`): the
+  joint swings only along one arc and still twists, as an elbow does.
+- **A set of bodies' solver state** (`save_body_set`, `restore_body_set`,
+  `joint_get_impulses`, `joint_set_impulses`), for late-joining peers.
 - **Mesh queries without a cap.** Box3D's mesh contact fills a buffer of 256
   triangles and warns; here the buffer grows.

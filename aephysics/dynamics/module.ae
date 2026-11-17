@@ -94,7 +94,7 @@ exports (
     intern_tag, clear_tags, intern_geometry, rec_commit_query, rec_aabb, rec_query_filter, rec_shape_proxy, rec_plane_result, rec_capsule_value,
     rec_float, rec_bool, rec_vec3, rec_quat, rec_transform, rec_id, rec_string, rec_raw, rec_geometry, finish_recording, recorded_geometry_at,
     OP_STATE_HASH, OP_BOUNDS, OP_END, OP_QUERY_TAG, OP_QUERY_OVERLAP_AABB, OP_QUERY_OVERLAP_SHAPE, OP_QUERY_CAST_RAY,
-    OP_QUERY_CAST_SHAPE, OP_QUERY_CAST_RAY_CLOSEST, OP_QUERY_CAST_MOVER, OP_QUERY_COLLIDE_MOVER, OP_CREATE_BODY, OP_DESTROY_BODY, OP_BODY_SET_TRANSFORM, OP_BODY_SET_LINEAR_VELOCITY, OP_BODY_SET_ANGULAR_VELOCITY, OP_BODY_SET_TARGET_TRANSFORM, OP_BODY_APPLY_FORCE, OP_BODY_APPLY_FORCE_TO_CENTER, OP_BODY_APPLY_TORQUE, OP_BODY_APPLY_LINEAR_IMPULSE, OP_BODY_APPLY_LINEAR_IMPULSE_TO_CENTER, OP_BODY_APPLY_ANGULAR_IMPULSE, OP_BODY_SET_BULLET, OP_BODY_SET_MASS_DATA, OP_BODY_APPLY_MASS_FROM_SHAPES, OP_BODY_SET_LINEAR_DAMPING, OP_BODY_SET_ANGULAR_DAMPING, OP_BODY_SET_GRAVITY_SCALE, OP_BODY_SET_AWAKE, OP_BODY_ENABLE_SLEEP, OP_BODY_SET_SLEEP_THRESHOLD, OP_BODY_SET_MOTION_LOCKS, OP_CREATE_SPHERE_SHAPE, OP_CREATE_CAPSULE_SHAPE, OP_CREATE_HULL_SHAPE, OP_CREATE_TRANSFORMED_HULL_SHAPE, OP_CREATE_MESH_SHAPE, OP_CREATE_HEIGHT_FIELD_SHAPE, OP_CREATE_COMPOUND_SHAPE, OP_DESTROY_SHAPE, OP_SHAPE_SET_DENSITY, OP_SHAPE_SET_FILTER, OP_SHAPE_SET_SURFACE_MATERIAL, OP_SHAPE_SET_SPHERE, OP_SHAPE_SET_CAPSULE, OP_SHAPE_SET_HULL, OP_SHAPE_SET_MESH, OP_SHAPE_SET_FRICTION, OP_SHAPE_SET_RESTITUTION, OP_SHAPE_SET_MESH_MATERIAL, OP_SHAPE_ENABLE_PRE_SOLVE_EVENTS, OP_BODY_ENABLE_HIT_EVENTS, OP_BODY_ALLOW_FAST_ROTATION, OP_BODY_ENABLE_CONTACT_RECYCLING, OP_BODY_SET_SAFETY_FACTOR, OP_SHAPE_APPLY_WIND, OP_BODY_SET_NAME, OP_SHAPE_SET_NAME, OP_CREATE_DISTANCE_JOINT, OP_CREATE_MOTOR_JOINT, OP_CREATE_FILTER_JOINT, OP_CREATE_PARALLEL_JOINT, OP_CREATE_PRISMATIC_JOINT, OP_CREATE_REVOLUTE_JOINT, OP_CREATE_SPHERICAL_JOINT, OP_CREATE_WELD_JOINT, OP_CREATE_WHEEL_JOINT, OP_DESTROY_JOINT, OP_JOINT_SET_LOCAL_FRAME_A, OP_JOINT_SET_LOCAL_FRAME_B, OP_JOINT_SET_COLLIDE_CONNECTED, OP_JOINT_WAKE_BODIES, OP_JOINT_SET_CONSTRAINT_TUNING, OP_JOINT_SET_FORCE_THRESHOLD, OP_JOINT_SET_TORQUE_THRESHOLD, OP_BODY_SET_TYPE, OP_BODY_DISABLE, OP_BODY_ENABLE, OP_SHAPE_ENABLE_SENSOR_EVENTS, OP_SHAPE_ENABLE_CONTACT_EVENTS, OP_SHAPE_ENABLE_HIT_EVENTS, OP_STEP, OP_ENABLE_SLEEPING, OP_ENABLE_WARM_STARTING, OP_ENABLE_CONTINUOUS, OP_ENABLE_SPECULATIVE, OP_SET_RESTITUTION_THRESHOLD, OP_SET_RESTITUTION_ITERATIONS, OP_ENABLE_RESTITUTION_PROPAGATION, OP_ENABLE_KINEMATIC_STATIC_SOFTNESS, OP_SET_HIT_EVENT_THRESHOLD, OP_SET_CONTACT_TUNING, OP_SET_CONTACT_RECYCLE_DISTANCE, OP_SET_MAXIMUM_LINEAR_SPEED, OP_SET_GRAVITY, OP_REBUILD_STATIC_TREE, OP_EXPLODE, OP_DISTANCE_JOINT_SET_LENGTH, OP_DISTANCE_JOINT_ENABLE_LIMIT, OP_DISTANCE_JOINT_SET_LENGTH_RANGE, OP_DISTANCE_JOINT_ENABLE_SPRING, OP_DISTANCE_JOINT_SET_SPRING_FORCE_RANGE, OP_DISTANCE_JOINT_SET_SPRING_HERTZ, OP_DISTANCE_JOINT_SET_SPRING_DAMPING_RATIO, OP_DISTANCE_JOINT_ENABLE_MOTOR, OP_DISTANCE_JOINT_SET_MOTOR_SPEED, OP_DISTANCE_JOINT_SET_MAX_MOTOR_FORCE, OP_MOTOR_JOINT_SET_LINEAR_VELOCITY, OP_MOTOR_JOINT_SET_ANGULAR_VELOCITY, OP_MOTOR_JOINT_SET_MAX_VELOCITY_TORQUE, OP_MOTOR_JOINT_SET_MAX_VELOCITY_FORCE, OP_MOTOR_JOINT_SET_LINEAR_HERTZ, OP_MOTOR_JOINT_SET_LINEAR_DAMPING_RATIO, OP_MOTOR_JOINT_SET_ANGULAR_HERTZ, OP_MOTOR_JOINT_SET_ANGULAR_DAMPING_RATIO, OP_MOTOR_JOINT_SET_MAX_SPRING_FORCE, OP_MOTOR_JOINT_SET_MAX_SPRING_TORQUE, OP_PARALLEL_JOINT_SET_SPRING_HERTZ, OP_PARALLEL_JOINT_SET_SPRING_DAMPING_RATIO, OP_PARALLEL_JOINT_SET_MAX_TORQUE, OP_PRISMATIC_JOINT_ENABLE_SPRING, OP_PRISMATIC_JOINT_SET_SPRING_HERTZ, OP_PRISMATIC_JOINT_SET_SPRING_DAMPING_RATIO, OP_PRISMATIC_JOINT_SET_TARGET_TRANSLATION, OP_PRISMATIC_JOINT_ENABLE_LIMIT, OP_PRISMATIC_JOINT_SET_LIMITS, OP_PRISMATIC_JOINT_ENABLE_MOTOR, OP_PRISMATIC_JOINT_SET_MOTOR_SPEED, OP_PRISMATIC_JOINT_SET_MAX_MOTOR_FORCE, OP_REVOLUTE_JOINT_ENABLE_LIMIT, OP_REVOLUTE_JOINT_SET_LIMITS, OP_REVOLUTE_JOINT_ENABLE_SPRING, OP_REVOLUTE_JOINT_SET_TARGET_ANGLE, OP_REVOLUTE_JOINT_SET_SPRING_HERTZ, OP_REVOLUTE_JOINT_SET_SPRING_DAMPING_RATIO, OP_REVOLUTE_JOINT_ENABLE_MOTOR, OP_REVOLUTE_JOINT_SET_MOTOR_SPEED, OP_REVOLUTE_JOINT_SET_MAX_MOTOR_TORQUE, OP_SPHERICAL_JOINT_ENABLE_CONE_LIMIT, OP_SPHERICAL_JOINT_SET_CONE_LIMIT, OP_SPHERICAL_JOINT_SET_CONE_AXIS, OP_SPHERICAL_JOINT_SET_CONE_ELLIPSE, OP_SPHERICAL_JOINT_ENABLE_TWIST_LIMIT, OP_SPHERICAL_JOINT_SET_TWIST_LIMITS, OP_SPHERICAL_JOINT_ENABLE_SPRING, OP_SPHERICAL_JOINT_SET_TARGET_ROTATION, OP_SPHERICAL_JOINT_SET_SPRING_HERTZ, OP_SPHERICAL_JOINT_SET_SPRING_DAMPING_RATIO, OP_SPHERICAL_JOINT_ENABLE_MOTOR, OP_SPHERICAL_JOINT_SET_MOTOR_VELOCITY, OP_SPHERICAL_JOINT_SET_MAX_MOTOR_TORQUE, OP_WELD_JOINT_SET_LINEAR_HERTZ, OP_WELD_JOINT_SET_LINEAR_DAMPING_RATIO, OP_WELD_JOINT_SET_ANGULAR_HERTZ, OP_WELD_JOINT_SET_ANGULAR_DAMPING_RATIO, OP_WHEEL_JOINT_ENABLE_SUSPENSION, OP_WHEEL_JOINT_SET_SUSPENSION_HERTZ, OP_WHEEL_JOINT_SET_SUSPENSION_DAMPING_RATIO, OP_WHEEL_JOINT_ENABLE_SUSPENSION_LIMIT, OP_WHEEL_JOINT_SET_SUSPENSION_LIMITS, OP_WHEEL_JOINT_ENABLE_SPIN_MOTOR, OP_WHEEL_JOINT_SET_SPIN_MOTOR_SPEED, OP_WHEEL_JOINT_SET_MAX_SPIN_TORQUE, OP_WHEEL_JOINT_ENABLE_STEERING, OP_WHEEL_JOINT_SET_STEERING_HERTZ, OP_WHEEL_JOINT_SET_STEERING_DAMPING_RATIO, OP_WHEEL_JOINT_SET_MAX_STEERING_TORQUE, OP_WHEEL_JOINT_ENABLE_STEERING_LIMIT, OP_WHEEL_JOINT_SET_STEERING_LIMITS, OP_WHEEL_JOINT_SET_TARGET_STEERING_ANGLE, OP_ENABLE_KINEMATIC_SPECULATION, OP_ENABLE_TRAVEL_SPECULATION, OP_SPHERICAL_JOINT_LOCK_CONE_MINOR,
+    OP_QUERY_CAST_SHAPE, OP_QUERY_CAST_RAY_CLOSEST, OP_QUERY_CAST_MOVER, OP_QUERY_COLLIDE_MOVER, OP_CREATE_BODY, OP_DESTROY_BODY, OP_BODY_SET_TRANSFORM, OP_BODY_SET_LINEAR_VELOCITY, OP_BODY_SET_ANGULAR_VELOCITY, OP_BODY_SET_TARGET_TRANSFORM, OP_BODY_APPLY_FORCE, OP_BODY_APPLY_FORCE_TO_CENTER, OP_BODY_APPLY_TORQUE, OP_BODY_APPLY_LINEAR_IMPULSE, OP_BODY_APPLY_LINEAR_IMPULSE_TO_CENTER, OP_BODY_APPLY_ANGULAR_IMPULSE, OP_BODY_SET_BULLET, OP_BODY_SET_MASS_DATA, OP_BODY_APPLY_MASS_FROM_SHAPES, OP_BODY_SET_LINEAR_DAMPING, OP_BODY_SET_ANGULAR_DAMPING, OP_BODY_SET_GRAVITY_SCALE, OP_BODY_SET_AWAKE, OP_BODY_ENABLE_SLEEP, OP_BODY_SET_SLEEP_THRESHOLD, OP_BODY_SET_MOTION_LOCKS, OP_CREATE_SPHERE_SHAPE, OP_CREATE_CAPSULE_SHAPE, OP_CREATE_HULL_SHAPE, OP_CREATE_TRANSFORMED_HULL_SHAPE, OP_CREATE_MESH_SHAPE, OP_CREATE_HEIGHT_FIELD_SHAPE, OP_CREATE_COMPOUND_SHAPE, OP_DESTROY_SHAPE, OP_SHAPE_SET_DENSITY, OP_SHAPE_SET_FILTER, OP_SHAPE_SET_SURFACE_MATERIAL, OP_SHAPE_SET_SPHERE, OP_SHAPE_SET_CAPSULE, OP_SHAPE_SET_HULL, OP_SHAPE_SET_MESH, OP_SHAPE_SET_FRICTION, OP_SHAPE_SET_RESTITUTION, OP_SHAPE_SET_MESH_MATERIAL, OP_SHAPE_ENABLE_PRE_SOLVE_EVENTS, OP_BODY_ENABLE_HIT_EVENTS, OP_BODY_ALLOW_FAST_ROTATION, OP_BODY_ENABLE_CONTACT_RECYCLING, OP_BODY_SET_SAFETY_FACTOR, OP_SHAPE_APPLY_WIND, OP_BODY_SET_NAME, OP_SHAPE_SET_NAME, OP_CREATE_DISTANCE_JOINT, OP_CREATE_MOTOR_JOINT, OP_CREATE_FILTER_JOINT, OP_CREATE_PARALLEL_JOINT, OP_CREATE_PRISMATIC_JOINT, OP_CREATE_REVOLUTE_JOINT, OP_CREATE_SPHERICAL_JOINT, OP_CREATE_WELD_JOINT, OP_CREATE_WHEEL_JOINT, OP_DESTROY_JOINT, OP_JOINT_SET_LOCAL_FRAME_A, OP_JOINT_SET_LOCAL_FRAME_B, OP_JOINT_SET_COLLIDE_CONNECTED, OP_JOINT_WAKE_BODIES, OP_JOINT_SET_CONSTRAINT_TUNING, OP_JOINT_SET_FORCE_THRESHOLD, OP_JOINT_SET_TORQUE_THRESHOLD, OP_BODY_SET_TYPE, OP_BODY_DISABLE, OP_BODY_ENABLE, OP_SHAPE_ENABLE_SENSOR_EVENTS, OP_SHAPE_ENABLE_CONTACT_EVENTS, OP_SHAPE_ENABLE_HIT_EVENTS, OP_STEP, OP_ENABLE_SLEEPING, OP_ENABLE_WARM_STARTING, OP_ENABLE_CONTINUOUS, OP_ENABLE_SPECULATIVE, OP_SET_RESTITUTION_THRESHOLD, OP_SET_RESTITUTION_ITERATIONS, OP_ENABLE_RESTITUTION_PROPAGATION, OP_ENABLE_KINEMATIC_STATIC_SOFTNESS, OP_SET_HIT_EVENT_THRESHOLD, OP_SET_CONTACT_TUNING, OP_SET_CONTACT_RECYCLE_DISTANCE, OP_SET_MAXIMUM_LINEAR_SPEED, OP_SET_GRAVITY, OP_REBUILD_STATIC_TREE, OP_EXPLODE, OP_DISTANCE_JOINT_SET_LENGTH, OP_DISTANCE_JOINT_ENABLE_LIMIT, OP_DISTANCE_JOINT_SET_LENGTH_RANGE, OP_DISTANCE_JOINT_ENABLE_SPRING, OP_DISTANCE_JOINT_SET_SPRING_FORCE_RANGE, OP_DISTANCE_JOINT_SET_SPRING_HERTZ, OP_DISTANCE_JOINT_SET_SPRING_DAMPING_RATIO, OP_DISTANCE_JOINT_ENABLE_MOTOR, OP_DISTANCE_JOINT_SET_MOTOR_SPEED, OP_DISTANCE_JOINT_SET_MAX_MOTOR_FORCE, OP_MOTOR_JOINT_SET_LINEAR_VELOCITY, OP_MOTOR_JOINT_SET_ANGULAR_VELOCITY, OP_MOTOR_JOINT_SET_MAX_VELOCITY_TORQUE, OP_MOTOR_JOINT_SET_MAX_VELOCITY_FORCE, OP_MOTOR_JOINT_SET_LINEAR_HERTZ, OP_MOTOR_JOINT_SET_LINEAR_DAMPING_RATIO, OP_MOTOR_JOINT_SET_ANGULAR_HERTZ, OP_MOTOR_JOINT_SET_ANGULAR_DAMPING_RATIO, OP_MOTOR_JOINT_SET_MAX_SPRING_FORCE, OP_MOTOR_JOINT_SET_MAX_SPRING_TORQUE, OP_PARALLEL_JOINT_SET_SPRING_HERTZ, OP_PARALLEL_JOINT_SET_SPRING_DAMPING_RATIO, OP_PARALLEL_JOINT_SET_MAX_TORQUE, OP_PRISMATIC_JOINT_ENABLE_SPRING, OP_PRISMATIC_JOINT_SET_SPRING_HERTZ, OP_PRISMATIC_JOINT_SET_SPRING_DAMPING_RATIO, OP_PRISMATIC_JOINT_SET_TARGET_TRANSLATION, OP_PRISMATIC_JOINT_ENABLE_LIMIT, OP_PRISMATIC_JOINT_SET_LIMITS, OP_PRISMATIC_JOINT_ENABLE_MOTOR, OP_PRISMATIC_JOINT_SET_MOTOR_SPEED, OP_PRISMATIC_JOINT_SET_MAX_MOTOR_FORCE, OP_REVOLUTE_JOINT_ENABLE_LIMIT, OP_REVOLUTE_JOINT_SET_LIMITS, OP_REVOLUTE_JOINT_ENABLE_SPRING, OP_REVOLUTE_JOINT_SET_TARGET_ANGLE, OP_REVOLUTE_JOINT_SET_SPRING_HERTZ, OP_REVOLUTE_JOINT_SET_SPRING_DAMPING_RATIO, OP_REVOLUTE_JOINT_ENABLE_MOTOR, OP_REVOLUTE_JOINT_SET_MOTOR_SPEED, OP_REVOLUTE_JOINT_SET_MAX_MOTOR_TORQUE, OP_SPHERICAL_JOINT_ENABLE_CONE_LIMIT, OP_SPHERICAL_JOINT_SET_CONE_LIMIT, OP_SPHERICAL_JOINT_SET_CONE_AXIS, OP_SPHERICAL_JOINT_SET_CONE_ELLIPSE, OP_SPHERICAL_JOINT_ENABLE_TWIST_LIMIT, OP_SPHERICAL_JOINT_SET_TWIST_LIMITS, OP_SPHERICAL_JOINT_ENABLE_SPRING, OP_SPHERICAL_JOINT_SET_TARGET_ROTATION, OP_SPHERICAL_JOINT_SET_SPRING_HERTZ, OP_SPHERICAL_JOINT_SET_SPRING_DAMPING_RATIO, OP_SPHERICAL_JOINT_ENABLE_MOTOR, OP_SPHERICAL_JOINT_SET_MOTOR_VELOCITY, OP_SPHERICAL_JOINT_SET_MAX_MOTOR_TORQUE, OP_WELD_JOINT_SET_LINEAR_HERTZ, OP_WELD_JOINT_SET_LINEAR_DAMPING_RATIO, OP_WELD_JOINT_SET_ANGULAR_HERTZ, OP_WELD_JOINT_SET_ANGULAR_DAMPING_RATIO, OP_WHEEL_JOINT_ENABLE_SUSPENSION, OP_WHEEL_JOINT_SET_SUSPENSION_HERTZ, OP_WHEEL_JOINT_SET_SUSPENSION_DAMPING_RATIO, OP_WHEEL_JOINT_ENABLE_SUSPENSION_LIMIT, OP_WHEEL_JOINT_SET_SUSPENSION_LIMITS, OP_WHEEL_JOINT_ENABLE_SPIN_MOTOR, OP_WHEEL_JOINT_SET_SPIN_MOTOR_SPEED, OP_WHEEL_JOINT_SET_MAX_SPIN_TORQUE, OP_WHEEL_JOINT_ENABLE_STEERING, OP_WHEEL_JOINT_SET_STEERING_HERTZ, OP_WHEEL_JOINT_SET_STEERING_DAMPING_RATIO, OP_WHEEL_JOINT_SET_MAX_STEERING_TORQUE, OP_WHEEL_JOINT_ENABLE_STEERING_LIMIT, OP_WHEEL_JOINT_SET_STEERING_LIMITS, OP_WHEEL_JOINT_SET_TARGET_STEERING_ANGLE, OP_ENABLE_KINEMATIC_SPECULATION, OP_ENABLE_TRAVEL_SPECULATION, OP_SPHERICAL_JOINT_LOCK_CONE_MINOR, OP_JOINT_SET_IMPULSES,
     create_compound_shape, destroy_shape, shape_is_valid, get_shape_full_id, get_shape, shape_get_body,
     shape_get_aabb, shape_get_type, shape_get_density, shape_set_density, shape_get_filter, shape_set_filter,
     shape_get_surface_material, shape_set_surface_material, shape_get_material_count, shape_is_sensor,
@@ -116,12 +116,13 @@ exports (
     store_joint_id, load_joint_id, set_worker_count,
     Manifold, ManifoldPoint, ContactSpec, ContactId, ContactBeginTouchEvent, ContactEndTouchEvent, JointSim, GraphColor, ConstraintGraph,
     GRAPH_COLOR_COUNT, OVERFLOW_INDEX, DYNAMIC_COLOR_COUNT, MAX_MANIFOLD_POINTS,
-    CONTACT_TOUCHING, CONTACT_ENABLE_CONTACT_EVENTS, CONTACT_STATIC, CONTACT_RECYCLE, SIM_TOUCHING, SIM_MESH_CONTACT,
+    CONTACT_TOUCHING, CONTACT_HIT_EVENT, CONTACT_ENABLE_CONTACT_EVENTS, CONTACT_STATIC, CONTACT_RECYCLE, SIM_TOUCHING, SIM_MESH_CONTACT,
     SIM_ENABLE_HIT_EVENT, RELATIVE_TRANSFORM_VALID, ENABLE_SPECULATIVE_POINTS,
     contact_at, joint_at, manifold_at, manifold_point_at, graph_color, contact_spec_at, joint_sim_at, contact_link_at, joint_link_at,
     world_contact_count, get_contact, contact_is_valid, make_contact_id, make_shape_id,
     world_contact_begin_event_count, world_contact_begin_event, world_contact_end_event_count, world_contact_end_event, swap_end_events,
     create_graph, destroy_graph, add_contact_to_graph, remove_contact_from_graph, add_joint_to_graph, remove_joint_from_graph,
+    assign_wanted_color, recolor_joints, touch_restored_contact, find_contact,
     create_contact, destroy_contact, update_contact, contact_edge_next, invalidate_body_contacts,
     merge_islands, link_contact, unlink_contact, link_joint, unlink_joint, split_island, try_sleep_island,
     update_pairs, collide, validate_contacts,
@@ -2603,6 +2604,7 @@ const OP_WHEEL_JOINT_SET_TARGET_STEERING_ANGLE = 175
 const OP_ENABLE_KINEMATIC_SPECULATION = 176
 const OP_ENABLE_TRAVEL_SPECULATION = 177
 const OP_SPHERICAL_JOINT_LOCK_CONE_MINOR = 178
+const OP_JOINT_SET_IMPULSES = 179
 
 // Whether the world of this index is recording: the hooks' test, false
 // for an index that is not a world's.
@@ -4711,12 +4713,43 @@ assign_color(g: *ConstraintGraph, body_id_a: int, body_id_b: int, kind_a: int, k
     return OVERFLOW_INDEX
 }
 
+// The colour another world gave a constraint (#189), when the pair may take
+// it there as assign_color would (a dynamic pair in the dynamic colours, a
+// pair with a static or kinematic body in 1 and up, neither dynamic body
+// taken), its bodies marked; otherwise the colour assign_color picks. A
+// world rebuilt in another order solves a set of bodies' constraints in
+// the order the first did only if they sit in the same colours.
+assign_wanted_color(g: *ConstraintGraph, body_id_a: int, body_id_b: int, kind_a: int, kind_b: int, wanted: int) -> int {
+    dynamic_a = kind_a == BODY_DYNAMIC
+    dynamic_b = kind_b == BODY_DYNAMIC
+    allowed = false
+    if dynamic_a && dynamic_b { allowed = wanted >= 0 && wanted < DYNAMIC_COLOR_COUNT }
+    else if dynamic_a || dynamic_b { allowed = wanted >= 1 && wanted < OVERFLOW_INDEX }
+    if allowed {
+        color = (g.colors + wanted * sizeof(GraphColor)) as *GraphColor
+        taken_a = dynamic_a && basics.bitset_get(&color.body_set, body_id_a)
+        taken_b = dynamic_b && basics.bitset_get(&color.body_set, body_id_b)
+        if taken_a == false && taken_b == false {
+            if dynamic_a { basics.bitset_set_grow(&color.body_set, body_id_a) }
+            if dynamic_b { basics.bitset_set_grow(&color.body_set, body_id_b) }
+            return wanted
+        }
+    }
+    return assign_color(g, body_id_a, body_id_b, kind_a, kind_b)
+}
+
 // A touching contact into a colour: convex contacts into the wide array,
 // mesh contacts and the overflow's into the scalar one.
 add_contact_to_graph(w: *World, c: *Contact) {
     body_a = body_at(w, c.edge_a.body_id)
     body_b = body_at(w, c.edge_b.body_id)
-    color_index = assign_color(&w.constraint_graph, body_a.id, body_b.id, body_a.kind, body_b.kind)
+    place_contact_in_color(w, c, assign_color(&w.constraint_graph, body_a.id, body_b.id, body_a.kind, body_b.kind))
+}
+
+// A touching contact into the colour given (its bodies already marked there).
+place_contact_in_color(w: *World, c: *Contact, color_index: int) {
+    body_a = body_at(w, c.edge_a.body_id)
+    body_b = body_at(w, c.edge_b.body_id)
     is_scalar = (c.flags & SIM_MESH_CONTACT) != 0 || color_index == OVERFLOW_INDEX
     color = graph_color(w, color_index)
     c.color_index = color_index
@@ -5809,12 +5842,80 @@ wake_solver_set(w: *World, set_index: int) {
 add_joint_to_graph(w: *World, sim: *JointSim, j: *Joint) {
     body_a = body_at(w, j.edge_a.body_id)
     body_b = body_at(w, j.edge_b.body_id)
-    color_index = assign_color(&w.constraint_graph, body_a.id, body_b.id, body_a.kind, body_b.kind)
+    place_joint_in_color(w, sim, j, assign_color(&w.constraint_graph, body_a.id, body_b.id, body_a.kind, body_b.kind))
+}
+
+// A joint sim copied into the colour given (its bodies already marked there).
+place_joint_in_color(w: *World, sim: *JointSim, j: *Joint, color_index: int) {
     color = graph_color(w, color_index)
     index = basics.buffer_push(&color.joint_sims)
     memcpy(color.joint_sims.data + index * sizeof(JointSim), sim as ptr, sizeof(JointSim))
     j.color_index = color_index
     j.local_index = index
+}
+
+// --- a set of bodies' solver state, restored (#189) ------------------------------------------------------------
+
+// Awake joints (`joint_ids`, int[count]) moved to the colours `colors`
+// (int[count]) wherever their pairs may take them (assign_wanted_color),
+// each sim carried over whole: all of them out of the graph first, so one
+// is not refused a colour another of them still holds.
+recolor_joints(w: *World, joint_ids: ptr, colors: ptr, count: int) {
+    ids = joint_ids as int[]
+    wanted = colors as int[]
+    held = basics.alloc(math.max_int(count, 1) * sizeof(JointSim))
+    lifted = basics.alloc(math.max_int(count, 1) * 4)
+    was_lifted = lifted as int[]
+    k = 0
+    while k < count {
+        j = joint_at(w, ids[k])
+        was_lifted[k] = 0
+        if j.set_index == AWAKE_SET && j.color_index != NULL_INDEX {
+            memcpy(held + k * sizeof(JointSim), joint_sim_at(&graph_color(w, j.color_index).joint_sims, j.local_index) as ptr, sizeof(JointSim))
+            remove_joint_from_graph(w, j.edge_a.body_id, j.edge_b.body_id, j.color_index, j.local_index)
+            was_lifted[k] = 1
+        }
+        k = k + 1
+    }
+    k = 0
+    while k < count {
+        if was_lifted[k] == 1 {
+            j = joint_at(w, ids[k])
+            body_a = body_at(w, j.edge_a.body_id)
+            body_b = body_at(w, j.edge_b.body_id)
+            place_joint_in_color(w, (held + k * sizeof(JointSim)) as *JointSim, j, assign_wanted_color(&w.constraint_graph, body_a.id, body_b.id, body_a.kind, body_b.kind, wanted[k]))
+        }
+        k = k + 1
+    }
+    basics.free_bytes(held, math.max_int(count, 1) * sizeof(JointSim))
+    basics.free_bytes(lifted, math.max_int(count, 1) * 4)
+}
+
+// A contact create_contact made, given the touching another world's had:
+// linked into its island and put in colour `wanted`, as the collide pass
+// does with one that starts touching, but with no begin event (it was
+// touching already). Its manifolds and flags are the caller's.
+touch_restored_contact(w: *World, c: *Contact, wanted: int) {
+    c.flags = c.flags | CONTACT_TOUCHING
+    link_contact(w, c)
+    old_local_index = c.local_index
+    body_a = body_at(w, c.edge_a.body_id)
+    body_b = body_at(w, c.edge_b.body_id)
+    place_contact_in_color(w, c, assign_wanted_color(&w.constraint_graph, body_a.id, body_b.id, body_a.kind, body_b.kind, wanted))
+    remove_non_touching_contact(w, AWAKE_SET, old_local_index)
+}
+
+// The contact between two shapes (a compound's child named), as the pair
+// set holds it in either order, or NULL_INDEX.
+find_contact(w: *World, shape_id_a: int, shape_id_b: int, child_index: int) -> int {
+    key = body_at(w, world_shape_at(w, shape_id_a).body_id).head_contact_key
+    while key != NULL_INDEX {
+        c = contact_at(w, key >> 1)
+        same = c.shape_id_a == shape_id_a && c.shape_id_b == shape_id_b || c.shape_id_a == shape_id_b && c.shape_id_b == shape_id_a
+        if same && c.child_index == child_index { return c.contact_id }
+        key = contact_edge_next(w, key)
+    }
+    return NULL_INDEX
 }
 
 remove_joint_from_graph(w: *World, body_id_a: int, body_id_b: int, color_index: int, local_index: int) {
