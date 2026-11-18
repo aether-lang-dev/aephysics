@@ -122,7 +122,7 @@ exports (
     world_contact_count, get_contact, contact_is_valid, make_contact_id, make_shape_id,
     world_contact_begin_event_count, world_contact_begin_event, world_contact_end_event_count, world_contact_end_event, swap_end_events,
     create_graph, destroy_graph, add_contact_to_graph, remove_contact_from_graph, add_joint_to_graph, remove_joint_from_graph,
-    assign_wanted_color, recolor_joints, touch_restored_contact, find_contact, contact_kind_for,
+    assign_wanted_color, recolor_joints, touch_restored_contact, find_contact, contact_kind_for, note_static,
     create_contact, destroy_contact, update_contact, contact_edge_next, invalidate_body_contacts,
     merge_islands, link_contact, unlink_contact, link_joint, unlink_joint, split_island, try_sleep_island,
     update_pairs, collide, validate_contacts,
@@ -1280,6 +1280,9 @@ struct World {
     manifold_allocators: Buffer    // BlockAllocator
     manifold_lock: int
     broad_phase: BroadPhase
+    // Bumped whenever static geometry changes (#197): a static scene built
+    // on it keeps the version it was built at, so the host knows it is stale.
+    static_version: long
     constraint_graph: ConstraintGraph
     task_contexts: ptr             // TaskContext[worker_count]
     worker_count: int
@@ -2159,6 +2162,7 @@ destroy_body(id: BodyId) {
         release_debug_shape(w, s)
         if s.sensor_index != NULL_INDEX { destroy_sensor(w, s) }
         if s.proxy_key != NULL_INDEX {
+            note_static(w, s)
             broad_phase.destroy_proxy(&w.broad_phase, s.proxy_key)
             s.proxy_key = NULL_INDEX
         }
@@ -2229,7 +2233,14 @@ update_shape_aabbs(w: *World, s: *WorldShape, t: Transform, proxy_kind: int) {
     set_shape_fat_aabb(w, s.id, math.aabb_round_out(AABB { lower: math.sub(box.lower, math.vec3(margin, margin, margin)), upper: math.add(box.upper, math.vec3(margin, margin, margin)) }))
 }
 
+// A shape of a static body changed, made or destroyed: static geometry is
+// not what a static scene built before saw (#197).
+note_static(w: *World, s: *WorldShape) {
+    if body_at(w, s.body_id).kind == BODY_STATIC { w.static_version = w.static_version + 1 }
+}
+
 create_shape_proxy(w: *World, s: *WorldShape, kind: int, t: Transform, force_pair_creation: bool) {
+    if kind == BODY_STATIC { w.static_version = w.static_version + 1 }
     update_shape_aabbs(w, s, t, kind)
     s.proxy_key = broad_phase.create_proxy(&w.broad_phase, kind, shape_fat_aabb(w, s.id), s.filter.category_bits, s.id, force_pair_creation)
 }
@@ -3469,6 +3480,7 @@ destroy_shape(id: ShapeId, update_body_mass: bool) {
     release_debug_shape(w, s)
     if s.sensor_index != NULL_INDEX { destroy_sensor(w, s) }
     if s.proxy_key != NULL_INDEX {
+        note_static(w, s)
         broad_phase.destroy_proxy(&w.broad_phase, s.proxy_key)
         s.proxy_key = NULL_INDEX
     }
@@ -3527,6 +3539,7 @@ shape_set_filter(id: ShapeId, filter: Filter) {
 // transform: made anew (`remake`, for new category bits) or moved, either
 // way flagged so the broad phase pairs it again (the reference's b3ResetProxy).
 reset_shape_proxy(w: *World, s: *WorldShape, wake_bodies: bool, remake: bool) {
+    note_static(w, s)
     w.locked = true
     destroy_shape_contacts(w, s, wake_bodies)
     body = body_at(w, s.body_id)
@@ -3558,7 +3571,9 @@ shape_set_surface_material(id: ShapeId, m: SurfaceMaterial) {
 // themselves.
 set_surface_material(id: ShapeId, m: SurfaceMaterial) {
     if valid_material(m) == false { return }
-    s = get_shape_full_id(world_at(id.world0), id)
+    w = world_at(id.world0)
+    s = get_shape_full_id(w, id)
+    note_static(w, s)
     s.material = m
     if s.materials != null {
         materials = s.materials as SurfaceMaterial[]
@@ -3671,6 +3686,7 @@ shape_set_mesh_material(id: ShapeId, m: SurfaceMaterial, index: int) {
         set_surface_material(id, m)
         return
     }
+    note_static(world_at(id.world0), s)
     materials = s.materials as SurfaceMaterial[]
     materials[index] = m
 }
@@ -3983,6 +3999,7 @@ body_set_transform(id: BodyId, position: Vec3, rotation: Quat) {
     w = body_world(id)
     if w.locked { return }
     body = get_body_full_id(w, id)
+    if body.kind == BODY_STATIC { w.static_version = w.static_version + 1 }
     sim = get_body_sim(w, body)
     sim.transform = Transform { p: position, q: rotation }
     sim.center = math.transform_point(sim.transform, math.widen3(sim.local_center))
@@ -7866,6 +7883,7 @@ body_set_type(id: BodyId, kind: int) {
             shape_id = s.next_shape_id
         }
     }
+    if original == BODY_STATIC || kind == BODY_STATIC { w.static_version = w.static_version + 1 }
     w.locked = true
     if body.set_index == DISABLED_SET {
         body.kind = kind
@@ -7961,6 +7979,7 @@ body_disable(id: BodyId) {
         s = world_shape_at(w, shape_id)
         shape_id = s.next_shape_id
         if s.proxy_key != NULL_INDEX {
+            note_static(w, s)
             broad_phase.destroy_proxy(&w.broad_phase, s.proxy_key)
             s.proxy_key = NULL_INDEX
         }

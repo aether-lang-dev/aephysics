@@ -401,6 +401,34 @@ Queries may run on any number of threads at once, but not while that world
 steps. Each thread takes one of 64 scratch slots the first time it queries,
 and gives it back when it exits.
 
+Long work a host runs beside its steps, such as a planner, goes on the
+scheduler's background lane:
+
+```aether
+handle = parallel.submit_background(scheduler, plan_job, job)
+// ... steps ...
+if parallel.background_done(scheduler, handle) {
+    // read the job's results
+    parallel.release_background(scheduler, handle)
+}
+```
+
+A thread takes a background task only when no step task is pending, and a
+step's `finish` never takes one, so a long task never stalls a step's
+slots. Each runs as a worker index of the lane's own. With one worker there
+are no threads, and a background task runs on the caller as it is
+submitted.
+
+Rays on the static geometry may be cast from such a task while the world
+steps. `build_static_scene(world)`, on the world's thread and outside a
+step, copies what a static ray reads. `static_cast_ray` and
+`static_cast_ray_closest` on it give the same hits as `cast_ray` for static
+shapes, bit for bit, and touch nothing of the world. A scene shares the
+world's geometry blocks, so no static shape it holds may be destroyed while
+a query runs. `world_static_version(world)` moves whenever static geometry
+changes; when it differs from `static_scene_version(scene)`, build another
+scene.
+
 ## Determinism
 
 The same world stepped the same way gives the same bits:
