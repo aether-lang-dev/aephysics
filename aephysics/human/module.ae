@@ -49,7 +49,7 @@ exports (
     ELBOW_TWIST_DEGREES, KNEE_TWIST_DEGREES,
     HumanBone, Human, BoneSpec, bone_at, filter_joint_at, spec_at,
     human_reference_shape, human_anatomical_limits, human_tight_limits, human_chain_child, human_shape_head, human_shape_tail, human_shape_toe, human_fit_shape, destroy_shape, create_human_shaped,
-    human_fit_bone, human_has_bone, human_bone_far_end,
+    human_fit_bone, human_fit_hinge_axis, human_has_bone, human_bone_far_end,
     create_human, destroy_human, human_set_velocity, human_apply_angular_impulse, human_set_joint_friction_torque,
     human_set_joint_spring_hertz, human_set_joint_damping_ratio, human_align_spring, human_release_align_spring, human_create_motor_anchors,
     human_create_parallel_anchors, human_destroy_anchors, human_has_anchors, human_set_anchor_target, human_set_bullet
@@ -716,13 +716,7 @@ human_fit_shape(shape: ptr, heads: ptr, tails: ptr, toes: ptr) {
     i = 0
     while i < BONE_COUNT {
         spec = spec_at(shape, i)
-        if spec.joint_kind == dynamics.JOINT_REVOLUTE {
-            parent = spec_at(shape, spec.parent)
-            wanted = from_hinge_frame(shape, i, in_anatomy[i])
-            fix = math.compute_quat_between_unit_vectors(hinge_axis(shape, i), wanted)
-            spec.frame_a.q = math.normalize_quat(math.inv_mul_quat(parent.reference.q, math.mul_quat(fix, math.mul_quat(parent.reference.q, spec.frame_a.q))))
-            spec.frame_b.q = math.normalize_quat(math.inv_mul_quat(spec.reference.q, math.mul_quat(fix, math.mul_quat(spec.reference.q, spec.frame_b.q))))
-        }
+        if spec.joint_kind == dynamics.JOINT_REVOLUTE { turn_hinge_axis(shape, i, from_hinge_frame(shape, i, in_anatomy[i])) }
         i = i + 1
     }
     basics.free_bytes(anatomy_block, BONE_COUNT * sizeof(Vec3))
@@ -778,6 +772,44 @@ human_fit_shape(shape: ptr, heads: ptr, tails: ptr, toes: ptr) {
 human_fit_bone(shape: ptr, index: int, head: Vec3, tail: Vec3) {
     if is_extra(index) == false { return }
     aim_extra(shape, index, head, tail, math.length(math.sub(human_shape_tail(shape, index), human_shape_head(shape, index))))
+}
+
+// A hinge's axis given by the host (#199): `axis`, in the figure's space,
+// is the axis a rig's elbow or knee flexes about (as its takes measure
+// it), for a revolute joint and for a twisting hinge's bend alike. Both
+// of the joint's frames turn together onto it, so its rest angle is what
+// it was; the axis takes the sign of the one it replaces, so the range
+// still bends the bone the way it did, and the range moves by the change
+// in the rest's bend, so straight stays straight. Call it after
+// human_fit_shape and before human_anatomical_limits, which aims the
+// range about the given axis. Nothing happens for a joint that is not a
+// hinge or an axis too short to have a direction.
+human_fit_hinge_axis(shape: ptr, index: int, axis: Vec3) {
+    if index <= BONE_PELVIS || index >= MAX_BONE_COUNT { return }
+    spec = spec_at(shape, index)
+    if spec.joint_kind != dynamics.JOINT_REVOLUTE { return }
+    length = math.length(axis)
+    if length < AXIS_MIN { return }
+    wanted = math.mul_sv(1.0 / length, axis)
+    if math.dot(wanted, hinge_axis(shape, index)) < 0.0 { wanted = math.neg(wanted) }
+    before = hinge_bend(shape, index)
+    turn_hinge_axis(shape, index, wanted)
+    shift = (before - hinge_bend(shape, index)) * math.RAD_TO_DEG
+    spec.lower_degrees = spec.lower_degrees + shift
+    spec.upper_degrees = spec.upper_degrees + shift
+}
+
+const AXIS_MIN = 0.000001
+
+// A hinge's frames on its parent and on its bone turned together, in the
+// figure's space, by the shortest arc from its axis to `wanted` (a unit
+// vector): the joint's rest angle stays what it was.
+turn_hinge_axis(shape: ptr, index: int, wanted: Vec3) {
+    spec = spec_at(shape, index)
+    parent = spec_at(shape, spec.parent)
+    fix = math.compute_quat_between_unit_vectors(hinge_axis(shape, index), wanted)
+    spec.frame_a.q = math.normalize_quat(math.inv_mul_quat(parent.reference.q, math.mul_quat(fix, math.mul_quat(parent.reference.q, spec.frame_a.q))))
+    spec.frame_b.q = math.normalize_quat(math.inv_mul_quat(spec.reference.q, math.mul_quat(fix, math.mul_quat(spec.reference.q, spec.frame_b.q))))
 }
 
 // An extra bone's line is its frame's z, `length` long as it stands (a

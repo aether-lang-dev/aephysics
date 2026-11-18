@@ -510,6 +510,13 @@ human.destroy_human(&figure)
 - **A figure fitted to a rig.** `human_reference_shape` gives the figure as
   data, `human_fit_shape` moves its joints and bones onto a rig's
   skeleton, and `create_human_shaped` builds the fitted figure.
+- **A rig's own hinge axes.** A fit keeps each elbow and knee axis where
+  the reference's sits against the anatomy. A rig whose takes flex about
+  their own axis passes it, in figure space, to `human_fit_hinge_axis`
+  after `human_fit_shape` and before `human_anatomical_limits`. Both joint
+  frames turn onto it, so the rest angle is kept, and the axis takes the
+  old one's sign, so the range still bends the bone the same way. A
+  twisting hinge bends about the same axis.
 
 ## Snapshots, recording and replay
 
