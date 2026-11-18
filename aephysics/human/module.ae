@@ -756,14 +756,23 @@ human_fit_bone(shape: ptr, index: int, head: Vec3, tail: Vec3) {
 
 // An extra bone's line is its frame's z, `length` long as it stands (a
 // clavicle's or spine_02's tail is another bone's joint, which a fit may
-// have moved already, so the caller says how long the bone is).
+// have moved already, so the caller says how long the bone is). The
+// capsule's centres are stretched along the line; a head's or a hand's
+// tail is its capsule's cap, which keeps its radius, so its centres are
+// stretched over the line less the radius and the cap ends on the tail
+// (stretched over the whole line, the cap overshot by r(1 - s), #192).
 aim_extra(shape: ptr, index: int, head: Vec3, tail: Vec3, length: float) {
     spec = spec_at(shape, index)
     fitted = math.sub(tail, head)
     fitted_length = math.length(fitted)
     if length <= LINE_MIN || fitted_length <= LINE_MIN { return }
     turn = math.compute_quat_between_unit_vectors(math.rotate_vector(spec.reference.q, math.vec3_axis_z()), math.mul_sv(1.0 / fitted_length, fitted))
-    spec.capsule = stretch(spec.capsule, math.vec3_axis_z(), fitted_length / length, 1.0)
+    along = fitted_length / length
+    if index == BONE_HEAD || index == BONE_HAND_L || index == BONE_HAND_R {
+        r = spec.capsule.radius
+        if length - r > LINE_MIN && fitted_length - r > LINE_MIN { along = (fitted_length - r) / (length - r) }
+    }
+    spec.capsule = stretch(spec.capsule, math.vec3_axis_z(), along, 1.0)
     spec.reference = Transform { p: head, q: math.normalize_quat(math.mul_quat(turn, spec.reference.q)) }
     rest_frames(shape, index)
 }
