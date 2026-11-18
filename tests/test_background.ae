@@ -1,0 +1,414 @@
+// The background lane (#196) and the static scene (#197): long tasks run
+// beside a world's steps on the same scheduler, never in its slots and
+// never by its finish, each as a worker index of the lane's own, and the
+// world steps bit for bit as without them; rays cast on a static scene
+// give the world's own static hits, bit for bit, from the lane's threads
+// while the world steps; the world's static version moves for every
+// static change and for none that is not.
+import std.string
+import aephysics.math
+import aephysics.basics
+import aephysics.native
+import aephysics.hull
+import aephysics.mesh
+import aephysics.height_field
+import aephysics.material
+import aephysics.shape
+import aephysics.dynamics
+import aephysics.physics_world
+import aephysics.parallel
+import aephysics.snapshot
+
+extern exit(code: int)
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+
+var failures = 0
+var checks = 0
+
+ensure(name: string, ok: bool) {
+    checks = checks + 1
+    if !ok {
+        println("background: FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+var g_box: ptr = null
+var g_slab: ptr = null
+var g_wave: ptr = null
+var g_field: ptr = null
+
+const STATIC_BITS = 1
+const MOVING_BITS = 2
+
+// A world of static ground (a slab, a wave mesh, a height field, kerbs of
+// hulls with their own materials) and dynamic boxes falling onto it,
+// on `s` (null for the world's own) with `workers` workers.
+make_world(s: *Scheduler, workers: int) -> WorldId {
+    wdef = dynamics.default_world_def()
+    wdef.worker_count = workers
+    wdef.scheduler = s
+    world_id = dynamics.create_world(&wdef)
+    sdef = dynamics.default_shape_def()
+    sdef.filter.category_bits = STATIC_BITS as long
+    bdef = dynamics.default_body_def()
+    bdef.position = math.vec3(0.0, 0.0 - 1.0, 0.0)
+    slab = dynamics.create_body(world_id, &bdef)
+    dynamics.create_hull_shape(slab, &sdef, g_slab as *HullData)
+    bdef.position = math.vec3(0.0 - 17.0, 0.2, 0.0 - 13.0)
+    wave = dynamics.create_body(world_id, &bdef)
+    dynamics.create_mesh_shape(wave, &sdef, g_wave as *MeshData, math.vec3_one())
+    bdef.position = math.vec3(1.0, 0.2, 0.0 - 13.0)
+    field = dynamics.create_body(world_id, &bdef)
+    dynamics.create_height_field_shape(field, &sdef, g_field as *HeightFieldData)
+    k = 0
+    while k < 6 {
+        bdef.position = math.vec3(2.0 * k - 5.0, 0.2, 3.0)
+        bdef.rotation = math.make_quat_from_axis_angle(math.vec3_axis_y(), 0.3 * k)
+        kerb = dynamics.create_body(world_id, &bdef)
+        kdef = dynamics.default_shape_def()
+        kdef.filter.category_bits = STATIC_BITS as long
+        kdef.base_material.user_material_id = (100 + k) as long
+        dynamics.create_hull_shape(kerb, &kdef, g_box as *HullData)
+        k = k + 1
+    }
+    ddef = dynamics.default_body_def()
+    ddef.kind = dynamics.BODY_DYNAMIC
+    mdef = dynamics.default_shape_def()
+    mdef.filter.category_bits = MOVING_BITS as long
+    k = 0
+    while k < 40 {
+        ddef.position = math.vec3((k % 8) * 1.3 - 5.0, 2.0 + (k / 8) * 1.2, (k % 5) * 0.7 - 1.0)
+        body = dynamics.create_body(world_id, &ddef)
+        dynamics.create_hull_shape(body, &mdef, g_box as *HullData)
+        k = k + 1
+    }
+    return world_id
+}
+
+static_filter() -> QueryFilter {
+    f = shape.default_query_filter()
+    f.mask_bits = STATIC_BITS as long
+    return f
+}
+
+const RAY_COUNT = 400
+
+ray_origin(i: int) -> Vec3 { return math.vec3((i % 20) * 1.7 - 17.0, 6.0, (i / 20) * 1.3 - 13.0) }
+ray_translation(i: int) -> Vec3 { return math.vec3(0.3 * ((i % 7) - 3), 0.0 - 12.0, 0.2 * ((i % 5) - 2)) }
+
+same_result(a: RayResult, b: RayResult) -> bool {
+    if a.hit != b.hit { return false }
+    if a.hit == false { return true }
+    return a.shape_id.index1 == b.shape_id.index1 && a.shape_id.generation == b.shape_id.generation &&
+           a.point.x == b.point.x && a.point.y == b.point.y && a.point.z == b.point.z &&
+           a.normal.x == b.normal.x && a.normal.y == b.normal.y && a.normal.z == b.normal.z &&
+           a.fraction == b.fraction && a.user_material_id == b.user_material_id && a.triangle_index == b.triangle_index
+}
+
+// --- the static scene against the world ---------------------------------------------------------------------
+
+test_static_hits() {
+    world_id = make_world(null, 1)
+    i = 0
+    while i < 30 {
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        i = i + 1
+    }
+    scene = physics_world.build_static_scene(world_id)
+    ensure("scene: built", scene != null)
+    ensure("scene: at the world's static version", physics_world.static_scene_version(scene) == physics_world.world_static_version(world_id))
+    same = 0
+    hits = 0
+    kinds = 0
+    triangles = 0
+    i = 0
+    while i < RAY_COUNT {
+        a = physics_world.static_cast_ray_closest(scene, ray_origin(i), ray_translation(i), static_filter())
+        b = physics_world.cast_ray_closest(world_id, ray_origin(i), ray_translation(i), static_filter())
+        if same_result(a, b) { same = same + 1 }
+        if a.hit { hits = hits + 1 }
+        if a.user_material_id >= (100 as long) { kinds = kinds + 1 }
+        if a.hit && a.triangle_index > 0 { triangles = triangles + 1 }
+        i = i + 1
+    }
+    ensure("scene: every ray's closest static hit the world's own, bit for bit (${same} of ${RAY_COUNT})", same == RAY_COUNT)
+    ensure("scene: the rays reach the ground, the mesh and field (${triangles} on triangles) and the kerbs (${kinds}): ${hits} hits", hits > 300 && kinds >= 3 && triangles > 50)
+    // Every hit along a ray, through the visitor form, as the world gives them.
+    seen_scene = all_hits(world_id, scene, true)
+    seen_world = all_hits(world_id, scene, false)
+    ensure("scene: every hit through the visitor as the world's (${seen_scene} and ${seen_world})", seen_scene == seen_world && seen_scene > RAY_COUNT)
+    physics_world.destroy_static_scene(scene)
+    dynamics.destroy_world(world_id)
+}
+
+count_hit(shape_id: ShapeId, point: Vec3, normal: Vec3, fraction: float, user_material_id: long, triangle_index: int, child_index: int, context: ptr) -> float {
+    sum = context as long[]
+    sum[0] = sum[0] + (shape_id.index1 as long) * 1000003 + (triangle_index as long)
+    sum[1] = sum[1] + 1
+    return 1.0
+}
+
+all_hits(world_id: WorldId, scene: *StaticScene, on_scene: bool) -> long {
+    block = calloc(2, 8)
+    sum = block as long[]
+    i = 0
+    while i < RAY_COUNT {
+        if on_scene { physics_world.static_cast_ray(scene, ray_origin(i), ray_translation(i), static_filter(), count_hit, block) }
+        else { physics_world.cast_ray(world_id, ray_origin(i), ray_translation(i), static_filter(), count_hit, block) }
+        i = i + 1
+    }
+    total = sum[0] + sum[1]
+    free(block)
+    return total
+}
+
+// A scene outlives the world's hulls: its hulls are its own copies, so
+// one built before the world destroyed its static shapes (and freed their
+// hulls) answers as it did; and a world restored from a snapshot has
+// another static version, so the scene is known to be stale.
+test_scene_lifetime() {
+    world_id = make_world(null, 1)
+    scene = physics_world.build_static_scene(world_id)
+    before_block = calloc(RAY_COUNT, sizeof(RayResult))
+    before = before_block as RayResult[]
+    i = 0
+    while i < RAY_COUNT {
+        before[i] = physics_world.static_cast_ray_closest(scene, ray_origin(i), ray_translation(i), static_filter())
+        i = i + 1
+    }
+    data, size = snapshot.save_world(world_id)
+    wdef = dynamics.default_world_def()
+    // Every static body destroyed: the world frees every hull it held.
+    w = dynamics.get_world(world_id.index1 - 1)
+    b = 0
+    while b < w.bodies.count {
+        body = dynamics.body_at(w, b)
+        if body.set_index != dynamics.NULL_INDEX && body.kind == dynamics.BODY_STATIC {
+            dynamics.destroy_body(dynamics.make_body_id(w, b))
+        }
+        b = b + 1
+    }
+    same = 0
+    i = 0
+    while i < RAY_COUNT {
+        if same_result(physics_world.static_cast_ray_closest(scene, ray_origin(i), ray_translation(i), static_filter()), before[i]) { same = same + 1 }
+        i = i + 1
+    }
+    ensure("lifetime: a scene answers as it did after the world freed its hulls (${same} of ${RAY_COUNT})", same == RAY_COUNT)
+    v = physics_world.world_static_version(world_id)
+    ensure("lifetime: the world restored from a snapshot", snapshot.restore_world(world_id, &wdef, data, size))
+    ensure("lifetime: a restore moves the static version", physics_world.world_static_version(world_id) != v)
+    snapshot.free_snapshot(data, size)
+    physics_world.destroy_static_scene(scene)
+    dynamics.destroy_world(world_id)
+    free(before_block)
+}
+
+// --- the static version ---------------------------------------------------------------------------------------
+
+test_static_version() {
+    world_id = make_world(null, 1)
+    v = physics_world.world_static_version(world_id)
+    steps = 0
+    while steps < 10 {
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        steps = steps + 1
+    }
+    ensure("version: steps leave it", physics_world.world_static_version(world_id) == v)
+    ddef = dynamics.default_body_def()
+    ddef.kind = dynamics.BODY_DYNAMIC
+    ddef.position = math.vec3(0.0, 8.0, 0.0)
+    mover = dynamics.create_body(world_id, &ddef)
+    sdef = dynamics.default_shape_def()
+    moving_shape = dynamics.create_hull_shape(mover, &sdef, g_box as *HullData)
+    dynamics.body_set_transform(mover, math.vec3(1.0, 8.0, 0.0), math.quat_identity())
+    dynamics.shape_set_friction(moving_shape, 0.2)
+    ensure("version: a dynamic body made, moved and its friction set leave it", physics_world.world_static_version(world_id) == v)
+    bdef = dynamics.default_body_def()
+    bdef.position = math.vec3(20.0, 0.0, 20.0)
+    post = dynamics.create_body(world_id, &bdef)
+    post_shape = dynamics.create_hull_shape(post, &sdef, g_box as *HullData)
+    v = moved_on(world_id, v, "a static shape made")
+    dynamics.body_set_transform(post, math.vec3(20.0, 0.0, 21.0), math.quat_identity())
+    v = moved_on(world_id, v, "a static body moved")
+    dynamics.shape_set_friction(post_shape, 0.3)
+    v = moved_on(world_id, v, "a static shape's friction set")
+    filter = dynamics.shape_get_filter(post_shape)
+    filter.category_bits = 4 as long
+    dynamics.shape_set_filter(post_shape, filter)
+    v = moved_on(world_id, v, "a static shape's filter set")
+    dynamics.body_disable(post)
+    v = moved_on(world_id, v, "a static body disabled")
+    dynamics.body_enable(post)
+    v = moved_on(world_id, v, "a static body enabled")
+    physics_world.rebuild_static_tree(world_id)
+    v = moved_on(world_id, v, "the static tree rebuilt")
+    dynamics.body_set_type(post, dynamics.BODY_DYNAMIC)
+    v = moved_on(world_id, v, "a static body made dynamic")
+    dynamics.body_set_type(post, dynamics.BODY_STATIC)
+    v = moved_on(world_id, v, "a dynamic body made static")
+    dynamics.destroy_shape(post_shape, false)
+    v = moved_on(world_id, v, "a static shape destroyed")
+    dynamics.destroy_body(post)
+    ensure("version: a static body with no shapes destroyed leaves it", physics_world.world_static_version(world_id) == v)
+    dynamics.destroy_world(world_id)
+}
+
+moved_on(world_id: WorldId, before: long, what: string) -> long {
+    now = physics_world.world_static_version(world_id)
+    ensure("version: ${what} moves it", now != before)
+    return now
+}
+
+// --- the background lane --------------------------------------------------------------------------------------
+
+// A planner's job: cast its share of the rays on a scene `repeat` times,
+// keep the last answers, and note the worker index it ran as.
+struct CastJob {
+    scene: *StaticScene
+    first: int
+    count: int
+    repeat: int
+    answers: ptr                   // RayResult[RAY_COUNT], shared, each job its own run
+    worker_index: int
+}
+
+cast_job(context: ptr) {
+    job = context as *CastJob
+    job.worker_index = native.worker_index()
+    answers = job.answers as RayResult[]
+    r = 0
+    while r < job.repeat {
+        i = job.first
+        while i < job.first + job.count {
+            answers[i] = physics_world.static_cast_ray_closest(job.scene, ray_origin(i), ray_translation(i), static_filter())
+            i = i + 1
+        }
+        r = r + 1
+    }
+}
+
+state_hash(world_id: WorldId) -> long { return dynamics.hash_world_state(dynamics.get_world(world_id.index1 - 1)) }
+
+test_lane() {
+    s = parallel.create_scheduler(4)
+    plain_s = parallel.create_scheduler(4)
+    world_id = make_world(s, 4)
+    plain_id = make_world(plain_s, 4)
+    w = dynamics.get_world(world_id.index1 - 1)
+    scene = physics_world.build_static_scene(world_id)
+    expected_block = calloc(RAY_COUNT, sizeof(RayResult))
+    expected = expected_block as RayResult[]
+    i = 0
+    while i < RAY_COUNT {
+        expected[i] = physics_world.static_cast_ray_closest(scene, ray_origin(i), ray_translation(i), static_filter())
+        i = i + 1
+    }
+    answers_block = calloc(RAY_COUNT, sizeof(RayResult))
+    jobs_block = calloc(8, sizeof(CastJob))
+    jobs = jobs_block as CastJob[]
+    handles_block = calloc(8, 4)
+    handles = handles_block as int[]
+    k = 0
+    while k < 8 {
+        jobs[k] = CastJob { scene: scene, first: k * (RAY_COUNT / 8), count: RAY_COUNT / 8, repeat: 40, answers: answers_block, worker_index: 0 - 1 }
+        handles[k] = parallel.submit_background(s, cast_job, jobs_block + k * sizeof(CastJob))
+        k = k + 1
+    }
+    ensure("lane: eight jobs submitted", handles[0] >= 0 && handles[7] >= 0)
+    ensure("lane: a job not done keeps its slot", parallel.release_background(s, handles[7]) == false || parallel.background_done(s, handles[7]))
+    // The world steps while the jobs run, on the same scheduler; its twin
+    // steps on its own with no jobs.
+    steps = 0
+    while steps < 120 {
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        physics_world.step(plain_id, 1.0 / 60.0, 4)
+        steps = steps + 1
+    }
+    k = 0
+    while k < 8 {
+        while parallel.background_done(s, handles[k]) == false { native.yield_thread() }
+        k = k + 1
+    }
+    ensure("lane: the world stepped bit for bit as its twin without jobs", state_hash(world_id) == state_hash(plain_id))
+    answers = answers_block as RayResult[]
+    same = 0
+    i = 0
+    while i < RAY_COUNT {
+        if same_result(answers[i], expected[i]) { same = same + 1 }
+        i = i + 1
+    }
+    ensure("lane: the rays cast on the lane while the world stepped answer as before it (${same} of ${RAY_COUNT})", same == RAY_COUNT)
+    // Each job ran as a worker index of the lane's, none of the world's.
+    outside = 0
+    k = 0
+    while k < 8 {
+        index = jobs[k].worker_index
+        if index >= w.worker_base && index < w.worker_base + w.worker_count { outside = outside + 1 }
+        if index < 0 || index >= native.MAX_WORKERS { outside = outside + 1 }
+        k = k + 1
+    }
+    ensure("lane: every job ran as a worker index of its own, none of the world's (${outside} clashes)", outside == 0)
+    k = 0
+    released = 0
+    while k < 8 {
+        if parallel.release_background(s, handles[k]) { released = released + 1 }
+        k = k + 1
+    }
+    ensure("lane: every finished job's slot given back (${released})", released == 8)
+    ensure("lane: a slot given back is not given back twice", parallel.release_background(s, handles[0]) == false)
+    physics_world.destroy_static_scene(scene)
+    dynamics.destroy_world(world_id)
+    dynamics.destroy_world(plain_id)
+    // Pending jobs at the end are dropped, a running one finishes.
+    k = 0
+    while k < 8 {
+        jobs[k].repeat = 1
+        k = k + 1
+    }
+    parallel.destroy_scheduler(s)
+    parallel.destroy_scheduler(plain_s)
+    free(expected_block)
+    free(answers_block)
+    free(jobs_block)
+    free(handles_block)
+}
+
+var g_inline_ran = 0
+inline_job(context: ptr) { g_inline_ran = native.worker_index() + 1000 }
+
+test_one_worker() {
+    one = parallel.create_scheduler(1)
+    caller = native.worker_index()
+    handle = parallel.submit_background(one, inline_job, null)
+    ensure("one worker: the job ran on submission", handle >= 0 && parallel.background_done(one, handle) && g_inline_ran >= 1000)
+    ensure("one worker: as the calling thread", g_inline_ran - 1000 == caller && native.worker_index() == caller)
+    ensure("one worker: its slot given back", parallel.release_background(one, handle))
+    // A handle released, its slot reused: the old one names no task.
+    again = parallel.submit_background(one, inline_job, null)
+    ensure("handles: the slot reused under a new handle", again >= 0 && again != handle)
+    ensure("handles: a stale one is never done and never released", parallel.background_done(one, handle) == false && parallel.release_background(one, handle) == false)
+    ensure("handles: the new one is", parallel.background_done(one, again) && parallel.release_background(one, again))
+    parallel.destroy_scheduler(one)
+}
+
+main() {
+    g_box = hull.make_box_hull(0.5, 0.2, 0.5) as ptr
+    g_slab = hull.make_box_hull(40.0, 1.0, 40.0) as ptr
+    g_wave = mesh.create_wave_mesh(30, 30, 0.5, 0.4, 0.3, 0.7) as ptr
+    g_field = height_field.create_wave(32, 32, math.vec3(0.5, 1.0, 0.5), 0.1, 0.07, true) as ptr
+    test_static_hits()
+    test_scene_lifetime()
+    test_static_version()
+    test_lane()
+    test_one_worker()
+    println("background: ${checks} checks")
+    if failures == 0 {
+        println("background: all checks passed")
+    } else {
+        println("background: ${failures} failure(s)")
+        exit(1)
+    }
+}

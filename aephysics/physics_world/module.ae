@@ -22,6 +22,7 @@ import aephysics.native
 import aephysics.basics
 import aephysics.dynamic_tree
 import aephysics.distance
+import aephysics.hull
 import aephysics.mesh
 import aephysics.shape
 import aephysics.broad_phase
@@ -48,7 +49,8 @@ exports (
     set_worker_count, get_worker_count,
     overlap_aabb, overlap_shape, collide_mover, cast_ray, cast_ray_closest, cast_shape, cast_mover,
     body_cast_ray, body_cast_shape, body_overlap_shape, body_collide_mover, body_time_of_impact_mover, shape_ray_cast,
-    default_explosion_def, explode
+    default_explosion_def, explode,
+    StaticShape, StaticScene, world_static_version, build_static_scene, destroy_static_scene, static_scene_version, static_cast_ray, static_cast_ray_closest
 )
 
 const NULL_INDEX = 0 - 1
@@ -762,7 +764,10 @@ get_bounds(id: WorldId) -> AABB {
 rebuild_static_tree(id: WorldId) {
     if dynamics.recording_on(id.index1 - 1) { recorder = dynamics.rec_begin(id.index1 - 1, dynamics.OP_REBUILD_STATIC_TREE); dynamics.rec_end(recorder) }
     w = world_of(id)
-    if w != null { dynamic_tree.tree_rebuild(broad_phase.tree(&w.broad_phase, dynamics.BODY_STATIC), true) }
+    if w != null {
+        dynamic_tree.tree_rebuild(broad_phase.tree(&w.broad_phase, dynamics.BODY_STATIC), true)
+        w.static_version = w.static_version + 1
+    }
 }
 
 // --- the world queries ------------------------------------------------------------------------------------------------
@@ -1825,4 +1830,205 @@ explode(id: WorldId, def: *ExplosionDef) {
     box = math.offset_aabb(AABB { lower: math.vec3(0.0 - extent, 0.0 - extent, 0.0 - extent), upper: math.vec3(extent, extent, extent) }, def.position)
     dynamic_tree.tree_query(broad_phase.tree(&w.broad_phase, dynamics.BODY_DYNAMIC), box, def.mask_bits, false, explosion_visitor, (&ec) as ptr)
     w.locked = false
+}
+
+// --- a static scene, for rays cast off the world's thread (#197) ---------------------------------------------
+
+// What a ray against the world's static geometry reads, copied out of the
+// world: the static tree and, by shape index, each static shape's
+// geometry, filter, body transform, materials and id. A query on it never
+// touches the world, so it may run on any thread while the world steps or
+// makes and destroys dynamic bodies, or destroys, restores or resets
+// itself. Its hulls are its own copies (the world frees its hulls with
+// their last shape); its meshes, height fields and compounds are the
+// host's own blocks, as the world holds them, which the host keeps while
+// a scene of them may be queried. The scene keeps the world's static
+// version at its build: when world_static_version moves on, the host
+// builds another. Box3D has no such query; its world queries run between
+// steps on the world's thread.
+struct StaticShape {
+    geometry: Shape
+    filter: Filter
+    transform: Transform
+    shape_id: ShapeId
+    material: SurfaceMaterial
+    materials: ptr                 // SurfaceMaterial[material_count], the scene's own copy, or null
+    material_count: int
+    live: bool
+}
+
+struct StaticScene {
+    tree: DynamicTree
+    shapes: ptr                    // StaticShape[shape_count], by shape index
+    shape_count: int
+    version: long
+    hulls: ptr                     // ptr[hull_count]: the scene's own copies of the world's hulls
+    worlds_hulls: ptr              // ptr[hull_count]: the world's hulls they copy, to share one copy
+    hull_count: int
+}
+
+// The scene's copy of a world hull, made once however many shapes share it.
+scene_hull(scene: *StaticScene, world_hull: *HullData) -> *HullData {
+    originals = scene.worlds_hulls as ptr[]
+    copies = scene.hulls as ptr[]
+    k = 0
+    while k < scene.hull_count {
+        if originals[k] == (world_hull as ptr) { return copies[k] as *HullData }
+        k = k + 1
+    }
+    copy = hull.clone_hull(world_hull)
+    originals[scene.hull_count] = world_hull as ptr
+    copies[scene.hull_count] = copy as ptr
+    scene.hull_count = scene.hull_count + 1
+    return copy
+}
+
+// The world's static version: it moves whenever a static body is made,
+// destroyed, moved, retyped, enabled or disabled, a static shape is made,
+// destroyed, reshaped or given another filter or material, or the static
+// tree is rebuilt. 0 for no world.
+world_static_version(id: WorldId) -> long {
+    w = world_of(id)
+    if w == null { return 0 as long }
+    return w.static_version
+}
+
+static_shape_at(scene: *StaticScene, index: int) -> *StaticShape { return (scene.shapes + index * sizeof(StaticShape)) as *StaticShape }
+
+// A static scene of the world as it is: built on the world's own thread,
+// not during a step (null then, or for no world). destroy_static_scene
+// gives it back.
+build_static_scene(id: WorldId) -> *StaticScene {
+    w = world_of(id)
+    if w == null || w.locked { return null }
+    scene = basics.alloc(sizeof(StaticScene)) as *StaticScene
+    block, size = dynamic_tree.tree_save_bytes(broad_phase.tree(&w.broad_phase, dynamics.BODY_STATIC))
+    if block == null {
+        scene.tree = dynamic_tree.tree_create(16)
+    } else {
+        scene.tree = dynamic_tree.tree_load_bytes(block, size, 1.0)
+        basics.free_bytes(block, size)
+    }
+    scene.shape_count = w.shapes.count
+    scene.shapes = basics.alloc(math.max_int(scene.shape_count, 1) * sizeof(StaticShape))
+    scene.version = w.static_version
+    scene.hulls = basics.alloc(math.max_int(scene.shape_count, 1) * 8)
+    scene.worlds_hulls = basics.alloc(math.max_int(scene.shape_count, 1) * 8)
+    scene.hull_count = 0
+    i = 0
+    while i < scene.shape_count {
+        record = static_shape_at(scene, i)
+        record.live = false
+        record.materials = null
+        record.material_count = 0
+        s = dynamics.world_shape_at(w, i)
+        if s.id != NULL_INDEX && s.proxy_key != NULL_INDEX && dynamics.body_at(w, s.body_id).kind == dynamics.BODY_STATIC {
+            record.geometry = s.geometry
+            if s.geometry.kind == shape.SHAPE_HULL { record.geometry.hull = scene_hull(scene, s.geometry.hull) }
+            record.filter = s.filter
+            record.transform = dynamics.get_body_transform(w, s.body_id)
+            record.shape_id = dynamics.make_shape_id(w, s)
+            record.material = s.material
+            record.material_count = s.material_count
+            if s.materials != null && s.material_count > 0 {
+                record.materials = basics.alloc(s.material_count * sizeof(SurfaceMaterial))
+                copies = record.materials as SurfaceMaterial[]
+                originals = s.materials as SurfaceMaterial[]
+                k = 0
+                while k < s.material_count {
+                    copies[k] = originals[k]
+                    k = k + 1
+                }
+            }
+            record.live = true
+        }
+        i = i + 1
+    }
+    return scene
+}
+
+destroy_static_scene(scene: *StaticScene) {
+    if scene == null { return }
+    i = 0
+    while i < scene.shape_count {
+        record = static_shape_at(scene, i)
+        if record.materials != null { basics.free_bytes(record.materials, record.material_count * sizeof(SurfaceMaterial)) }
+        i = i + 1
+    }
+    copies = scene.hulls as ptr[]
+    i = 0
+    while i < scene.hull_count {
+        hull.destroy_hull(copies[i] as *HullData)
+        i = i + 1
+    }
+    basics.free_bytes(scene.hulls, math.max_int(scene.shape_count, 1) * 8)
+    basics.free_bytes(scene.worlds_hulls, math.max_int(scene.shape_count, 1) * 8)
+    basics.free_bytes(scene.shapes, math.max_int(scene.shape_count, 1) * sizeof(StaticShape))
+    dynamic_tree.tree_destroy(&scene.tree)
+    basics.free_bytes(scene as ptr, sizeof(StaticScene))
+}
+
+// The world's static version the scene was built at.
+static_scene_version(scene: *StaticScene) -> long { return scene.version }
+
+struct StaticCastContext {
+    scene: *StaticScene
+    visitor: fn(ShapeId, Vec3, Vec3, float, long, int, int, ptr) -> float
+    filter: QueryFilter
+    fraction: float
+    origin: Vec3
+    user_context: ptr
+}
+
+// A static shape's user material id by index, as material_user_id gives a world shape's.
+static_material_user_id(record: *StaticShape, material_index: int) -> long {
+    index = math.clamp_int(material_index, 0, record.material_count - 1)
+    if record.materials == null { return record.material.user_material_id }
+    materials = record.materials as SurfaceMaterial[]
+    return materials[index].user_material_id
+}
+
+// ray_cast_visitor on the scene's copy, arithmetic for arithmetic.
+static_ray_visitor(input: *RayCastInput, proxy_id: int, user_data: long, context: ptr) -> float {
+    cc = context as *StaticCastContext
+    index = user_data as int
+    if index < 0 || index >= cc.scene.shape_count { return input.max_fraction }
+    record = static_shape_at(cc.scene, index)
+    if record.live == false || shape.should_query_collide(record.filter, cc.filter) == false { return input.max_fraction }
+    t = Transform { p: math.sub(record.transform.p, cc.origin), q: record.transform.q }
+    output = shape.ray_cast_shape(&record.geometry, t, math.vec3_zero(), input.translation, input.max_fraction)
+    if output.hit {
+        visitor = cc.visitor
+        fraction = visitor(record.shape_id, math.add(cc.origin, output.point), output.normal, output.fraction,
+                           static_material_user_id(record, output.material_index), output.triangle_index, output.child_index, cc.user_context)
+        if 0.0 <= fraction && fraction <= 1.0 { cc.fraction = fraction }
+        return fraction
+    }
+    return input.max_fraction
+}
+
+// cast_ray against the scene's static shapes: the same hits, in the same
+// order, as cast_ray gives for static shapes. Safe from any thread, as
+// many at once as there are worker indices (each query uses its thread's
+// worker scratch: run it on a scheduler's worker or background lane).
+static_cast_ray(scene: *StaticScene, origin: Vec3, translation: Vec3, filter: QueryFilter,
+                visitor: fn(ShapeId, Vec3, Vec3, float, long, int, int, ptr) -> float, context: ptr) -> TreeStats {
+    stats = TreeStats { node_visits: 0, leaf_visits: 0 }
+    if scene == null || math.is_valid_position(origin) == false || math.is_valid_vec3(translation) == false { return stats }
+    input = RayCastInput { origin: origin, translation: translation, max_fraction: 1.0 }
+    cc = StaticCastContext { scene: scene, visitor: visitor, filter: filter, fraction: 1.0, origin: origin, user_context: context }
+    return dynamic_tree.tree_ray_cast(&scene.tree, &input, filter.mask_bits, false, static_ray_visitor, (&cc) as ptr)
+}
+
+// cast_ray_closest against the scene's static shapes.
+static_cast_ray_closest(scene: *StaticScene, origin: Vec3, translation: Vec3, filter: QueryFilter) -> RayResult {
+    result = RayResult { shape_id: dynamics.null_shape_id(), point: math.vec3_zero(), normal: math.vec3_zero(), user_material_id: 0 as long,
+                         fraction: 0.0, triangle_index: 0, child_index: 0, node_visits: 0, leaf_visits: 0, hit: false }
+    if scene == null || math.is_valid_position(origin) == false || math.is_valid_vec3(translation) == false { return result }
+    input = RayCastInput { origin: origin, translation: translation, max_fraction: 1.0 }
+    cc = StaticCastContext { scene: scene, visitor: closest_ray_visitor, filter: filter, fraction: 1.0, origin: origin, user_context: (&result) as ptr }
+    stats = dynamic_tree.tree_ray_cast(&scene.tree, &input, filter.mask_bits, false, static_ray_visitor, (&cc) as ptr)
+    result.node_visits = stats.node_visits
+    result.leaf_visits = stats.leaf_visits
+    return result
 }
