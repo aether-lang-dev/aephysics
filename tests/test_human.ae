@@ -1191,10 +1191,13 @@ test_ankle_shins() {
 // fall: the reference's, with ankles, and fitted to a figure a tenth
 // larger on tight limits with ankles. The hashes were taken from main's
 // module (ad0cae2) before the extra bones were added: every flag off, the
-// figure is built and steps as it did, bit for bit.
+// figure is built and steps as it did, bit for bit. The fitted figure's
+// hash moved once, on purpose (#194): a fit now keeps each hinge's axis
+// where it sat against the anatomy, which turns its frames a little even
+// for a fit that only scales.
 const UNCHANGED_REFERENCE = 0 - 1845097547785975894
 const UNCHANGED_ANKLES = 6625657960679933986
-const UNCHANGED_FITTED = 0 - 3497850239973562386
+const UNCHANGED_FITTED = 0 - 2126288751593268895
 
 unchanged_hash(kind: int) -> long {
     world_id = world_with_ground()
@@ -1623,6 +1626,91 @@ test_fit_cap_tail() {
     }
 }
 
+// A hinge's axis in the figure's space, and its flexion: the bone's line
+// turned about the axis half a radian from the rest toward the end of its
+// range farther from it (the bend; straight lies at the other), less the line.
+fitted_hinge_axis(shape: ptr, index: int) -> Vec3 {
+    spec = human.spec_at(shape, index)
+    return math.rotate_vector(math.mul_quat(human.spec_at(shape, spec.parent).reference.q, spec.frame_a.q), math.vec3_axis_z())
+}
+
+flexion_move(shape: ptr, index: int) -> Vec3 {
+    spec = human.spec_at(shape, index)
+    parent = human.spec_at(shape, spec.parent)
+    rest = math.get_twist_angle(math.inv_mul_quat(math.mul_quat(parent.reference.q, spec.frame_a.q), math.mul_quat(spec.reference.q, spec.frame_b.q)))
+    lower = spec.lower_degrees * math.DEG_TO_RAD
+    upper = spec.upper_degrees * math.DEG_TO_RAD
+    bend = upper
+    if math.abs_float(lower - rest) > math.abs_float(upper - rest) { bend = lower }
+    line = math.normalize(math.sub(human.human_shape_tail(shape, index), human.human_shape_head(shape, index)))
+    toward_bend = 0.5
+    if bend < rest { toward_bend = 0.0 - 0.5 }
+    turned = math.rotate_vector(math.make_quat_from_axis_angle(fitted_hinge_axis(shape, index), toward_bend), line)
+    return math.sub(turned, line)
+}
+
+// The reference's landmarks with the arms straight out at the shoulders (a
+// T-posed rig); `crossed` gives each arm the other side's place, as a rig
+// mapped by name does (the reference's _L bones sit on its right).
+t_posed(shape: ptr, crossed: bool) -> ptr {
+    n = human.BONE_COUNT
+    block = landmarks(shape)
+    v = block as Vec3[]
+    arms = [human.BONE_UPPER_ARM_L, human.BONE_UPPER_ARM_R]
+    k = 0
+    while k < 2 {
+        upper = arms[k]
+        shoulder = v[upper]
+        side = 1.0
+        if shoulder.x < 0.0 { side = 0.0 - 1.0 }
+        if crossed { side = 0.0 - side }
+        start = math.vec3(side * math.abs_float(shoulder.x), shoulder.y, shoulder.z)
+        v[upper] = start
+        v[n + upper] = math.add(start, math.vec3(side * 0.3, 0.0, 0.0))
+        v[upper + 1] = v[n + upper]
+        v[n + upper + 1] = math.add(v[upper + 1], math.vec3(side * 0.3, 0.0, 0.0))
+        k = k + 1
+    }
+    return block
+}
+
+// Fitted to a T-posed rig, arms on either side, each elbow keeps the
+// reference's axis against the anatomy (#194): it bends the forearm
+// forward, as the reference's does, and its axis leans forward no more
+// than the reference's; each knee bends the shin back.
+test_fit_hinge_axes() {
+    n = human.BONE_COUNT
+    reference = human.human_reference_shape()
+    up = math.normalize(math.sub(human.human_shape_head(reference, human.BONE_NECK), human.human_shape_head(reference, human.BONE_PELVIS)))
+    toes = math.sub(human.human_shape_toe(reference, human.BONE_CALF_L), human.human_shape_tail(reference, human.BONE_CALF_L))
+    forward = math.normalize(math.sub(toes, math.mul_sv(math.dot(toes, up), up)))
+    hinges = [human.BONE_LOWER_ARM_L, human.BONE_LOWER_ARM_R, human.BONE_CALF_L, human.BONE_CALF_R]
+    way = 0
+    while way < 2 {
+        shape = human.human_reference_shape()
+        block = t_posed(shape, way == 1)
+        human.human_fit_shape(shape, block, block + n * sizeof(Vec3), block + 2 * n * sizeof(Vec3))
+        k = 0
+        while k < 4 {
+            i = hinges[k]
+            lean = math.abs_float(math.dot(fitted_hinge_axis(shape, i), forward))
+            reference_lean = math.abs_float(math.dot(fitted_hinge_axis(reference, i), forward))
+            move = math.dot(flexion_move(shape, i), forward)
+            if i == human.BONE_LOWER_ARM_L || i == human.BONE_LOWER_ARM_R {
+                ensure("fit hinges, arms ${way}: elbow ${i} bends the forearm forward (${move}), its axis leaning forward ${lean} against the reference's ${reference_lean}",
+                       move > 0.3 && lean < reference_lean + 0.02)
+            } else {
+                ensure("fit hinges, arms ${way}: knee ${i} bends the shin back (${move})", move < 0.0 - 0.3)
+            }
+            k = k + 1
+        }
+        free(block)
+        human.destroy_shape(shape)
+        way = way + 1
+    }
+    human.destroy_shape(reference)
+}
+
 // How far a bone has turned about its own line against its parent since
 // `rest` (the bone's rotation in its parent's frame then).
 turn_about_line(h: *Human, index: int, rest: Quat) -> float {
@@ -1694,6 +1782,7 @@ main() {
     test_extras_masses()
     test_extras_fit()
     test_fit_cap_tail()
+    test_fit_hinge_axes()
     test_twist()
     hull.destroy_hull(g_slab as *HullData)
     println("human: ${checks} checks")

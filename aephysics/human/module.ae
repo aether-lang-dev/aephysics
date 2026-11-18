@@ -627,6 +627,17 @@ human_fit_shape(shape: ptr, heads: ptr, tails: ptr, toes: ptr) {
         extra_length[e] = math.length(math.sub(human_shape_tail(shape, e), extra.reference.p))
         e = e + 1
     }
+    // Each hinge's axis as it sits against the figure's anatomy, to be put
+    // back after the fit (#194): the bones turn by their shortest arcs,
+    // which carry a hinge's axis off the anatomical one when an arm swings
+    // far (a T-posed rig's elbows bent in the wrong plane).
+    anatomy_block = basics.alloc(BONE_COUNT * sizeof(Vec3))
+    in_anatomy = anatomy_block as Vec3[]
+    i = 0
+    while i < BONE_COUNT {
+        if spec_at(shape, i).joint_kind == dynamics.JOINT_REVOLUTE { in_anatomy[i] = in_hinge_frame(shape, i, hinge_axis(shape, i)) }
+        i = i + 1
+    }
     head_at = heads as Vec3[]
     tail_at = tails as Vec3[]
     turns = basics.alloc(BONE_COUNT * sizeof(Quat))
@@ -700,6 +711,21 @@ human_fit_shape(shape: ptr, heads: ptr, tails: ptr, toes: ptr) {
         point_foot(spec_at(shape, BONE_CALF_L), unit[BONE_CALF_L], toe_at[0], head_at[BONE_CALF_L])
         point_foot(spec_at(shape, BONE_CALF_R), unit[BONE_CALF_R], toe_at[1], head_at[BONE_CALF_R])
     }
+    // Each hinge's axis put back where it sat against the anatomy, both of
+    // its joint's frames turned together so its rest angle is what it was.
+    i = 0
+    while i < BONE_COUNT {
+        spec = spec_at(shape, i)
+        if spec.joint_kind == dynamics.JOINT_REVOLUTE {
+            parent = spec_at(shape, spec.parent)
+            wanted = from_hinge_frame(shape, i, in_anatomy[i])
+            fix = math.compute_quat_between_unit_vectors(hinge_axis(shape, i), wanted)
+            spec.frame_a.q = math.normalize_quat(math.inv_mul_quat(parent.reference.q, math.mul_quat(fix, math.mul_quat(parent.reference.q, spec.frame_a.q))))
+            spec.frame_b.q = math.normalize_quat(math.inv_mul_quat(spec.reference.q, math.mul_quat(fix, math.mul_quat(spec.reference.q, spec.frame_b.q))))
+        }
+        i = i + 1
+    }
+    basics.free_bytes(anatomy_block, BONE_COUNT * sizeof(Vec3))
     // A hinge's range is held against the rest; the rig's rest bends the
     // joint more or less than the reference's, so the range moves by the
     // difference and still ends where it did: straight stays straight.
@@ -907,6 +933,29 @@ aim_ellipse(shape: ptr, index: int, up: Vec3, forward: Vec3, ahead: float, back:
     }
     spec.swing_degrees = major_degrees
     spec.swing_minor_degrees = minor_degrees
+}
+
+// A hinge's frame of anatomy, unit and square: x along its parent bone's
+// line, y the figure's forward across it (its up where the line runs
+// forward), z their cross. A vector's parts in it, and back.
+hinge_frame(shape: ptr, index: int) -> Matrix3 {
+    parent = spec_at(shape, index).parent
+    x = math.normalize(math.sub(human_shape_tail(shape, parent), human_shape_head(shape, parent)))
+    up = figure_up(shape)
+    y = across(figure_forward(shape, up), x)
+    if math.length(y) < 0.1 { y = across(up, x) }
+    y = math.normalize(y)
+    return Matrix3 { cx: x, cy: y, cz: math.cross(x, y) }
+}
+
+in_hinge_frame(shape: ptr, index: int, v: Vec3) -> Vec3 {
+    m = hinge_frame(shape, index)
+    return math.vec3(math.dot(v, m.cx), math.dot(v, m.cy), math.dot(v, m.cz))
+}
+
+from_hinge_frame(shape: ptr, index: int, parts: Vec3) -> Vec3 {
+    m = hinge_frame(shape, index)
+    return math.normalize(math.add(math.add(math.mul_sv(parts.x, m.cx), math.mul_sv(parts.y, m.cy)), math.mul_sv(parts.z, m.cz)))
 }
 
 // A hinge's axis in the figure's space: its frame on the parent's z.
