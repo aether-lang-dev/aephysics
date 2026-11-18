@@ -22,6 +22,7 @@ import aephysics.native
 import aephysics.basics
 import aephysics.dynamic_tree
 import aephysics.distance
+import aephysics.hull
 import aephysics.mesh
 import aephysics.shape
 import aephysics.broad_phase
@@ -1837,12 +1838,14 @@ explode(id: WorldId, def: *ExplosionDef) {
 // world: the static tree and, by shape index, each static shape's
 // geometry, filter, body transform, materials and id. A query on it never
 // touches the world, so it may run on any thread while the world steps or
-// makes and destroys dynamic bodies; the geometry blocks (hulls, meshes,
-// height fields, compounds) are the world's, shared, so no static shape a
-// scene holds may be destroyed while a query on the scene runs. The scene
-// keeps the world's static version at its build: when
-// world_static_version moves on, the host builds another. Box3D has no
-// such query; its world queries run between steps on the world's thread.
+// makes and destroys dynamic bodies, or destroys, restores or resets
+// itself. Its hulls are its own copies (the world frees its hulls with
+// their last shape); its meshes, height fields and compounds are the
+// host's own blocks, as the world holds them, which the host keeps while
+// a scene of them may be queried. The scene keeps the world's static
+// version at its build: when world_static_version moves on, the host
+// builds another. Box3D has no such query; its world queries run between
+// steps on the world's thread.
 struct StaticShape {
     geometry: Shape
     filter: Filter
@@ -1859,6 +1862,25 @@ struct StaticScene {
     shapes: ptr                    // StaticShape[shape_count], by shape index
     shape_count: int
     version: long
+    hulls: ptr                     // ptr[hull_count]: the scene's own copies of the world's hulls
+    worlds_hulls: ptr              // ptr[hull_count]: the world's hulls they copy, to share one copy
+    hull_count: int
+}
+
+// The scene's copy of a world hull, made once however many shapes share it.
+scene_hull(scene: *StaticScene, world_hull: *HullData) -> *HullData {
+    originals = scene.worlds_hulls as ptr[]
+    copies = scene.hulls as ptr[]
+    k = 0
+    while k < scene.hull_count {
+        if originals[k] == (world_hull as ptr) { return copies[k] as *HullData }
+        k = k + 1
+    }
+    copy = hull.clone_hull(world_hull)
+    originals[scene.hull_count] = world_hull as ptr
+    copies[scene.hull_count] = copy as ptr
+    scene.hull_count = scene.hull_count + 1
+    return copy
 }
 
 // The world's static version: it moves whenever a static body is made,
@@ -1890,6 +1912,9 @@ build_static_scene(id: WorldId) -> *StaticScene {
     scene.shape_count = w.shapes.count
     scene.shapes = basics.alloc(math.max_int(scene.shape_count, 1) * sizeof(StaticShape))
     scene.version = w.static_version
+    scene.hulls = basics.alloc(math.max_int(scene.shape_count, 1) * 8)
+    scene.worlds_hulls = basics.alloc(math.max_int(scene.shape_count, 1) * 8)
+    scene.hull_count = 0
     i = 0
     while i < scene.shape_count {
         record = static_shape_at(scene, i)
@@ -1899,6 +1924,7 @@ build_static_scene(id: WorldId) -> *StaticScene {
         s = dynamics.world_shape_at(w, i)
         if s.id != NULL_INDEX && s.proxy_key != NULL_INDEX && dynamics.body_at(w, s.body_id).kind == dynamics.BODY_STATIC {
             record.geometry = s.geometry
+            if s.geometry.kind == shape.SHAPE_HULL { record.geometry.hull = scene_hull(scene, s.geometry.hull) }
             record.filter = s.filter
             record.transform = dynamics.get_body_transform(w, s.body_id)
             record.shape_id = dynamics.make_shape_id(w, s)
@@ -1929,6 +1955,14 @@ destroy_static_scene(scene: *StaticScene) {
         if record.materials != null { basics.free_bytes(record.materials, record.material_count * sizeof(SurfaceMaterial)) }
         i = i + 1
     }
+    copies = scene.hulls as ptr[]
+    i = 0
+    while i < scene.hull_count {
+        hull.destroy_hull(copies[i] as *HullData)
+        i = i + 1
+    }
+    basics.free_bytes(scene.hulls, math.max_int(scene.shape_count, 1) * 8)
+    basics.free_bytes(scene.worlds_hulls, math.max_int(scene.shape_count, 1) * 8)
     basics.free_bytes(scene.shapes, math.max_int(scene.shape_count, 1) * sizeof(StaticShape))
     dynamic_tree.tree_destroy(&scene.tree)
     basics.free_bytes(scene as ptr, sizeof(StaticScene))

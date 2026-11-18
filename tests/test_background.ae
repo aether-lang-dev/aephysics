@@ -17,6 +17,7 @@ import aephysics.shape
 import aephysics.dynamics
 import aephysics.physics_world
 import aephysics.parallel
+import aephysics.snapshot
 
 extern exit(code: int)
 extern calloc(count: int, size: int) -> ptr
@@ -161,6 +162,48 @@ all_hits(world_id: WorldId, scene: *StaticScene, on_scene: bool) -> long {
     total = sum[0] + sum[1]
     free(block)
     return total
+}
+
+// A scene outlives the world's hulls: its hulls are its own copies, so
+// one built before the world destroyed its static shapes (and freed their
+// hulls) answers as it did; and a world restored from a snapshot has
+// another static version, so the scene is known to be stale.
+test_scene_lifetime() {
+    world_id = make_world(null, 1)
+    scene = physics_world.build_static_scene(world_id)
+    before_block = calloc(RAY_COUNT, sizeof(RayResult))
+    before = before_block as RayResult[]
+    i = 0
+    while i < RAY_COUNT {
+        before[i] = physics_world.static_cast_ray_closest(scene, ray_origin(i), ray_translation(i), static_filter())
+        i = i + 1
+    }
+    data, size = snapshot.save_world(world_id)
+    wdef = dynamics.default_world_def()
+    // Every static body destroyed: the world frees every hull it held.
+    w = dynamics.get_world(world_id.index1 - 1)
+    b = 0
+    while b < w.bodies.count {
+        body = dynamics.body_at(w, b)
+        if body.set_index != dynamics.NULL_INDEX && body.kind == dynamics.BODY_STATIC {
+            dynamics.destroy_body(dynamics.make_body_id(w, b))
+        }
+        b = b + 1
+    }
+    same = 0
+    i = 0
+    while i < RAY_COUNT {
+        if same_result(physics_world.static_cast_ray_closest(scene, ray_origin(i), ray_translation(i), static_filter()), before[i]) { same = same + 1 }
+        i = i + 1
+    }
+    ensure("lifetime: a scene answers as it did after the world freed its hulls (${same} of ${RAY_COUNT})", same == RAY_COUNT)
+    v = physics_world.world_static_version(world_id)
+    ensure("lifetime: the world restored from a snapshot", snapshot.restore_world(world_id, &wdef, data, size))
+    ensure("lifetime: a restore moves the static version", physics_world.world_static_version(world_id) != v)
+    snapshot.free_snapshot(data, size)
+    physics_world.destroy_static_scene(scene)
+    dynamics.destroy_world(world_id)
+    free(before_block)
 }
 
 // --- the static version ---------------------------------------------------------------------------------------
@@ -341,8 +384,13 @@ test_one_worker() {
     caller = native.worker_index()
     handle = parallel.submit_background(one, inline_job, null)
     ensure("one worker: the job ran on submission", handle >= 0 && parallel.background_done(one, handle) && g_inline_ran >= 1000)
-    ensure("one worker: as a worker index of its own, the caller's put back", g_inline_ran - 1000 != caller && native.worker_index() == caller)
+    ensure("one worker: as the calling thread", g_inline_ran - 1000 == caller && native.worker_index() == caller)
     ensure("one worker: its slot given back", parallel.release_background(one, handle))
+    // A handle released, its slot reused: the old one names no task.
+    again = parallel.submit_background(one, inline_job, null)
+    ensure("handles: the slot reused under a new handle", again >= 0 && again != handle)
+    ensure("handles: a stale one is never done and never released", parallel.background_done(one, handle) == false && parallel.release_background(one, handle) == false)
+    ensure("handles: the new one is", parallel.background_done(one, again) && parallel.release_background(one, again))
     parallel.destroy_scheduler(one)
 }
 
@@ -352,6 +400,7 @@ main() {
     g_wave = mesh.create_wave_mesh(30, 30, 0.5, 0.4, 0.3, 0.7) as ptr
     g_field = height_field.create_wave(32, 32, math.vec3(0.5, 1.0, 0.5), 0.1, 0.07, true) as ptr
     test_static_hits()
+    test_scene_lifetime()
     test_static_version()
     test_lane()
     test_one_worker()

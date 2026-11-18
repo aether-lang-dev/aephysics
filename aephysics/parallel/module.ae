@@ -33,7 +33,10 @@
 // finish. Each runs as a worker index of its own, from a run of slots the
 // scheduler claims for its threads, so per-worker scratch never collides
 // with a step's or another world's. With one worker there are no threads,
-// and a background task runs on the caller as it is submitted.
+// and a background task runs as it is submitted, as the calling thread
+// (its own worker index). destroy_scheduler lets a running task finish and
+// drops pending ones; a world that found no worker slots of its own (base
+// 0, shared) is not kept off the lane's indices.
 import std.worker
 import aephysics.native
 import aephysics.basics
@@ -59,6 +62,7 @@ const MAX_BACKGROUND_TASKS = 64
 // A background task in its slot: its status (atomic, first), what to call and on what.
 struct BackgroundTask {
     status: int
+    generation: int                // moves on each release, so a stale handle names no task
     body: fn(ptr) -> void
     context: ptr
 }
@@ -125,7 +129,7 @@ execute_background_one(s: *Scheduler, ordinal: int) -> bool {
     while i < MAX_BACKGROUND_TASKS {
         t = background_at(s, i)
         if native.atomic_load(background_status(t)) == TASK_PENDING && native.atomic_cas(background_status(t), TASK_PENDING, TASK_CLAIMED) {
-            native.set_worker_index(first + ordinal)
+            native.set_worker_index(first + ordinal - 1)
             t.body(t.context)
             native.atomic_store(background_status(t), TASK_COMPLETE)
             return true
@@ -146,7 +150,7 @@ worker_main(s: *Scheduler) {
         while true {
             while execute_one(s) {
             }
-            if execute_background_one(s, ordinal) == false { break }
+            if native.atomic_load((&s.shutdown) as ptr) != 0 || execute_background_one(s, ordinal) == false { break }
         }
     }
     native.atomic_add((&s.live) as ptr, 0 - 1)
@@ -190,7 +194,7 @@ destroy_scheduler(s: *Scheduler) {
     }
     native.semaphore_destroy(s.semaphore)
     basics.free_bytes(s.semaphore, native.semaphore_bytes())
-    if s.background_first >= 0 { native.release_slots(s.background_first, s.worker_count) }
+    if s.background_first >= 0 { native.release_slots(s.background_first, s.thread_count) }
     basics.free_bytes(s.background, MAX_BACKGROUND_TASKS * sizeof(BackgroundTask))
     basics.free_bytes(s.tasks, MAX_TASKS * sizeof(Task))
     basics.free_bytes(s.for_tasks, MAX_WORKERS * sizeof(ForTask))
@@ -274,15 +278,16 @@ finish(s: *Scheduler, t: *Task) {
 
 // --- the background lane (#196) ------------------------------------------------------------------------------
 
-// The lane's worker slots, a run as long as the scheduler has workers,
-// claimed the first time a task is submitted (a scheduler that never uses
-// the lane holds none): the first, or -1 when the slots are all held.
+// The lane's worker slots, a run as long as the scheduler has threads,
+// claimed the first time a task is submitted to a scheduler with threads
+// (one that never uses the lane holds none): the first, or -1 when no run
+// is free. The thread of ordinal k runs as first + k - 1.
 background_slots(s: *Scheduler) -> int {
     while true {
         first = native.atomic_load((&s.background_first) as ptr)
         if first >= 0 { return first }
         if first == 0 - 1 && native.atomic_cas((&s.background_first) as ptr, 0 - 1, 0 - 2) {
-            claimed = native.claim_slots(s.worker_count)
+            claimed = native.claim_slots(s.thread_count)
             if claimed < 0 {
                 native.atomic_store((&s.background_first) as ptr, 0 - 1)
                 return 0 - 1
@@ -294,49 +299,63 @@ background_slots(s: *Scheduler) -> int {
     }
 }
 
+// A handle: the slot, and the slot's generation when it was taken, so a
+// handle released and its slot reused names no task.
+background_handle(slot: int, generation: int) -> int { return (generation & 0xFFFFF) * MAX_BACKGROUND_TASKS + slot }
+
+// The task a handle names, or null for one stale or out of range.
+background_of(s: *Scheduler, handle: int) -> *BackgroundTask {
+    if handle < 0 { return null }
+    t = background_at(s, handle % MAX_BACKGROUND_TASKS)
+    if (t.generation & 0xFFFFF) != handle / MAX_BACKGROUND_TASKS { return null }
+    return t
+}
+
 // A long task submitted to the lane: its handle, or -1 when the lane is
-// full or no worker slots are free. A thread runs it when no step task is
-// pending, as a worker index of the lane's own (native.worker_index in the
-// body); with one worker it runs here, now. The caller asks
-// background_done and, once it is, takes its results and gives the slot
-// back with release_background. The context must live until then.
+// full or no run of worker slots is free. A thread runs it when no step
+// task is pending, as a worker index of the lane's own (native.worker_index
+// in the body); with one worker (no threads) it runs here and now, as the
+// calling thread. The caller asks background_done and, once it is, takes
+// its results and gives the slot back with release_background. The
+// context must live until then.
 submit_background(s: *Scheduler, body: fn(ptr) -> void, context: @keep ptr) -> int {
-    first = background_slots(s)
-    if first < 0 { return 0 - 1 }
+    if s.thread_count > 0 && background_slots(s) < 0 { return 0 - 1 }
     i = 0
     while i < MAX_BACKGROUND_TASKS {
         t = background_at(s, i)
         if native.atomic_load(background_status(t)) == TASK_FREE && native.atomic_cas(background_status(t), TASK_FREE, TASK_FILLING) {
             t.body = body
             t.context = context
+            handle = background_handle(i, t.generation)
             if s.thread_count == 0 {
-                caller = native.worker_index()
-                native.set_worker_index(first)
                 body(context)
-                native.set_worker_index(caller)
                 native.atomic_store(background_status(t), TASK_COMPLETE)
             } else {
                 native.atomic_store(background_status(t), TASK_PENDING)
                 native.semaphore_signal(s.semaphore, 1)
             }
-            return i
+            return handle
         }
         i = i + 1
     }
     return 0 - 1
 }
 
-// Whether a background task has run to its end.
+// Whether a background task has run to its end (false for a stale handle).
 background_done(s: *Scheduler, handle: int) -> bool {
-    if handle < 0 || handle >= MAX_BACKGROUND_TASKS { return false }
-    return native.atomic_load(background_status(background_at(s, handle))) == TASK_COMPLETE
+    t = background_of(s, handle)
+    if t == null { return false }
+    return native.atomic_load(background_status(t)) == TASK_COMPLETE
 }
 
 // A finished background task's slot given back: whether it was finished
-// (one still pending or running keeps its slot).
+// (one still pending or running keeps its slot; a stale handle does
+// nothing).
 release_background(s: *Scheduler, handle: int) -> bool {
-    if handle < 0 || handle >= MAX_BACKGROUND_TASKS { return false }
-    return native.atomic_cas(background_status(background_at(s, handle)), TASK_COMPLETE, TASK_FREE)
+    t = background_of(s, handle)
+    if t == null || native.atomic_load(background_status(t)) != TASK_COMPLETE { return false }
+    t.generation = t.generation + 1
+    return native.atomic_cas(background_status(t), TASK_COMPLETE, TASK_FREE)
 }
 
 // --- parallel_for --------------------------------------------------------------------------------------------

@@ -1680,6 +1680,8 @@ reset_world(id: WorldId, def: *WorldDef) -> bool {
     if w.locked || w.recording != null { return false }
     free_world_contents(w)
     init_world_contents(w, def)
+    // Whatever it held is gone: a static scene built before is stale (#197).
+    w.static_version = w.static_version + 1
     return true
 }
 
