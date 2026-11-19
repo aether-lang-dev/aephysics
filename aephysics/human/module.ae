@@ -46,7 +46,7 @@ exports (
     HEAD_FLEXION_DEGREES, HEAD_EXTENSION_DEGREES, HEAD_TILT_DEGREES, HEAD_TURN_DEGREES,
     CLAVICLE_ELEVATION_DEGREES, CLAVICLE_DEPRESSION_DEGREES, CLAVICLE_PROTRACTION_DEGREES, CLAVICLE_ROTATION_DEGREES,
     WRIST_FLEXION_DEGREES, WRIST_EXTENSION_DEGREES, WRIST_DEVIATION_DEGREES, WRIST_TWIST_DEGREES,
-    ELBOW_TWIST_DEGREES, KNEE_TWIST_DEGREES, SHOULDER_INTERNAL_ROTATION, SHOULDER_EXTERNAL_ROTATION,
+    ELBOW_TWIST_DEGREES, KNEE_TWIST_DEGREES, SHOULDER_INTERNAL_ROTATION, SHOULDER_EXTERNAL_ROTATION, HIP_INTERNAL_ROTATION, HIP_EXTERNAL_ROTATION,
     HumanBone, Human, BoneSpec, bone_at, filter_joint_at, spec_at,
     human_reference_shape, human_anatomical_limits, human_tight_limits, human_chain_child, human_shape_head, human_shape_tail, human_shape_toe, human_fit_shape, destroy_shape, create_human_shaped,
     human_fit_bone, human_fit_hinge_axis, human_has_bone, human_bone_far_end,
@@ -849,7 +849,8 @@ cone_off_axis(axis: Vec3) -> bool { return axis.x != 0.0 || axis.y != 0.0 || axi
 // degrees whose centre leans forward, down and out from the rest -- and
 // turns the arm 70 degrees inward and 90 outward about itself (#201). A hip
 // lifts the thigh 125 degrees for kneeling and sitting and takes it 25
-// back: a cone of 78 leaning forward and out. A knee bends from straight
+// back: a cone of 78 leaning forward and out -- and turns it 45 degrees
+// inward and 45 outward about itself (#205). A knee bends from straight
 // to 150 degrees and an elbow to 145, neither past straight. The spine,
 // the neck and the other twists keep the reference's. Measured on the shape as
 // it stands -- forward the way its toes point, up from the pelvis to the
@@ -879,6 +880,10 @@ const HIP_FLEXION = 125.0
 const HIP_EXTENSION = 25.0
 const HIP_ABDUCTION = 45.0
 const HIP_ADDUCTION = 30.0
+// Published ranges for the thigh turning about itself, from standing
+// (the same sources as the shoulder's): 45 degrees inward, 45 outward.
+const HIP_INTERNAL_ROTATION = 45.0
+const HIP_EXTERNAL_ROTATION = 45.0
 const KNEE_FLEXION = 150.0
 const ELBOW_FLEXION = 145.0
 
@@ -898,6 +903,8 @@ human_anatomical_limits(shape: ptr) {
     aim_twist(shape, BONE_UPPER_ARM_R, up, forward, SHOULDER_INTERNAL_ROTATION, SHOULDER_EXTERNAL_ROTATION)
     aim_ellipse(shape, BONE_THIGH_L, up, forward, HIP_FLEXION, HIP_EXTENSION, HIP_ABDUCTION, HIP_ADDUCTION)
     aim_ellipse(shape, BONE_THIGH_R, up, forward, HIP_FLEXION, HIP_EXTENSION, HIP_ABDUCTION, HIP_ADDUCTION)
+    aim_twist(shape, BONE_THIGH_L, up, forward, HIP_INTERNAL_ROTATION, HIP_EXTERNAL_ROTATION)
+    aim_twist(shape, BONE_THIGH_R, up, forward, HIP_INTERNAL_ROTATION, HIP_EXTERNAL_ROTATION)
     set_hinge(shape, BONE_CALF_L, math.neg(forward), KNEE_FLEXION)
     set_hinge(shape, BONE_CALF_R, math.neg(forward), KNEE_FLEXION)
     set_hinge(shape, BONE_LOWER_ARM_L, forward, ELBOW_FLEXION)

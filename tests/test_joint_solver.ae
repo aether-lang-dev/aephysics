@@ -1018,6 +1018,49 @@ test_impulses() {
     dynamics.destroy_world(f.world_id)
 }
 
+// A cone centred off frame A's z reads its twist from the centre (#204).
+// Frame B's z 178 degrees from A's z (60 to the centre, 118 beyond it),
+// turned 0.3 about itself, then nudged 0.02 sideways: about A's z the
+// swing-twist split is at its pole, and the nudge swings the twist read
+// by far more than the nudge; from the centre, B's z is 118 degrees away
+// and the twist read barely moves. Past an upper limit the biased solve
+// turns B back about its own z.
+test_spherical_twist_from_centre() {
+    f = fixture()
+    sdef = dynamics.default_spherical_joint_def()
+    common_frames(&f, &sdef.base)
+    sdef.enable_cone_limit = true
+    sdef.cone_axis = math.vec3(0.8660254037844386, 0.0, 0.5)
+    sdef.cone_angle = 2.2
+    sdef.enable_twist_limit = true
+    sdef.lower_twist_angle = 0.0 - 0.5
+    sdef.upper_twist_angle = 0.5
+    id = dynamics.create_spherical_joint(f.world_id, &sdef)
+    q = math.normalize_quat(math.mul_quat(math.make_quat_from_axis_angle(math.vec3_axis_y(), 3.1066860685499065), math.make_quat_from_axis_angle(math.vec3_axis_z(), 0.3)))
+    nudged = math.normalize_quat(math.mul_quat(math.make_quat_from_axis_angle(math.vec3_axis_x(), 0.02), q))
+    dynamics.body_set_transform(f.cube_id, math.vec3(0.0, 4.0, 0.0), q)
+    from_centre = joint_solver.spherical_joint_get_twist_angle(id)
+    dynamics.body_set_transform(f.cube_id, math.vec3(0.0, 4.0, 0.0), nudged)
+    from_centre_nudged = joint_solver.spherical_joint_get_twist_angle(id)
+    about_z_moved = math.abs_float(math.get_twist_angle(nudged) - math.get_twist_angle(q))
+    centre_moved = math.abs_float(from_centre_nudged - from_centre)
+    small("twist from the centre: read as turned", from_centre - 0.3, 0.01)
+    ensure("twist from the centre: a 0.02 nudge moves the twist about A's z by ${about_z_moved}, from the centre by ${centre_moved}",
+           about_z_moved > 0.5 && centre_moved < 0.05)
+    small("twist from the centre: inside its limits, no separation", dynamics.joint_get_angular_separation(id), 0.000001)
+    dynamics.body_set_transform(f.cube_id, math.vec3(0.0, 4.0, 0.0), q)
+    joint_solver.spherical_joint_set_twist_limits(id, 0.0 - 0.2, 0.2)
+    small("twist from the centre: 0.1 past the upper limit", dynamics.joint_get_angular_separation(id) - 0.1, 0.01)
+    set_velocity(&f, math.vec3_zero(), math.vec3_zero())
+    solve_biased(&f, id)
+    back = math.dot(math.widen3(cube_state(&f).w), math.rotate_vector(q, math.vec3_axis_z()))
+    ensure("twist from the centre: the solve turns it back about its own z (${back})", back < 0.0 - 0.01)
+    // A cone about A's z (the reference's) reads twist about A's z, as before.
+    joint_solver.spherical_joint_set_cone_axis(id, math.vec3_axis_z())
+    ensure("twist from the centre: on the reference's cone, about A's z", joint_solver.spherical_joint_get_twist_angle(id) == math.get_twist_angle(dynamics.body_get_rotation(f.cube_id)))
+    dynamics.destroy_world(f.world_id)
+}
+
 main() {
     dynamics.reserve_scratch()
     before = basics.alloc_count()
@@ -1029,6 +1072,7 @@ main() {
     test_prismatic()
     test_spherical()
     test_spherical_lock()
+    test_spherical_twist_from_centre()
     test_impulses()
     test_parallel_motor_wheel()
     test_point_mass_matrix()

@@ -1659,11 +1659,15 @@ prepare_spherical_joint(base: *JointSim, ctx: *StepContext) {
         j.swing_axis = swing_axis
     }
     if j.enable_twist_limit {
-        rel_q = math.inv_mul_quat(j.frame_a.q, j.frame_b.q)
+        // Read from the cone's centre when it is off frame A's z (#204):
+        // the reference's row with frame A turned onto the centre.
+        rel_q = dynamics.spherical_twist_rotation(j, math.inv_mul_quat(j.frame_a.q, j.frame_b.q))
+        reference_axis = cone_axis
+        if dynamics.spherical_cone_off_axis(j) { reference_axis = math.rotate_vector(j.frame_a.q, j.cone_axis) }
         tan_half = math.sqrt_float((rel_q.x * rel_q.x + rel_q.y * rel_q.y) / (rel_q.z * rel_q.z + rel_q.w * rel_q.w))
-        swing_axis = math.normalize(math.cross(cone_axis, twist_axis))
-        perp = math.cross(swing_axis, cone_axis)
-        jacobian = math.mul_add(cone_axis, tan_half, perp)
+        swing_axis = math.normalize(math.cross(reference_axis, twist_axis))
+        perp = math.cross(swing_axis, reference_axis)
+        jacobian = math.mul_add(reference_axis, tan_half, perp)
         k = math.dot(jacobian, math.mul_mv(inertia_sum, jacobian))
         j.twist_mass = 0.0
         if k > 0.0 { j.twist_mass = 1.0 / k }
@@ -1753,7 +1757,7 @@ solve_spherical_joint(base: *JointSim, ctx: *StepContext, use_bias: bool) {
         w_b = math.add(w_b, math.mul_mv(i_b, lambda))
     }
     if j.enable_twist_limit && fixed_rotation == false {
-        twist = math.get_twist_angle(rel_q)
+        twist = dynamics.spherical_twist_angle(j, rel_q)
         jacobian = j.twist_jacobian
         // Lower.
         scales = limit_scales(base, ctx, twist - j.lower_twist_angle, use_bias)
@@ -1991,7 +1995,7 @@ spherical_joint_set_twist_limits(id: JointId, lower: float, upper: float) {
 spherical_joint_get_twist_angle(id: JointId) -> float {
     base = sim_of(id, dynamics.JOINT_SPHERICAL)
     if base == null { return 0.0 }
-    return math.get_twist_angle(spherical_relative_rotation(id, base))
+    return dynamics.spherical_twist_angle(dynamics.spherical_joint_of(base), spherical_relative_rotation(id, base))
 }
 spherical_joint_enable_spring(id: JointId, flag: bool) {
     if dynamics.recording_on(id.world0) { recorder = dynamics.rec_begin(id.world0, dynamics.OP_SPHERICAL_JOINT_ENABLE_SPRING); dynamics.rec_id(recorder, id.index1, id.generation); dynamics.rec_bool(recorder, flag); dynamics.rec_end(recorder) }
