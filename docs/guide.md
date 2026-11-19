@@ -473,9 +473,12 @@ human.destroy_human(&figure)
   and filter joints keep the other limbs that would clash apart. Give each
   figure its own index, or two figures' hips pass through each other.
 - **Joint ranges.** By default the joints have a person's ranges: shoulders
-  that reach overhead, hips on an elliptical cone, knees and elbows that
-  never pass straight. `human_tight_limits(shape)` puts Box3D's tighter
-  ones on a figure's shape before `create_human_shaped`.
+  that reach overhead and turn 70 degrees inward and 90 outward, hips on an
+  elliptical cone, knees and elbows that never pass straight. Every joint's
+  frames meet at the rest pose, so its angles are measured from the rest,
+  the two sides are mirrors, and a joint spring holds the rest.
+  `human_tight_limits(shape)` puts Box3D's tighter ranges, and its own
+  frames, on a figure's shape before `create_human_shaped`.
 - **Feet.** With `figure.ankles = true` before creation, the feet are bones
   of their own on elliptical ankle cones, so a crouched figure's soles lie
   flat.

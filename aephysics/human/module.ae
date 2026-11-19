@@ -46,7 +46,7 @@ exports (
     HEAD_FLEXION_DEGREES, HEAD_EXTENSION_DEGREES, HEAD_TILT_DEGREES, HEAD_TURN_DEGREES,
     CLAVICLE_ELEVATION_DEGREES, CLAVICLE_DEPRESSION_DEGREES, CLAVICLE_PROTRACTION_DEGREES, CLAVICLE_ROTATION_DEGREES,
     WRIST_FLEXION_DEGREES, WRIST_EXTENSION_DEGREES, WRIST_DEVIATION_DEGREES, WRIST_TWIST_DEGREES,
-    ELBOW_TWIST_DEGREES, KNEE_TWIST_DEGREES,
+    ELBOW_TWIST_DEGREES, KNEE_TWIST_DEGREES, SHOULDER_INTERNAL_ROTATION, SHOULDER_EXTERNAL_ROTATION,
     HumanBone, Human, BoneSpec, bone_at, filter_joint_at, spec_at,
     human_reference_shape, human_anatomical_limits, human_tight_limits, human_chain_child, human_shape_head, human_shape_tail, human_shape_toe, human_fit_shape, destroy_shape, create_human_shaped,
     human_fit_bone, human_fit_hinge_axis, human_has_bone, human_bone_far_end,
@@ -270,10 +270,11 @@ set_spec(shape: ptr, index: int, spec: BoneSpec) { (shape as BoneSpec[])[index] 
 
 no_foot() -> Capsule { return manifold.capsule(math.vec3(0.0, 0.0, 0.0), math.vec3(0.0, 0.0, 0.0), 0.0) }
 
-// The reference's figure with a body's reach: its frames, capsules and
-// masses as the reference measured them, its joints given the ranges of
-// human_anatomical_limits (human_tight_limits puts back the reference's)
-// and its shins and soles a grip on the ground.
+// The reference's figure with a body's reach: its bones, capsules and
+// masses as the reference measured them, its joints' frames meeting at the
+// rest and given the ranges of human_anatomical_limits (human_tight_limits
+// puts back the reference's frames and ranges) and its shins and soles a
+// grip on the ground.
 human_reference_shape() -> ptr {
     shape = reference_tight_shape()
     human_anatomical_limits(shape)
@@ -846,9 +847,7 @@ cone_off_axis(axis: Vec3) -> bool { return axis.x != 0.0 || axis.y != 0.0 || axi
 // ahead and overhead (flexion past 180 degrees), out to the side and over
 // the head (abduction), and 55 degrees back (extension): one cone of 120
 // degrees whose centre leans forward, down and out from the rest -- and
-// turns the arm 60 degrees either way about itself, as a person's does
-// (the reference's frames sit 15 degrees apart at the rest, so a raise
-// read against them twists the arm on the way up). A hip
+// turns the arm 70 degrees inward and 90 outward about itself (#201). A hip
 // lifts the thigh 125 degrees for kneeling and sitting and takes it 25
 // back: a cone of 78 leaning forward and out. A knee bends from straight
 // to 150 degrees and an elbow to 145, neither past straight. The spine,
@@ -856,8 +855,24 @@ cone_off_axis(axis: Vec3) -> bool { return axis.x != 0.0 || axis.y != 0.0 || axi
 // it stands -- forward the way its toes point, up from the pelvis to the
 // neck, out from a limb's parent to its joint -- so a fitted shape takes
 // them as well as the reference's.
+//
+// Every joint's frames are made to meet at the rest first (#202). The
+// reference's do not: its frames' zero is a pose of their own, the thighs
+// 14 and 18 degrees back and out of the rest (not as mirrors), the knees
+// bent 30 and the spine leaning, so twist ranges were centred off the
+// rest, a swinging limb read a twist against frames off its line, and a
+// spring pulled each side to a pose of its own. Frame A turns onto frame
+// B, which stays on the bone's line (the cones are aimed against it):
+// swing, twist and a hinge's angle are nothing at the rest, a spring holds
+// the rest, and every range is held against it. human_tight_limits puts
+// the reference's frames back.
 const SHOULDER_CONE = 120.0
-const SHOULDER_TWIST = 60.0
+// Published ranges for the arm turning about itself (American Academy of
+// Orthopaedic Surgeons, "Joint Motion: Method of Measuring and Recording",
+// 1965; Greene and Heckman, "The Clinical Measurement of Joint Motion",
+// 1994): 70 degrees inward (the hand to the belly) and 90 outward.
+const SHOULDER_INTERNAL_ROTATION = 70.0
+const SHOULDER_EXTERNAL_ROTATION = 90.0
 // A person's hip, from standing: the thigh flexes ahead to 125 degrees
 // and extends back to 25; it abducts out to 45 and adducts across to 30.
 const HIP_FLEXION = 125.0
@@ -872,12 +887,15 @@ human_anatomical_limits(shape: ptr) {
     toes = math.add(math.sub(human_shape_toe(shape, BONE_CALF_L), human_shape_tail(shape, BONE_CALF_L)),
                     math.sub(human_shape_toe(shape, BONE_CALF_R), human_shape_tail(shape, BONE_CALF_R)))
     forward = math.normalize(across(toes, up))
+    i = 0
+    while i < BONE_COUNT {
+        if spec_at(shape, i).parent >= 0 { meet_at_rest(shape, i) }
+        i = i + 1
+    }
     aim_cone(shape, BONE_UPPER_ARM_L, up, forward, SHOULDER_CONE, 0.3, 0.0 - 0.4, 0.866)
     aim_cone(shape, BONE_UPPER_ARM_R, up, forward, SHOULDER_CONE, 0.3, 0.0 - 0.4, 0.866)
-    spec_at(shape, BONE_UPPER_ARM_L).lower_degrees = 0.0 - SHOULDER_TWIST
-    spec_at(shape, BONE_UPPER_ARM_L).upper_degrees = SHOULDER_TWIST
-    spec_at(shape, BONE_UPPER_ARM_R).lower_degrees = 0.0 - SHOULDER_TWIST
-    spec_at(shape, BONE_UPPER_ARM_R).upper_degrees = SHOULDER_TWIST
+    aim_twist(shape, BONE_UPPER_ARM_L, up, forward, SHOULDER_INTERNAL_ROTATION, SHOULDER_EXTERNAL_ROTATION)
+    aim_twist(shape, BONE_UPPER_ARM_R, up, forward, SHOULDER_INTERNAL_ROTATION, SHOULDER_EXTERNAL_ROTATION)
     aim_ellipse(shape, BONE_THIGH_L, up, forward, HIP_FLEXION, HIP_EXTENSION, HIP_ABDUCTION, HIP_ADDUCTION)
     aim_ellipse(shape, BONE_THIGH_R, up, forward, HIP_FLEXION, HIP_EXTENSION, HIP_ABDUCTION, HIP_ADDUCTION)
     set_hinge(shape, BONE_CALF_L, math.neg(forward), KNEE_FLEXION)
@@ -886,16 +904,23 @@ human_anatomical_limits(shape: ptr) {
     set_hinge(shape, BONE_LOWER_ARM_R, forward, ELBOW_FLEXION)
 }
 
-// The reference's limits put back on a shape: cones about the rest (45
+// The reference's limits put back on a shape: cones about its frames (45
 // degrees at the shoulders, 30 at the hips) and hinges 30 (the knees) and
-// 35 degrees (the elbows) either side of it. A stiffer, steadier figure:
-// the one the reference's sample drops.
+// 35 degrees (the elbows) either side of their zero, with the reference's
+// frames (each joint's frame on the parent turned so the joint's angle at
+// the shape's rest is the reference's again, #202). A stiffer, steadier
+// figure: the one the reference's sample drops.
 human_tight_limits(shape: ptr) {
     tight = reference_tight_shape()
     i = 0
     while i < BONE_COUNT {
         spec = spec_at(shape, i)
         t = spec_at(tight, i)
+        if spec.parent >= 0 {
+            at_rest = math.inv_mul_quat(math.mul_quat(spec_at(tight, t.parent).reference.q, t.frame_a.q), math.mul_quat(t.reference.q, t.frame_b.q))
+            on_bone = math.mul_quat(spec.reference.q, spec.frame_b.q)
+            spec.frame_a.q = math.normalize_quat(math.inv_mul_quat(spec_at(shape, spec.parent).reference.q, math.mul_quat(on_bone, math.conjugate(at_rest))))
+        }
         spec.swing_degrees = t.swing_degrees
         spec.lower_degrees = t.lower_degrees
         spec.upper_degrees = t.upper_degrees
@@ -905,6 +930,36 @@ human_tight_limits(shape: ptr) {
         i = i + 1
     }
     destroy_shape(tight)
+}
+
+// A joint's frame on its parent turned onto its frame on the bone as the
+// shape stands, so the two meet at the rest (#202).
+meet_at_rest(shape: ptr, index: int) {
+    spec = spec_at(shape, index)
+    parent = spec_at(shape, spec.parent)
+    spec.frame_a.q = math.normalize_quat(math.inv_mul_quat(parent.reference.q, math.mul_quat(spec.reference.q, spec.frame_b.q)))
+}
+
+// A limb's twist range, `inward` and `outward` degrees about itself from
+// the rest (internal and external rotation). Which sign is inward is the
+// limb's handedness: seen with the limb hanging and its joint's z down the
+// bone, a turn that swings a forward-pointing forearm toward the middle.
+// Worked out from the shape (its side, up, forward and the way z runs
+// along the bone), so a fitted or mirrored rig needs no rule by name.
+aim_twist(shape: ptr, index: int, up: Vec3, forward: Vec3, inward: float, outward: float) {
+    spec = spec_at(shape, index)
+    parent = spec_at(shape, spec.parent)
+    side = math.normalize(across(across(math.sub(spec.reference.p, parent.reference.p), up), forward))
+    z = math.rotate_vector(math.mul_quat(spec.reference.q, spec.frame_b.q), math.vec3_axis_z())
+    distal = math.neg(up)
+    if math.dot(z, math.sub(human_shape_tail(shape, index), human_shape_head(shape, index))) < 0.0 { distal = up }
+    if math.dot(math.cross(distal, forward), side) < 0.0 {
+        spec.lower_degrees = 0.0 - outward
+        spec.upper_degrees = inward
+    } else {
+        spec.lower_degrees = 0.0 - inward
+        spec.upper_degrees = outward
+    }
 }
 
 across(v: Vec3, axis: Vec3) -> Vec3 { return math.sub(v, math.mul_sv(math.dot(v, axis), axis)) }
