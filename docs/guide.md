@@ -670,6 +670,22 @@ it changes results, so Box3D's own scenes give Box3D's checksums.
   read from the cone's centre instead, so it stays well defined across
   the whole cone. The rest still reads no twist. Cones about frame A's z
   read it as Box3D does.
+- **Limit rows made each sub-step.** Box3D builds a spherical joint's cone
+  and twist rows once a step, where the step starts (its source asks
+  whether an updated swing axis would help). A limb swinging fast turns
+  about half a radian in a step, so the cone pushed it back about where it
+  had been: a foot landing on its shin ran 1.2 rad past its cone, and more
+  sub-steps did not help. Here each limit that can act in a sub-step has
+  its row built again there, where the bodies are, as Box3D already does
+  for a revolute joint's perpendicular rows. A limit too far away to act
+  keeps its row, which gives the same bits at no extra cost. Over sixteen thrown figures the worst overrun is 0.69
+  rad at 4 sub-steps, 0.47 at 8 and 0.24 at 16. An elliptical cone pushes
+  along the normal at the nearest point of its rim. The direction a row is
+  built along then turns no faster than the rim curves, so a foot pressed
+  hard against its limit comes to rest instead of shaking.
+- **An elliptical cone's separation** (`joint_get_angular_separation`) is
+  measured against the ellipse's radius toward frame B's z, not against its
+  major half-angle.
 - **A set of bodies' solver state** (`save_body_set`, `restore_body_set`,
   `joint_get_impulses`, `joint_set_impulses`), for late-joining peers.
 - **Canonical begin order** (`canonical_begin_order`, `order_key`):
