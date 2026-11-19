@@ -1038,6 +1038,7 @@ all_ops() {
     kdef = dynamics.default_body_def()
     kdef.kind = dynamics.BODY_KINEMATIC
     kdef.position = math.vec3(0.0 - 3.0, 0.5, 3.0)
+    kdef.order_key = 5
     paddle = dynamics.create_body(world_id, &kdef)
     dynamics.create_hull_shape(paddle, &sdef, g_box as *HullData)
 
@@ -1102,6 +1103,7 @@ all_ops() {
     dynamics.body_enable_sleep(subject, true)
     physics_world.step(world_id, 1.0 / 60.0, 4)
     dynamics.body_set_sleep_threshold(subject, 0.04)
+    dynamics.body_set_order_key(subject, 3)
     dynamics.body_set_motion_locks(heavy, MotionLocks { linear_x: false, linear_y: false, linear_z: true, angular_x: true, angular_y: false, angular_z: false })
     dynamics.create_transformed_hull_shape(spare, &sdef, g_box as *HullData, Transform { p: math.vec3(0.0, 0.2, 0.0), q: math.quat_identity() }, math.vec3(1.0, 0.5, 2.0))
     dynamics.shape_set_density(sphere_shape, 2.0, true)
@@ -1148,6 +1150,7 @@ all_ops() {
     physics_world.enable_kinematic_static_softness(world_id, true)
     physics_world.enable_kinematic_speculation(world_id, true)
     physics_world.enable_travel_speculation(world_id, true)
+    physics_world.enable_canonical_begin_order(world_id, true)
     physics_world.set_hit_event_threshold(world_id, 0.5)
     physics_world.set_contact_tuning(world_id, 25.0, 8.0, 2.5)
     physics_world.set_contact_recycle_distance(world_id, 0.02)
@@ -1263,7 +1266,7 @@ all_ops() {
     dynamics.destroy_world(world_id)
 
     // Every opcode a recording has.
-    all_op_count = 164
+    all_op_count = 166
     all_ops_list = [
         dynamics.OP_CREATE_BODY, dynamics.OP_DESTROY_BODY, dynamics.OP_BODY_SET_TRANSFORM,
         dynamics.OP_BODY_SET_LINEAR_VELOCITY, dynamics.OP_BODY_SET_ANGULAR_VELOCITY,
@@ -1334,7 +1337,8 @@ all_ops() {
         dynamics.OP_WHEEL_JOINT_SET_STEERING_HERTZ, dynamics.OP_WHEEL_JOINT_SET_STEERING_DAMPING_RATIO,
         dynamics.OP_WHEEL_JOINT_SET_MAX_STEERING_TORQUE, dynamics.OP_WHEEL_JOINT_ENABLE_STEERING_LIMIT,
         dynamics.OP_WHEEL_JOINT_SET_STEERING_LIMITS, dynamics.OP_WHEEL_JOINT_SET_TARGET_STEERING_ANGLE, dynamics.OP_ENABLE_KINEMATIC_SPECULATION,
-        dynamics.OP_ENABLE_TRAVEL_SPECULATION, dynamics.OP_SPHERICAL_JOINT_LOCK_CONE_MINOR, dynamics.OP_JOINT_SET_IMPULSES
+        dynamics.OP_ENABLE_TRAVEL_SPECULATION, dynamics.OP_SPHERICAL_JOINT_LOCK_CONE_MINOR, dynamics.OP_JOINT_SET_IMPULSES,
+        dynamics.OP_ENABLE_CANONICAL_BEGIN_ORDER, dynamics.OP_BODY_SET_ORDER_KEY
     ]
     seen = calloc(4096, 4)
     mark_ops(r, seen)

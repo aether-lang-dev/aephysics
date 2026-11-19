@@ -113,7 +113,7 @@ The world definition's fields, with their defaults:
 | `hit_event_threshold` | 1 | approach speed that makes a hit event |
 | `maximum_linear_speed` | 400 | m/s |
 | `friction_callback`, `restitution_callback` | geometric mean, maximum | how two materials mix |
-| `enable_kinematic_static_softness`, `enable_kinematic_speculation`, `enable_travel_speculation` | false | see [Where aephysics goes past Box3D](#where-aephysics-goes-past-box3d) |
+| `enable_kinematic_static_softness`, `enable_kinematic_speculation`, `enable_travel_speculation`, `canonical_begin_order` | false | see [Where aephysics goes past Box3D](#where-aephysics-goes-past-box3d) |
 
 Most settings can change between steps through `physics_world`:
 `enable_sleeping`, `enable_continuous`, `enable_warm_starting`,
@@ -550,11 +550,23 @@ data, size = snapshot.save_body_set(world, bones, bone_count)
 ok = snapshot.restore_body_set(other_world, other_bones, bone_count, shape_map, map_count, data, size)
 ```
 
-The two worlds then step on alike, bit for bit, unless the joining world
-has a history of its own and two contacts on one body start touching in
-the same step. Those take their colours in contact-id order, as Box3D's
-do, and each world numbers contacts from its own history. A sleeping set
-is saved asleep and goes back to sleep. One joint's impulses alone are
+The two worlds then step on alike, bit for bit, until two of the set's
+contacts start touching in the same step. Those take their colours in
+contact-id order, as Box3D's do, and each world numbers new contacts from
+its own history, so the joined world may colour them otherwise and part
+from the last bit. For joins that stay exact, put both worlds on a
+canonical begin order and give the set's bodies the same order keys in
+each (a networked figure's bones by their network ids):
+
+```aether
+world_def.canonical_begin_order = true      // or physics_world.enable_canonical_begin_order(world, true)
+body_def.order_key = figure_id * 64 + bone  // or dynamics.body_set_order_key(body, key)
+```
+
+Contacts that start touching together then take their colours ordered
+by their bodies' keys and their shapes' places on them, after every
+contact that stopped. A body with no key (-1) sorts after every keyed
+one, by its own id. A sleeping set is saved asleep and goes back to sleep. One joint's impulses alone are
 `joint_get_impulses` and `joint_set_impulses`.
 
 A recording keeps every call that changes a world, field by field, with a
@@ -649,5 +661,8 @@ it changes results, so Box3D's own scenes give Box3D's checksums.
   joint swings only along one arc and still twists, as an elbow does.
 - **A set of bodies' solver state** (`save_body_set`, `restore_body_set`,
   `joint_get_impulses`, `joint_set_impulses`), for late-joining peers.
+- **Canonical begin order** (`canonical_begin_order`, `order_key`):
+  contacts that start touching together are coloured in an order two
+  worlds share, so a late join stays bit for bit.
 - **Mesh queries without a cap.** Box3D's mesh contact fills a buffer of 256
   triangles and warns; here the buffer grows.
