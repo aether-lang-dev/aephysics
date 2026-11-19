@@ -1194,10 +1194,13 @@ test_ankle_shins() {
 // figure is built and steps as it did, bit for bit. The fitted figure's
 // hash moved once, on purpose (#194): a fit now keeps each hinge's axis
 // where it sat against the anatomy, which turns its frames a little even
-// for a fit that only scales.
-const UNCHANGED_REFERENCE = 0 - 1845097547785975894
-const UNCHANGED_ANKLES = 6625657960679933986
-const UNCHANGED_FITTED = 0 - 2126288751593268895
+// for a fit that only scales. All three moved once more, on purpose
+// (#202): a person's ranges now come with frames that meet at the rest,
+// and the tight preset puts the reference's back by their angle at the
+// rest, the same frames to round-off.
+const UNCHANGED_REFERENCE = 101769349529503931
+const UNCHANGED_ANKLES = 9000564361300388678
+const UNCHANGED_FITTED = 0 - 3875750476885056911
 
 unchanged_hash(kind: int) -> long {
     world_id = world_with_ground()
@@ -1411,9 +1414,12 @@ worst_of_throws(flags: int) -> JointWorst {
 // settles, and no joint ever turned through it. A soft joint is a spring
 // whose stiffness goes with the mass it moves, so a light bone pressed to
 // its limit by the figure's weight (a wrist under the body, a shoulder
-// hanging from a clavicle) settles a little past it: within 3.5 degrees,
-// where the reference's heavier bones settle within 0.3.
-const SETTLED_ANGLE = 0.06
+// hanging from a clavicle) settles a little past it: within 6.3 degrees,
+// where the reference's heavier bones settle within 0.3. Over sixteen
+// throws of every extra, a hand pinned between the chest and the ground
+// settles 0.106 rad past (#202's frames; before them, the four throws here
+// settled within 0.06 and the sixteen had a joint stuck 1.53 rad past).
+const SETTLED_ANGLE = 0.11
 const SETTLED_SEPARATION = 0.005
 const NEVER_THROUGH = 1.2
 
@@ -1904,6 +1910,124 @@ test_fit_given_hinge_axes() {
     human.destroy_shape(fitted)
 }
 
+// Every joint's frames meet at the rest (#202), on the reference and on a
+// fitted shape, so the two sides are mirrors: no swing or twist at the
+// rest on either, and each limb's range the mirror of the other's; the
+// tight preset puts the reference's frames back (its left hip 17.8
+// degrees off the rest and its right 14.1, as Box3D's sample has them).
+test_rest_frames() {
+    n = human.BONE_COUNT
+    way = 0
+    while way < 2 {
+        shape = human.human_reference_shape()
+        if way == 1 {
+            block = t_posed(shape, false)
+            human.human_fit_shape(shape, block, block + n * sizeof(Vec3), block + 2 * n * sizeof(Vec3))
+            human.human_anatomical_limits(shape)
+            free(block)
+        }
+        met = true
+        worst = 0.0
+        i = 1
+        while i < n {
+            rest = rest_angle(shape, i)
+            off = math.get_swing_angle(rest) + math.abs_float(math.get_twist_angle(rest))
+            if off > worst { worst = off }
+            if off > 0.000001 { met = false }
+            i = i + 1
+        }
+        ensure("rest frames ${way}: every joint's frames meet at the rest (worst ${worst} rad)", met)
+        pairs = [human.BONE_THIGH_L, human.BONE_THIGH_R, human.BONE_UPPER_ARM_L, human.BONE_UPPER_ARM_R]
+        k = 0
+        while k < 4 {
+            l = human.spec_at(shape, pairs[k])
+            r = human.spec_at(shape, pairs[k + 1])
+            ensure("rest frames ${way}: bone ${pairs[k]}'s twist range mirrors bone ${pairs[k + 1]}'s (${l.lower_degrees}..${l.upper_degrees} against ${r.lower_degrees}..${r.upper_degrees})",
+                   l.lower_degrees == 0.0 - r.upper_degrees && l.upper_degrees == 0.0 - r.lower_degrees)
+            ensure("rest frames ${way}: bone ${pairs[k]}'s cone mirrors bone ${pairs[k + 1]}'s",
+                   l.swing_degrees == r.swing_degrees && l.swing_minor_degrees == r.swing_minor_degrees)
+            k = k + 2
+        }
+        human.destroy_shape(shape)
+        way = way + 1
+    }
+    tight = human.human_reference_shape()
+    human.human_tight_limits(tight)
+    left = math.get_swing_angle(rest_angle(tight, human.BONE_THIGH_L)) * math.RAD_TO_DEG
+    right = math.get_swing_angle(rest_angle(tight, human.BONE_THIGH_R)) * math.RAD_TO_DEG
+    ensure("rest frames: the tight preset puts the reference's hip frames back (${left}, ${right} degrees off the rest)",
+           math.abs_float(left - 17.83) < 0.01 && math.abs_float(right - 14.11) < 0.01)
+    human.destroy_shape(tight)
+}
+
+// An arm turned about itself to past either end of its range, weightless,
+// its elbow bent: how far it turned (degrees) and how far the forearm's
+// tip ended from the figure's middle, in the chest's frame.
+struct ArmTurn {
+    degrees: float
+    out: float
+}
+
+arm_turned(index: int, past_upper: bool) -> ArmTurn {
+    shape = human.human_reference_shape()
+    world_id = world_with_ground()
+    physics_world.set_gravity(world_id, math.vec3_zero())
+    h = Human { bones: null, filter_joints: null, filter_joint_count: 0, friction_torque: 0.0, is_spawned: false }
+    human.create_human_shaped(&h, world_id, Transform { p: math.vec3(0.0, 1.5, 0.0), q: math.quat_identity() }, shape, 0.5, 1.0, 0.7, 1, null)
+    spec = human.spec_at(shape, index)
+    target = (spec.upper_degrees + 20.0) * math.DEG_TO_RAD
+    if !past_upper { target = (spec.lower_degrees - 20.0) * math.DEG_TO_RAD }
+    shoulder = human.bone_at(&h, index).joint_id
+    joint_solver.spherical_joint_set_target_rotation(shoulder, math.make_quat_from_axis_angle(math.vec3_axis_z(), target))
+    joint_solver.spherical_joint_set_spring_hertz(shoulder, 6.0)
+    joint_solver.spherical_joint_set_spring_damping_ratio(shoulder, 1.0)
+    // The elbow at 60 percent of its bend, the far end of its range.
+    forearm = index + 1
+    elbow = human.bone_at(&h, forearm).joint_id
+    lower = joint_solver.revolute_joint_get_lower_limit(elbow)
+    upper = joint_solver.revolute_joint_get_upper_limit(elbow)
+    bend = upper
+    if math.abs_float(lower) > math.abs_float(upper) { bend = lower }
+    joint_solver.revolute_joint_set_target_angle(elbow, 0.6 * bend)
+    joint_solver.revolute_joint_set_spring_hertz(elbow, 6.0)
+    joint_solver.revolute_joint_set_spring_damping_ratio(elbow, 1.0)
+    steps(world_id, 180)
+    chest_id = human.bone_at(&h, human.BONE_SPINE_03).body_id
+    chest = Transform { p: dynamics.body_get_position(chest_id), q: dynamics.body_get_rotation(chest_id) }
+    tip_body = human.bone_at(&h, forearm).body_id
+    tip = math.transform_point(Transform { p: dynamics.body_get_position(tip_body), q: dynamics.body_get_rotation(tip_body) }, human.human_bone_far_end(&h, forearm))
+    in_figure = math.transform_point(human.spec_at(shape, human.BONE_SPINE_03).reference, math.inv_transform_point(chest, tip))
+    result = ArmTurn { degrees: joint_solver.spherical_joint_get_twist_angle(shoulder) * math.RAD_TO_DEG, out: math.abs_float(in_figure.x) }
+    human.destroy_human(&h)
+    dynamics.destroy_world(world_id)
+    human.destroy_shape(shape)
+    return result
+}
+
+// Shoulders turn 70 degrees inward and 90 outward (#201): each arm, its
+// elbow bent, turned past either end stops there, and the inward end is
+// the one that brings the forearm toward the middle, on both sides.
+test_shoulder_rotation() {
+    arms = [human.BONE_UPPER_ARM_L, human.BONE_UPPER_ARM_R]
+    k = 0
+    while k < 2 {
+        i = arms[k]
+        a = arm_turned(i, true)
+        b = arm_turned(i, false)
+        inward = a
+        outward = b
+        if b.out < a.out {
+            inward = b
+            outward = a
+        }
+        println("human: shoulder ${i} turned inward ${inward.degrees} degrees, the forearm's tip ${inward.out} m from the middle; outward ${outward.degrees}, ${outward.out} m")
+        ensure("shoulders: arm ${i} turns inward to 70 degrees (${inward.degrees})", math.abs_float(math.abs_float(inward.degrees) - human.SHOULDER_INTERNAL_ROTATION) < 5.0)
+        ensure("shoulders: arm ${i} turns outward to 90 degrees (${outward.degrees})", math.abs_float(math.abs_float(outward.degrees) - human.SHOULDER_EXTERNAL_ROTATION) < 5.0)
+        ensure("shoulders: arm ${i}, the inward turn brings the forearm in (${inward.out} against ${outward.out} m)", inward.out + 0.1 < outward.out)
+        k = k + 1
+    }
+}
+
 main() {
     g_slab = hull.make_box_hull(20.0, 1.0, 20.0) as ptr
     test_build_and_fall()
@@ -1927,6 +2051,8 @@ main() {
     test_fit_cap_tail()
     test_fit_hinge_axes()
     test_fit_given_hinge_axes()
+    test_rest_frames()
+    test_shoulder_rotation()
     test_twist()
     hull.destroy_hull(g_slab as *HullData)
     println("human: ${checks} checks")
