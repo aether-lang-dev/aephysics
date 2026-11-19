@@ -85,7 +85,7 @@ exports (
     body_set_linear_damping, body_get_linear_damping, body_set_angular_damping, body_get_angular_damping,
     body_set_gravity_scale, body_get_gravity_scale, body_set_user_data, body_get_user_data,
     body_is_awake, body_set_awake, body_is_enabled, body_is_sleep_enabled, body_enable_sleep,
-    body_set_sleep_threshold, body_get_sleep_threshold, body_get_shape_count, body_get_shapes, body_compute_aabb,
+    body_set_sleep_threshold, body_get_sleep_threshold, body_set_order_key, body_get_order_key, body_get_shape_count, body_get_shapes, body_compute_aabb,
     body_set_motion_locks, body_get_motion_locks, body_get_flags,
     create_sphere_shape, create_capsule_shape, create_hull_shape, create_transformed_hull_shape, create_mesh_shape, create_height_field_shape,
     HullEntry, world_hull_count, add_hull_to_database, allocate_manifolds, OwnedGeometry, adopt_geometry, world_at, destroy_solver_set,
@@ -94,7 +94,7 @@ exports (
     intern_tag, clear_tags, intern_geometry, rec_commit_query, rec_aabb, rec_query_filter, rec_shape_proxy, rec_plane_result, rec_capsule_value,
     rec_float, rec_bool, rec_vec3, rec_quat, rec_transform, rec_id, rec_string, rec_raw, rec_geometry, finish_recording, recorded_geometry_at,
     OP_STATE_HASH, OP_BOUNDS, OP_END, OP_QUERY_TAG, OP_QUERY_OVERLAP_AABB, OP_QUERY_OVERLAP_SHAPE, OP_QUERY_CAST_RAY,
-    OP_QUERY_CAST_SHAPE, OP_QUERY_CAST_RAY_CLOSEST, OP_QUERY_CAST_MOVER, OP_QUERY_COLLIDE_MOVER, OP_CREATE_BODY, OP_DESTROY_BODY, OP_BODY_SET_TRANSFORM, OP_BODY_SET_LINEAR_VELOCITY, OP_BODY_SET_ANGULAR_VELOCITY, OP_BODY_SET_TARGET_TRANSFORM, OP_BODY_APPLY_FORCE, OP_BODY_APPLY_FORCE_TO_CENTER, OP_BODY_APPLY_TORQUE, OP_BODY_APPLY_LINEAR_IMPULSE, OP_BODY_APPLY_LINEAR_IMPULSE_TO_CENTER, OP_BODY_APPLY_ANGULAR_IMPULSE, OP_BODY_SET_BULLET, OP_BODY_SET_MASS_DATA, OP_BODY_APPLY_MASS_FROM_SHAPES, OP_BODY_SET_LINEAR_DAMPING, OP_BODY_SET_ANGULAR_DAMPING, OP_BODY_SET_GRAVITY_SCALE, OP_BODY_SET_AWAKE, OP_BODY_ENABLE_SLEEP, OP_BODY_SET_SLEEP_THRESHOLD, OP_BODY_SET_MOTION_LOCKS, OP_CREATE_SPHERE_SHAPE, OP_CREATE_CAPSULE_SHAPE, OP_CREATE_HULL_SHAPE, OP_CREATE_TRANSFORMED_HULL_SHAPE, OP_CREATE_MESH_SHAPE, OP_CREATE_HEIGHT_FIELD_SHAPE, OP_CREATE_COMPOUND_SHAPE, OP_DESTROY_SHAPE, OP_SHAPE_SET_DENSITY, OP_SHAPE_SET_FILTER, OP_SHAPE_SET_SURFACE_MATERIAL, OP_SHAPE_SET_SPHERE, OP_SHAPE_SET_CAPSULE, OP_SHAPE_SET_HULL, OP_SHAPE_SET_MESH, OP_SHAPE_SET_FRICTION, OP_SHAPE_SET_RESTITUTION, OP_SHAPE_SET_MESH_MATERIAL, OP_SHAPE_ENABLE_PRE_SOLVE_EVENTS, OP_BODY_ENABLE_HIT_EVENTS, OP_BODY_ALLOW_FAST_ROTATION, OP_BODY_ENABLE_CONTACT_RECYCLING, OP_BODY_SET_SAFETY_FACTOR, OP_SHAPE_APPLY_WIND, OP_BODY_SET_NAME, OP_SHAPE_SET_NAME, OP_CREATE_DISTANCE_JOINT, OP_CREATE_MOTOR_JOINT, OP_CREATE_FILTER_JOINT, OP_CREATE_PARALLEL_JOINT, OP_CREATE_PRISMATIC_JOINT, OP_CREATE_REVOLUTE_JOINT, OP_CREATE_SPHERICAL_JOINT, OP_CREATE_WELD_JOINT, OP_CREATE_WHEEL_JOINT, OP_DESTROY_JOINT, OP_JOINT_SET_LOCAL_FRAME_A, OP_JOINT_SET_LOCAL_FRAME_B, OP_JOINT_SET_COLLIDE_CONNECTED, OP_JOINT_WAKE_BODIES, OP_JOINT_SET_CONSTRAINT_TUNING, OP_JOINT_SET_FORCE_THRESHOLD, OP_JOINT_SET_TORQUE_THRESHOLD, OP_BODY_SET_TYPE, OP_BODY_DISABLE, OP_BODY_ENABLE, OP_SHAPE_ENABLE_SENSOR_EVENTS, OP_SHAPE_ENABLE_CONTACT_EVENTS, OP_SHAPE_ENABLE_HIT_EVENTS, OP_STEP, OP_ENABLE_SLEEPING, OP_ENABLE_WARM_STARTING, OP_ENABLE_CONTINUOUS, OP_ENABLE_SPECULATIVE, OP_SET_RESTITUTION_THRESHOLD, OP_SET_RESTITUTION_ITERATIONS, OP_ENABLE_RESTITUTION_PROPAGATION, OP_ENABLE_KINEMATIC_STATIC_SOFTNESS, OP_SET_HIT_EVENT_THRESHOLD, OP_SET_CONTACT_TUNING, OP_SET_CONTACT_RECYCLE_DISTANCE, OP_SET_MAXIMUM_LINEAR_SPEED, OP_SET_GRAVITY, OP_REBUILD_STATIC_TREE, OP_EXPLODE, OP_DISTANCE_JOINT_SET_LENGTH, OP_DISTANCE_JOINT_ENABLE_LIMIT, OP_DISTANCE_JOINT_SET_LENGTH_RANGE, OP_DISTANCE_JOINT_ENABLE_SPRING, OP_DISTANCE_JOINT_SET_SPRING_FORCE_RANGE, OP_DISTANCE_JOINT_SET_SPRING_HERTZ, OP_DISTANCE_JOINT_SET_SPRING_DAMPING_RATIO, OP_DISTANCE_JOINT_ENABLE_MOTOR, OP_DISTANCE_JOINT_SET_MOTOR_SPEED, OP_DISTANCE_JOINT_SET_MAX_MOTOR_FORCE, OP_MOTOR_JOINT_SET_LINEAR_VELOCITY, OP_MOTOR_JOINT_SET_ANGULAR_VELOCITY, OP_MOTOR_JOINT_SET_MAX_VELOCITY_TORQUE, OP_MOTOR_JOINT_SET_MAX_VELOCITY_FORCE, OP_MOTOR_JOINT_SET_LINEAR_HERTZ, OP_MOTOR_JOINT_SET_LINEAR_DAMPING_RATIO, OP_MOTOR_JOINT_SET_ANGULAR_HERTZ, OP_MOTOR_JOINT_SET_ANGULAR_DAMPING_RATIO, OP_MOTOR_JOINT_SET_MAX_SPRING_FORCE, OP_MOTOR_JOINT_SET_MAX_SPRING_TORQUE, OP_PARALLEL_JOINT_SET_SPRING_HERTZ, OP_PARALLEL_JOINT_SET_SPRING_DAMPING_RATIO, OP_PARALLEL_JOINT_SET_MAX_TORQUE, OP_PRISMATIC_JOINT_ENABLE_SPRING, OP_PRISMATIC_JOINT_SET_SPRING_HERTZ, OP_PRISMATIC_JOINT_SET_SPRING_DAMPING_RATIO, OP_PRISMATIC_JOINT_SET_TARGET_TRANSLATION, OP_PRISMATIC_JOINT_ENABLE_LIMIT, OP_PRISMATIC_JOINT_SET_LIMITS, OP_PRISMATIC_JOINT_ENABLE_MOTOR, OP_PRISMATIC_JOINT_SET_MOTOR_SPEED, OP_PRISMATIC_JOINT_SET_MAX_MOTOR_FORCE, OP_REVOLUTE_JOINT_ENABLE_LIMIT, OP_REVOLUTE_JOINT_SET_LIMITS, OP_REVOLUTE_JOINT_ENABLE_SPRING, OP_REVOLUTE_JOINT_SET_TARGET_ANGLE, OP_REVOLUTE_JOINT_SET_SPRING_HERTZ, OP_REVOLUTE_JOINT_SET_SPRING_DAMPING_RATIO, OP_REVOLUTE_JOINT_ENABLE_MOTOR, OP_REVOLUTE_JOINT_SET_MOTOR_SPEED, OP_REVOLUTE_JOINT_SET_MAX_MOTOR_TORQUE, OP_SPHERICAL_JOINT_ENABLE_CONE_LIMIT, OP_SPHERICAL_JOINT_SET_CONE_LIMIT, OP_SPHERICAL_JOINT_SET_CONE_AXIS, OP_SPHERICAL_JOINT_SET_CONE_ELLIPSE, OP_SPHERICAL_JOINT_ENABLE_TWIST_LIMIT, OP_SPHERICAL_JOINT_SET_TWIST_LIMITS, OP_SPHERICAL_JOINT_ENABLE_SPRING, OP_SPHERICAL_JOINT_SET_TARGET_ROTATION, OP_SPHERICAL_JOINT_SET_SPRING_HERTZ, OP_SPHERICAL_JOINT_SET_SPRING_DAMPING_RATIO, OP_SPHERICAL_JOINT_ENABLE_MOTOR, OP_SPHERICAL_JOINT_SET_MOTOR_VELOCITY, OP_SPHERICAL_JOINT_SET_MAX_MOTOR_TORQUE, OP_WELD_JOINT_SET_LINEAR_HERTZ, OP_WELD_JOINT_SET_LINEAR_DAMPING_RATIO, OP_WELD_JOINT_SET_ANGULAR_HERTZ, OP_WELD_JOINT_SET_ANGULAR_DAMPING_RATIO, OP_WHEEL_JOINT_ENABLE_SUSPENSION, OP_WHEEL_JOINT_SET_SUSPENSION_HERTZ, OP_WHEEL_JOINT_SET_SUSPENSION_DAMPING_RATIO, OP_WHEEL_JOINT_ENABLE_SUSPENSION_LIMIT, OP_WHEEL_JOINT_SET_SUSPENSION_LIMITS, OP_WHEEL_JOINT_ENABLE_SPIN_MOTOR, OP_WHEEL_JOINT_SET_SPIN_MOTOR_SPEED, OP_WHEEL_JOINT_SET_MAX_SPIN_TORQUE, OP_WHEEL_JOINT_ENABLE_STEERING, OP_WHEEL_JOINT_SET_STEERING_HERTZ, OP_WHEEL_JOINT_SET_STEERING_DAMPING_RATIO, OP_WHEEL_JOINT_SET_MAX_STEERING_TORQUE, OP_WHEEL_JOINT_ENABLE_STEERING_LIMIT, OP_WHEEL_JOINT_SET_STEERING_LIMITS, OP_WHEEL_JOINT_SET_TARGET_STEERING_ANGLE, OP_ENABLE_KINEMATIC_SPECULATION, OP_ENABLE_TRAVEL_SPECULATION, OP_SPHERICAL_JOINT_LOCK_CONE_MINOR, OP_JOINT_SET_IMPULSES,
+    OP_QUERY_CAST_SHAPE, OP_QUERY_CAST_RAY_CLOSEST, OP_QUERY_CAST_MOVER, OP_QUERY_COLLIDE_MOVER, OP_CREATE_BODY, OP_DESTROY_BODY, OP_BODY_SET_TRANSFORM, OP_BODY_SET_LINEAR_VELOCITY, OP_BODY_SET_ANGULAR_VELOCITY, OP_BODY_SET_TARGET_TRANSFORM, OP_BODY_APPLY_FORCE, OP_BODY_APPLY_FORCE_TO_CENTER, OP_BODY_APPLY_TORQUE, OP_BODY_APPLY_LINEAR_IMPULSE, OP_BODY_APPLY_LINEAR_IMPULSE_TO_CENTER, OP_BODY_APPLY_ANGULAR_IMPULSE, OP_BODY_SET_BULLET, OP_BODY_SET_MASS_DATA, OP_BODY_APPLY_MASS_FROM_SHAPES, OP_BODY_SET_LINEAR_DAMPING, OP_BODY_SET_ANGULAR_DAMPING, OP_BODY_SET_GRAVITY_SCALE, OP_BODY_SET_AWAKE, OP_BODY_ENABLE_SLEEP, OP_BODY_SET_SLEEP_THRESHOLD, OP_BODY_SET_MOTION_LOCKS, OP_CREATE_SPHERE_SHAPE, OP_CREATE_CAPSULE_SHAPE, OP_CREATE_HULL_SHAPE, OP_CREATE_TRANSFORMED_HULL_SHAPE, OP_CREATE_MESH_SHAPE, OP_CREATE_HEIGHT_FIELD_SHAPE, OP_CREATE_COMPOUND_SHAPE, OP_DESTROY_SHAPE, OP_SHAPE_SET_DENSITY, OP_SHAPE_SET_FILTER, OP_SHAPE_SET_SURFACE_MATERIAL, OP_SHAPE_SET_SPHERE, OP_SHAPE_SET_CAPSULE, OP_SHAPE_SET_HULL, OP_SHAPE_SET_MESH, OP_SHAPE_SET_FRICTION, OP_SHAPE_SET_RESTITUTION, OP_SHAPE_SET_MESH_MATERIAL, OP_SHAPE_ENABLE_PRE_SOLVE_EVENTS, OP_BODY_ENABLE_HIT_EVENTS, OP_BODY_ALLOW_FAST_ROTATION, OP_BODY_ENABLE_CONTACT_RECYCLING, OP_BODY_SET_SAFETY_FACTOR, OP_SHAPE_APPLY_WIND, OP_BODY_SET_NAME, OP_SHAPE_SET_NAME, OP_CREATE_DISTANCE_JOINT, OP_CREATE_MOTOR_JOINT, OP_CREATE_FILTER_JOINT, OP_CREATE_PARALLEL_JOINT, OP_CREATE_PRISMATIC_JOINT, OP_CREATE_REVOLUTE_JOINT, OP_CREATE_SPHERICAL_JOINT, OP_CREATE_WELD_JOINT, OP_CREATE_WHEEL_JOINT, OP_DESTROY_JOINT, OP_JOINT_SET_LOCAL_FRAME_A, OP_JOINT_SET_LOCAL_FRAME_B, OP_JOINT_SET_COLLIDE_CONNECTED, OP_JOINT_WAKE_BODIES, OP_JOINT_SET_CONSTRAINT_TUNING, OP_JOINT_SET_FORCE_THRESHOLD, OP_JOINT_SET_TORQUE_THRESHOLD, OP_BODY_SET_TYPE, OP_BODY_DISABLE, OP_BODY_ENABLE, OP_SHAPE_ENABLE_SENSOR_EVENTS, OP_SHAPE_ENABLE_CONTACT_EVENTS, OP_SHAPE_ENABLE_HIT_EVENTS, OP_STEP, OP_ENABLE_SLEEPING, OP_ENABLE_WARM_STARTING, OP_ENABLE_CONTINUOUS, OP_ENABLE_SPECULATIVE, OP_SET_RESTITUTION_THRESHOLD, OP_SET_RESTITUTION_ITERATIONS, OP_ENABLE_RESTITUTION_PROPAGATION, OP_ENABLE_KINEMATIC_STATIC_SOFTNESS, OP_SET_HIT_EVENT_THRESHOLD, OP_SET_CONTACT_TUNING, OP_SET_CONTACT_RECYCLE_DISTANCE, OP_SET_MAXIMUM_LINEAR_SPEED, OP_SET_GRAVITY, OP_REBUILD_STATIC_TREE, OP_EXPLODE, OP_DISTANCE_JOINT_SET_LENGTH, OP_DISTANCE_JOINT_ENABLE_LIMIT, OP_DISTANCE_JOINT_SET_LENGTH_RANGE, OP_DISTANCE_JOINT_ENABLE_SPRING, OP_DISTANCE_JOINT_SET_SPRING_FORCE_RANGE, OP_DISTANCE_JOINT_SET_SPRING_HERTZ, OP_DISTANCE_JOINT_SET_SPRING_DAMPING_RATIO, OP_DISTANCE_JOINT_ENABLE_MOTOR, OP_DISTANCE_JOINT_SET_MOTOR_SPEED, OP_DISTANCE_JOINT_SET_MAX_MOTOR_FORCE, OP_MOTOR_JOINT_SET_LINEAR_VELOCITY, OP_MOTOR_JOINT_SET_ANGULAR_VELOCITY, OP_MOTOR_JOINT_SET_MAX_VELOCITY_TORQUE, OP_MOTOR_JOINT_SET_MAX_VELOCITY_FORCE, OP_MOTOR_JOINT_SET_LINEAR_HERTZ, OP_MOTOR_JOINT_SET_LINEAR_DAMPING_RATIO, OP_MOTOR_JOINT_SET_ANGULAR_HERTZ, OP_MOTOR_JOINT_SET_ANGULAR_DAMPING_RATIO, OP_MOTOR_JOINT_SET_MAX_SPRING_FORCE, OP_MOTOR_JOINT_SET_MAX_SPRING_TORQUE, OP_PARALLEL_JOINT_SET_SPRING_HERTZ, OP_PARALLEL_JOINT_SET_SPRING_DAMPING_RATIO, OP_PARALLEL_JOINT_SET_MAX_TORQUE, OP_PRISMATIC_JOINT_ENABLE_SPRING, OP_PRISMATIC_JOINT_SET_SPRING_HERTZ, OP_PRISMATIC_JOINT_SET_SPRING_DAMPING_RATIO, OP_PRISMATIC_JOINT_SET_TARGET_TRANSLATION, OP_PRISMATIC_JOINT_ENABLE_LIMIT, OP_PRISMATIC_JOINT_SET_LIMITS, OP_PRISMATIC_JOINT_ENABLE_MOTOR, OP_PRISMATIC_JOINT_SET_MOTOR_SPEED, OP_PRISMATIC_JOINT_SET_MAX_MOTOR_FORCE, OP_REVOLUTE_JOINT_ENABLE_LIMIT, OP_REVOLUTE_JOINT_SET_LIMITS, OP_REVOLUTE_JOINT_ENABLE_SPRING, OP_REVOLUTE_JOINT_SET_TARGET_ANGLE, OP_REVOLUTE_JOINT_SET_SPRING_HERTZ, OP_REVOLUTE_JOINT_SET_SPRING_DAMPING_RATIO, OP_REVOLUTE_JOINT_ENABLE_MOTOR, OP_REVOLUTE_JOINT_SET_MOTOR_SPEED, OP_REVOLUTE_JOINT_SET_MAX_MOTOR_TORQUE, OP_SPHERICAL_JOINT_ENABLE_CONE_LIMIT, OP_SPHERICAL_JOINT_SET_CONE_LIMIT, OP_SPHERICAL_JOINT_SET_CONE_AXIS, OP_SPHERICAL_JOINT_SET_CONE_ELLIPSE, OP_SPHERICAL_JOINT_ENABLE_TWIST_LIMIT, OP_SPHERICAL_JOINT_SET_TWIST_LIMITS, OP_SPHERICAL_JOINT_ENABLE_SPRING, OP_SPHERICAL_JOINT_SET_TARGET_ROTATION, OP_SPHERICAL_JOINT_SET_SPRING_HERTZ, OP_SPHERICAL_JOINT_SET_SPRING_DAMPING_RATIO, OP_SPHERICAL_JOINT_ENABLE_MOTOR, OP_SPHERICAL_JOINT_SET_MOTOR_VELOCITY, OP_SPHERICAL_JOINT_SET_MAX_MOTOR_TORQUE, OP_WELD_JOINT_SET_LINEAR_HERTZ, OP_WELD_JOINT_SET_LINEAR_DAMPING_RATIO, OP_WELD_JOINT_SET_ANGULAR_HERTZ, OP_WELD_JOINT_SET_ANGULAR_DAMPING_RATIO, OP_WHEEL_JOINT_ENABLE_SUSPENSION, OP_WHEEL_JOINT_SET_SUSPENSION_HERTZ, OP_WHEEL_JOINT_SET_SUSPENSION_DAMPING_RATIO, OP_WHEEL_JOINT_ENABLE_SUSPENSION_LIMIT, OP_WHEEL_JOINT_SET_SUSPENSION_LIMITS, OP_WHEEL_JOINT_ENABLE_SPIN_MOTOR, OP_WHEEL_JOINT_SET_SPIN_MOTOR_SPEED, OP_WHEEL_JOINT_SET_MAX_SPIN_TORQUE, OP_WHEEL_JOINT_ENABLE_STEERING, OP_WHEEL_JOINT_SET_STEERING_HERTZ, OP_WHEEL_JOINT_SET_STEERING_DAMPING_RATIO, OP_WHEEL_JOINT_SET_MAX_STEERING_TORQUE, OP_WHEEL_JOINT_ENABLE_STEERING_LIMIT, OP_WHEEL_JOINT_SET_STEERING_LIMITS, OP_WHEEL_JOINT_SET_TARGET_STEERING_ANGLE, OP_ENABLE_KINEMATIC_SPECULATION, OP_ENABLE_TRAVEL_SPECULATION, OP_SPHERICAL_JOINT_LOCK_CONE_MINOR, OP_JOINT_SET_IMPULSES, OP_ENABLE_CANONICAL_BEGIN_ORDER, OP_BODY_SET_ORDER_KEY,
     create_compound_shape, destroy_shape, shape_is_valid, get_shape_full_id, get_shape, shape_get_body,
     shape_get_aabb, shape_get_type, shape_get_density, shape_set_density, shape_get_filter, shape_set_filter,
     shape_get_surface_material, shape_set_surface_material, shape_get_material_count, shape_is_sensor,
@@ -279,6 +279,14 @@ struct WorldDef {
     // reference's choice: its continuous collision takes a body only when it
     // moves more than half its extent in a step.
     enable_travel_speculation: bool
+    // Contacts that begin touching in one step take their graph colours in
+    // an order both of two worlds share (#206): by their bodies' order keys
+    // (BodyDef.order_key) and their shapes' places on them, after every
+    // contact that stopped. A figure joined into another world
+    // (snapshot.restore_body_set) then steps as it did where it was saved,
+    // bit for bit. Off, the reference's choice: contact-id order, which a
+    // world's history decides.
+    canonical_begin_order: bool
     contact_speed: float           // the push-out speed
     contact_hertz: float           // the contact spring
     contact_damping_ratio: float
@@ -349,6 +357,11 @@ struct BodyDef {
     is_enabled: bool
     allow_fast_rotation: bool
     enable_contact_recycling: bool
+    // The body's place in the canonical begin order (#206), the same in
+    // every world that holds it (a networked figure's bone by its network
+    // id): 0 or more, or -1 for none (after every key, by the world's own
+    // body id).
+    order_key: int
 }
 
 struct ShapeDef {
@@ -396,7 +409,7 @@ default_restitution(restitution_a: float, user_a: long, restitution_b: float, us
 default_world_def() -> WorldDef {
     return WorldDef { gravity: math.vec3(0.0, 0.0 - 10.0, 0.0), hit_event_threshold: 1.0, restitution_threshold: 1.0, contact_speed: 3.0,
                       restitution_iterations: 2, enable_restitution_propagation: false, enable_kinematic_static_softness: false, enable_kinematic_speculation: false,
-                      enable_travel_speculation: false,
+                      enable_travel_speculation: false, canonical_begin_order: false,
                       contact_hertz: 30.0, contact_damping_ratio: 10.0, maximum_linear_speed: 400.0,
                       friction_callback: default_friction, restitution_callback: default_restitution,
                       enable_sleep: true, enable_continuous: true, static_body_count: 0, dynamic_body_count: 0,
@@ -409,7 +422,7 @@ default_body_def() -> BodyDef {
                      angular_velocity: math.vec3_zero(), linear_damping: 0.0, angular_damping: 0.0, gravity_scale: 1.0,
                      sleep_threshold: 0.05, safety_factor: 0.5, name: null, user_data: null,
                      motion_locks: MotionLocks { linear_x: false, linear_y: false, linear_z: false, angular_x: false, angular_y: false, angular_z: false },
-                     enable_sleep: true, is_awake: true, is_bullet: false, is_enabled: true, allow_fast_rotation: false, enable_contact_recycling: true }
+                     enable_sleep: true, is_awake: true, is_bullet: false, is_enabled: true, allow_fast_rotation: false, enable_contact_recycling: true, order_key: 0 - 1 }
 }
 
 default_shape_def() -> ShapeDef {
@@ -473,6 +486,7 @@ struct Body {
     generation: int
     user_data: ptr
     name_id: int                   // the name's id in the world's name cache, or NULL_NAME
+    order_key: int                 // BodyDef.order_key
 }
 
 // What the solver reads and writes for an awake body.
@@ -1346,6 +1360,7 @@ struct World {
     enable_kinematic_static_softness: bool
     enable_kinematic_speculation: bool
     enable_travel_speculation: bool
+    canonical_begin_order: bool
     max_linear_speed: float
     contact_speed: float
     contact_hertz: float
@@ -1642,6 +1657,7 @@ init_world_contents(w: *World, def: *WorldDef) {
     w.enable_kinematic_static_softness = def.enable_kinematic_static_softness
     w.enable_kinematic_speculation = def.enable_kinematic_speculation
     w.enable_travel_speculation = def.enable_travel_speculation
+    w.canonical_begin_order = def.canonical_begin_order
     w.max_linear_speed = def.maximum_linear_speed
     w.contact_speed = def.contact_speed
     w.contact_hertz = def.contact_hertz
@@ -2017,11 +2033,14 @@ valid_nonnegative(x: float) -> bool { return math.is_valid_float(x) && x >= 0.0 
 // restitution and rolling resistance not below zero.
 valid_material(m: SurfaceMaterial) -> bool { return material.is_valid_material(m) }
 
+valid_order_key(key: int) -> bool { return key >= 0 - 1 }
+
 valid_body_def(def: *BodyDef) -> bool {
     if math.is_valid_position(def.position) == false || math.is_valid_quat(def.rotation) == false { return false }
     if math.is_valid_vec3(def.linear_velocity) == false || math.is_valid_vec3(def.angular_velocity) == false { return false }
     if valid_nonnegative(def.linear_damping) == false || valid_nonnegative(def.angular_damping) == false { return false }
     if valid_nonnegative(def.sleep_threshold) == false || valid_nonnegative(def.safety_factor) == false { return false }
+    if valid_order_key(def.order_key) == false { return false }
     return math.is_valid_float(def.gravity_scale)
 }
 
@@ -2032,6 +2051,14 @@ create_body(world_id: WorldId, def: *BodyDef) -> BodyId {
     made = create_body_internal(world_id, def)
     rec_id(recorder, made.index1, made.generation)
     rec_end(recorder)
+    // A body def's record keeps its fields (older players read it), so a
+    // key comes in a record of its own.
+    if made.index1 != 0 && def.order_key != 0 - 1 {
+        keyed = rec_begin(world_id.index1 - 1, OP_BODY_SET_ORDER_KEY)
+        rec_id(keyed, made.index1, made.generation)
+        rec_int(keyed, def.order_key)
+        rec_end(keyed)
+    }
     return made
 }
 
@@ -2123,6 +2150,7 @@ create_body_internal(world_id: WorldId, def: *BodyDef) -> BodyId {
     body.kind = def.kind
     body.flags = flags
     body.name_id = basics.name_cache_add(&w.names, def.name)
+    body.order_key = def.order_key
     if set_id >= AWAKE_SET { create_island_for_body(w, set_id, body) }
     w.locked = false
     return BodyId { index1: body_id + 1, world0: w.world_id, generation: body.generation }
@@ -2440,7 +2468,7 @@ struct RecordedGeometry {
 // which older players skip.
 const RECORDING_MAGIC = 0x43525041    // "APRC", little-endian
 const RECORDING_MAJOR_VERSION = 1
-const RECORDING_MINOR_VERSION = 3
+const RECORDING_MINOR_VERSION = 4
 const RECORDING_HEADER_BYTES = 32
 
 const OP_STATE_HASH = 2
@@ -2618,6 +2646,8 @@ const OP_ENABLE_KINEMATIC_SPECULATION = 176
 const OP_ENABLE_TRAVEL_SPECULATION = 177
 const OP_SPHERICAL_JOINT_LOCK_CONE_MINOR = 178
 const OP_JOINT_SET_IMPULSES = 179
+const OP_ENABLE_CANONICAL_BEGIN_ORDER = 180
+const OP_BODY_SET_ORDER_KEY = 181
 
 // Whether the world of this index is recording: the hooks' test, false
 // for an index that is not a world's.
@@ -4387,6 +4417,17 @@ body_set_sleep_threshold(id: BodyId, threshold: float) {
     if recording_on(id.world0) { recorder = rec_begin(id.world0, OP_BODY_SET_SLEEP_THRESHOLD); rec_id(recorder, id.index1, id.generation); rec_float(recorder, threshold); rec_end(recorder) }
     if valid_nonnegative(threshold) == false { return }
     get_body_full_id(body_world(id), id).sleep_threshold = threshold
+}
+// A body's order key (BodyDef.order_key): -1 for none, else 0 or more;
+// another value changes nothing.
+body_set_order_key(id: BodyId, key: int) {
+    if recording_on(id.world0) { recorder = rec_begin(id.world0, OP_BODY_SET_ORDER_KEY); rec_id(recorder, id.index1, id.generation); rec_int(recorder, key); rec_end(recorder) }
+    if body_is_valid(id) == false || valid_order_key(key) == false { return }
+    get_body_full_id(body_world(id), id).order_key = key
+}
+body_get_order_key(id: BodyId) -> int {
+    if body_is_valid(id) == false { return 0 - 1 }
+    return get_body_full_id(body_world(id), id).order_key
 }
 body_get_shape_count(id: BodyId) -> int { return get_body_full_id(body_world(id), id).shape_count }
 body_get_flags(id: BodyId) -> int { return get_body_full_id(body_world(id), id).flags }
@@ -6518,8 +6559,14 @@ collide_pass(w: *World) -> int {
         basics.arena_sync(&tc.arena)
         i = i + 1
     }
-    // The state changes, in id order.
+    // The state changes, in id order. With a canonical begin order the
+    // contacts that began touching wait until every other change is made,
+    // then go in the order both worlds share (begin_in_canonical_order).
     changed = 0
+    // On the heap, made at the first begin: sized for every contact id.
+    begun_block = null
+    begun_bytes = 0
+    begun_count = 0
     bits = w.contact_state.bits as long[]
     k = 0
     while k < w.contact_state.block_count {
@@ -6532,13 +6579,16 @@ collide_pass(w: *World) -> int {
             if (flags & SIM_DISJOINT) != 0 {
                 destroy_contact(w, c, false)
             } else if (flags & SIM_STARTED_TOUCHING) != 0 {
-                if (flags & CONTACT_ENABLE_CONTACT_EVENTS) != 0 { push_begin_event(w, c) }
-                c.flags = (c.flags & (0 - 1 - SIM_STARTED_TOUCHING)) | CONTACT_TOUCHING
-                // Linked first: this wakes the other body and settles the sims.
-                link_contact(w, c)
-                old_local_index = c.local_index
-                add_contact_to_graph(w, c)
-                remove_non_touching_contact(w, AWAKE_SET, old_local_index)
+                if w.canonical_begin_order {
+                    if begun_block == null {
+                        begun_bytes = math.max_int(w.contact_state.block_count * 64, 1) * 4
+                        begun_block = basics.alloc(begun_bytes)
+                    }
+                    (begun_block as int[])[begun_count] = contact_id
+                    begun_count = begun_count + 1
+                } else {
+                    begin_touching(w, c)
+                }
             } else if (flags & SIM_STOPPED_TOUCHING) != 0 {
                 c.flags = c.flags & (0 - 1 - SIM_STOPPED_TOUCHING) & (0 - 1 - CONTACT_TOUCHING)
                 if (c.flags & CONTACT_ENABLE_CONTACT_EVENTS) != 0 { push_end_event(w, c) }
@@ -6555,7 +6605,137 @@ collide_pass(w: *World) -> int {
         }
         k = k + 1
     }
+    if begun_block != null {
+        begin_in_canonical_order(w, begun_block as int[], begun_count)
+        basics.free_bytes(begun_block, begun_bytes)
+    }
     return changed
+}
+
+// A contact that began touching: its begin event, linked into the island
+// graph and put in a graph colour.
+begin_touching(w: *World, c: *Contact) {
+    if (c.flags & CONTACT_ENABLE_CONTACT_EVENTS) != 0 { push_begin_event(w, c) }
+    c.flags = (c.flags & (0 - 1 - SIM_STARTED_TOUCHING)) | CONTACT_TOUCHING
+    // Linked first: this wakes the other body and settles the sims.
+    link_contact(w, c)
+    old_local_index = c.local_index
+    add_contact_to_graph(w, c)
+    remove_non_touching_contact(w, AWAKE_SET, old_local_index)
+}
+
+// The canonical begin order (#206): each contact's two ends, a body's
+// order key (or, with none, a value past every key from its body id) and
+// the shape's place on the body packed in a long, the lower end first,
+// then the child index. Two worlds that key their bodies alike and give
+// them the same shapes in the same order agree on it whatever ids their
+// histories gave the contacts.
+begin_in_canonical_order(w: *World, ids: int[], count: int) {
+    if count == 0 { return }
+    keys_block = basics.alloc(count * 3 * 8)
+    keys = keys_block as long[]
+    // Each shape's place on its body, a body's list walked once.
+    places = basics.map_create(2 * count)
+    i = 0
+    while i < count {
+        c = contact_at(w, ids[i])
+        a = contact_end_key(w, &places, c.shape_id_a)
+        b = contact_end_key(w, &places, c.shape_id_b)
+        keys[3 * i] = a
+        keys[3 * i + 1] = b
+        if b < a {
+            keys[3 * i] = b
+            keys[3 * i + 1] = a
+        }
+        keys[3 * i + 2] = c.child_index as long
+        i = i + 1
+    }
+    basics.map_destroy(&places)
+    order_block = basics.alloc(count * 2 * 4)
+    order = order_block as int[]
+    i = 0
+    while i < count {
+        order[i] = i
+        i = i + 1
+    }
+    merge_sort_by_keys(order, count, keys)
+    i = 0
+    while i < count {
+        begin_touching(w, contact_at(w, ids[order[i]]))
+        i = i + 1
+    }
+    basics.free_bytes(order_block, count * 2 * 4)
+    basics.free_bytes(keys_block, count * 3 * 8)
+}
+
+contact_end_key(w: *World, places: *LongMap, shape_id: int) -> long {
+    shape = world_shape_at(w, shape_id)
+    body = body_at(w, shape.body_id)
+    key = body.order_key as long
+    if key < (0 as long) { key = (2147483648 as long) + (body.id as long) }
+    if basics.map_has(places, shape_id as long) == false {
+        place = 0
+        id = body.head_shape_id
+        while id != NULL_INDEX {
+            basics.map_set(places, id as long, math.min_int(place, 65535))
+            place = place + 1
+            id = world_shape_at(w, id).next_shape_id
+        }
+    }
+    return key * (65536 as long) + (basics.map_get(places, shape_id as long, 65535) as long)
+}
+
+// `order` (int[2 * count]: the first half the indices, the second scratch)
+// sorted by keys[3 * index ..], stably, bottom up.
+merge_sort_by_keys(order: int[], count: int, keys: long[]) {
+    width = 1
+    from = 0
+    to = count
+    while width < count {
+        start = 0
+        while start < count {
+            middle = math.min_int(start + width, count)
+            end = math.min_int(start + 2 * width, count)
+            l = middle
+            r = end
+            x = start
+            y = middle
+            o = start
+            while o < end {
+                take_left = x < l && (y >= r || compare_keys(keys, order[from + x], order[from + y]) <= 0)
+                if take_left {
+                    order[to + o] = order[from + x]
+                    x = x + 1
+                } else {
+                    order[to + o] = order[from + y]
+                    y = y + 1
+                }
+                o = o + 1
+            }
+            start = start + 2 * width
+        }
+        swap = from
+        from = to
+        to = swap
+        width = width * 2
+    }
+    if from != 0 {
+        i = 0
+        while i < count {
+            order[i] = order[from + i]
+            i = i + 1
+        }
+    }
+}
+
+compare_keys(keys: long[], a: int, b: int) -> int {
+    k = 0
+    while k < 3 {
+        if keys[3 * a + k] < keys[3 * b + k] { return 0 - 1 }
+        if keys[3 * a + k] > keys[3 * b + k] { return 1 }
+        k = k + 1
+    }
+    return 0
 }
 
 // The end events are double buffered so the user reads last pass's after

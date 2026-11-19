@@ -573,6 +573,11 @@ var g_join_slab: ptr = null
 var g_join_crate: ptr = null
 var g_history_joins = 0
 var g_history_exact = 0
+// With a canonical begin order (#206): the worlds on it, the figure's
+// bones keyed by their index; the joins that met contacts beginning
+// together, all held bit for bit.
+var g_join_canonical = false
+var g_canonical_together = 0
 
 join_world(h: *Human, layout: int) -> ShapeId {
     wdef = world_def()
@@ -592,6 +597,14 @@ join_world(h: *Human, layout: int) -> ShapeId {
     shape = human.human_reference_shape()
     human.create_human_shaped(h, world_id, Transform { p: math.vec3(0.0, 1.2, 0.0), q: math.quat_identity() }, shape, 5.0, 1.0, 0.7, 1, null)
     human.destroy_shape(shape)
+    if g_join_canonical {
+        physics_world.enable_canonical_begin_order(world_id, true)
+        b = 0
+        while b < h.bone_count {
+            dynamics.body_set_order_key(human.bone_at(h, b).body_id, b)
+            b = b + 1
+        }
+    }
     if layout == 1 { slab_shape = join_slab(world_id) }
     if layout == 3 { steps(world_id, 30) }
     return slab_shape
@@ -732,9 +745,14 @@ join_at(at: int, layout: int) {
     }
     free(marks)
     if parted >= 0 { println("snapshot: join at ${at}, layout ${layout}: parted at step ${parted} (contacts first began together at ${together}), ${figures_apart(&a, &b)} m apart after 600") }
-    ensure("join at ${at}, layout ${layout}: bit for bit until contacts begin together (parted at ${parted}, together at ${together})",
-           parted < 0 || (together >= 0 && parted >= together))
-    if layout == 3 {
+    if g_join_canonical {
+        ensure("canonical join at ${at}, layout ${layout}: bit for bit for 600 steps (parted at ${parted}, contacts began together at ${together})", parted < 0)
+        if together >= 0 { g_canonical_together = g_canonical_together + 1 }
+    } else {
+        ensure("join at ${at}, layout ${layout}: bit for bit until contacts begin together (parted at ${parted}, together at ${together})",
+               parted < 0 || (together >= 0 && parted >= together))
+    }
+    if layout == 3 && g_join_canonical == false {
         g_history_joins = g_history_joins + 1
         if parted < 0 { g_history_exact = g_history_exact + 1 }
     }
@@ -813,6 +831,43 @@ refused_restores() {
     dynamics.destroy_world(world_b)
 }
 
+// Order keys (#206): none by default, a key given by the def or set, a
+// negative other than -1 refused; a world's canonical begin order and its
+// bodies' keys kept by a snapshot.
+order_keys() {
+    ensure("order keys: none by default", dynamics.default_body_def().order_key == 0 - 1)
+    wdef = world_def()
+    ensure("order keys: a world's begin order the reference's by default", wdef.canonical_begin_order == false)
+    wdef.canonical_begin_order = true
+    world_id = dynamics.create_world(&wdef)
+    ensure("order keys: a world made on a canonical begin order is on it", physics_world.is_canonical_begin_order_enabled(world_id))
+    plain = dynamic_body(world_id, math.vec3(0.0, 1.0, 0.0))
+    ensure("order keys: a body made without one has none", dynamics.body_get_order_key(plain) == 0 - 1)
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.order_key = 7
+    keyed = dynamics.create_body(world_id, &bdef)
+    ensure("order keys: a def's key", dynamics.body_get_order_key(keyed) == 7)
+    dynamics.body_set_order_key(keyed, 0 - 2)
+    ensure("order keys: -2 refused", dynamics.body_get_order_key(keyed) == 7)
+    dynamics.body_set_order_key(keyed, 0)
+    ensure("order keys: 0 is a key", dynamics.body_get_order_key(keyed) == 0)
+    dynamics.body_set_order_key(plain, 2147483647)
+    ensure("order keys: the largest int is a key", dynamics.body_get_order_key(plain) == 2147483647)
+    bdef.order_key = 0 - 5
+    refused = dynamics.create_body(world_id, &bdef)
+    ensure("order keys: a def with -5 makes no body", refused.index1 == 0)
+    data, size = snapshot.save_world(world_id)
+    copy = snapshot.load_world(&wdef, data, size)
+    ensure("order keys: a snapshot keeps the begin order", physics_world.is_canonical_begin_order_enabled(copy))
+    ensure("order keys: a snapshot keeps the keys",
+           dynamics.body_get_order_key(dynamics.make_body_id(dynamics.get_world(copy.index1 - 1), keyed.index1 - 1)) == 0 &&
+           dynamics.body_get_order_key(dynamics.make_body_id(dynamics.get_world(copy.index1 - 1), plain.index1 - 1)) == 2147483647)
+    snapshot.free_snapshot(data, size)
+    dynamics.destroy_world(copy)
+    dynamics.destroy_world(world_id)
+}
+
 body_set_join() {
     g_join_slab = hull.make_box_hull(20.0, 1.0, 20.0) as ptr
     g_join_crate = hull.make_box_hull(0.5, 0.5, 0.5) as ptr
@@ -827,6 +882,21 @@ body_set_join() {
     }
     refused_restores()
     println("snapshot: into a world with a history, ${g_history_exact} of ${g_history_joins} joins bit for bit for 600 steps")
+    // The same joins with the worlds on a canonical begin order and the
+    // bones keyed: every one bit for bit, in every layout (#206).
+    g_join_canonical = true
+    k = 0
+    while k < 8 {
+        join_at(seeds[k], 0)
+        join_at(seeds[k], 1)
+        join_at(seeds[k], 2)
+        join_at(seeds[k], 3)
+        k = k + 1
+    }
+    g_join_canonical = false
+    println("snapshot: on a canonical begin order, 32 of 32 joins checked bit for bit; ${g_canonical_together} met contacts beginning together")
+    ensure("canonical joins: contacts began together in many of them (${g_canonical_together})", g_canonical_together >= 8)
+    order_keys()
     println("snapshot: a cold join (pose and motion only) parts by ${cold_join_apart(40)} m after 600 steps")
     hull.destroy_hull(g_join_slab as *HullData)
     hull.destroy_hull(g_join_crate as *HullData)

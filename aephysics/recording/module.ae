@@ -2559,6 +2559,18 @@ dispatch_call(p: *Player, op: int) -> bool {
         if p.ok { physics_world.enable_kinematic_speculation(a_world_id_id, a_bool_flag) }
         return true
     }
+    if op == dynamics.OP_ENABLE_CANONICAL_BEGIN_ORDER {
+        a_world_id_id = p.world_id
+        a_bool_flag = read_bool(p)
+        if p.ok { physics_world.enable_canonical_begin_order(a_world_id_id, a_bool_flag) }
+        return true
+    }
+    if op == dynamics.OP_BODY_SET_ORDER_KEY {
+        a_body_id_id = read_body_id(p)
+        a_int_key = read_int(p)
+        if p.ok { dynamics.body_set_order_key(a_body_id_id, a_int_key) }
+        return true
+    }
     if op == dynamics.OP_ENABLE_TRAVEL_SPECULATION {
         a_world_id_id = p.world_id
         a_bool_flag = read_bool(p)
