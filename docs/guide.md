@@ -565,8 +565,11 @@ body_def.order_key = figure_id * 64 + bone  // or dynamics.body_set_order_key(bo
 
 Contacts that start touching together then take their colours ordered
 by their bodies' keys and their shapes' places on them, after every
-contact that stopped. A body with no key (-1) sorts after every keyed
-one, by its own id. A sleeping set is saved asleep and goes back to sleep. One joint's impulses alone are
+contact that stopped. Keys must differ between bodies that can touch
+(`figure_id * 64 + bone` holds for figures of up to 64 bones); two
+bodies with one key, or a body past 65536 shapes, fall back to
+contact-id order for their ties. A body with no key (-1) sorts after
+every keyed one, by its own id. A sleeping set is saved asleep and goes back to sleep. One joint's impulses alone are
 `joint_get_impulses` and `joint_set_impulses`.
 
 A recording keeps every call that changes a world, field by field, with a

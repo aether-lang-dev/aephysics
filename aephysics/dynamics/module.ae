@@ -6563,9 +6563,10 @@ collide_pass(w: *World) -> int {
     // contacts that began touching wait until every other change is made,
     // then go in the order both worlds share (begin_in_canonical_order).
     changed = 0
+    // On the heap, made at the first begin: sized for every contact id.
     begun_block = null
+    begun_bytes = 0
     begun_count = 0
-    if w.canonical_begin_order { begun_block = basics.stack_alloc(&w.stack, math.max_int(w.contact_state.block_count * 64, 1) * 4) }
     bits = w.contact_state.bits as long[]
     k = 0
     while k < w.contact_state.block_count {
@@ -6578,7 +6579,11 @@ collide_pass(w: *World) -> int {
             if (flags & SIM_DISJOINT) != 0 {
                 destroy_contact(w, c, false)
             } else if (flags & SIM_STARTED_TOUCHING) != 0 {
-                if begun_block != null {
+                if w.canonical_begin_order {
+                    if begun_block == null {
+                        begun_bytes = math.max_int(w.contact_state.block_count * 64, 1) * 4
+                        begun_block = basics.alloc(begun_bytes)
+                    }
                     (begun_block as int[])[begun_count] = contact_id
                     begun_count = begun_count + 1
                 } else {
@@ -6602,7 +6607,7 @@ collide_pass(w: *World) -> int {
     }
     if begun_block != null {
         begin_in_canonical_order(w, begun_block as int[], begun_count)
-        basics.stack_free(&w.stack, begun_block)
+        basics.free_bytes(begun_block, begun_bytes)
     }
     return changed
 }
@@ -6627,13 +6632,15 @@ begin_touching(w: *World, c: *Contact) {
 // histories gave the contacts.
 begin_in_canonical_order(w: *World, ids: int[], count: int) {
     if count == 0 { return }
-    keys_block = basics.stack_alloc(&w.stack, count * 3 * 8)
+    keys_block = basics.alloc(count * 3 * 8)
     keys = keys_block as long[]
+    // Each shape's place on its body, a body's list walked once.
+    places = basics.map_create(2 * count)
     i = 0
     while i < count {
         c = contact_at(w, ids[i])
-        a = contact_end_key(w, c.shape_id_a)
-        b = contact_end_key(w, c.shape_id_b)
+        a = contact_end_key(w, &places, c.shape_id_a)
+        b = contact_end_key(w, &places, c.shape_id_b)
         keys[3 * i] = a
         keys[3 * i + 1] = b
         if b < a {
@@ -6643,7 +6650,8 @@ begin_in_canonical_order(w: *World, ids: int[], count: int) {
         keys[3 * i + 2] = c.child_index as long
         i = i + 1
     }
-    order_block = basics.stack_alloc(&w.stack, count * 2 * 4)
+    basics.map_destroy(&places)
+    order_block = basics.alloc(count * 2 * 4)
     order = order_block as int[]
     i = 0
     while i < count {
@@ -6656,22 +6664,25 @@ begin_in_canonical_order(w: *World, ids: int[], count: int) {
         begin_touching(w, contact_at(w, ids[order[i]]))
         i = i + 1
     }
-    basics.stack_free(&w.stack, order_block)
-    basics.stack_free(&w.stack, keys_block)
+    basics.free_bytes(order_block, count * 2 * 4)
+    basics.free_bytes(keys_block, count * 3 * 8)
 }
 
-contact_end_key(w: *World, shape_id: int) -> long {
+contact_end_key(w: *World, places: *LongMap, shape_id: int) -> long {
     shape = world_shape_at(w, shape_id)
     body = body_at(w, shape.body_id)
     key = body.order_key as long
     if key < (0 as long) { key = (2147483648 as long) + (body.id as long) }
-    place = 0
-    id = body.head_shape_id
-    while id != NULL_INDEX && id != shape_id {
-        place = place + 1
-        id = world_shape_at(w, id).next_shape_id
+    if basics.map_has(places, shape_id as long) == false {
+        place = 0
+        id = body.head_shape_id
+        while id != NULL_INDEX {
+            basics.map_set(places, id as long, math.min_int(place, 65535))
+            place = place + 1
+            id = world_shape_at(w, id).next_shape_id
+        }
     }
-    return key * (65536 as long) + (math.min_int(place, 65535) as long)
+    return key * (65536 as long) + (basics.map_get(places, shape_id as long, 65535) as long)
 }
 
 // `order` (int[2 * count]: the first half the indices, the second scratch)
