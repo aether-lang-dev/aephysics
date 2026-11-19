@@ -135,7 +135,7 @@ exports (
     default_filter_joint_def, default_prismatic_joint_def, default_revolute_joint_def, default_spherical_joint_def,
     default_weld_joint_def, default_wheel_joint_def, null_joint_id,
     distance_joint_of, motor_joint_of, parallel_joint_of, prismatic_joint_of, revolute_joint_of, spherical_joint_of, weld_joint_of, wheel_joint_of,
-    set_spherical_cone_axis, spherical_cone_off_axis, clamp_spherical_cone, spherical_swing_angle,
+    set_spherical_cone_axis, spherical_cone_off_axis, spherical_twist_rotation, spherical_twist_angle, spherical_centre_turn, clamp_spherical_cone, spherical_swing_angle,
     spherical_cone_elliptical, spherical_cone_minor, spherical_cone_gap, spherical_cone_push_axis, spherical_cone_major_axis, spherical_cone_minor_axis, spherical_lock_error,
     joint_is_valid, get_joint_full_id, make_joint_id, get_joint_sim, get_joint_sim_of_kind, joint_edge_next,
     create_distance_joint, create_motor_joint, create_filter_joint, create_parallel_joint, create_prismatic_joint,
@@ -7356,6 +7356,24 @@ clamp_spherical_cone(s: *SphericalJoint, angle: float) -> float {
 }
 
 // The swing a spherical joint's cone limits, from the frames' relative rotation.
+// The rotation a spherical joint's twist is read from (#204): frame B
+// against frame A, or, for a cone centred off frame A's z, against frame A
+// turned by the shortest arc onto the centre. The reference reads twist
+// about frame A's z, whose swing-twist split is lost at the far pole: an
+// arm raised overhead against a rest that hangs down is near it, and its
+// twist jumps by up to pi from one step to the next, the limit pushing it
+// round the wrong way. From the centre, B's z is never farther than the
+// cone (at most 0.8 pi, clamp_spherical_cone) plus what it overruns. The
+// shortest arc has no turn about z, so the rest still reads no twist.
+spherical_twist_rotation(s: *SphericalJoint, rel_q: Quat) -> Quat {
+    if spherical_cone_off_axis(s) == false { return rel_q }
+    return math.inv_mul_quat(spherical_centre_turn(s), rel_q)
+}
+
+spherical_centre_turn(s: *SphericalJoint) -> Quat { return math.compute_quat_between_unit_vectors(math.vec3_axis_z(), s.cone_axis) }
+
+spherical_twist_angle(s: *SphericalJoint, rel_q: Quat) -> float { return math.get_twist_angle(spherical_twist_rotation(s, rel_q)) }
+
 spherical_swing_angle(s: *SphericalJoint, rel_q: Quat) -> float {
     if spherical_cone_off_axis(s) == false { return math.get_swing_angle(rel_q) }
     b = math.rotate_vector(rel_q, math.vec3_axis_z())
@@ -7856,7 +7874,7 @@ joint_get_angular_separation(id: JointId) -> float {
             sum = sum + math.max_float(0.0, swing - s.cone_angle)
         }
         if s.enable_twist_limit {
-            twist = math.get_twist_angle(rel_q)
+            twist = spherical_twist_angle(s, rel_q)
             sum = sum + math.max_float(0.0, s.lower_twist_angle - twist)
             sum = sum + math.max_float(0.0, twist - s.upper_twist_angle)
         }

@@ -474,7 +474,8 @@ human.destroy_human(&figure)
   figure its own index, or two figures' hips pass through each other.
 - **Joint ranges.** By default the joints have a person's ranges: shoulders
   that reach overhead and turn 70 degrees inward and 90 outward, hips on an
-  elliptical cone, knees and elbows that never pass straight. Every joint's
+  elliptical cone that turn 45 degrees each way, knees and elbows that
+  never pass straight. Every joint's
   frames meet at the rest pose, so its angles are measured from the rest,
   the two sides are mirrors, and a joint spring holds the rest.
   `human_tight_limits(shape)` puts Box3D's tighter ranges, and its own
@@ -662,6 +663,13 @@ it changes results, so Box3D's own scenes give Box3D's checksums.
   for hips and shoulders. A circle about z stays the default, bit for bit.
 - **A locked minor on a cone** (`spherical_joint_lock_cone_minor`): the
   joint swings only along one arc and still twists, as an elbow does.
+- **Twist read from a cone's centre.** Box3D reads a spherical joint's
+  twist about frame A's z. For a cone centred off it (a shoulder's, whose
+  rest hangs down), an arm raised overhead is near the far pole of that
+  split, and the twist read jumps by up to pi between steps. The twist is
+  read from the cone's centre instead, so it stays well defined across
+  the whole cone. The rest still reads no twist. Cones about frame A's z
+  read it as Box3D does.
 - **A set of bodies' solver state** (`save_body_set`, `restore_body_set`,
   `joint_get_impulses`, `joint_set_impulses`), for late-joining peers.
 - **Canonical begin order** (`canonical_begin_order`, `order_key`):

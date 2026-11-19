@@ -1197,10 +1197,12 @@ test_ankle_shins() {
 // for a fit that only scales. All three moved once more, on purpose
 // (#202): a person's ranges now come with frames that meet at the rest,
 // and the tight preset puts the reference's back by their angle at the
-// rest, the same frames to round-off.
-const UNCHANGED_REFERENCE = 101769349529503931
-const UNCHANGED_ANKLES = 9000564361300388678
-const UNCHANGED_FITTED = 0 - 3875750476885056911
+// rest, the same frames to round-off. And once more (#204, #205): a cone
+// centred off the rest (the shoulders', the hips', the ankles') reads its
+// twist from its centre, and the hips turn 45 degrees each way.
+const UNCHANGED_REFERENCE = 5759444031876973653
+const UNCHANGED_ANKLES = 182076244786469052
+const UNCHANGED_FITTED = 0 - 7811433904010306131
 
 unchanged_hash(kind: int) -> long {
     world_id = world_with_ground()
@@ -1358,8 +1360,10 @@ move_rigidly(h: *Human, velocity: Vec3, spin: Vec3) {
 // A figure with `flags` dropped from standing with a kick, then thrown
 // (flung up and spun hard), stepping 600 steps in all: the worst limit
 // excursion and joint separation over the whole of it. `variant` picks
-// one of four kicks and throws: a fall is chaotic, so one throw's worst
-// says little, and figures are compared by their worst over the four.
+// one of sixteen kicks and throws, leaning harder every second one: a
+// fall is chaotic, so a few throws' worst says little (four passed bounds
+// that sixteen broke, #204), and figures are compared by their worst over
+// the sixteen.
 drop_and_throw(flags: int, variant: int) -> JointWorst {
     world_id = world_with_ground()
     h = Human { bones: null, filter_joints: null, filter_joint_count: 0, friction_torque: 0.0, is_spawned: false }
@@ -1390,11 +1394,13 @@ drop_and_throw(flags: int, variant: int) -> JointWorst {
     return worst
 }
 
-// The worst of the four throws.
+// The worst of the sixteen throws.
+const THROWS = 16
+
 worst_of_throws(flags: int) -> JointWorst {
     worst = JointWorst { angular: 0.0, linear: 0.0, settled_angular: 0.0, settled_linear: 0.0 }
     variant = 0
-    while variant < 4 {
+    while variant < THROWS {
         one = drop_and_throw(flags, variant)
         worst.angular = math.max_float(worst.angular, one.angular)
         worst.linear = math.max_float(worst.linear, one.linear)
@@ -1414,18 +1420,19 @@ worst_of_throws(flags: int) -> JointWorst {
 // settles, and no joint ever turned through it. A soft joint is a spring
 // whose stiffness goes with the mass it moves, so a light bone pressed to
 // its limit by the figure's weight (a wrist under the body, a shoulder
-// hanging from a clavicle) settles a little past it: within 6.3 degrees,
+// hanging from a clavicle) settles a little past it: within 4.6 degrees,
 // where the reference's heavier bones settle within 0.3. Over sixteen
-// throws of every extra, a hand pinned between the chest and the ground
-// settles 0.106 rad past (#202's frames; before them, the four throws here
-// settled within 0.06 and the sixteen had a joint stuck 1.53 rad past).
-const SETTLED_ANGLE = 0.11
+// throws of every extra the worst settles 0.073 rad past (#204: with twist
+// read from a cone's centre; read about the rest, a shoulder raised high
+// lost its twist and the worst was 0.16, a joint once stuck 1.53 past).
+// The sag is the joints' softness: at 16 sub-steps and 240 Hz it is 0.003.
+const SETTLED_ANGLE = 0.08
 const SETTLED_SEPARATION = 0.005
 const NEVER_THROUGH = 1.2
 
 test_extras_build() {
     baseline = worst_of_throws(0)
-    println("human: the reference's figure, dropped and thrown four ways: worst limit excursion ${baseline.angular} rad, worst separation ${baseline.linear} m, settled ${baseline.settled_angular} rad and ${baseline.settled_linear} m")
+    println("human: the reference's figure, dropped and thrown sixteen ways: worst limit excursion ${baseline.angular} rad, worst separation ${baseline.linear} m, settled ${baseline.settled_angular} rad and ${baseline.settled_linear} m")
     options = [WITH_HEAD, WITH_CLAVICLES, WITH_HANDS, WITH_SPINE_02, WITH_TWIST, WITH_HEAD | WITH_CLAVICLES | WITH_HANDS | WITH_SPINE_02 | WITH_TWIST,
                WITH_HEAD | WITH_CLAVICLES | WITH_HANDS | WITH_SPINE_02 | WITH_TWIST | WITH_ANKLES]
     k = 0
@@ -1488,7 +1495,7 @@ test_extras_build() {
         // Dropped from standing and thrown, its joints hold and stay within
         // their limits as the reference's figure's do.
         worst = worst_of_throws(flags)
-        println("human: extras ${flags}, dropped and thrown four ways: worst limit excursion ${worst.angular} rad, worst separation ${worst.linear} m, settled ${worst.settled_angular} rad and ${worst.settled_linear} m")
+        println("human: extras ${flags}, dropped and thrown sixteen ways: worst limit excursion ${worst.angular} rad, worst separation ${worst.linear} m, settled ${worst.settled_angular} rad and ${worst.settled_linear} m")
         ensure("extras ${flags}: settled, every joint inside its limits after each drop and throw (${worst.settled_angular} rad)", worst.settled_angular < SETTLED_ANGLE)
         ensure("extras ${flags}: settled, every joint closed (${worst.settled_linear} m)", worst.settled_linear < SETTLED_SEPARATION)
         ensure("extras ${flags}: no joint turned through its limit on an impact (${worst.angular} rad)", worst.angular < NEVER_THROUGH)
@@ -1960,15 +1967,16 @@ test_rest_frames() {
     human.destroy_shape(tight)
 }
 
-// An arm turned about itself to past either end of its range, weightless,
-// its elbow bent: how far it turned (degrees) and how far the forearm's
-// tip ended from the figure's middle, in the chest's frame.
+// A limb turned about itself to past either end of its range, weightless,
+// its elbow or knee bent: how far it turned (degrees) and how far the
+// forearm's or shin's tip ended from the figure's middle, in its parent's
+// frame (the chest's, the pelvis's).
 struct ArmTurn {
     degrees: float
     out: float
 }
 
-arm_turned(index: int, past_upper: bool) -> ArmTurn {
+limb_turned(index: int, past_upper: bool) -> ArmTurn {
     shape = human.human_reference_shape()
     world_id = world_with_ground()
     physics_world.set_gravity(world_id, math.vec3_zero())
@@ -1981,7 +1989,7 @@ arm_turned(index: int, past_upper: bool) -> ArmTurn {
     joint_solver.spherical_joint_set_target_rotation(shoulder, math.make_quat_from_axis_angle(math.vec3_axis_z(), target))
     joint_solver.spherical_joint_set_spring_hertz(shoulder, 6.0)
     joint_solver.spherical_joint_set_spring_damping_ratio(shoulder, 1.0)
-    // The elbow at 60 percent of its bend, the far end of its range.
+    // The elbow or knee at 60 percent of its bend, the far end of its range.
     forearm = index + 1
     elbow = human.bone_at(&h, forearm).joint_id
     lower = joint_solver.revolute_joint_get_lower_limit(elbow)
@@ -1992,11 +2000,11 @@ arm_turned(index: int, past_upper: bool) -> ArmTurn {
     joint_solver.revolute_joint_set_spring_hertz(elbow, 6.0)
     joint_solver.revolute_joint_set_spring_damping_ratio(elbow, 1.0)
     steps(world_id, 180)
-    chest_id = human.bone_at(&h, human.BONE_SPINE_03).body_id
+    chest_id = human.bone_at(&h, spec.parent).body_id
     chest = Transform { p: dynamics.body_get_position(chest_id), q: dynamics.body_get_rotation(chest_id) }
     tip_body = human.bone_at(&h, forearm).body_id
     tip = math.transform_point(Transform { p: dynamics.body_get_position(tip_body), q: dynamics.body_get_rotation(tip_body) }, human.human_bone_far_end(&h, forearm))
-    in_figure = math.transform_point(human.spec_at(shape, human.BONE_SPINE_03).reference, math.inv_transform_point(chest, tip))
+    in_figure = math.transform_point(human.spec_at(shape, spec.parent).reference, math.inv_transform_point(chest, tip))
     result = ArmTurn { degrees: joint_solver.spherical_joint_get_twist_angle(shoulder) * math.RAD_TO_DEG, out: math.abs_float(in_figure.x) }
     human.destroy_human(&h)
     dynamics.destroy_world(world_id)
@@ -2012,8 +2020,8 @@ test_shoulder_rotation() {
     k = 0
     while k < 2 {
         i = arms[k]
-        a = arm_turned(i, true)
-        b = arm_turned(i, false)
+        a = limb_turned(i, true)
+        b = limb_turned(i, false)
         inward = a
         outward = b
         if b.out < a.out {
@@ -2024,6 +2032,32 @@ test_shoulder_rotation() {
         ensure("shoulders: arm ${i} turns inward to 70 degrees (${inward.degrees})", math.abs_float(math.abs_float(inward.degrees) - human.SHOULDER_INTERNAL_ROTATION) < 5.0)
         ensure("shoulders: arm ${i} turns outward to 90 degrees (${outward.degrees})", math.abs_float(math.abs_float(outward.degrees) - human.SHOULDER_EXTERNAL_ROTATION) < 5.0)
         ensure("shoulders: arm ${i}, the inward turn brings the forearm in (${inward.out} against ${outward.out} m)", inward.out + 0.1 < outward.out)
+        k = k + 1
+    }
+}
+
+// Hips turn 45 degrees inward and 45 outward (#205): each thigh, its knee
+// bent, turned past either end stops there, and the inward end is the one
+// that swings the shin out, away from the middle, on both sides.
+test_hip_rotation() {
+    thighs = [human.BONE_THIGH_L, human.BONE_THIGH_R]
+    k = 0
+    while k < 2 {
+        i = thighs[k]
+        a = limb_turned(i, true)
+        b = limb_turned(i, false)
+        inward = a
+        outward = b
+        if b.out > a.out {
+            inward = b
+            outward = a
+        }
+        println("human: hip ${i} turned inward ${inward.degrees} degrees, the shin's tip ${inward.out} m from the middle; outward ${outward.degrees}, ${outward.out} m")
+        ensure("hips: thigh ${i} turns inward to 45 degrees (${inward.degrees})", math.abs_float(math.abs_float(inward.degrees) - human.HIP_INTERNAL_ROTATION) < 5.0)
+        ensure("hips: thigh ${i} turns outward to 45 degrees (${outward.degrees})", math.abs_float(math.abs_float(outward.degrees) - human.HIP_EXTERNAL_ROTATION) < 5.0)
+        ensure("hips: thigh ${i}, the inward turn swings the shin out (${inward.out} against ${outward.out} m)", inward.out > outward.out + 0.1)
+        // Inward is the arm's sign on the same side: positive on the right.
+        ensure("hips: thigh ${i} turns inward the way its side's arm does", (inward.degrees > 0.0) == (i == human.BONE_THIGH_R))
         k = k + 1
     }
 }
@@ -2053,6 +2087,7 @@ main() {
     test_fit_given_hinge_axes()
     test_rest_frames()
     test_shoulder_rotation()
+    test_hip_rotation()
     test_twist()
     hull.destroy_hull(g_slab as *HullData)
     println("human: ${checks} checks")
