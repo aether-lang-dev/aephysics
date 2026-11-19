@@ -647,8 +647,43 @@ figures_apart(a: *Human, b: *Human) -> float {
     return worst
 }
 
+// How many of a figure's contacts touch now that did not at the last
+// call, its contacts' touching marks kept in `marks` (bytes by contact id,
+// JOIN_MARKS of them).
+const JOIN_MARKS = 4096
+
+begun_touching(h: *Human, marks: ptr) -> int {
+    w = dynamics.get_world(human.bone_at(h, 0).body_id.world0)
+    now = calloc(JOIN_MARKS, 1)
+    seen = now as byte[]
+    was = marks as byte[]
+    begun = 0
+    i = 0
+    while i < h.bone_count {
+        key = dynamics.body_at(w, human.bone_at(h, i).body_id.index1 - 1).head_contact_key
+        while key != 0 - 1 {
+            id = key >> 1
+            if id < JOIN_MARKS && (dynamics.contact_at(w, id).flags & dynamics.CONTACT_TOUCHING) != 0 && seen[id] == 0 {
+                seen[id] = 1
+                if was[id] == 0 { begun = begun + 1 }
+            }
+            key = dynamics.contact_edge_next(w, key)
+        }
+        i = i + 1
+    }
+    memcpy(marks, now, JOIN_MARKS)
+    free(now)
+    return begun
+}
+
 // A figure kicked onto the slab, saved at step `at` and restored into a
-// world built as `layout` says: both then step 600 more, bit for bit.
+// world built as `layout` says: both then step 600 more, bit for bit until
+// two of the figure's contacts begin touching in one step. Contacts that
+// begin together take their graph colours in contact-id order (as Box3D's
+// do), and a world numbers new contacts from its own history: the joined
+// world's ids differ from the saved world's whatever its layout (two such
+// contacts took swapped colours in #203's seed 23), so from that step the
+// two may part from the last bit. Measured and printed past it.
 join_at(at: int, layout: int) {
     a = Human { bones: null, filter_joints: null, filter_joint_count: 0, friction_torque: 0.0, is_spawned: false }
     slab_a = join_world(&a, 0)
@@ -684,20 +719,21 @@ join_at(at: int, layout: int) {
     asleep_a = physics_world.get_awake_body_count(world_a) == 0
     ensure("join at ${at}, layout ${layout}: asleep here as there", asleep_a == false || dynamics.body_is_awake(human.bone_at(&b, 0).body_id) == false)
     parted = 0 - 1
+    together = 0 - 1
+    marks = calloc(JOIN_MARKS, 1)
+    begun_touching(&a, marks)
     s = 0
     while s < 600 {
         physics_world.step(world_a, 1.0 / 60.0, 4)
         physics_world.step(world_b, 1.0 / 60.0, 4)
+        if together < 0 && begun_touching(&a, marks) >= 2 { together = s }
         if parted < 0 && same_figures(&a, &b) == false { parted = s }
         s = s + 1
     }
-    if parted >= 0 { println("snapshot: join at ${at}, layout ${layout}: parted at step ${parted}, ${figures_apart(&a, &b)} m apart after 600") }
-    // A world with a history (layout 3) numbers new contacts from the ids
-    // its own history freed, and contacts that start touching on a body in
-    // the same step take their colours in id order (as Box3D's do): two
-    // such worlds can order them differently and part from the last bit.
-    // Measured and printed, not held to bit for bit.
-    if layout < 3 { ensure("join at ${at}, layout ${layout}: bit for bit for 600 steps (parted at ${parted})", parted < 0) }
+    free(marks)
+    if parted >= 0 { println("snapshot: join at ${at}, layout ${layout}: parted at step ${parted} (contacts first began together at ${together}), ${figures_apart(&a, &b)} m apart after 600") }
+    ensure("join at ${at}, layout ${layout}: bit for bit until contacts begin together (parted at ${parted}, together at ${together})",
+           parted < 0 || (together >= 0 && parted >= together))
     if layout == 3 {
         g_history_joins = g_history_joins + 1
         if parted < 0 { g_history_exact = g_history_exact + 1 }
