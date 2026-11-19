@@ -4,7 +4,9 @@
 // for two seconds under gravity. Every joint's linear and angular
 // separation (between its frames) stays within 2 cm and 0.02 rad -- the
 // solver honours the frames, and the readouts measure them (a free hinge
-// that had swung half round once read as torn: aephysics#82).
+// that had swung half round once read as torn: aephysics#82). And a
+// spherical joint's cone holds a box swung fast across it, whatever the
+// cone: the reference's circle, one off frame A's z, an ellipse (#204).
 import std.string
 import aephysics.math
 import aephysics.hull
@@ -25,6 +27,9 @@ range(lo: float, hi: float) -> float { return lo + (hi - lo) * rand01() }
 random_quat() -> Quat { return math.make_quat_from_axis_angle(math.normalize(math.vec3(range(0.0 - 1.0, 1.0), range(0.0 - 1.0, 1.0), range(0.1, 1.0))), range(0.0, 6.2)) }
 
 const KIND_COUNT = 5
+// How far past its cone a fast swing may run: a circle's, an ellipse's.
+const SWING_PAST_CIRCLE = 0.06
+const SWING_PAST_ELLIPSE = 0.15
 var g_failed = false
 
 // One trial: a static body and a box joined with frames turned every way,
@@ -108,6 +113,58 @@ trial(kind: int, box: *HullData, worst: *Vec2) {
     dynamics.destroy_world(world_id)
 }
 
+// A cone holding a fast swing (#204): a box on a spherical joint, tipped
+// inside its cone and spun at 25 to 35 rad/s about an axis across it, so
+// frame B's z sweeps half a radian a step across the cone, not straight
+// out from its centre. Without gravity, for a second. The cone's row
+// linearised where the step began pushed about the wrong line once the
+// box had swung on: over sixteen swings it ran 0.56 rad past the ellipse,
+// 0.17 past the circle off A's z and 0.11 past the reference's; pushed
+// where B's z is each sub-step, 0.09, 0.04 and 0.04. `cone` 0 is the
+// circle about frame A's z, 1 a circle off it, 2 an ellipse off it (0.3
+// across, where a sub-step's sweep is a larger part of the room).
+fast_swing(cone: int, box: *HullData) -> float {
+    wdef = dynamics.default_world_def()
+    wdef.gravity = math.vec3_zero()
+    world_id = dynamics.create_world(&wdef)
+    adef = dynamics.default_body_def()
+    a = dynamics.create_body(world_id, &adef)
+    across = math.normalize(math.vec3(range(0.0 - 1.0, 1.0), range(0.0 - 1.0, 1.0), 0.0))
+    tip = math.make_quat_from_axis_angle(across, range(0.0, 0.3))
+    frame_b = Transform { p: math.vec3(0.0, 0.0, 0.0 - 0.5), q: math.quat_identity() }
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.position = math.rotate_vector(tip, math.vec3(0.0, 0.0, 0.5))
+    bdef.rotation = tip
+    spin_axis = math.normalize(math.vec3(range(0.0 - 1.0, 1.0), range(0.0 - 1.0, 1.0), 0.0))
+    bdef.angular_velocity = math.mul_sv(range(25.0, 35.0), spin_axis)
+    bdef.linear_velocity = math.cross(bdef.angular_velocity, bdef.position)
+    b = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    dynamics.create_hull_shape(b, &sdef, box)
+    d = dynamics.default_spherical_joint_def()
+    d.base.body_id_a = a
+    d.base.body_id_b = b
+    d.base.local_frame_b = frame_b
+    d.enable_cone_limit = true
+    d.cone_angle = 0.6
+    if cone >= 1 { d.cone_axis = math.vec3(sin(0.2), 0.0, cos(0.2)) }
+    if cone == 2 {
+        d.cone_angle = 0.8
+        d.cone_minor_angle = 0.3
+    }
+    id = dynamics.create_spherical_joint(world_id, &d)
+    worst = 0.0
+    step = 0
+    while step < 60 {
+        physics_world.step(world_id, 1.0 / 60.0, 4)
+        worst = math.max_float(worst, dynamics.joint_get_angular_separation(id))
+        step = step + 1
+    }
+    dynamics.destroy_world(world_id)
+    return worst
+}
+
 main() {
     box = hull.make_box_hull(0.3, 0.2, 0.4)
     kind = 0
@@ -121,6 +178,20 @@ main() {
         println("joint_frames: kind ${kind} worst linear separation ${worst.x} m, worst angular ${worst.y} rad")
         if worst.x > 0.02 || worst.y > 0.02 { g_failed = true }
         kind = kind + 1
+    }
+    cone = 0
+    while cone < 3 {
+        worst_swing = 0.0
+        t = 0
+        while t < 16 {
+            worst_swing = math.max_float(worst_swing, fast_swing(cone, box))
+            t = t + 1
+        }
+        println("joint_frames: cone ${cone} swung fast, worst past its limit ${worst_swing} rad")
+        bound = SWING_PAST_CIRCLE
+        if cone == 2 { bound = SWING_PAST_ELLIPSE }
+        if worst_swing > bound { g_failed = true }
+        cone = cone + 1
     }
     hull.destroy_hull(box)
     if g_failed {

@@ -1649,39 +1649,7 @@ prepare_spherical_joint(base: *JointSim, ctx: *StepContext) {
     j.frame_b = world_frame(bodies.sim_b, base.local_frame_b)
     j.delta_center = math.sub(bodies.sim_b.center, bodies.sim_a.center)
     inertia_sum = math.add_mm(math.widen_mat3(base.inv_inertia_a), math.widen_mat3(base.inv_inertia_b))
-    cone_axis = math.rotate_vector(j.frame_a.q, math.vec3_axis_z())
-    twist_axis = math.rotate_vector(j.frame_b.q, math.vec3_axis_z())
-    if j.enable_cone_limit {
-        swing_axis = dynamics.spherical_cone_push_axis(j, j.frame_a.q, twist_axis)
-        k = math.dot(swing_axis, math.mul_mv(inertia_sum, swing_axis))
-        j.swing_mass = 0.0
-        if k > 0.0 { j.swing_mass = 1.0 / k }
-        j.swing_axis = swing_axis
-    }
-    if j.enable_twist_limit {
-        // Read from the cone's centre when it is off frame A's z (#204):
-        // the reference's row with frame A turned onto the centre.
-        rel_q = dynamics.spherical_twist_rotation(j, math.inv_mul_quat(j.frame_a.q, j.frame_b.q))
-        reference_axis = cone_axis
-        if dynamics.spherical_cone_off_axis(j) { reference_axis = math.rotate_vector(j.frame_a.q, j.cone_axis) }
-        tan_half = math.sqrt_float((rel_q.x * rel_q.x + rel_q.y * rel_q.y) / (rel_q.z * rel_q.z + rel_q.w * rel_q.w))
-        swing_axis = math.normalize(math.cross(reference_axis, twist_axis))
-        perp = math.cross(swing_axis, reference_axis)
-        jacobian = math.mul_add(reference_axis, tan_half, perp)
-        k = math.dot(jacobian, math.mul_mv(inertia_sum, jacobian))
-        j.twist_mass = 0.0
-        if k > 0.0 { j.twist_mass = 1.0 / k }
-        j.twist_jacobian = jacobian
-    }
-    // The minor lock: C = B's z along the cone's minor axis on A, whose
-    // rate is (w_b - w_a) along B's z crossed with that axis.
-    if j.lock_cone_minor {
-        lock_axis = math.cross(twist_axis, math.rotate_vector(j.frame_a.q, dynamics.spherical_cone_minor_axis(j)))
-        k = math.dot(lock_axis, math.mul_mv(inertia_sum, lock_axis))
-        j.lock_mass = 0.0
-        if k > 0.0 { j.lock_mass = 1.0 / k }
-        j.lock_axis = lock_axis
-    }
+    spherical_angular_rows(j, j.frame_a.q, j.frame_b.q, inertia_sum)
     if base.fixed_rotation == false { j.rotation_mass = math.invert_matrix(inertia_sum) } else { j.rotation_mass = math.mat3_zero() }
     j.spring_softness = dynamics.make_soft(j.hertz, j.damping_ratio, ctx.h)
     // A spring off or of no stiffness computes no impulse; its last one is
@@ -1696,6 +1664,85 @@ prepare_spherical_joint(base: *JointSim, ctx: *StepContext) {
         j.upper_twist_impulse = 0.0
         j.lock_impulse = 0.0
     }
+}
+
+// The angular limits' rows with frames A and B at `quat_a` and `quat_b`
+// (world): the cone's push axis, the twist's Jacobian and the minor lock's
+// axis, each with its effective mass. The prepare makes them where the step
+// starts, as the reference does, and each solve again where the sub-steps
+// have moved the bodies (#204), as the reference's revolute joint makes its
+// perpendicular rows (spherical_rows_where_now). The reference keeps the
+// step's first (its todo asks whether an updated swing axis helps): a limb
+// swinging fast turns half a radian in a step, and a cone row pushing about
+// where B's z was when the step began holds it back along the wrong line.
+// A foot landing at 30 rad/s ran 1.2 rad past its cone so, at 16 sub-steps
+// as at 4 (more sub-steps gave the stale row nothing new to push along);
+// made where B's z is, the worst over sixteen throws is 0.69 at 4
+// sub-steps, 0.47 at 8 and 0.24 at 16. (An ellipse's push turns with B's z
+// faster than a circle's; spherical_cone_push_axis keeps that to the rim's
+// curvature, which a row made each sub-step needs.)
+spherical_angular_rows(j: *SphericalJoint, quat_a: Quat, quat_b: Quat, inertia_sum: Matrix3) {
+    if j.enable_cone_limit { spherical_cone_row(j, quat_a, quat_b, inertia_sum) }
+    if j.enable_twist_limit { spherical_twist_row(j, quat_a, quat_b, inertia_sum) }
+    if j.lock_cone_minor { spherical_lock_row(j, quat_a, quat_b, inertia_sum) }
+}
+
+// The cone's row. B's z on the cone's centre has no direction to push: the
+// row keeps its last axis, a cone's width from the limit.
+spherical_cone_row(j: *SphericalJoint, quat_a: Quat, quat_b: Quat, inertia_sum: Matrix3) {
+    swing_axis = dynamics.spherical_cone_push_axis(j, quat_a, math.rotate_vector(quat_b, math.vec3_axis_z()))
+    if math.length_squared(swing_axis) > 0.0 {
+        k = math.dot(swing_axis, math.mul_mv(inertia_sum, swing_axis))
+        j.swing_mass = 0.0
+        if k > 0.0 { j.swing_mass = 1.0 / k }
+        j.swing_axis = swing_axis
+    }
+}
+
+// The twist's row, read from the cone's centre when it is off frame A's z
+// (#204): the reference's row with frame A turned onto the centre.
+spherical_twist_row(j: *SphericalJoint, quat_a: Quat, quat_b: Quat, inertia_sum: Matrix3) {
+    twist_axis = math.rotate_vector(quat_b, math.vec3_axis_z())
+    rel_q = dynamics.spherical_twist_rotation(j, math.inv_mul_quat(quat_a, quat_b))
+    reference_axis = math.rotate_vector(quat_a, math.vec3_axis_z())
+    if dynamics.spherical_cone_off_axis(j) { reference_axis = math.rotate_vector(quat_a, j.cone_axis) }
+    tan_half = math.sqrt_float((rel_q.x * rel_q.x + rel_q.y * rel_q.y) / (rel_q.z * rel_q.z + rel_q.w * rel_q.w))
+    twist_swing = math.normalize(math.cross(reference_axis, twist_axis))
+    perp = math.cross(twist_swing, reference_axis)
+    jacobian = math.mul_add(reference_axis, tan_half, perp)
+    k = math.dot(jacobian, math.mul_mv(inertia_sum, jacobian))
+    j.twist_mass = 0.0
+    if k > 0.0 { j.twist_mass = 1.0 / k }
+    j.twist_jacobian = jacobian
+}
+
+// The minor lock's row: C = B's z along the cone's minor axis on A, whose
+// rate is (w_b - w_a) along B's z crossed with that axis.
+spherical_lock_row(j: *SphericalJoint, quat_a: Quat, quat_b: Quat, inertia_sum: Matrix3) {
+    lock_axis = math.cross(math.rotate_vector(quat_b, math.vec3_axis_z()), math.rotate_vector(quat_a, dynamics.spherical_cone_minor_axis(j)))
+    k = math.dot(lock_axis, math.mul_mv(inertia_sum, lock_axis))
+    j.lock_mass = 0.0
+    if k > 0.0 { j.lock_mass = 1.0 / k }
+    j.lock_axis = lock_axis
+}
+
+// A solve's rows where the frames are now: each limit's that can act in
+// this sub-step, one holding an impulse or within `reach` of its limit
+// (twice the angle the frames' relative speed turns them in a sub-step).
+// A limit holding none and farther than that pushes nothing whatever its
+// row: its speculative bias, the gap over the sub-step, outruns any closing
+// speed along a unit axis (or the twist's Jacobian, no longer than root 2
+// within a quarter turn), and its impulse clamps to zero. So its row is
+// left as it was, with results bit for bit those of making every row:
+// most joints sit inside their ranges most of the time, and making every
+// row every solve cost the spherical joint a third of its time. The minor
+// lock is an equality, always acting: its row is made every time.
+spherical_rows_where_now(j: *SphericalJoint, quat_a: Quat, quat_b: Quat, cone_gap: float, twist: float, inertia_sum: Matrix3, reach: float) {
+    if j.enable_cone_limit && (j.swing_impulse > 0.0 || cone_gap < reach) { spherical_cone_row(j, quat_a, quat_b, inertia_sum) }
+    if j.enable_twist_limit && (j.lower_twist_impulse > 0.0 || j.upper_twist_impulse > 0.0 || twist - j.lower_twist_angle < reach || j.upper_twist_angle - twist < reach) {
+        spherical_twist_row(j, quat_a, quat_b, inertia_sum)
+    }
+    if j.lock_cone_minor { spherical_lock_row(j, quat_a, quat_b, inertia_sum) }
 }
 
 warm_start_spherical_joint(base: *JointSim, ctx: *StepContext) {
@@ -1734,6 +1781,15 @@ solve_spherical_joint(base: *JointSim, ctx: *StepContext, use_bias: bool) {
     quat_a = math.mul_quat(math.widen_quat(state_a.dq), j.frame_a.q)
     quat_b = math.mul_quat(math.widen_quat(state_b.dq), j.frame_b.q)
     rel_q = math.inv_mul_quat(quat_a, quat_b)
+    // The limits read once, for the rows and their solves.
+    cone_gap = 0.0
+    if j.enable_cone_limit { cone_gap = dynamics.spherical_cone_gap(j, rel_q) }
+    twist = 0.0
+    if j.enable_twist_limit { twist = dynamics.spherical_twist_angle(j, rel_q) }
+    if fixed_rotation == false && (j.enable_cone_limit || j.enable_twist_limit || j.lock_cone_minor) {
+        reach = 2.0 * ctx.h * math.length(math.sub(w_b, w_a))
+        spherical_rows_where_now(j, quat_a, quat_b, cone_gap, twist, math.add_mm(i_a, i_b), reach)
+    }
     if j.enable_spring && fixed_rotation == false {
         delta_rotation = math.delta_quat_to_rotation(rel_q, j.target_rotation)
         c = math.neg(math.rotate_vector(quat_a, delta_rotation))
@@ -1757,7 +1813,6 @@ solve_spherical_joint(base: *JointSim, ctx: *StepContext, use_bias: bool) {
         w_b = math.add(w_b, math.mul_mv(i_b, lambda))
     }
     if j.enable_twist_limit && fixed_rotation == false {
-        twist = dynamics.spherical_twist_angle(j, rel_q)
         jacobian = j.twist_jacobian
         // Lower.
         scales = limit_scales(base, ctx, twist - j.lower_twist_angle, use_bias)
@@ -1780,7 +1835,7 @@ solve_spherical_joint(base: *JointSim, ctx: *StepContext, use_bias: bool) {
     }
     if j.enable_cone_limit && fixed_rotation == false {
         swing_axis = j.swing_axis
-        scales = limit_scales(base, ctx, dynamics.spherical_cone_gap(j, rel_q), use_bias)
+        scales = limit_scales(base, ctx, cone_gap, use_bias)
         cdot = math.dot(math.sub(w_a, w_b), swing_axis)
         old_impulse = j.swing_impulse
         delta = 0.0 - scales.mass_scale * j.swing_mass * (cdot + scales.bias) - scales.impulse_scale * old_impulse

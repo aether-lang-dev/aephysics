@@ -967,6 +967,9 @@ foot_tilt(h: *Human, foot_index: int) -> float {
     return asin(math.abs_float(axis.y)) * math.RAD_TO_DEG
 }
 
+// The feet's last excursions past their limits, degrees (crouched_soles).
+var g_crouch_sag = Vec2 { x: 0.0, y: 0.0 }
+
 crouched_soles(degrees: float) -> Vec2 {
     world_id = world_with_ground()
     h = Human { bones: null, filter_joints: null, filter_joint_count: 0, friction_torque: 0.0, is_spawned: false }
@@ -1010,6 +1013,8 @@ crouched_soles(degrees: float) -> Vec2 {
         s = s + 1
     }
     tilt = Vec2 { x: foot_tilt(&h, human.BONE_FOOT_L) - rest_l, y: foot_tilt(&h, human.BONE_FOOT_R) - rest_r }
+    g_crouch_sag = Vec2 { x: dynamics.joint_get_angular_separation(human.bone_at(&h, human.BONE_FOOT_L).joint_id) * math.RAD_TO_DEG,
+                          y: dynamics.joint_get_angular_separation(human.bone_at(&h, human.BONE_FOOT_R).joint_id) * math.RAD_TO_DEG }
     human.destroy_human(&h)
     dynamics.destroy_world(world_id)
     return tilt
@@ -1020,10 +1025,19 @@ test_ankle_crouch() {
     ensure("crouch: shins 25 degrees over the feet, the soles lie as standing (${shallow.x}, ${shallow.y} degrees)",
            math.abs_float(shallow.x) < 3.0 && math.abs_float(shallow.y) < 3.0)
     deep = crouched_soles(45.0)
+    sag = g_crouch_sag
     over = 45.0 - human.ANKLE_DORSAL_DEGREES
-    println("human: crouched soles against standing: shins at 25 degrees ${shallow.x} and ${shallow.y}, at 45 degrees ${deep.x} and ${deep.y}")
-    ensure("crouch: shins 45 degrees over, the soles lift by what the 35 cannot take (${deep.x}, ${deep.y} against ${over})",
-           math.abs_float(deep.x - over) < 4.0 && math.abs_float(deep.y - over) < 4.0)
+    println("human: crouched soles against standing: shins at 25 degrees ${shallow.x} and ${shallow.y}, at 45 degrees ${deep.x} and ${deep.y}, the ankles ${sag.x} and ${sag.y} past their limits")
+    // Past the range the foot is wedged: the shin held, the toes on the
+    // ground and held there by friction, the ankle's limit turning the foot
+    // toes down. The sole lifts by what the 35 cannot take less what the
+    // ankle gives, a light bone's soft joint under that wedge (#204): 3.7
+    // and 5.3 degrees, the soles 6.4 and 4.8, at rest and asleep in half a
+    // second. (Its row once shook the foot at 2 rad/s, and the shaking
+    // walked the toes on until the soles lifted 8.4.)
+    ensure("crouch: shins 45 degrees over, the soles lift by what the 35 cannot take, less what the ankles give (${deep.x} + ${sag.x}, ${deep.y} + ${sag.y} against ${over})",
+           math.abs_float(deep.x + sag.x - over) < 1.0 && math.abs_float(deep.y + sag.y - over) < 1.0)
+    ensure("crouch: the wedged ankles give at most 6 degrees (${sag.x}, ${sag.y})", sag.x < 6.0 && sag.y < 6.0)
 }
 
 // #174: with ankles each calf's capsule stops at its ankle, its cap within
@@ -1199,10 +1213,13 @@ test_ankle_shins() {
 // and the tight preset puts the reference's back by their angle at the
 // rest, the same frames to round-off. And once more (#204, #205): a cone
 // centred off the rest (the shoulders', the hips', the ankles') reads its
-// twist from its centre, and the hips turn 45 degrees each way.
-const UNCHANGED_REFERENCE = 5759444031876973653
-const UNCHANGED_ANKLES = 182076244786469052
-const UNCHANGED_FITTED = 0 - 7811433904010306131
+// twist from its centre, and the hips turn 45 degrees each way. And once
+// more (#204): a spherical joint's limit rows are made again each sub-step
+// where B's z is, and an ellipse's pushes along the nearest rim point's
+// normal.
+const UNCHANGED_REFERENCE = 9051829026855609828
+const UNCHANGED_ANKLES = 5474879403437732451
+const UNCHANGED_FITTED = 0 - 3429263234805564101
 
 unchanged_hash(kind: int) -> long {
     world_id = world_with_ground()
@@ -1413,22 +1430,23 @@ worst_of_throws(flags: int) -> JointWorst {
 
 // A soft joint gives on an impact and comes back: Box3D's joints are soft
 // constraints at a quarter of the sub-step rate, and a light body struck
-// between the ground and a heavy one (a hand under the figure, a head on
-// its neck in a spin) overruns its limit for a few steps, more than the
-// reference's heavier bones do (at four sub-steps; eight halve it). What
-// holds is the limit itself: every joint back at it once the figure
-// settles, and no joint ever turned through it. A soft joint is a spring
-// whose stiffness goes with the mass it moves, so a light bone pressed to
-// its limit by the figure's weight (a wrist under the body, a shoulder
-// hanging from a clavicle) settles a little past it: within 4.6 degrees,
-// where the reference's heavier bones settle within 0.3. Over sixteen
-// throws of every extra the worst settles 0.073 rad past (#204: with twist
-// read from a cone's centre; read about the rest, a shoulder raised high
-// lost its twist and the worst was 0.16, a joint once stuck 1.53 past).
+// between the ground and a heavy one (a foot planted as the shin comes
+// down on it, a hand under the figure) overruns its limit for a step or
+// two. What holds is the limit itself: every joint back at it once the
+// figure settles, and none ever turned through it. Over sixteen throws of
+// every figure the worst overrun is 0.70 rad at four sub-steps, and the
+// figures with all the extras overrun 0.38 on average (#204: with the limit
+// rows made once a step, as the reference makes them, a limb swinging fast
+// was pushed back about where it had been, and the ankles ran 1.25 past,
+// at sixteen sub-steps as at four; now, at sixteen, 0.24). A soft joint is
+// a spring whose stiffness goes with the mass it moves, so a light bone
+// pressed to its limit by the figure's weight (a forearm pinned under the
+// torso, a shoulder hanging from a clavicle) settles a little past it: the
+// worst over the sixteen throws 0.064 rad, the reference's figure 0.028.
 // The sag is the joints' softness: at 16 sub-steps and 240 Hz it is 0.003.
 const SETTLED_ANGLE = 0.08
 const SETTLED_SEPARATION = 0.005
-const NEVER_THROUGH = 1.2
+const NEVER_THROUGH = 0.8
 
 test_extras_build() {
     baseline = worst_of_throws(0)

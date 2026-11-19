@@ -7458,6 +7458,28 @@ spherical_cone_gap(s: *SphericalJoint, rel_q: Quat) -> float {
     return cone_radius(s.cone_angle, s.cone_minor_angle as float, reach.along_major, reach.along_minor) - reach.theta
 }
 
+// The nearest point of the ellipse x^2/a^2 + y^2/b^2 = 1 to (px, py) outside
+// it: the root t > 0 of a^2 px^2/(t + a^2)^2 + b^2 py^2/(t + b^2)^2 = 1, by
+// bisection (Eberly, Distance from a Point to an Ellipse); the point is
+// (a^2 px/(t + a^2), b^2 py/(t + b^2)) and its normal (px/(t + a^2),
+// py/(t + b^2)). The function falls from above 1 at 0 to at most 1 at
+// sqrt(a^2 px^2 + b^2 py^2) less the smaller square, which brackets the root.
+ellipse_nearest_t(a: float, b: float, px: float, py: float) -> float {
+    aa = a * a
+    bb = b * b
+    lo = 0.0
+    hi = math.max_float(math.sqrt_float(aa * px * px + bb * py * py) - math.min_float(aa, bb), 0.0)
+    i = 0
+    while i < 64 {
+        t = 0.5 * (lo + hi)
+        u = a * px / (t + aa)
+        v = b * py / (t + bb)
+        if u * u + v * v > 1.0 { lo = t } else { hi = t }
+        i = i + 1
+    }
+    return 0.5 * (lo + hi)
+}
+
 // The world axis the cone limit pushes about, with frame B's z at
 // `twist_axis` (world): for the circle the reference's, the centre crossed
 // with B's z; for the ellipse the rotation that carries B's z along the
@@ -7472,6 +7494,18 @@ spherical_cone_push_axis(s: *SphericalJoint, frame_a_q: Quat, twist_axis: Vec3) 
     minor = s.cone_minor_angle as float
     normal_major = reach.theta * reach.along_major / (a * a)
     normal_minor = reach.theta * reach.along_minor / (minor * minor)
+    // Past the rim, the normal where the rim is nearest (#204), not the
+    // gradient at B's z: near an ellipse's end the gradient turns as fast as
+    // a/b squared with B's z (eight times for the ankle's 42.5 by 15 degrees),
+    // and a row made each sub-step at a foot pressed hard past the rim there
+    // turned its push to and fro (a crouched foot shook at 2 rad/s). The
+    // nearest point's normal turns as 1 over the rim's curvature radius plus
+    // B's distance from it, and is the rim's normal on it.
+    if normal_major * reach.along_major + normal_minor * reach.along_minor > 1.0 / reach.theta {
+        t = ellipse_nearest_t(a, minor, reach.theta * reach.along_major, reach.theta * reach.along_minor)
+        normal_major = reach.theta * reach.along_major / (t + a * a)
+        normal_minor = reach.theta * reach.along_minor / (t + minor * minor)
+    }
     radial = normal_major * reach.along_major + normal_minor * reach.along_minor
     around = normal_minor * reach.along_major - normal_major * reach.along_minor
     // B's z moves along `outward` as the angle grows and along `sideways`
@@ -7869,10 +7903,10 @@ joint_get_angular_separation(id: JointId) -> float {
     if kind == JOINT_SPHERICAL {
         s = spherical_joint_of(base)
         sum = 0.0
-        if s.enable_cone_limit {
-            swing = spherical_swing_angle(s, rel_q)
-            sum = sum + math.max_float(0.0, swing - s.cone_angle)
-        }
+        // Past the cone where B's z is: an ellipse's radius in that
+        // direction, not its major half-angle (which read a foot turned
+        // sideways a whole 27.5 degrees past its side limit as inside).
+        if s.enable_cone_limit { sum = sum + math.max_float(0.0, 0.0 - spherical_cone_gap(s, rel_q)) }
         if s.enable_twist_limit {
             twist = spherical_twist_angle(s, rel_q)
             sum = sum + math.max_float(0.0, s.lower_twist_angle - twist)
