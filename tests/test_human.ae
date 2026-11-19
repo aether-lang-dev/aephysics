@@ -1360,8 +1360,10 @@ move_rigidly(h: *Human, velocity: Vec3, spin: Vec3) {
 // A figure with `flags` dropped from standing with a kick, then thrown
 // (flung up and spun hard), stepping 600 steps in all: the worst limit
 // excursion and joint separation over the whole of it. `variant` picks
-// one of four kicks and throws: a fall is chaotic, so one throw's worst
-// says little, and figures are compared by their worst over the four.
+// one of sixteen kicks and throws, leaning harder every second one: a
+// fall is chaotic, so a few throws' worst says little (four passed bounds
+// that sixteen broke, #204), and figures are compared by their worst over
+// the sixteen.
 drop_and_throw(flags: int, variant: int) -> JointWorst {
     world_id = world_with_ground()
     h = Human { bones: null, filter_joints: null, filter_joint_count: 0, friction_torque: 0.0, is_spawned: false }
@@ -1392,11 +1394,13 @@ drop_and_throw(flags: int, variant: int) -> JointWorst {
     return worst
 }
 
-// The worst of the four throws.
+// The worst of the sixteen throws.
+const THROWS = 16
+
 worst_of_throws(flags: int) -> JointWorst {
     worst = JointWorst { angular: 0.0, linear: 0.0, settled_angular: 0.0, settled_linear: 0.0 }
     variant = 0
-    while variant < 4 {
+    while variant < THROWS {
         one = drop_and_throw(flags, variant)
         worst.angular = math.max_float(worst.angular, one.angular)
         worst.linear = math.max_float(worst.linear, one.linear)
@@ -1428,7 +1432,7 @@ const NEVER_THROUGH = 1.2
 
 test_extras_build() {
     baseline = worst_of_throws(0)
-    println("human: the reference's figure, dropped and thrown four ways: worst limit excursion ${baseline.angular} rad, worst separation ${baseline.linear} m, settled ${baseline.settled_angular} rad and ${baseline.settled_linear} m")
+    println("human: the reference's figure, dropped and thrown sixteen ways: worst limit excursion ${baseline.angular} rad, worst separation ${baseline.linear} m, settled ${baseline.settled_angular} rad and ${baseline.settled_linear} m")
     options = [WITH_HEAD, WITH_CLAVICLES, WITH_HANDS, WITH_SPINE_02, WITH_TWIST, WITH_HEAD | WITH_CLAVICLES | WITH_HANDS | WITH_SPINE_02 | WITH_TWIST,
                WITH_HEAD | WITH_CLAVICLES | WITH_HANDS | WITH_SPINE_02 | WITH_TWIST | WITH_ANKLES]
     k = 0
@@ -1491,7 +1495,7 @@ test_extras_build() {
         // Dropped from standing and thrown, its joints hold and stay within
         // their limits as the reference's figure's do.
         worst = worst_of_throws(flags)
-        println("human: extras ${flags}, dropped and thrown four ways: worst limit excursion ${worst.angular} rad, worst separation ${worst.linear} m, settled ${worst.settled_angular} rad and ${worst.settled_linear} m")
+        println("human: extras ${flags}, dropped and thrown sixteen ways: worst limit excursion ${worst.angular} rad, worst separation ${worst.linear} m, settled ${worst.settled_angular} rad and ${worst.settled_linear} m")
         ensure("extras ${flags}: settled, every joint inside its limits after each drop and throw (${worst.settled_angular} rad)", worst.settled_angular < SETTLED_ANGLE)
         ensure("extras ${flags}: settled, every joint closed (${worst.settled_linear} m)", worst.settled_linear < SETTLED_SEPARATION)
         ensure("extras ${flags}: no joint turned through its limit on an impact (${worst.angular} rad)", worst.angular < NEVER_THROUGH)
