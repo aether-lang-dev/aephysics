@@ -201,8 +201,8 @@ struct LimitScales {
 limit_scales(base: *JointSim, ctx: *StepContext, c: float, use_bias: bool) -> LimitScales {
     if c > 0.0 { return LimitScales { bias: c * ctx.inv_h, mass_scale: 1.0, impulse_scale: 0.0 } }
     if use_bias {
-        return LimitScales { bias: base.constraint_softness.bias_rate * c, mass_scale: base.constraint_softness.mass_scale,
-                             impulse_scale: base.constraint_softness.impulse_scale }
+        return LimitScales { bias: base.limit_softness.bias_rate * c, mass_scale: base.limit_softness.mass_scale,
+                             impulse_scale: base.limit_softness.impulse_scale }
     }
     return LimitScales { bias: 0.0, mass_scale: 1.0, impulse_scale: 0.0 }
 }
@@ -2872,6 +2872,8 @@ wheel_joint_get_steering_torque(id: JointId) -> float {
 prepare_joint(base: *JointSim, ctx: *StepContext) {
     hertz = math.min_float(base.constraint_hertz, 0.25 * ctx.inv_h)
     base.constraint_softness = dynamics.make_soft(hertz, base.constraint_damping_ratio, ctx.h)
+    base.limit_softness = base.constraint_softness
+    if ctx.limit_load_scale > 0.0 && ctx.enable_warm_starting { size_limits_to_load(base, ctx) }
     kind = base.kind
     if kind == dynamics.JOINT_PARALLEL { prepare_parallel_joint(base, ctx) }
     else if kind == dynamics.JOINT_DISTANCE { prepare_distance_joint(base, ctx) }
@@ -2881,6 +2883,32 @@ prepare_joint(base: *JointSim, ctx: *StepContext) {
     else if kind == dynamics.JOINT_SPHERICAL { prepare_spherical_joint(base, ctx) }
     else if kind == dynamics.JOINT_WELD { prepare_weld_joint(base, ctx) }
     else if kind == dynamics.JOINT_WHEEL { prepare_wheel_joint(base, ctx) }
+}
+
+// A joint's limits sized to the load it carries (#213). The soft step makes
+// a limit a spring for the joint's own bodies (their reduced mass), so a
+// limit holding back a heavy body through a light one (a shoulder under a
+// figure lying on its arm, its cone pressed by the torso) gives as the light
+// limb's spring would: on ground sized to its load (#212), where the arm no
+// longer sinks in, a shoulder rested 0.13 rad past its cone. Here the
+// joint's point impulse as the step begins, over |gravity| h, is the mass
+// it holds up; when that is more than its own, its limits' spring is made
+// for it: the same hertz and damping ratio, the stiffness k (hertz times the
+// step) scaled by carried / own, mass_scale = k / (1 + k), impulse_scale =
+// 1 / (1 + k), the same bias rate. Only the limits, which push one way: the
+// point and the locks sized so too held a light foot between them and the
+// ground too stiffly for one pass to settle, and a welded figure toppled.
+size_limits_to_load(base: *JointSim, ctx: *StepContext) {
+    w = ctx.world
+    sim_a = dynamics.get_body_sim(w, dynamics.body_at(w, base.body_id_a))
+    sim_b = dynamics.get_body_sim(w, dynamics.body_at(w, base.body_id_b))
+    inv_mass = sim_a.inv_mass + sim_b.inv_mass
+    soft = base.constraint_softness
+    if inv_mass <= 0.0 || soft.impulse_scale <= 0.0 { return }
+    carried = dynamics.get_joint_reaction(w, base, 1.0).force * ctx.limit_load_scale * inv_mass
+    if carried <= 1.0 { return }
+    k = carried * soft.mass_scale / soft.impulse_scale
+    base.limit_softness = Softness { bias_rate: soft.bias_rate, mass_scale: k / (1.0 + k), impulse_scale: 1.0 / (1.0 + k) }
 }
 
 warm_start_joint(base: *JointSim, ctx: *StepContext) {

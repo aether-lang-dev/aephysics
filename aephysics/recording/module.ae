@@ -2571,6 +2571,12 @@ dispatch_call(p: *Player, op: int) -> bool {
         if p.ok { physics_world.enable_loaded_contacts(a_world_id_id, a_bool_flag) }
         return true
     }
+    if op == dynamics.OP_ENABLE_LOADED_LIMITS {
+        a_world_id_id = p.world_id
+        a_bool_flag = read_bool(p)
+        if p.ok { physics_world.enable_loaded_limits(a_world_id_id, a_bool_flag) }
+        return true
+    }
     if op == dynamics.OP_BODY_SET_ORDER_KEY {
         a_body_id_id = read_body_id(p)
         a_int_key = read_int(p)

@@ -113,7 +113,7 @@ The world definition's fields, with their defaults:
 | `hit_event_threshold` | 1 | approach speed that makes a hit event |
 | `maximum_linear_speed` | 400 | m/s |
 | `friction_callback`, `restitution_callback` | geometric mean, maximum | how two materials mix |
-| `enable_kinematic_static_softness`, `enable_kinematic_speculation`, `enable_travel_speculation`, `canonical_begin_order`, `loaded_contacts` | false | see [Where aephysics goes past Box3D](#where-aephysics-goes-past-box3d) |
+| `enable_kinematic_static_softness`, `enable_kinematic_speculation`, `enable_travel_speculation`, `canonical_begin_order`, `loaded_contacts`, `loaded_limits` | false | see [Where aephysics goes past Box3D](#where-aephysics-goes-past-box3d) |
 
 Most settings can change between steps through `physics_world`:
 `enable_sleeping`, `enable_continuous`, `enable_warm_starting`,
@@ -695,9 +695,24 @@ it changes results, so Box3D's own scenes give Box3D's checksums.
   ratio, sized to the load. The box sinks 0.07 mm, as a box on its own
   does, and the feet lie flat. A point carrying no more than its own body
   is unchanged, and so are contacts between two moving bodies, where a
-  light body squeezed between two near-rigid contacts shook. Joints still
-  give under such loads (#213): a limb pinned under a figure on firm ground
-  rests further past its limit than on the soft one.
+  light body squeezed between two near-rigid contacts shook. Joint limits
+  have the same sizing; see the next item.
+- **Joint limits sized to their load** (`loaded_limits`,
+  `physics_world.enable_loaded_limits`). A joint limit is a spring sized to
+  the joint's own bodies, so a light limb pressed to its limit by a heavy
+  body gives as the limb's spring would. On firm ground (`loaded_contacts`)
+  a ragdoll lying on its arm rested 0.13 rad past its shoulder's cone.
+  With the option on, a joint whose point holds up more than its own
+  bodies has its limits' spring made, once a step, for that mass. Over
+  sixteen thrown figures with ankles, at 4 sub-steps with both options on,
+  the worst settled excursion is 0.014 rad (0.145 with the ground alone,
+  0.052 with neither). An 80 kg pole leaning on the 0.1 rad cone of a joint
+  on a 1.16 kg foot rests 0.002 rad past it instead of 0.044. Only the
+  limits change: sizing the point and the locks the same way held a light
+  foot between them and the ground too stiffly for one solver pass, and a
+  welded figure toppled. A joint's point still gives a few millimetres
+  under such loads; more sub-steps, with `joint_set_constraint_tuning` at
+  up to an eighth of the sub-step rate, are what stiffen it.
 - **A parallel joint's torque cap is the torque applied.** Box3D caps the
   impulse of the joint's two rows. Those rows are the half-angle's, about
   half a unit long near alignment, so a joint given `max_torque` 331 N m

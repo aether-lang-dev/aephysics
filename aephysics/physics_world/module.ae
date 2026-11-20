@@ -42,7 +42,7 @@ exports (
     joint_event_count, joint_event,
     enable_sleeping, is_sleeping_enabled, enable_warm_starting, is_warm_starting_enabled, enable_sse2_fallback, enable_continuous, is_continuous_enabled,
     enable_speculative, set_restitution_threshold, get_restitution_threshold, set_restitution_iterations, get_restitution_iterations,
-    enable_restitution_propagation, is_restitution_propagation_enabled, enable_kinematic_static_softness, is_kinematic_static_softness_enabled, enable_kinematic_speculation, is_kinematic_speculation_enabled, enable_travel_speculation, is_travel_speculation_enabled, enable_canonical_begin_order, is_canonical_begin_order_enabled, enable_loaded_contacts, is_loaded_contacts_enabled, set_hit_event_threshold, get_hit_event_threshold,
+    enable_restitution_propagation, is_restitution_propagation_enabled, enable_kinematic_static_softness, is_kinematic_static_softness_enabled, enable_kinematic_speculation, is_kinematic_speculation_enabled, enable_travel_speculation, is_travel_speculation_enabled, enable_canonical_begin_order, is_canonical_begin_order_enabled, enable_loaded_contacts, is_loaded_contacts_enabled, enable_loaded_limits, is_loaded_limits_enabled, set_hit_event_threshold, get_hit_event_threshold,
     set_contact_tuning, set_contact_recycle_distance, get_contact_recycle_distance, set_maximum_linear_speed, get_maximum_linear_speed,
     set_gravity, get_gravity, set_user_data, get_user_data, set_friction_callback, set_restitution_callback,
     set_custom_filter_callback, set_pre_solve_callback, get_awake_body_count, get_counters, get_bounds, rebuild_static_tree,
@@ -222,6 +222,11 @@ step(id: WorldId, time_step: float, sub_step_count: int) {
     if w.loaded_contacts {
         g = math.length(w.gravity)
         if g > 0.0 && ctx.h > 0.0 { ctx.load_scale = 1.0 / (g * ctx.h) }
+    }
+    ctx.limit_load_scale = 0.0
+    if w.loaded_limits {
+        g = math.length(w.gravity)
+        if g > 0.0 && ctx.h > 0.0 { ctx.limit_load_scale = 1.0 / (g * ctx.h) }
     }
     ctx.restitution_threshold = w.restitution_threshold
     ctx.any_restitution = 0
@@ -443,6 +448,14 @@ enable_loaded_contacts(id: WorldId, flag: bool) {
     if w != null { w.loaded_contacts = flag }
 }
 is_loaded_contacts_enabled(id: WorldId) -> bool { return dynamics.get_world(id.index1 - 1).loaded_contacts }
+// Joint limits sized to the load their joints carry (off: the reference's;
+// #213). See WorldDef.loaded_limits.
+enable_loaded_limits(id: WorldId, flag: bool) {
+    if dynamics.recording_on(id.index1 - 1) { recorder = dynamics.rec_begin(id.index1 - 1, dynamics.OP_ENABLE_LOADED_LIMITS); dynamics.rec_bool(recorder, flag); dynamics.rec_end(recorder) }
+    w = world_of(id)
+    if w != null { w.loaded_limits = flag }
+}
+is_loaded_limits_enabled(id: WorldId) -> bool { return dynamics.get_world(id.index1 - 1).loaded_limits }
 set_hit_event_threshold(id: WorldId, value: float) {
     if dynamics.recording_on(id.index1 - 1) { recorder = dynamics.rec_begin(id.index1 - 1, dynamics.OP_SET_HIT_EVENT_THRESHOLD); dynamics.rec_float(recorder, value); dynamics.rec_end(recorder) }
     if math.is_valid_float(value) == false { return }

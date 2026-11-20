@@ -1645,6 +1645,9 @@ human_create_parallel_anchors(h: *Human, world_id: WorldId) {
     pdef = dynamics.default_parallel_joint_def()
     pdef.hertz = 8.0
     pdef.damping_ratio = 1.0
+    // The reference's 800 N m. Box3D capped the parallel joint's half-angle
+    // rows, so its figure's anchors applied at most about 400; here the cap
+    // is the torque applied (#211), so these hold up to the 800 it names.
     pdef.max_torque = 800.0
     i = 0
     while i < h.bone_count {

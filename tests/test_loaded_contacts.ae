@@ -1,11 +1,13 @@
-// Ground contacts sized to the load they carry (#212,
-// WorldDef.loaded_contacts). Box3D's soft contact is a spring sized to the
+// Ground contacts and joint limits sized to the load they carry (#212,
+// WorldDef.loaded_contacts; #213, WorldDef.loaded_limits). Box3D's soft contact is a spring sized to the
 // point's own effective mass, so a light body holding up a heavy one stands
 // on a spring sized to the light one: a 1 kg box under a 100 kg box sinks
 // 7 mm into the ground, and a heavy body welded onto light feet pitches its
 // feet on the ground and topples. Sized to the load, the box sinks as a
 // lone box does, as still, and the feet lie flat. Off by default (the
-// reference's), kept by snapshots.
+// reference's), kept by snapshots. And a joint's limit is a spring sized to
+// its joint's own bodies: a heavy pole leaning on the cone of a joint on a
+// light foot rests past it; sized to the load, at it.
 import std.string
 import aephysics.math
 import aephysics.hull
@@ -155,6 +157,48 @@ standing(loaded: bool) -> Stand {
     return out
 }
 
+// An 80 kg pole on a spherical joint atop a 1.16 kg foot standing on the
+// ground, leaning past its 0.1 rad cone, on ground sized to its load at 8
+// sub-steps: how far past the cone it rests after two seconds.
+leaning_pole(limits: bool) -> float {
+    world_id = world_with_ground(true)
+    physics_world.enable_loaded_limits(world_id, limits)
+    foot = dynamics.null_body_id()
+    fdef = dynamics.default_body_def()
+    fdef.kind = dynamics.BODY_DYNAMIC
+    fdef.position = math.vec3(0.0, 0.03, 0.0)
+    foot = dynamics.create_body(world_id, &fdef)
+    fs = dynamics.default_shape_def()
+    fs.density = 1.156 / (8.0 * 0.15 * 0.03 * 0.08)
+    dynamics.create_hull_shape(foot, &fs, hull.make_box_hull(0.15, 0.03, 0.08))
+    lean = math.make_quat_from_axis_angle(math.vec3_axis_z(), 0.15)
+    pdef = dynamics.default_body_def()
+    pdef.kind = dynamics.BODY_DYNAMIC
+    pdef.position = math.add(math.vec3(0.0, 0.06, 0.0), math.rotate_vector(lean, math.vec3(0.0, 0.5, 0.0)))
+    pdef.rotation = lean
+    pole = dynamics.create_body(world_id, &pdef)
+    ps = dynamics.default_shape_def()
+    ps.density = 80.0 / (8.0 * 0.05 * 0.5 * 0.05)
+    dynamics.create_hull_shape(pole, &ps, hull.make_box_hull(0.05, 0.5, 0.05))
+    up = math.compute_quat_between_unit_vectors(math.vec3_axis_z(), math.vec3_axis_y())
+    sdef = dynamics.default_spherical_joint_def()
+    sdef.base.body_id_a = foot
+    sdef.base.body_id_b = pole
+    sdef.base.local_frame_a = Transform { p: math.vec3(0.0, 0.03, 0.0), q: up }
+    sdef.base.local_frame_b = Transform { p: math.vec3(0.0, 0.0 - 0.5, 0.0), q: up }
+    sdef.enable_cone_limit = true
+    sdef.cone_angle = 0.1
+    joint = dynamics.create_spherical_joint(world_id, &sdef)
+    s = 0
+    while s < 120 {
+        physics_world.step(world_id, 1.0 / 60.0, 8)
+        s = s + 1
+    }
+    past = dynamics.joint_get_angular_separation(joint)
+    dynamics.destroy_world(world_id)
+    return past
+}
+
 main() {
     wdef = dynamics.default_world_def()
     ensure("off by default, the reference's contacts", wdef.loaded_contacts == false)
@@ -181,15 +225,23 @@ main() {
     ensure("sized to the load, a nudged figure stays up (${on.worst} rad)", on.worst < 0.05)
     ensure("sized to the load, its rocking dies away (${on.first_peak} then ${on.late_peak} rad)", on.late_peak < 0.5 * on.first_peak)
 
+    ensure("limits sized to their joints' own bodies by default", wdef.loaded_limits == false)
+    unsized = leaning_pole(false)
+    sized = leaning_pole(true)
+    println("loaded_contacts: an 80 kg pole leaning on the cone of a joint on a 1.16 kg foot rests ${unsized} rad past it, ${sized} with the limit sized to its load")
+    ensure("a heavy pole on a light foot's joint rests past its cone (${unsized} rad)", unsized > 0.01)
+    ensure("sized to its load, the cone holds it (${sized} rad)", sized < 0.1 * unsized)
+
     // Set between steps, and kept by a snapshot.
     world_id = world_with_ground(false)
     physics_world.enable_loaded_contacts(world_id, true)
-    ensure("set between steps", physics_world.is_loaded_contacts_enabled(world_id))
+    physics_world.enable_loaded_limits(world_id, true)
+    ensure("set between steps", physics_world.is_loaded_contacts_enabled(world_id) && physics_world.is_loaded_limits_enabled(world_id))
     box_body(world_id, 1.0, 0.1, 0.0)
     data, size = snapshot.save_world(world_id)
     plain = dynamics.default_world_def()
     copy = snapshot.load_world(&plain, data, size)
-    ensure("a snapshot keeps it", physics_world.is_loaded_contacts_enabled(copy))
+    ensure("a snapshot keeps them", physics_world.is_loaded_contacts_enabled(copy) && physics_world.is_loaded_limits_enabled(copy))
     snapshot.free_snapshot(data, size)
     dynamics.destroy_world(copy)
     dynamics.destroy_world(world_id)

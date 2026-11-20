@@ -1381,8 +1381,14 @@ move_rigidly(h: *Human, velocity: Vec3, spin: Vec3) {
 // fall is chaotic, so a few throws' worst says little (four passed bounds
 // that sixteen broke, #204), and figures are compared by their worst over
 // the sixteen.
+var g_loaded = false
+
 drop_and_throw(flags: int, variant: int) -> JointWorst {
     world_id = world_with_ground()
+    if g_loaded {
+        physics_world.enable_loaded_contacts(world_id, true)
+        physics_world.enable_loaded_limits(world_id, true)
+    }
     h = Human { bones: null, filter_joints: null, filter_joint_count: 0, friction_torque: 0.0, is_spawned: false }
     set_flags(&h, flags)
     shape = human.human_reference_shape()
@@ -1447,6 +1453,21 @@ worst_of_throws(flags: int) -> JointWorst {
 const SETTLED_ANGLE = 0.08
 const SETTLED_SEPARATION = 0.005
 const NEVER_THROUGH = 0.8
+
+// On ground sized to its load (#212) a limb pinned under the figure no
+// longer sinks in, and its joint's limit, a spring sized to the limb, took
+// the torso's weight: a shoulder rested 0.13 rad past its cone over sixteen
+// throws. With the limits sized to their joints' load too (#213) the worst
+// settles 0.014, and the impacts' overruns fall with it.
+test_loaded_throws() {
+    g_loaded = true
+    worst = worst_of_throws(WITH_HEAD | WITH_CLAVICLES | WITH_HANDS | WITH_SPINE_02 | WITH_TWIST | WITH_ANKLES)
+    g_loaded = false
+    println("human: every extra with ankles, on ground and limits sized to their load, dropped and thrown sixteen ways: worst limit excursion ${worst.angular} rad, worst separation ${worst.linear} m, settled ${worst.settled_angular} rad and ${worst.settled_linear} m")
+    ensure("loaded: settled, every joint at its limits (${worst.settled_angular} rad)", worst.settled_angular < 0.25 * SETTLED_ANGLE)
+    ensure("loaded: settled, every joint closed (${worst.settled_linear} m)", worst.settled_linear < SETTLED_SEPARATION)
+    ensure("loaded: no joint turned through its limit on an impact (${worst.angular} rad)", worst.angular < NEVER_THROUGH)
+}
 
 test_extras_build() {
     baseline = worst_of_throws(0)
@@ -2098,6 +2119,7 @@ main() {
     test_ankle_shins()
     test_unchanged()
     test_extras_build()
+    test_loaded_throws()
     test_extras_masses()
     test_extras_fit()
     test_fit_cap_tail()
