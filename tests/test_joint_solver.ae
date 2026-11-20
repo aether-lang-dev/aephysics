@@ -238,6 +238,58 @@ polarity_run(kind: int, negate: bool) -> Vec3 {
     return w
 }
 
+// A joint left with no dynamic body is not solved, so it holds no
+// impulse. It kept its last one: a cube hanging from a hinge, made
+// kinematic, read the 10 N it had hung by for as long as it stayed
+// kinematic, and made dynamic again it was warm-started with it.
+test_inert_joint() {
+    s = stepped(10.0, math.vec3(0.0, 3.0, 0.0), math.quat_identity())
+    rdef = dynamics.default_revolute_joint_def()
+    rdef.base.body_id_a = s.ground_id
+    rdef.base.body_id_b = s.cube_id
+    rdef.base.local_frame_a.p = math.vec3(0.0, 4.0, 0.0)
+    rdef.base.local_frame_b.p = math.vec3(0.0, 1.0, 0.0)
+    rid = dynamics.create_revolute_joint(s.world_id, &rdef)
+    step = 0
+    while step < 30 {
+        physics_world.step(s.world_id, 1.0 / 60.0, 4)
+        step = step + 1
+    }
+    hung = math.length(joint_solver.joint_get_constraint_force(rid))
+    small("inert joint: hanging, the hinge holds the cube's weight (${hung})", hung - 10.0, 0.01)
+    dynamics.body_set_type(s.cube_id, dynamics.BODY_KINEMATIC)
+    physics_world.step(s.world_id, 1.0 / 60.0, 4)
+    values = calloc(joint_solver.JOINT_IMPULSE_COUNT, 8)
+    n = joint_solver.joint_get_impulses(rid, values)
+    held = 0.0
+    k = 0
+    while k < n {
+        held = held + math.abs_float((values as float[])[k])
+        k = k + 1
+    }
+    ensure("inert joint: the hinge's impulses counted (${n})", n == 9)
+    small("inert joint: kinematic, the hinge holds no impulse", held, 0.0000001)
+    small("inert joint: kinematic, the hinge reads no force", math.length(joint_solver.joint_get_constraint_force(rid)), 0.0000001)
+    // Dynamic again, it starts cold and takes the weight back.
+    dynamics.body_set_type(s.cube_id, dynamics.BODY_DYNAMIC)
+    n = joint_solver.joint_get_impulses(rid, values)
+    held = 0.0
+    k = 0
+    while k < n {
+        held = held + math.abs_float((values as float[])[k])
+        k = k + 1
+    }
+    small("inert joint: dynamic again, nothing to warm-start", held, 0.0000001)
+    step = 0
+    while step < 30 {
+        physics_world.step(s.world_id, 1.0 / 60.0, 4)
+        step = step + 1
+    }
+    small("inert joint: dynamic again, it holds the weight", math.length(joint_solver.joint_get_constraint_force(rid)) - 10.0, 0.01)
+    free(values)
+    dynamics.destroy_world(s.world_id)
+}
+
 test_polarity() {
     a = polarity_run(0, false)
     b = polarity_run(0, true)
@@ -1224,6 +1276,7 @@ main() {
     test_parallel_half_turn()
     step_scratch = basics.alloc_count() - hand
     test_polarity()
+    test_inert_joint()
     ensure("the stepped worlds after the first leave nothing (${basics.alloc_count() - hand - step_scratch})", basics.alloc_count() == hand + step_scratch)
     hull.destroy_hull(g_cube as *HullData)
     // The scratch stays allocated: the worlds' block, the masses, the dummy state (the modules' scratch is reserved before the count).

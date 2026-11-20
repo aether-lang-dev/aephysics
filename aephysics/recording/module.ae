@@ -2917,8 +2917,8 @@ dispatch_call(p: *Player, op: int) -> bool {
     if op == dynamics.OP_JOINT_SET_IMPULSES {
         a_joint_id_id = read_joint_id(p)
         a_int_count = read_int(p)
-        if p.ok && a_int_count >= 0 && a_int_count <= joint_solver.JOINT_IMPULSE_COUNT {
-            impulses = basics.alloc(joint_solver.JOINT_IMPULSE_COUNT * 8)
+        if p.ok && a_int_count >= 0 && a_int_count <= dynamics.JOINT_IMPULSE_COUNT {
+            impulses = basics.alloc(dynamics.JOINT_IMPULSE_COUNT * 8)
             given = impulses as float[]
             k = 0
             while k < a_int_count {
@@ -2926,7 +2926,7 @@ dispatch_call(p: *Player, op: int) -> bool {
                 k = k + 1
             }
             if p.ok { joint_solver.joint_set_impulses(a_joint_id_id, impulses, a_int_count) }
-            basics.free_bytes(impulses, joint_solver.JOINT_IMPULSE_COUNT * 8)
+            basics.free_bytes(impulses, dynamics.JOINT_IMPULSE_COUNT * 8)
         }
         return true
     }

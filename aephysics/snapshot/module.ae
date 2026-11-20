@@ -1216,7 +1216,7 @@ save_body_set(world_id: WorldId, bodies: ptr, count: int) -> (ptr, int) {
         i = i + 1
     }
     w_int(&wr, joint_count)
-    impulses = basics.alloc(joint_solver.JOINT_IMPULSE_COUNT * 8)
+    impulses = basics.alloc(dynamics.JOINT_IMPULSE_COUNT * 8)
     i = 0
     while i < count {
         key = dynamics.body_at(w, local[i]).head_joint_key
@@ -1230,7 +1230,7 @@ save_body_set(world_id: WorldId, bodies: ptr, count: int) -> (ptr, int) {
                 w_int(&wr, j.kind)
                 w_int(&wr, joint_ordinal(w, local[i], key))
                 w_int(&wr, j.color_index)
-                n = joint_solver.joint_impulses_io(dynamics.get_joint_sim(w, j), j.kind, impulses as float[], false)
+                n = dynamics.joint_impulses_io(dynamics.get_joint_sim(w, j), j.kind, impulses as float[], false)
                 w_int(&wr, n)
                 k = 0
                 while k < n {
@@ -1242,7 +1242,7 @@ save_body_set(world_id: WorldId, bodies: ptr, count: int) -> (ptr, int) {
         }
         i = i + 1
     }
-    basics.free_bytes(impulses, joint_solver.JOINT_IMPULSE_COUNT * 8)
+    basics.free_bytes(impulses, dynamics.JOINT_IMPULSE_COUNT * 8)
 
     // The contacts of any of them, each once, in the order the world made them.
     total = 0
@@ -1465,8 +1465,8 @@ apply_body_set(w: *World, local: int[], count: int, shape_map: ptr, map_count: i
     colors_block = basics.alloc(math.max_int(joint_count, 1) * 4)
     joint_ids = ids_block as int[]
     joint_colors = colors_block as int[]
-    impulses = basics.alloc(joint_solver.JOINT_IMPULSE_COUNT * 8)
-    probe = basics.alloc(joint_solver.JOINT_IMPULSE_COUNT * 8)
+    impulses = basics.alloc(dynamics.JOINT_IMPULSE_COUNT * 8)
+    probe = basics.alloc(dynamics.JOINT_IMPULSE_COUNT * 8)
     k = 0
     while k < joint_count && ok {
         from = r_int(&rd)
@@ -1476,7 +1476,7 @@ apply_body_set(w: *World, local: int[], count: int, shape_map: ptr, map_count: i
         ordinal = r_int(&rd)
         color = r_int(&rd)
         n = r_int(&rd)
-        if rd.ok == false || from < 0 || from >= count || to < 0 || to >= count || n < 0 || n > joint_solver.JOINT_IMPULSE_COUNT {
+        if rd.ok == false || from < 0 || from >= count || to < 0 || to >= count || n < 0 || n > dynamics.JOINT_IMPULSE_COUNT {
             ok = false
             break
         }
@@ -1507,11 +1507,11 @@ apply_body_set(w: *World, local: int[], count: int, shape_map: ptr, map_count: i
         }
         j = dynamics.joint_at(w, found)
         joint_sim = dynamics.get_joint_sim(w, j)
-        if joint_solver.joint_impulses_io(joint_sim, kind, probe as float[], false) != n {
+        if dynamics.joint_impulses_io(joint_sim, kind, probe as float[], false) != n {
             ok = false
             break
         }
-        if apply { joint_solver.joint_impulses_io(joint_sim, kind, impulses as float[], true) }
+        if apply { dynamics.joint_impulses_io(joint_sim, kind, impulses as float[], true) }
         joint_ids[k] = found
         joint_colors[k] = color
         k = k + 1
@@ -1519,8 +1519,8 @@ apply_body_set(w: *World, local: int[], count: int, shape_map: ptr, map_count: i
     if apply && ok { dynamics.recolor_joints(w, ids_block, colors_block, joint_count) }
     basics.free_bytes(ids_block, math.max_int(joint_count, 1) * 4)
     basics.free_bytes(colors_block, math.max_int(joint_count, 1) * 4)
-    basics.free_bytes(impulses, joint_solver.JOINT_IMPULSE_COUNT * 8)
-    basics.free_bytes(probe, joint_solver.JOINT_IMPULSE_COUNT * 8)
+    basics.free_bytes(impulses, dynamics.JOINT_IMPULSE_COUNT * 8)
+    basics.free_bytes(probe, dynamics.JOINT_IMPULSE_COUNT * 8)
 
     // The contacts, made again in the order the world saved made them.
     contact_count = 0

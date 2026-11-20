@@ -740,6 +740,13 @@ it changes results, so Box3D's own scenes give Box3D's checksums.
   a whole turn (its quaternion negated), warm-started each step backwards:
   the parallel joint above then applied half its cap. Here the prepares
   match it too, and q and -q step alike to the bit.
+- **A joint with no dynamic body holds no impulse.** When `body_set_type`
+  leaves a joint between kinematic or static bodies, it is not solved.
+  Box3D keeps the impulse it last gathered. So its force kept reading that
+  impulse for as long as the joint was inert, and when a body turned
+  dynamic again, the next step warm-started it into bodies that had moved
+  meanwhile. Here its impulses are cleared, so it reads zero and starts
+  cold.
 - **The parallel and revolute torque reads** use the frames as they now
   stand: the axes the last sub-step solved along and the next step
   warm-starts along. Box3D reads along
