@@ -1,0 +1,204 @@
+// Ground contacts sized to the load they carry (#212,
+// WorldDef.loaded_contacts). Box3D's soft contact is a spring sized to the
+// point's own effective mass, so a light body holding up a heavy one stands
+// on a spring sized to the light one: a 1 kg box under a 100 kg box sinks
+// 7 mm into the ground, and a heavy body welded onto light feet pitches its
+// feet on the ground and topples. Sized to the load, the box sinks as a
+// lone box does, as still, and the feet lie flat. Off by default (the
+// reference's), kept by snapshots.
+import std.string
+import aephysics.math
+import aephysics.hull
+import aephysics.manifold
+import aephysics.dynamics
+import aephysics.physics_world
+import aephysics.snapshot
+
+extern exit(code: int)
+
+var failures = 0
+var checks = 0
+
+ensure(name: string, ok: bool) {
+    checks = checks + 1
+    if !ok {
+        println("loaded_contacts: FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+const PI = 3.14159265358979
+
+world_with_ground(loaded: bool) -> WorldId {
+    wdef = dynamics.default_world_def()
+    wdef.loaded_contacts = loaded
+    world_id = dynamics.create_world(&wdef)
+    physics_world.enable_sleeping(world_id, false)
+    gdef = dynamics.default_body_def()
+    gdef.position = math.vec3(0.0, 0.0 - 1.0, 0.0)
+    ground = dynamics.create_body(world_id, &gdef)
+    sdef = dynamics.default_shape_def()
+    dynamics.create_hull_shape(ground, &sdef, hull.make_box_hull(20.0, 1.0, 20.0))
+    return world_id
+}
+
+// A box of `mass` and half-size `half` with its bottom at `bottom`.
+box_body(world_id: WorldId, mass: float, half: float, bottom: float) -> BodyId {
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.position = math.vec3(0.0, bottom + half, 0.0)
+    b = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    sdef.density = mass / (8.0 * half * half * half)
+    dynamics.create_hull_shape(b, &sdef, hull.make_box_hull(half, half, half))
+    return b
+}
+
+var g_shake = 0.0
+
+// How far the light box's bottom sinks into the ground, metres, with a
+// heavy box resting on it, after two seconds at 8 sub-steps.
+light_under_heavy(loaded: bool) -> float {
+    world_id = world_with_ground(loaded)
+    light = box_body(world_id, 1.0, 0.1, 0.0)
+    box_body(world_id, 100.0, 0.25, 0.2)
+    s = 0
+    while s < 120 {
+        physics_world.step(world_id, 1.0 / 60.0, 8)
+        if s >= 60 { g_shake = math.max_float(g_shake, math.abs_float(dynamics.body_get_linear_velocity(light).y)) }
+        s = s + 1
+    }
+    depth = 0.0 - (dynamics.body_get_position(light).y - 0.1)
+    dynamics.destroy_world(world_id)
+    return depth
+}
+
+// A lone 1 kg box's depth, for scale.
+lone_box() -> float {
+    world_id = world_with_ground(false)
+    light = box_body(world_id, 1.0, 0.1, 0.0)
+    s = 0
+    while s < 120 {
+        physics_world.step(world_id, 1.0 / 60.0, 8)
+        s = s + 1
+    }
+    depth = 0.0 - (dynamics.body_get_position(light).y - 0.1)
+    dynamics.destroy_world(world_id)
+    return depth
+}
+
+// A standing figure as ae3d#1025 measured it: an 82 kg trunk welded onto two
+// 1.16 kg capsule feet, its weight 2 mm behind the ankles, at 8 sub-steps.
+struct Stand {
+    foot_pitch: float              // the feet's pitch on the ground at rest
+    worst: float                   // the trunk's worst pitch from its rest after a nudge
+    first_peak: float              // its first swing, and its swings in the last second
+    late_peak: float
+}
+
+pitch_of(q: Quat) -> float {
+    up = math.rotate_vector(q, math.vec3(0.0, 1.0, 0.0))
+    return math.atan2_approx(0.0 - up.x, up.y)
+}
+
+standing(loaded: bool) -> Stand {
+    world_id = world_with_ground(loaded)
+    tdef = dynamics.default_body_def()
+    tdef.kind = dynamics.BODY_DYNAMIC
+    tdef.position = math.vec3(0.0, 0.08, 0.0)
+    trunk = dynamics.create_body(world_id, &tdef)
+    tsdef = dynamics.default_shape_def()
+    tsdef.density = 82.1 / (0.3 * 0.8 * 0.4)
+    dynamics.create_hull_shape(trunk, &tsdef, hull.make_offset_box_hull(0.15, 0.4, 0.2, math.vec3(0.0 - 0.002, 0.95, 0.0)))
+    foot = dynamics.null_body_id()
+    side = 0
+    while side < 2 {
+        z = 0.1
+        if side == 1 { z = 0.0 - 0.1 }
+        fdef = dynamics.default_body_def()
+        fdef.kind = dynamics.BODY_DYNAMIC
+        fdef.position = math.vec3(0.0, 0.08, 0.0)
+        foot = dynamics.create_body(world_id, &fdef)
+        fsdef = dynamics.default_shape_def()
+        fsdef.density = 1.156 / (PI * 0.068 * 0.068 * 0.154 + 4.0 / 3.0 * PI * 0.068 * 0.068 * 0.068)
+        dynamics.create_capsule_shape(foot, &fsdef, manifold.capsule(math.vec3(0.0 - 0.045, 0.0 - 0.012, z), math.vec3(0.109, 0.0 - 0.012, z), 0.068))
+        wj = dynamics.default_weld_joint_def()
+        wj.base.body_id_a = trunk
+        wj.base.body_id_b = foot
+        wj.base.local_frame_a = Transform { p: math.vec3(0.0, 0.0, z), q: math.quat_identity() }
+        wj.base.local_frame_b = Transform { p: math.vec3(0.0, 0.0, z), q: math.quat_identity() }
+        dynamics.create_weld_joint(world_id, &wj)
+        side = side + 1
+    }
+    out = Stand { foot_pitch: 0.0, worst: 0.0, first_peak: 0.0, late_peak: 0.0 }
+    rest = 0.0
+    s = 0
+    while s < 480 {
+        physics_world.step(world_id, 1.0 / 60.0, 8)
+        if s == 59 {
+            out.foot_pitch = math.abs_float(pitch_of(dynamics.body_get_rotation(foot)))
+            rest = pitch_of(dynamics.body_get_rotation(trunk))
+            // A nudge forward, the figure turning about its soles.
+            w = math.vec3(0.0, 0.0, 0.0 - 0.05)
+            dynamics.body_set_angular_velocity(trunk, w)
+            dynamics.body_set_linear_velocity(trunk, math.cross(w, math.sub(dynamics.body_get_world_center(trunk), math.vec3(0.03, 0.0, 0.0))))
+        }
+        if s >= 60 {
+            off = math.abs_float(pitch_of(dynamics.body_get_rotation(trunk)) - rest)
+            out.worst = math.max_float(out.worst, off)
+            if s < 180 { out.first_peak = math.max_float(out.first_peak, off) }
+            if s >= 420 { out.late_peak = math.max_float(out.late_peak, off) }
+        }
+        s = s + 1
+    }
+    dynamics.destroy_world(world_id)
+    return out
+}
+
+main() {
+    wdef = dynamics.default_world_def()
+    ensure("off by default, the reference's contacts", wdef.loaded_contacts == false)
+
+    lone = lone_box()
+    g_shake = 0.0
+    soft = light_under_heavy(false)
+    soft_shake = g_shake
+    g_shake = 0.0
+    held = light_under_heavy(true)
+    held_shake = g_shake
+    println("loaded_contacts: the light box's speed at rest, worst over the last second: ${soft_shake} sized to itself, ${held_shake} sized to its load")
+    println("loaded_contacts: a 1 kg box alone sinks ${lone} m; under 100 kg, ${soft} m sized to itself, ${held} m sized to its load")
+    ensure("a light box under a heavy one sinks into the ground on the reference's contacts (${soft} m)", soft > 0.003)
+    ensure("sized to its load, it sinks no more than twice a lone box (${held} against ${lone} m)", held < 2.0 * lone + 0.0002)
+    ensure("sized to its load, it rests as still (${held_shake} against ${soft_shake} m/s)", held_shake < 2.0 * soft_shake + 0.0001)
+
+    off = standing(false)
+    on = standing(true)
+    println("loaded_contacts: standing on light feet, sized to the feet: feet pitched ${off.foot_pitch} rad, nudged worst ${off.worst}, swings ${off.first_peak} then ${off.late_peak}")
+    println("loaded_contacts: sized to the load: feet pitched ${on.foot_pitch} rad, nudged worst ${on.worst}, swings ${on.first_peak} then ${on.late_peak}")
+    ensure("sized to the feet, the feet pitch on the ground (${off.foot_pitch} rad)", off.foot_pitch > 0.02)
+    ensure("sized to the load, the feet lie flat (${on.foot_pitch} rad)", on.foot_pitch < 0.0005)
+    ensure("sized to the load, a nudged figure stays up (${on.worst} rad)", on.worst < 0.05)
+    ensure("sized to the load, its rocking dies away (${on.first_peak} then ${on.late_peak} rad)", on.late_peak < 0.5 * on.first_peak)
+
+    // Set between steps, and kept by a snapshot.
+    world_id = world_with_ground(false)
+    physics_world.enable_loaded_contacts(world_id, true)
+    ensure("set between steps", physics_world.is_loaded_contacts_enabled(world_id))
+    box_body(world_id, 1.0, 0.1, 0.0)
+    data, size = snapshot.save_world(world_id)
+    plain = dynamics.default_world_def()
+    copy = snapshot.load_world(&plain, data, size)
+    ensure("a snapshot keeps it", physics_world.is_loaded_contacts_enabled(copy))
+    snapshot.free_snapshot(data, size)
+    dynamics.destroy_world(copy)
+    dynamics.destroy_world(world_id)
+
+    println("loaded_contacts: ${checks} checks")
+    if failures == 0 {
+        println("loaded_contacts: all checks passed")
+    } else {
+        println("loaded_contacts: ${failures} failure(s)")
+        exit(1)
+    }
+}

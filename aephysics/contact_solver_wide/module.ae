@@ -187,6 +187,7 @@ struct WideConstraintPoint {
     lever_arm: f32x8
     relative_velocity: f32x8
     restitution_impulse: f32x8     // what the restitution passes added beyond the approach
+    load_stiffness: f32x8          // sized to its load (#212; contact_solver's ManifoldConstraintPoint)
 }
 
 // Eight convex contacts' constraints (b3ContactConstraintWide): the body
@@ -619,6 +620,13 @@ prepare_wide_slot(ctx: *StepContext, color: *GraphColor, slot: int, end: int) {
         valid = lanes.mask8_and(greater_w(k_normal, zero), has_point)
         cp.normal_mass = blend_w(zero, div_w(one, k_normal), valid)
         cp.relative_velocity = zero
+        // The mass it holds up as the step begins (the scalar prepare says why).
+        cp.load_stiffness = zero
+        if ctx.load_scale > 0.0 {
+            carried = div_w(mul_w(cp.normal_impulse, splat_w(ctx.load_scale)), max_w(cp.normal_mass, splat_w(math.EPSILON)))
+            unit = div_w(c.mass_scale, max_w(c.impulse_scale, splat_w(math.EPSILON)))
+            cp.load_stiffness = blend_w(blend_w(zero, mul_w(carried, unit), greater_w(carried, one)), zero, greater_w(mul_w(m_a, m_b), zero))
+        }
         point_index = point_index + 1
     }
     // The normal velocity before the solve is for restitution and hit
@@ -779,10 +787,12 @@ solve_wide_contacts(ctx: *StepContext, constraints: ptr, count: int, use_bias: b
         bias_rate = zero
         mass_scale = one
         impulse_scale = zero
+        loaded = false
         if use_bias {
             bias_rate = mul_w(c.mass_scale, c.bias_rate)
             mass_scale = c.mass_scale
             impulse_scale = c.impulse_scale
+            loaded = ctx.load_scale > 0.0
         }
         dp = sub_v_w(b_b.dp, b_a.dp)
         total_normal_impulse = zero
@@ -800,9 +810,19 @@ solve_wide_contacts(ctx: *StepContext, constraints: ptr, count: int, use_bias: b
             apart = greater_w(s, zero)
             spec_bias = mul_w(s, inv_h)
             soft_bias = max_w(mul_w(bias_rate, s), contact_speed)
+            soft_mass_scale = mass_scale
+            soft_impulse_scale = impulse_scale
+            // Sized to the load it carries (#212), as the scalar solve.
+            if loaded {
+                stiffness = cp.load_stiffness
+                held = greater_w(stiffness, zero)
+                soft_mass_scale = blend_w(mass_scale, div_w(stiffness, add_w(one, stiffness)), held)
+                soft_impulse_scale = blend_w(impulse_scale, div_w(one, add_w(one, stiffness)), held)
+                soft_bias = max_w(mul_w(mul_w(soft_mass_scale, c.bias_rate), s), contact_speed)
+            }
             bias = blend_w(soft_bias, spec_bias, apart)
-            point_mass_scale = blend_w(mass_scale, one, apart)
-            point_impulse_scale = blend_w(impulse_scale, zero, apart)
+            point_mass_scale = blend_w(soft_mass_scale, one, apart)
+            point_impulse_scale = blend_w(soft_impulse_scale, zero, apart)
             vr_a = add_v_w(b_a.v, cross_w(b_a.w, r_a))
             vr_b = add_v_w(b_b.v, cross_w(b_b.w, r_b))
             vn = dot_w(sub_v_w(vr_b, vr_a), c.normal)
