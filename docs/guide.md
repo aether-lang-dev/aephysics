@@ -611,7 +611,14 @@ and released when the shape, its geometry or the world goes.
 ## Fitting into a host engine
 
 - **Memory.** `basics.set_allocator(allocate, release)` routes every block
-  the engine makes through the host. `physics_world.get_counters` and
+  the engine makes through the host. The engine asks for each block's
+  alignment: 32 bytes (the widest lanes, Box3D's `B3_ALIGNMENT`), or 64, a
+  cache line, for the arrays the step streams (bodies, contacts, joints, the
+  step's stack). The host's allocator must honour it. Without a host
+  allocator those arrays come from an aligned allocation of aephysics' own,
+  until Aether's `alloc.raw_aligned` (aether#3778) replaces it. A 64-byte body
+  state on `calloc`'s 16-byte boundary can span two lines, and on the joint
+  grid that cost 3% a step. `physics_world.get_counters` and
   `dump_memory_stats` say where the memory went.
 - **Logging and failure.** `basics.set_log_fn` takes the engine's messages
   and `basics.set_assert_fn` its one hard stop. Bad input (a NaN, a negative

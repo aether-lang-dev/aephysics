@@ -90,6 +90,10 @@ name_cache_unit() {
     ensure("names: nothing left (${basics.alloc_count() - before} blocks, ${basics.bytes_in_use() - before_bytes} bytes)", basics.alloc_count() == before && basics.bytes_in_use() == before_bytes)
 }
 
+// Whether a block starts on a 64-byte cache line (basics.CACHE_LINE).
+var g_origin: ptr = null
+on_line(block: ptr) -> bool { return (block - g_origin) % basics.CACHE_LINE == 0 }
+
 main() {
     // Bit math.
     ensure("clz of 9 is 28", basics.clz32(9) == 31 - 3)
@@ -241,6 +245,7 @@ main() {
     basics.ints_destroy(&ints)
 
     things = basics.buffer_create(sizeof(Thing), 2)
+    ensure("a buffer's items start on a cache line", on_line(things.data))
     i = 0
     while i < 50 {
         at = basics.buffer_push(&things)
@@ -340,14 +345,16 @@ main() {
     }
     free(elements_block)
 
-    // The stack: LIFO, with the heap past its capacity.
+    // The stack: LIFO, with the heap past its capacity, every block on a
+    // cache line (the step's constraints are streamed from it).
     stack = basics.stack_create(256)
     first = basics.stack_alloc(&stack, 100)
     second = basics.stack_alloc(&stack, 100)
-    ensure("stack allocations are aligned", (second - first) == 112)
+    ensure("stack allocations are a line apart", (second - first) == 128)
     third = basics.stack_alloc(&stack, 100)
     ensure("past the block the stack still hands out memory", third != null)
-    ensure("and counts it", basics.stack_allocation(&stack) == 336 && basics.stack_max_allocation(&stack) == 336)
+    ensure("and counts it", basics.stack_allocation(&stack) == 384 && basics.stack_max_allocation(&stack) == 384)
+    ensure("its blocks start on cache lines, the heap's past it too", on_line(first) && on_line(second) && on_line(third))
     basics.stack_free(&stack, third)
     basics.stack_free(&stack, second)
     basics.stack_free(&stack, first)

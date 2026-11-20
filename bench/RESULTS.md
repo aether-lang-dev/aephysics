@@ -1480,6 +1480,41 @@ largest kind, is never read for it. Padding `JointSim` to a whole number of
 lines would save a twentieth of the lines a pass reads and cost a twentieth
 more memory: not taken.
 
+### Cache-line storage, and the inlining budget again (2026-11-20)
+
+Same machine and method as the round above, least of five alternated runs.
+
+**Alignment.** A body state is 64 bytes, one cache line, but the buffers it
+lives in came from `calloc`, which promises 16 bytes on Windows. Printing
+where the awake set's states began: the large pyramid's array happened to
+start on a line (0 mod 64), and the joint grid's at 48 mod 64, so every
+state there spanned two lines. The buffers the step streams (bodies,
+contacts, joints) and the step's stack now come from `basics.alloc_lines`, on
+a 64-byte line: from the host's allocator when one is set, else
+`native.alloc_aligned` (`_aligned_malloc` or `posix_memalign`), the shape of
+Aether's `alloc.raw_aligned` (aether#3778) until that lands. Blocks a caller
+may free itself stay `calloc`'s.
+
+| scene | before | after |
+|---|---|---|
+| joint grid, ms a step | 10.78 | 10.42 (warm start 1.52 to 1.42) |
+| large pyramid | 5.87 | 5.92 |
+| rain | 4.31 | 4.28 |
+
+The gain is the guarantee: where an array lands no longer decides whether
+its states share lines.
+
+**The inlining budget** (`--param max-inline-insns-auto=400 --param
+inline-unit-growth=400`), measured again now that Aether emits small leaf
+functions `static inline` (aether#2123). Without it: joint grid 10.78 to
+14.89 ms (+38%), large pyramid 6.12 to 7.05 (+15%), rain 4.38 to 5.41 (+23%);
+the executable 1.54 MB with it, 1.18 without; the same bits either way.
+Sampled without it, `rotate_vector`, `solve3`, `mul_quat` and
+`point_mass_matrix` stay calls although each is emitted `static inline`:
+GCC's -O3 heuristics decline them (they take a 72-byte matrix or a
+32-byte quaternion by value, and grow as their own callees inline). The
+budget stays; the case is with the Aether session.
+
 ## Build flags (inlining)
 
 The generated C of every Aether function is a plain `static` function,

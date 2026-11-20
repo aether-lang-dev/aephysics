@@ -3,7 +3,7 @@
 // allocates (a world on four workers, its scheduler and semaphore, a
 // ragdoll, a snapshot, a recording) and gets every one back but the
 // scratch the engine keeps for the program, each zeroed and asked at the
-// reference's alignment; its log takes the world's memory, part by part,
+// reference's alignment (a cache line for the storage the step streams); its log takes the world's memory, part by part,
 // adding up to the counters' byte count; its failure function is called.
 // Then a contact by its id, a joint's tuning, a mesh's material count, the
 // world counts, the version, the maximum capacity (kept at each step's
@@ -50,12 +50,14 @@ var g_allocations = 0
 var g_releases = 0
 var g_bytes = 0
 var g_wrong_alignment = 0
+var g_line_blocks = 0
 
 // Dirty memory, so a block the engine reads before writing would show.
 host_allocate(size: int, alignment: int) -> ptr {
     native.atomic_add((&g_allocations) as ptr, 1)
     native.atomic_add((&g_bytes) as ptr, size)
-    if alignment != basics.HOST_ALIGNMENT { native.atomic_add((&g_wrong_alignment) as ptr, 1) }
+    if alignment != basics.HOST_ALIGNMENT && alignment != basics.CACHE_LINE { native.atomic_add((&g_wrong_alignment) as ptr, 1) }
+    if alignment == basics.CACHE_LINE { native.atomic_add((&g_line_blocks) as ptr, 1) }
     block = malloc(size)
     memset(block, 205, size)
     return block
@@ -261,7 +263,8 @@ main() {
     out = native.atomic_load((&g_allocations) as ptr) - native.atomic_load((&g_releases) as ptr)
     ensure("allocator: every block the host's (${native.atomic_load((&g_allocations) as ptr)} made, ${out} kept, ${basics.alloc_count()} counted)",
            native.atomic_load((&g_allocations) as ptr) > 500 && out == basics.alloc_count() && native.atomic_load((&g_bytes) as ptr) == basics.bytes_in_use())
-    ensure("allocator: asked at the reference's alignment", native.atomic_load((&g_wrong_alignment) as ptr) == 0)
+    ensure("allocator: asked at the reference's alignment, or a cache line for the storage the step streams (${native.atomic_load((&g_line_blocks) as ptr)} blocks)",
+           native.atomic_load((&g_wrong_alignment) as ptr) == 0 && native.atomic_load((&g_line_blocks) as ptr) > 0)
 
     // The rest needs no world.
     version = physics_world.get_version()
