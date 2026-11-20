@@ -29,7 +29,7 @@ import aephysics.dynamics
 import aephysics.contact_solver
 
 exports (
-    WIDTH, Vec3W, IntW, WideConstraintPoint, WideConstraint,
+    WIDTH, Vec3W, IntW, WideConstraintPoint, WideConstraint, WideLoad,
     wide_constraint_at, wide_constraint_count, wide_point_at, lane, int_lane,
     prepare_wide_contacts, prepare_wide_range, zero_wide_tail, warm_start_wide_contacts, solve_wide_contacts, apply_wide_restitution, store_wide_impulses, store_wide_range,
     lanes_native
@@ -187,7 +187,17 @@ struct WideConstraintPoint {
     lever_arm: f32x8
     relative_velocity: f32x8
     restitution_impulse: f32x8     // what the restitution passes added beyond the approach
-    load_stiffness: f32x8          // sized to its load (#212; contact_solver's ManifoldConstraintPoint)
+}
+
+// A wide point's load stiffness (#212; contact_solver's
+// ManifoldConstraintPoint.load_stiffness), in StepContext.wide_loads.
+struct WideLoad {
+    stiffness: f32x8
+}
+
+wide_load_at(ctx: *StepContext, c: *WideConstraint, point_index: int) -> *WideLoad {
+    index = ((c as ptr) - ctx.wide_base) / sizeof(WideConstraint)
+    return (ctx.wide_loads + (index * dynamics.MAX_MANIFOLD_POINTS + point_index) * sizeof(WideLoad)) as *WideLoad
 }
 
 // Eight convex contacts' constraints (b3ContactConstraintWide): the body
@@ -621,11 +631,10 @@ prepare_wide_slot(ctx: *StepContext, color: *GraphColor, slot: int, end: int) {
         cp.normal_mass = blend_w(zero, div_w(one, k_normal), valid)
         cp.relative_velocity = zero
         // The mass it holds up as the step begins (the scalar prepare says why).
-        cp.load_stiffness = zero
-        if ctx.load_scale > 0.0 {
+        if ctx.wide_loads != null {
             carried = div_w(mul_w(cp.normal_impulse, splat_w(ctx.load_scale)), max_w(cp.normal_mass, splat_w(math.EPSILON)))
             unit = div_w(c.mass_scale, max_w(c.impulse_scale, splat_w(math.EPSILON)))
-            cp.load_stiffness = blend_w(blend_w(zero, mul_w(carried, unit), greater_w(carried, one)), zero, greater_w(mul_w(m_a, m_b), zero))
+            wide_load_at(ctx, c, point_index).stiffness = blend_w(blend_w(zero, mul_w(carried, unit), greater_w(carried, one)), zero, greater_w(mul_w(m_a, m_b), zero))
         }
         point_index = point_index + 1
     }
@@ -792,7 +801,7 @@ solve_wide_contacts(ctx: *StepContext, constraints: ptr, count: int, use_bias: b
             bias_rate = mul_w(c.mass_scale, c.bias_rate)
             mass_scale = c.mass_scale
             impulse_scale = c.impulse_scale
-            loaded = ctx.load_scale > 0.0
+            loaded = ctx.wide_loads != null
         }
         dp = sub_v_w(b_b.dp, b_a.dp)
         total_normal_impulse = zero
@@ -814,7 +823,7 @@ solve_wide_contacts(ctx: *StepContext, constraints: ptr, count: int, use_bias: b
             soft_impulse_scale = impulse_scale
             // Sized to the load it carries (#212), as the scalar solve.
             if loaded {
-                stiffness = cp.load_stiffness
+                stiffness = wide_load_at(ctx, c, point_index).stiffness
                 held = greater_w(stiffness, zero)
                 soft_mass_scale = blend_w(mass_scale, div_w(stiffness, add_w(one, stiffness)), held)
                 soft_impulse_scale = blend_w(impulse_scale, div_w(one, add_w(one, stiffness)), held)
