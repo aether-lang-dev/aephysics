@@ -957,13 +957,14 @@ meet_at_rest(shape: ptr, index: int) {
     spec = spec_at(shape, index)
     parent = spec_at(shape, spec.parent)
     centre = math.rotate_vector(spec.frame_a.q, spec.cone_axis)
-    major = math.rotate_vector(spec.frame_a.q, spec.cone_major_axis)
+    // An ellipse whose major axis is left zero reaches along frame A's x:
+    // kept as that, or it would turn with the frame while its centre stays.
+    stored_major = spec.cone_major_axis
+    if spec.swing_minor_degrees > 0.0 && math.length_squared(stored_major) == 0.0 { stored_major = math.vec3_axis_x() }
+    major = math.rotate_vector(spec.frame_a.q, stored_major)
     spec.frame_a.q = math.normalize_quat(math.inv_mul_quat(parent.reference.q, math.mul_quat(spec.reference.q, spec.frame_b.q)))
     spec.cone_axis = math.inv_rotate_vector(spec.frame_a.q, centre)
     spec.cone_major_axis = math.inv_rotate_vector(spec.frame_a.q, major)
-    // A frame that did not move gives its centre back on z to the last bits:
-    // on z it is, or the joint would take the off-axis path for nothing.
-    if math.length(math.sub(spec.cone_axis, math.vec3_axis_z())) < 0.000000001 { spec.cone_axis = math.vec3_axis_z() }
 }
 
 // A limb's twist range, `inward` and `outward` degrees about itself from

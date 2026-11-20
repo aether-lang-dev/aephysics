@@ -1858,15 +1858,16 @@ solve_spherical_joint(base: *JointSim, ctx: *StepContext, use_bias: bool) {
     // long; the reach below covers a length of 2 (a swing of 120 degrees from
     // the axis the twist is read about). A cone centred off the rest reaches
     // past that (a shoulder's to 0.8 pi, where the Jacobian is 3.2 long), and
-    // there a twist closing on its limit could outrun the reach and keep the
-    // row a sub-step before had made. The twist's reach is stretched with the
-    // Jacobian past 2, and is the same below it, bit for bit.
+    // there a twist closing on its limit could outrun the reach. A row left as
+    // it was pushes along the Jacobian it was made with, so the reach covers
+    // the longer of that one and today's: stretched with them past 2, the
+    // same below, bit for bit.
     twist_stretch = 1.0
     if j.enable_twist_limit {
         twist_q = dynamics.spherical_twist_rotation(j, rel_q)
         twist = math.get_twist_angle(twist_q)
         stretch = math.sqrt_float(1.0 + (twist_q.x * twist_q.x + twist_q.y * twist_q.y) / (twist_q.z * twist_q.z + twist_q.w * twist_q.w))
-        twist_stretch = math.max_float(1.0, 0.5 * stretch)
+        twist_stretch = math.max_float(1.0, 0.5 * math.max_float(stretch, math.length(j.twist_jacobian)))
     }
     if fixed_rotation == false && (j.enable_cone_limit || j.enable_twist_limit || j.lock_cone_minor) {
         reach = 2.0 * ctx.h * math.length(math.sub(w_b, w_a))

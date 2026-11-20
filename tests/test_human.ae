@@ -770,7 +770,7 @@ test_hips() {
     // little differently under the push and the thigh stops at another
     // flexion on the same edge.
     edge = edge_abduction(pushed.flexion)
-    ensure("hips: a thigh sprung out to 90 stays on its cone's edge (abduction ${pushed.abduction} against ${edge} at flexion ${pushed.flexion})", pushed.abduction < edge + 2.0 && edge < 70.0)
+    ensure("hips: a thigh sprung out to 90 stays on its cone's edge (abduction ${pushed.abduction} against ${edge} at flexion ${pushed.flexion})", pushed.abduction < edge + 2.0 && pushed.abduction > edge - 2.0 && edge < 70.0)
     pushed_r = thigh_reach(human.BONE_THIGH_R, true, 90.0)
     ensure("hips: the right as the left (${pushed_r.abduction})", math.abs_float(pushed_r.abduction - pushed.abduction) < 2.0)
     within = thigh_reach(human.BONE_THIGH_L, true, 35.0)
@@ -2194,9 +2194,8 @@ test_hip_rotation() {
 // (#224): meeting the rest turned their frames 10 degrees and their cones
 // with them, so the trunk flexed 70 and extended 70 where the reference's
 // flexes 90 and extends 50 (a person's 80 and 25). Each cone's centre in
-// the world matches the reference figure's, the rest reads no swing off a
-// frame that turned, and a joint whose frame did
-// not move keeps its cone on z exactly (the reference's path, bit for bit).
+// the world matches the reference figure's, the frames meet at the rest,
+// and the rest sits 10 degrees behind the kept centre.
 test_spine_and_neck_ranges() {
     shape = human.human_reference_shape()
     reference = human.human_reference_shape()
@@ -2218,7 +2217,6 @@ test_spine_and_neck_ranges() {
         ensure("bone ${i}: the rest is 10 degrees behind the cone's centre (${off})", math.abs_float(off - 10.0) < 0.05)
         k = k + 1
     }
-    ensure("spine_02 keeps its cone on z exactly", human.spec_at(shape, human.BONE_SPINE_02).cone_axis.x == 0.0 && human.spec_at(shape, human.BONE_SPINE_02).cone_axis.y == 0.0 && human.spec_at(shape, human.BONE_SPINE_02).cone_axis.z == 1.0)
     human.destroy_shape(shape)
     human.destroy_shape(reference)
 }
