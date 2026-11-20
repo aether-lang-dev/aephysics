@@ -94,7 +94,7 @@ exports (
     intern_tag, clear_tags, intern_geometry, rec_commit_query, rec_aabb, rec_query_filter, rec_shape_proxy, rec_plane_result, rec_capsule_value,
     rec_float, rec_bool, rec_vec3, rec_quat, rec_transform, rec_id, rec_string, rec_raw, rec_geometry, finish_recording, recorded_geometry_at,
     OP_STATE_HASH, OP_BOUNDS, OP_END, OP_QUERY_TAG, OP_QUERY_OVERLAP_AABB, OP_QUERY_OVERLAP_SHAPE, OP_QUERY_CAST_RAY,
-    OP_QUERY_CAST_SHAPE, OP_QUERY_CAST_RAY_CLOSEST, OP_QUERY_CAST_MOVER, OP_QUERY_COLLIDE_MOVER, OP_CREATE_BODY, OP_DESTROY_BODY, OP_BODY_SET_TRANSFORM, OP_BODY_SET_LINEAR_VELOCITY, OP_BODY_SET_ANGULAR_VELOCITY, OP_BODY_SET_TARGET_TRANSFORM, OP_BODY_APPLY_FORCE, OP_BODY_APPLY_FORCE_TO_CENTER, OP_BODY_APPLY_TORQUE, OP_BODY_APPLY_LINEAR_IMPULSE, OP_BODY_APPLY_LINEAR_IMPULSE_TO_CENTER, OP_BODY_APPLY_ANGULAR_IMPULSE, OP_BODY_SET_BULLET, OP_BODY_SET_MASS_DATA, OP_BODY_APPLY_MASS_FROM_SHAPES, OP_BODY_SET_LINEAR_DAMPING, OP_BODY_SET_ANGULAR_DAMPING, OP_BODY_SET_GRAVITY_SCALE, OP_BODY_SET_AWAKE, OP_BODY_ENABLE_SLEEP, OP_BODY_SET_SLEEP_THRESHOLD, OP_BODY_SET_MOTION_LOCKS, OP_CREATE_SPHERE_SHAPE, OP_CREATE_CAPSULE_SHAPE, OP_CREATE_HULL_SHAPE, OP_CREATE_TRANSFORMED_HULL_SHAPE, OP_CREATE_MESH_SHAPE, OP_CREATE_HEIGHT_FIELD_SHAPE, OP_CREATE_COMPOUND_SHAPE, OP_DESTROY_SHAPE, OP_SHAPE_SET_DENSITY, OP_SHAPE_SET_FILTER, OP_SHAPE_SET_SURFACE_MATERIAL, OP_SHAPE_SET_SPHERE, OP_SHAPE_SET_CAPSULE, OP_SHAPE_SET_HULL, OP_SHAPE_SET_MESH, OP_SHAPE_SET_FRICTION, OP_SHAPE_SET_RESTITUTION, OP_SHAPE_SET_MESH_MATERIAL, OP_SHAPE_ENABLE_PRE_SOLVE_EVENTS, OP_BODY_ENABLE_HIT_EVENTS, OP_BODY_ALLOW_FAST_ROTATION, OP_BODY_ENABLE_CONTACT_RECYCLING, OP_BODY_SET_SAFETY_FACTOR, OP_SHAPE_APPLY_WIND, OP_BODY_SET_NAME, OP_SHAPE_SET_NAME, OP_CREATE_DISTANCE_JOINT, OP_CREATE_MOTOR_JOINT, OP_CREATE_FILTER_JOINT, OP_CREATE_PARALLEL_JOINT, OP_CREATE_PRISMATIC_JOINT, OP_CREATE_REVOLUTE_JOINT, OP_CREATE_SPHERICAL_JOINT, OP_CREATE_WELD_JOINT, OP_CREATE_WHEEL_JOINT, OP_DESTROY_JOINT, OP_JOINT_SET_LOCAL_FRAME_A, OP_JOINT_SET_LOCAL_FRAME_B, OP_JOINT_SET_COLLIDE_CONNECTED, OP_JOINT_WAKE_BODIES, OP_JOINT_SET_CONSTRAINT_TUNING, OP_JOINT_SET_FORCE_THRESHOLD, OP_JOINT_SET_TORQUE_THRESHOLD, OP_BODY_SET_TYPE, OP_BODY_DISABLE, OP_BODY_ENABLE, OP_SHAPE_ENABLE_SENSOR_EVENTS, OP_SHAPE_ENABLE_CONTACT_EVENTS, OP_SHAPE_ENABLE_HIT_EVENTS, OP_STEP, OP_ENABLE_SLEEPING, OP_ENABLE_WARM_STARTING, OP_ENABLE_CONTINUOUS, OP_ENABLE_SPECULATIVE, OP_SET_RESTITUTION_THRESHOLD, OP_SET_RESTITUTION_ITERATIONS, OP_ENABLE_RESTITUTION_PROPAGATION, OP_ENABLE_KINEMATIC_STATIC_SOFTNESS, OP_SET_HIT_EVENT_THRESHOLD, OP_SET_CONTACT_TUNING, OP_SET_CONTACT_RECYCLE_DISTANCE, OP_SET_MAXIMUM_LINEAR_SPEED, OP_SET_GRAVITY, OP_REBUILD_STATIC_TREE, OP_EXPLODE, OP_DISTANCE_JOINT_SET_LENGTH, OP_DISTANCE_JOINT_ENABLE_LIMIT, OP_DISTANCE_JOINT_SET_LENGTH_RANGE, OP_DISTANCE_JOINT_ENABLE_SPRING, OP_DISTANCE_JOINT_SET_SPRING_FORCE_RANGE, OP_DISTANCE_JOINT_SET_SPRING_HERTZ, OP_DISTANCE_JOINT_SET_SPRING_DAMPING_RATIO, OP_DISTANCE_JOINT_ENABLE_MOTOR, OP_DISTANCE_JOINT_SET_MOTOR_SPEED, OP_DISTANCE_JOINT_SET_MAX_MOTOR_FORCE, OP_MOTOR_JOINT_SET_LINEAR_VELOCITY, OP_MOTOR_JOINT_SET_ANGULAR_VELOCITY, OP_MOTOR_JOINT_SET_MAX_VELOCITY_TORQUE, OP_MOTOR_JOINT_SET_MAX_VELOCITY_FORCE, OP_MOTOR_JOINT_SET_LINEAR_HERTZ, OP_MOTOR_JOINT_SET_LINEAR_DAMPING_RATIO, OP_MOTOR_JOINT_SET_ANGULAR_HERTZ, OP_MOTOR_JOINT_SET_ANGULAR_DAMPING_RATIO, OP_MOTOR_JOINT_SET_MAX_SPRING_FORCE, OP_MOTOR_JOINT_SET_MAX_SPRING_TORQUE, OP_PARALLEL_JOINT_SET_SPRING_HERTZ, OP_PARALLEL_JOINT_SET_SPRING_DAMPING_RATIO, OP_PARALLEL_JOINT_SET_MAX_TORQUE, OP_PRISMATIC_JOINT_ENABLE_SPRING, OP_PRISMATIC_JOINT_SET_SPRING_HERTZ, OP_PRISMATIC_JOINT_SET_SPRING_DAMPING_RATIO, OP_PRISMATIC_JOINT_SET_TARGET_TRANSLATION, OP_PRISMATIC_JOINT_ENABLE_LIMIT, OP_PRISMATIC_JOINT_SET_LIMITS, OP_PRISMATIC_JOINT_ENABLE_MOTOR, OP_PRISMATIC_JOINT_SET_MOTOR_SPEED, OP_PRISMATIC_JOINT_SET_MAX_MOTOR_FORCE, OP_REVOLUTE_JOINT_ENABLE_LIMIT, OP_REVOLUTE_JOINT_SET_LIMITS, OP_REVOLUTE_JOINT_ENABLE_SPRING, OP_REVOLUTE_JOINT_SET_TARGET_ANGLE, OP_REVOLUTE_JOINT_SET_SPRING_HERTZ, OP_REVOLUTE_JOINT_SET_SPRING_DAMPING_RATIO, OP_REVOLUTE_JOINT_ENABLE_MOTOR, OP_REVOLUTE_JOINT_SET_MOTOR_SPEED, OP_REVOLUTE_JOINT_SET_MAX_MOTOR_TORQUE, OP_SPHERICAL_JOINT_ENABLE_CONE_LIMIT, OP_SPHERICAL_JOINT_SET_CONE_LIMIT, OP_SPHERICAL_JOINT_SET_CONE_AXIS, OP_SPHERICAL_JOINT_SET_CONE_ELLIPSE, OP_SPHERICAL_JOINT_ENABLE_TWIST_LIMIT, OP_SPHERICAL_JOINT_SET_TWIST_LIMITS, OP_SPHERICAL_JOINT_ENABLE_SPRING, OP_SPHERICAL_JOINT_SET_TARGET_ROTATION, OP_SPHERICAL_JOINT_SET_SPRING_HERTZ, OP_SPHERICAL_JOINT_SET_SPRING_DAMPING_RATIO, OP_SPHERICAL_JOINT_ENABLE_MOTOR, OP_SPHERICAL_JOINT_SET_MOTOR_VELOCITY, OP_SPHERICAL_JOINT_SET_MAX_MOTOR_TORQUE, OP_WELD_JOINT_SET_LINEAR_HERTZ, OP_WELD_JOINT_SET_LINEAR_DAMPING_RATIO, OP_WELD_JOINT_SET_ANGULAR_HERTZ, OP_WELD_JOINT_SET_ANGULAR_DAMPING_RATIO, OP_WHEEL_JOINT_ENABLE_SUSPENSION, OP_WHEEL_JOINT_SET_SUSPENSION_HERTZ, OP_WHEEL_JOINT_SET_SUSPENSION_DAMPING_RATIO, OP_WHEEL_JOINT_ENABLE_SUSPENSION_LIMIT, OP_WHEEL_JOINT_SET_SUSPENSION_LIMITS, OP_WHEEL_JOINT_ENABLE_SPIN_MOTOR, OP_WHEEL_JOINT_SET_SPIN_MOTOR_SPEED, OP_WHEEL_JOINT_SET_MAX_SPIN_TORQUE, OP_WHEEL_JOINT_ENABLE_STEERING, OP_WHEEL_JOINT_SET_STEERING_HERTZ, OP_WHEEL_JOINT_SET_STEERING_DAMPING_RATIO, OP_WHEEL_JOINT_SET_MAX_STEERING_TORQUE, OP_WHEEL_JOINT_ENABLE_STEERING_LIMIT, OP_WHEEL_JOINT_SET_STEERING_LIMITS, OP_WHEEL_JOINT_SET_TARGET_STEERING_ANGLE, OP_ENABLE_KINEMATIC_SPECULATION, OP_ENABLE_TRAVEL_SPECULATION, OP_SPHERICAL_JOINT_LOCK_CONE_MINOR, OP_JOINT_SET_IMPULSES, OP_ENABLE_CANONICAL_BEGIN_ORDER, OP_BODY_SET_ORDER_KEY, OP_ENABLE_LOADED_CONTACTS, OP_ENABLE_LOADED_LIMITS,
+    OP_QUERY_CAST_SHAPE, OP_QUERY_CAST_RAY_CLOSEST, OP_QUERY_CAST_MOVER, OP_QUERY_COLLIDE_MOVER, OP_CREATE_BODY, OP_DESTROY_BODY, OP_BODY_SET_TRANSFORM, OP_BODY_SET_LINEAR_VELOCITY, OP_BODY_SET_ANGULAR_VELOCITY, OP_BODY_SET_TARGET_TRANSFORM, OP_BODY_APPLY_FORCE, OP_BODY_APPLY_FORCE_TO_CENTER, OP_BODY_APPLY_TORQUE, OP_BODY_APPLY_LINEAR_IMPULSE, OP_BODY_APPLY_LINEAR_IMPULSE_TO_CENTER, OP_BODY_APPLY_ANGULAR_IMPULSE, OP_BODY_SET_BULLET, OP_BODY_SET_MASS_DATA, OP_BODY_APPLY_MASS_FROM_SHAPES, OP_BODY_SET_LINEAR_DAMPING, OP_BODY_SET_ANGULAR_DAMPING, OP_BODY_SET_GRAVITY_SCALE, OP_BODY_SET_AWAKE, OP_BODY_ENABLE_SLEEP, OP_BODY_SET_SLEEP_THRESHOLD, OP_BODY_SET_MOTION_LOCKS, OP_CREATE_SPHERE_SHAPE, OP_CREATE_CAPSULE_SHAPE, OP_CREATE_HULL_SHAPE, OP_CREATE_TRANSFORMED_HULL_SHAPE, OP_CREATE_MESH_SHAPE, OP_CREATE_HEIGHT_FIELD_SHAPE, OP_CREATE_COMPOUND_SHAPE, OP_DESTROY_SHAPE, OP_SHAPE_SET_DENSITY, OP_SHAPE_SET_FILTER, OP_SHAPE_SET_SURFACE_MATERIAL, OP_SHAPE_SET_SPHERE, OP_SHAPE_SET_CAPSULE, OP_SHAPE_SET_HULL, OP_SHAPE_SET_MESH, OP_SHAPE_SET_FRICTION, OP_SHAPE_SET_RESTITUTION, OP_SHAPE_SET_MESH_MATERIAL, OP_SHAPE_ENABLE_PRE_SOLVE_EVENTS, OP_BODY_ENABLE_HIT_EVENTS, OP_BODY_ALLOW_FAST_ROTATION, OP_BODY_ENABLE_CONTACT_RECYCLING, OP_BODY_SET_SAFETY_FACTOR, OP_SHAPE_APPLY_WIND, OP_BODY_SET_NAME, OP_SHAPE_SET_NAME, OP_CREATE_DISTANCE_JOINT, OP_CREATE_MOTOR_JOINT, OP_CREATE_FILTER_JOINT, OP_CREATE_PARALLEL_JOINT, OP_CREATE_PRISMATIC_JOINT, OP_CREATE_REVOLUTE_JOINT, OP_CREATE_SPHERICAL_JOINT, OP_CREATE_WELD_JOINT, OP_CREATE_WHEEL_JOINT, OP_DESTROY_JOINT, OP_JOINT_SET_LOCAL_FRAME_A, OP_JOINT_SET_LOCAL_FRAME_B, OP_JOINT_SET_COLLIDE_CONNECTED, OP_JOINT_WAKE_BODIES, OP_JOINT_SET_CONSTRAINT_TUNING, OP_JOINT_SET_FORCE_THRESHOLD, OP_JOINT_SET_TORQUE_THRESHOLD, OP_BODY_SET_TYPE, OP_BODY_DISABLE, OP_BODY_ENABLE, OP_SHAPE_ENABLE_SENSOR_EVENTS, OP_SHAPE_ENABLE_CONTACT_EVENTS, OP_SHAPE_ENABLE_HIT_EVENTS, OP_STEP, OP_ENABLE_SLEEPING, OP_ENABLE_WARM_STARTING, OP_ENABLE_CONTINUOUS, OP_ENABLE_SPECULATIVE, OP_SET_RESTITUTION_THRESHOLD, OP_SET_RESTITUTION_ITERATIONS, OP_ENABLE_RESTITUTION_PROPAGATION, OP_ENABLE_KINEMATIC_STATIC_SOFTNESS, OP_SET_HIT_EVENT_THRESHOLD, OP_SET_CONTACT_TUNING, OP_SET_CONTACT_RECYCLE_DISTANCE, OP_SET_MAXIMUM_LINEAR_SPEED, OP_SET_GRAVITY, OP_REBUILD_STATIC_TREE, OP_EXPLODE, OP_DISTANCE_JOINT_SET_LENGTH, OP_DISTANCE_JOINT_ENABLE_LIMIT, OP_DISTANCE_JOINT_SET_LENGTH_RANGE, OP_DISTANCE_JOINT_ENABLE_SPRING, OP_DISTANCE_JOINT_SET_SPRING_FORCE_RANGE, OP_DISTANCE_JOINT_SET_SPRING_HERTZ, OP_DISTANCE_JOINT_SET_SPRING_DAMPING_RATIO, OP_DISTANCE_JOINT_ENABLE_MOTOR, OP_DISTANCE_JOINT_SET_MOTOR_SPEED, OP_DISTANCE_JOINT_SET_MAX_MOTOR_FORCE, OP_MOTOR_JOINT_SET_LINEAR_VELOCITY, OP_MOTOR_JOINT_SET_ANGULAR_VELOCITY, OP_MOTOR_JOINT_SET_MAX_VELOCITY_TORQUE, OP_MOTOR_JOINT_SET_MAX_VELOCITY_FORCE, OP_MOTOR_JOINT_SET_LINEAR_HERTZ, OP_MOTOR_JOINT_SET_LINEAR_DAMPING_RATIO, OP_MOTOR_JOINT_SET_ANGULAR_HERTZ, OP_MOTOR_JOINT_SET_ANGULAR_DAMPING_RATIO, OP_MOTOR_JOINT_SET_MAX_SPRING_FORCE, OP_MOTOR_JOINT_SET_MAX_SPRING_TORQUE, OP_PARALLEL_JOINT_SET_SPRING_HERTZ, OP_PARALLEL_JOINT_SET_SPRING_DAMPING_RATIO, OP_PARALLEL_JOINT_SET_MAX_TORQUE, OP_PRISMATIC_JOINT_ENABLE_SPRING, OP_PRISMATIC_JOINT_SET_SPRING_HERTZ, OP_PRISMATIC_JOINT_SET_SPRING_DAMPING_RATIO, OP_PRISMATIC_JOINT_SET_TARGET_TRANSLATION, OP_PRISMATIC_JOINT_ENABLE_LIMIT, OP_PRISMATIC_JOINT_SET_LIMITS, OP_PRISMATIC_JOINT_ENABLE_MOTOR, OP_PRISMATIC_JOINT_SET_MOTOR_SPEED, OP_PRISMATIC_JOINT_SET_MAX_MOTOR_FORCE, OP_REVOLUTE_JOINT_ENABLE_LIMIT, OP_REVOLUTE_JOINT_SET_LIMITS, OP_REVOLUTE_JOINT_ENABLE_SPRING, OP_REVOLUTE_JOINT_SET_TARGET_ANGLE, OP_REVOLUTE_JOINT_SET_SPRING_HERTZ, OP_REVOLUTE_JOINT_SET_SPRING_DAMPING_RATIO, OP_REVOLUTE_JOINT_ENABLE_MOTOR, OP_REVOLUTE_JOINT_SET_MOTOR_SPEED, OP_REVOLUTE_JOINT_SET_MAX_MOTOR_TORQUE, OP_SPHERICAL_JOINT_ENABLE_CONE_LIMIT, OP_SPHERICAL_JOINT_SET_CONE_LIMIT, OP_SPHERICAL_JOINT_SET_CONE_AXIS, OP_SPHERICAL_JOINT_SET_CONE_ELLIPSE, OP_SPHERICAL_JOINT_ENABLE_TWIST_LIMIT, OP_SPHERICAL_JOINT_SET_TWIST_LIMITS, OP_SPHERICAL_JOINT_ENABLE_SPRING, OP_SPHERICAL_JOINT_SET_TARGET_ROTATION, OP_SPHERICAL_JOINT_SET_SPRING_HERTZ, OP_SPHERICAL_JOINT_SET_SPRING_DAMPING_RATIO, OP_SPHERICAL_JOINT_ENABLE_MOTOR, OP_SPHERICAL_JOINT_SET_MOTOR_VELOCITY, OP_SPHERICAL_JOINT_SET_MAX_MOTOR_TORQUE, OP_WELD_JOINT_SET_LINEAR_HERTZ, OP_WELD_JOINT_SET_LINEAR_DAMPING_RATIO, OP_WELD_JOINT_SET_ANGULAR_HERTZ, OP_WELD_JOINT_SET_ANGULAR_DAMPING_RATIO, OP_WHEEL_JOINT_ENABLE_SUSPENSION, OP_WHEEL_JOINT_SET_SUSPENSION_HERTZ, OP_WHEEL_JOINT_SET_SUSPENSION_DAMPING_RATIO, OP_WHEEL_JOINT_ENABLE_SUSPENSION_LIMIT, OP_WHEEL_JOINT_SET_SUSPENSION_LIMITS, OP_WHEEL_JOINT_ENABLE_SPIN_MOTOR, OP_WHEEL_JOINT_SET_SPIN_MOTOR_SPEED, OP_WHEEL_JOINT_SET_MAX_SPIN_TORQUE, OP_WHEEL_JOINT_ENABLE_STEERING, OP_WHEEL_JOINT_SET_STEERING_HERTZ, OP_WHEEL_JOINT_SET_STEERING_DAMPING_RATIO, OP_WHEEL_JOINT_SET_MAX_STEERING_TORQUE, OP_WHEEL_JOINT_ENABLE_STEERING_LIMIT, OP_WHEEL_JOINT_SET_STEERING_LIMITS, OP_WHEEL_JOINT_SET_TARGET_STEERING_ANGLE, OP_ENABLE_KINEMATIC_SPECULATION, OP_ENABLE_TRAVEL_SPECULATION, OP_SPHERICAL_JOINT_LOCK_CONE_MINOR, OP_JOINT_SET_IMPULSES, OP_ENABLE_CANONICAL_BEGIN_ORDER, OP_BODY_SET_ORDER_KEY, OP_ENABLE_LOADED_CONTACTS, OP_ENABLE_LOADED_LIMITS, OP_JOINT_SET_LIMIT_TUNING,
     create_compound_shape, destroy_shape, shape_is_valid, get_shape_full_id, get_shape, shape_get_body,
     shape_get_aabb, shape_get_type, shape_get_density, shape_set_density, shape_get_filter, shape_set_filter,
     shape_get_surface_material, shape_set_surface_material, shape_get_material_count, shape_is_sensor,
@@ -142,7 +142,7 @@ exports (
     create_revolute_joint, create_spherical_joint, create_weld_joint, create_wheel_joint, destroy_joint, destroy_joint_internal,
     joint_get_type, joint_get_body_a, joint_get_body_b, joint_get_world, joint_set_local_frame_a, joint_get_local_frame_a,
     joint_set_local_frame_b, joint_get_local_frame_b, joint_set_user_data, joint_get_user_data, joint_set_collide_connected,
-    joint_get_collide_connected, joint_is_awake, joint_wake_bodies, joint_set_constraint_tuning, joint_get_constraint_hertz,
+    joint_get_collide_connected, joint_is_awake, joint_wake_bodies, joint_set_constraint_tuning, joint_get_constraint_hertz, joint_set_limit_tuning, joint_get_limit_tuning, joint_get_limit_hertz, joint_get_limit_damping_ratio,
     joint_get_constraint_damping_ratio, joint_set_force_threshold, joint_get_force_threshold, joint_set_torque_threshold,
     joint_get_torque_threshold, get_joint_reaction, JOINT_IMPULSE_COUNT, joint_impulses_io, clear_joint_impulses, joint_get_linear_separation, joint_get_angular_separation,
     should_bodies_collide, world_set_custom_filter, world_clear_custom_filter,
@@ -738,6 +738,10 @@ struct JointDef {
     torque_threshold: float
     constraint_hertz: float        // advanced: the constraint's stiffness
     constraint_damping_ratio: float
+    // The limits' own stiffness and damping (#226): a soft stop, separate
+    // from the point and the locks. 0 hertz: the constraint's, as Box3D has.
+    limit_hertz: float
+    limit_damping_ratio: float
     draw_scale: float
     collide_connected: bool        // whether the attached bodies collide
 }
@@ -1123,7 +1127,7 @@ struct JointSim {
     inv_inertia_a: Matrix3f        // the body sims' world inertias, single precision as they are kept
     inv_inertia_b: Matrix3f
     constraint_softness: Softness
-    limit_softness: Softness       // the limits' rows' (#213): the constraint softness, or sized to the joint's load
+    limit_softness: Softness       // the limits' rows': their own (#226) or the constraint softness, sized to the joint's load (#213)
     force_threshold: float         // the solve's joint event test
     torque_threshold: float
     data: long[83]                 // JOINT_DATA_BYTES
@@ -1134,6 +1138,8 @@ struct JointSim {
     local_frame_b: Transform
     constraint_hertz: float
     constraint_damping_ratio: float
+    limit_hertz: float             // 0: the limits take the constraint softness
+    limit_damping_ratio: float
 }
 
 struct JointPair {
@@ -2501,7 +2507,7 @@ struct RecordedGeometry {
 // which older players skip.
 const RECORDING_MAGIC = 0x43525041    // "APRC", little-endian
 const RECORDING_MAJOR_VERSION = 1
-const RECORDING_MINOR_VERSION = 6
+const RECORDING_MINOR_VERSION = 7
 const RECORDING_HEADER_BYTES = 32
 
 const OP_STATE_HASH = 2
@@ -2683,6 +2689,7 @@ const OP_ENABLE_CANONICAL_BEGIN_ORDER = 180
 const OP_BODY_SET_ORDER_KEY = 181
 const OP_ENABLE_LOADED_CONTACTS = 182
 const OP_ENABLE_LOADED_LIMITS = 183
+const OP_JOINT_SET_LIMIT_TUNING = 184
 
 // Whether the world of this index is recording: the hooks' test, false
 // for an index that is not a world's.
@@ -6867,7 +6874,7 @@ default_joint_def() -> JointDef {
     max = math.MAX_FLOAT
     return JointDef { user_data: null, body_id_a: null_body_id(), body_id_b: null_body_id(),
                       local_frame_a: math.transform_identity(), local_frame_b: math.transform_identity(),
-                      force_threshold: max, torque_threshold: max, constraint_hertz: 60.0, constraint_damping_ratio: 2.0,
+                      force_threshold: max, torque_threshold: max, constraint_hertz: 60.0, constraint_damping_ratio: 2.0, limit_hertz: 0.0, limit_damping_ratio: 0.0,
                       draw_scale: 1.0, collide_connected: false }
 }
 
@@ -7095,6 +7102,8 @@ create_joint(w: *World, def: *JointDef, kind: int) -> JointPair {
     sim.kind = kind
     sim.constraint_hertz = def.constraint_hertz
     sim.constraint_damping_ratio = def.constraint_damping_ratio
+    sim.limit_hertz = def.limit_hertz
+    sim.limit_damping_ratio = def.limit_damping_ratio
     sim.constraint_softness = Softness { bias_rate: 0.0, mass_scale: 1.0, impulse_scale: 0.0 }
     sim.limit_softness = sim.constraint_softness
     sim.force_threshold = def.force_threshold
@@ -7136,6 +7145,7 @@ joint_world(world_id: WorldId, def: *JointDef) -> *World {
     if math.is_valid_transform(def.local_frame_a) == false || math.is_valid_transform(def.local_frame_b) == false { return null }
     if valid_nonnegative(def.force_threshold) == false || valid_nonnegative(def.torque_threshold) == false { return null }
     if valid_nonnegative(def.constraint_hertz) == false || valid_nonnegative(def.constraint_damping_ratio) == false { return null }
+    if valid_nonnegative(def.limit_hertz) == false || valid_nonnegative(def.limit_damping_ratio) == false { return null }
     return w
 }
 
@@ -7152,6 +7162,7 @@ create_distance_joint(world_id: WorldId, def: *DistanceJointDef) -> JointId {
     made = create_distance_joint_internal(world_id, def)
     rec_id(recorder, made.index1, made.generation)
     rec_end(recorder)
+    rec_joint_limit_tuning(world_id.index1 - 1, made, &def.base)
     return made
 }
 
@@ -7188,6 +7199,7 @@ create_motor_joint(world_id: WorldId, def: *MotorJointDef) -> JointId {
     made = create_motor_joint_internal(world_id, def)
     rec_id(recorder, made.index1, made.generation)
     rec_end(recorder)
+    rec_joint_limit_tuning(world_id.index1 - 1, made, &def.base)
     return made
 }
 
@@ -7223,6 +7235,7 @@ create_filter_joint(world_id: WorldId, def: *FilterJointDef) -> JointId {
     made = create_filter_joint_internal(world_id, def)
     rec_id(recorder, made.index1, made.generation)
     rec_end(recorder)
+    rec_joint_limit_tuning(world_id.index1 - 1, made, &def.base)
     return made
 }
 
@@ -7243,6 +7256,7 @@ create_parallel_joint(world_id: WorldId, def: *ParallelJointDef) -> JointId {
     made = create_parallel_joint_internal(world_id, def)
     rec_id(recorder, made.index1, made.generation)
     rec_end(recorder)
+    rec_joint_limit_tuning(world_id.index1 - 1, made, &def.base)
     return made
 }
 
@@ -7268,6 +7282,7 @@ create_prismatic_joint(world_id: WorldId, def: *PrismaticJointDef) -> JointId {
     made = create_prismatic_joint_internal(world_id, def)
     rec_id(recorder, made.index1, made.generation)
     rec_end(recorder)
+    rec_joint_limit_tuning(world_id.index1 - 1, made, &def.base)
     return made
 }
 
@@ -7301,6 +7316,7 @@ create_revolute_joint(world_id: WorldId, def: *RevoluteJointDef) -> JointId {
     made = create_revolute_joint_internal(world_id, def)
     rec_id(recorder, made.index1, made.generation)
     rec_end(recorder)
+    rec_joint_limit_tuning(world_id.index1 - 1, made, &def.base)
     return made
 }
 
@@ -7337,6 +7353,7 @@ create_spherical_joint(world_id: WorldId, def: *SphericalJointDef) -> JointId {
     made = create_spherical_joint_internal(world_id, def)
     rec_id(recorder, made.index1, made.generation)
     rec_end(recorder)
+    rec_joint_limit_tuning(world_id.index1 - 1, made, &def.base)
     return made
 }
 
@@ -7568,6 +7585,7 @@ create_weld_joint(world_id: WorldId, def: *WeldJointDef) -> JointId {
     made = create_weld_joint_internal(world_id, def)
     rec_id(recorder, made.index1, made.generation)
     rec_end(recorder)
+    rec_joint_limit_tuning(world_id.index1 - 1, made, &def.base)
     return made
 }
 
@@ -7594,6 +7612,7 @@ create_wheel_joint(world_id: WorldId, def: *WheelJointDef) -> JointId {
     made = create_wheel_joint_internal(world_id, def)
     rec_id(recorder, made.index1, made.generation)
     rec_end(recorder)
+    rec_joint_limit_tuning(world_id.index1 - 1, made, &def.base)
     return made
 }
 
@@ -7733,6 +7752,46 @@ joint_get_constraint_tuning(id: JointId) -> (float, float) {
     w = world_at(id.world0)
     sim = get_joint_sim(w, get_joint_full_id(w, id))
     return sim.constraint_hertz, sim.constraint_damping_ratio
+}
+// The limits' own stiffness and damping (#226): every limit row of the
+// joint (a hinge's or a slider's stops, a ball joint's cone and twist, a
+// wheel's suspension and steering stops, a distance joint's range) is a
+// spring of `hertz` and `damping_ratio` past its limit, while the point and
+// the locks keep the constraint's. A person's end range gives where a rigid
+// stop props a limp body up (the engines' soft limit: PhysX's
+// PxJointLimitParameters, Unity's SoftJointLimitSpring). 0 hertz is the
+// constraint's softness, Box3D's one for the whole joint, and the default.
+// The hertz is held to a quarter of the sub-step rate, as the constraint's.
+joint_set_limit_tuning(id: JointId, hertz: float, damping_ratio: float) {
+    if recording_on(id.world0) { recorder = rec_begin(id.world0, OP_JOINT_SET_LIMIT_TUNING); rec_id(recorder, id.index1, id.generation); rec_float(recorder, hertz); rec_float(recorder, damping_ratio); rec_end(recorder) }
+    if valid_spring(hertz, damping_ratio) == false { return }
+    w = world_at(id.world0)
+    sim = get_joint_sim(w, get_joint_full_id(w, id))
+    sim.limit_hertz = hertz
+    sim.limit_damping_ratio = damping_ratio
+}
+joint_get_limit_tuning(id: JointId) -> (float, float) {
+    w = world_at(id.world0)
+    sim = get_joint_sim(w, get_joint_full_id(w, id))
+    return sim.limit_hertz, sim.limit_damping_ratio
+}
+joint_get_limit_hertz(id: JointId) -> float {
+    w = world_at(id.world0)
+    return get_joint_sim(w, get_joint_full_id(w, id)).limit_hertz
+}
+joint_get_limit_damping_ratio(id: JointId) -> float {
+    w = world_at(id.world0)
+    return get_joint_sim(w, get_joint_full_id(w, id)).limit_damping_ratio
+}
+// A joint made with limit tuning is recorded making it and then setting it,
+// so a recording's joint definitions keep the layout older players read.
+rec_joint_limit_tuning(world0: int, made: JointId, def: *JointDef) {
+    if made.index1 == 0 || (def.limit_hertz == 0.0 && def.limit_damping_ratio == 0.0) { return }
+    recorder = rec_begin(world0, OP_JOINT_SET_LIMIT_TUNING)
+    rec_id(recorder, made.index1, made.generation)
+    rec_float(recorder, def.limit_hertz)
+    rec_float(recorder, def.limit_damping_ratio)
+    rec_end(recorder)
 }
 joint_get_constraint_hertz(id: JointId) -> float {
     w = world_at(id.world0)
