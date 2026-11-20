@@ -874,8 +874,15 @@ solve_parallel_joint(base: *JointSim, ctx: *StepContext) {
         delta = Vec2 { x: 0.0 - j.softness.mass_scale * sol.x - j.softness.impulse_scale * old_impulse.x,
                        y: 0.0 - j.softness.mass_scale * sol.y - j.softness.impulse_scale * old_impulse.y }
         j.perp_impulse = math.add2(old_impulse, delta)
-        if math.dot2(j.perp_impulse, j.perp_impulse) > max_impulse * max_impulse {
-            j.perp_impulse = math.mul_sv2(max_impulse / math.sqrt_float(math.dot2(j.perp_impulse, j.perp_impulse)), j.perp_impulse)
+        // The cap is on the torque the rows apply. The reference caps the
+        // rows' impulse, but the rows are the half-angle's (C = relQ.v),
+        // about half a unit long near alignment, so a joint given 331 N m
+        // applied at most 165.6 (ae3d#1025): its torque getter, reading
+        // what was applied, said so. Scaled to the applied torque, a cap
+        // never reached changes nothing, bit for bit.
+        applied = math.length(math.blend2(j.perp_impulse.x, perp_x, j.perp_impulse.y, perp_y))
+        if applied > max_impulse {
+            j.perp_impulse = math.mul_sv2(max_impulse / applied, j.perp_impulse)
         }
         delta = math.sub2(j.perp_impulse, old_impulse)
         angular = math.blend2(delta.x, perp_x, delta.y, perp_y)

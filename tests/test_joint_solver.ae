@@ -790,6 +790,18 @@ test_parallel_motor_wheel() {
     ensure("parallel: turns back about x (${math.widen3(state.w).x})", math.widen3(state.w).x < 0.0 - 0.01)
     small("parallel: the spin about z untouched", math.widen3(state.w).z - 1.0, 0.01)
     ensure("parallel: a torque", math.length(joint_solver.joint_get_constraint_torque(pid)) > 0.0)
+    // The cap is on the torque applied: a stiff spring far off alignment
+    // and spinning away saturates it, and the torque it applies is the cap
+    // (the reference's capped the half-angle rows' impulse, half the torque).
+    joint_solver.parallel_joint_set_spring_hertz(pid, 60.0)
+    joint_solver.parallel_joint_set_max_torque(pid, 2.0)
+    dynamics.body_set_transform(f.cube_id, math.vec3(0.0, 4.0, 0.0), math.make_quat_from_axis_angle(math.normalize(math.vec3(1.0, 0.5, 0.0)), 0.8))
+    set_velocity(&f, math.vec3_zero(), math.vec3(40.0, 20.0, 0.0))
+    solve_step(&f, pid)
+    capped = math.length(joint_solver.joint_get_constraint_torque(pid))
+    small("parallel: saturated, the torque applied is the cap (${capped} against 2)", capped - 2.0, 0.000001)
+    joint_solver.parallel_joint_set_spring_hertz(pid, 2.0)
+    joint_solver.parallel_joint_set_max_torque(pid, math.MAX_FLOAT)
     // Turned down to no torque, it lets go: the impulse it last applied is
     // not warm-started into the next step.
     joint_solver.parallel_joint_set_max_torque(pid, 0.0)
