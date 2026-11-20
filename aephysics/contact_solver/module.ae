@@ -67,6 +67,7 @@ struct StepContext {
     // (World.loaded_contacts, #212): a point's impulse times it is the mass
     // it holds up. 0 for the reference's contacts, sized to their bodies.
     load_scale: float
+    limit_load_scale: float        // the same for joint limits (World.loaded_limits, #213); 0 when off
 }
 
 default_step_context(w: *World) -> StepContext {
@@ -75,7 +76,7 @@ default_step_context(w: *World) -> StepContext {
                          restitution_threshold: w.restitution_threshold, max_linear_velocity: w.max_linear_speed, world: w,
                          states: null, sims: null, enlarged_shapes: null, enlarged_shape_count: 0, bullet_bodies: null, bullet_body_count: 0,
                          awake_contact_indices: null, awake_contact_count: 0, active_color_count: 0, enable_warm_starting: w.enable_warm_starting,
-                         any_restitution: 0, sub_step_index: 0, body_inertias: null , load_scale: 0.0 }
+                         any_restitution: 0, sub_step_index: 0, body_inertias: null , load_scale: 0.0, limit_load_scale: 0.0 }
 }
 
 // One manifold point's constraint: the anchors relative to the centres
