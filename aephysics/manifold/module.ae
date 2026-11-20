@@ -956,9 +956,25 @@ add_near_vertices(out: ClipVertex[], count: int, hull_a: *HullData, ref_face: in
     edges_b = hull.edges(hull_b)
     points_b = hull.points(hull_b)
     m = math.make_matrix_from_quat(transform_b_to_a.q)
+    // A vertex's separation from the reference plane, measured in B's own
+    // frame: dot(R^T n, v) + dot(n, p) - offset, one dot product where the
+    // vertex taken into A's frame and measured costs a matrix product and a
+    // dot (that was three quarters of this pass). It only rules vertices
+    // out: the margin is a millionth of the sizes involved, past any
+    // difference in rounding between the two forms by nine orders, and a
+    // vertex it keeps is taken into A's frame and measured as before, so the
+    // contact is the same to the bit.
+    normal_in_b = math.inv_rotate_vector(transform_b_to_a.q, ref_plane.normal)
+    offset_in_b = math.dot(ref_plane.normal, transform_b_to_a.p) - ref_plane.offset
+    size = 1.0 + math.abs_float(offset_in_b) + math.length(hull_b.aabb.lower) + math.length(hull_b.aabb.upper)
+    cutoff = reach + 0.000001 * size
     out_count = count
     v = 0
     while v < hull_b.vertex_count && out_count < MAX_CLIP_POINTS {
+        if math.dot(normal_in_b, points_b[v]) + offset_in_b >= cutoff {
+            v = v + 1
+            continue
+        }
         position = math.add(math.mul_mv(m, points_b[v]), transform_b_to_a.p)
         separation = math.plane_separation(ref_plane, position)
         if separation < reach {

@@ -1066,6 +1066,9 @@ all_ops() {
     a, b = pair_bodies(world_id, 2.0)
     revolute_def = dynamics.default_revolute_joint_def()
     revolute_def.base = joint_base(a, b)
+    // Made with its limits' own tuning: recorded as a create, then the tuning.
+    revolute_def.base.limit_hertz = 6.0
+    revolute_def.base.limit_damping_ratio = 0.7
     j_revolute = dynamics.create_revolute_joint(world_id, &revolute_def)
     a, b = pair_bodies(world_id, 4.0)
     spherical_def = dynamics.default_spherical_joint_def()
@@ -1133,6 +1136,7 @@ all_ops() {
     physics_world.step(world_id, 1.0 / 60.0, 4)
     dynamics.joint_wake_bodies(j_wheel)
     dynamics.joint_set_constraint_tuning(j_weld, 60.0, 5.0)
+    dynamics.joint_set_limit_tuning(j_prismatic, 12.0, 1.0)
     dynamics.joint_set_force_threshold(j_weld, 1000.0)
     dynamics.joint_set_torque_threshold(j_weld, 1000.0)
     dynamics.shape_enable_sensor_events(sphere_shape, true)
@@ -1268,7 +1272,7 @@ all_ops() {
     dynamics.destroy_world(world_id)
 
     // Every opcode a recording has.
-    all_op_count = 168
+    all_op_count = 169
     all_ops_list = [
         dynamics.OP_CREATE_BODY, dynamics.OP_DESTROY_BODY, dynamics.OP_BODY_SET_TRANSFORM,
         dynamics.OP_BODY_SET_LINEAR_VELOCITY, dynamics.OP_BODY_SET_ANGULAR_VELOCITY,
@@ -1340,7 +1344,8 @@ all_ops() {
         dynamics.OP_WHEEL_JOINT_SET_MAX_STEERING_TORQUE, dynamics.OP_WHEEL_JOINT_ENABLE_STEERING_LIMIT,
         dynamics.OP_WHEEL_JOINT_SET_STEERING_LIMITS, dynamics.OP_WHEEL_JOINT_SET_TARGET_STEERING_ANGLE, dynamics.OP_ENABLE_KINEMATIC_SPECULATION,
         dynamics.OP_ENABLE_TRAVEL_SPECULATION, dynamics.OP_SPHERICAL_JOINT_LOCK_CONE_MINOR, dynamics.OP_JOINT_SET_IMPULSES,
-        dynamics.OP_ENABLE_CANONICAL_BEGIN_ORDER, dynamics.OP_BODY_SET_ORDER_KEY, dynamics.OP_ENABLE_LOADED_CONTACTS, dynamics.OP_ENABLE_LOADED_LIMITS
+        dynamics.OP_ENABLE_CANONICAL_BEGIN_ORDER, dynamics.OP_BODY_SET_ORDER_KEY, dynamics.OP_ENABLE_LOADED_CONTACTS, dynamics.OP_ENABLE_LOADED_LIMITS,
+        dynamics.OP_JOINT_SET_LIMIT_TUNING
     ]
     seen = calloc(4096, 4)
     mark_ops(r, seen)

@@ -1799,9 +1799,9 @@ spherical_lock_row(j: *SphericalJoint, quat_a: Quat, quat_b: Quat, inertia_sum: 
 // most joints sit inside their ranges most of the time, and making every
 // row every solve cost the spherical joint a third of its time. The minor
 // lock is an equality, always acting: its row is made every time.
-spherical_rows_where_now(j: *SphericalJoint, quat_a: Quat, quat_b: Quat, cone_gap: float, twist: float, inertia_sum: Matrix3, reach: float) {
+spherical_rows_where_now(j: *SphericalJoint, quat_a: Quat, quat_b: Quat, cone_gap: float, twist: float, inertia_sum: Matrix3, reach: float, twist_reach: float) {
     if j.enable_cone_limit && (j.swing_impulse > 0.0 || cone_gap < reach) { spherical_cone_row(j, quat_a, quat_b, inertia_sum) }
-    if j.enable_twist_limit && (j.lower_twist_impulse > 0.0 || j.upper_twist_impulse > 0.0 || twist - j.lower_twist_angle < reach || j.upper_twist_angle - twist < reach) {
+    if j.enable_twist_limit && (j.lower_twist_impulse > 0.0 || j.upper_twist_impulse > 0.0 || twist - j.lower_twist_angle < twist_reach || j.upper_twist_angle - twist < twist_reach) {
         spherical_twist_row(j, quat_a, quat_b, inertia_sum)
     }
     if j.lock_cone_minor { spherical_lock_row(j, quat_a, quat_b, inertia_sum) }
@@ -1854,10 +1854,24 @@ solve_spherical_joint(base: *JointSim, ctx: *StepContext, use_bias: bool) {
     cone_gap = 0.0
     if j.enable_cone_limit { cone_gap = dynamics.spherical_cone_gap(j, rel_q) }
     twist = 0.0
-    if j.enable_twist_limit { twist = dynamics.spherical_twist_angle(j, rel_q) }
+    // The twist row's Jacobian is ref + tan(swing / 2) perp, 1 / cos(swing / 2)
+    // long; the reach below covers a length of 2 (a swing of 120 degrees from
+    // the axis the twist is read about). A cone centred off the rest reaches
+    // past that (a shoulder's to 0.8 pi, where the Jacobian is 3.2 long), and
+    // there a twist closing on its limit could outrun the reach. A row left as
+    // it was pushes along the Jacobian it was made with, so the reach covers
+    // the longer of that one and today's: stretched with them past 2, the
+    // same below, bit for bit.
+    twist_stretch = 1.0
+    if j.enable_twist_limit {
+        twist_q = dynamics.spherical_twist_rotation(j, rel_q)
+        twist = math.get_twist_angle(twist_q)
+        stretch = math.sqrt_float(1.0 + (twist_q.x * twist_q.x + twist_q.y * twist_q.y) / (twist_q.z * twist_q.z + twist_q.w * twist_q.w))
+        twist_stretch = math.max_float(1.0, 0.5 * math.max_float(stretch, math.length(j.twist_jacobian)))
+    }
     if fixed_rotation == false && (j.enable_cone_limit || j.enable_twist_limit || j.lock_cone_minor) {
         reach = 2.0 * ctx.h * math.length(math.sub(w_b, w_a))
-        spherical_rows_where_now(j, quat_a, quat_b, cone_gap, twist, math.add_mm(i_a, i_b), reach)
+        spherical_rows_where_now(j, quat_a, quat_b, cone_gap, twist, math.add_mm(i_a, i_b), reach, twist_stretch * reach)
     }
     if j.enable_spring && fixed_rotation == false {
         delta_rotation = math.delta_quat_to_rotation(rel_q, j.target_rotation)
@@ -2935,7 +2949,9 @@ wheel_joint_get_steering_torque(id: JointId) -> float {
 prepare_joint(base: *JointSim, ctx: *StepContext) {
     hertz = math.min_float(base.constraint_hertz, 0.25 * ctx.inv_h)
     base.constraint_softness = dynamics.make_soft(hertz, base.constraint_damping_ratio, ctx.h)
+    // The limits' own stiffness (#226), else the constraint's; held as it is.
     base.limit_softness = base.constraint_softness
+    if base.limit_hertz > 0.0 { base.limit_softness = dynamics.make_soft(math.min_float(base.limit_hertz, 0.25 * ctx.inv_h), base.limit_damping_ratio, ctx.h) }
     if ctx.limit_load_scale > 0.0 && ctx.enable_warm_starting { size_limits_to_load(base, ctx) }
     kind = base.kind
     if kind == dynamics.JOINT_PARALLEL { prepare_parallel_joint(base, ctx) }
@@ -2956,7 +2972,8 @@ prepare_joint(base: *JointSim, ctx: *StepContext) {
 // longer sinks in, a shoulder rested 0.13 rad past its cone. Here the
 // joint's point impulse as the step begins, over |gravity| h, is the mass
 // it holds up; when that is more than its own, its limits' spring is made
-// for it: the same hertz and damping ratio, the stiffness k (hertz times the
+// for it: the limits' hertz and damping ratio (their own, #226, else the
+// constraint's), the stiffness k (hertz times the
 // step) scaled by carried / own, mass_scale = k / (1 + k), impulse_scale =
 // 1 / (1 + k), the same bias rate. Only the limits, which push one way: the
 // point and the locks sized so too held a light foot between them and the
@@ -2966,7 +2983,7 @@ size_limits_to_load(base: *JointSim, ctx: *StepContext) {
     sim_a = dynamics.get_body_sim(w, dynamics.body_at(w, base.body_id_a))
     sim_b = dynamics.get_body_sim(w, dynamics.body_at(w, base.body_id_b))
     inv_mass = sim_a.inv_mass + sim_b.inv_mass
-    soft = base.constraint_softness
+    soft = base.limit_softness
     if inv_mass <= 0.0 || soft.impulse_scale <= 0.0 { return }
     carried = dynamics.get_joint_reaction(w, base, 1.0).force * ctx.limit_load_scale * inv_mass
     if carried <= 1.0 { return }

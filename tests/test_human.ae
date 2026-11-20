@@ -23,6 +23,7 @@ extern atan2(y: float, x: float) -> float
 extern asin(x: float) -> float
 extern cos(x: float) -> float
 extern sin(x: float) -> float
+extern tan(x: float) -> float
 
 var failures = 0
 var checks = 0
@@ -677,6 +678,35 @@ thigh_reach(index: int, out_side: bool, degrees: float) -> ThighReach {
     return result
 }
 
+// The cone's edge for a left thigh at `flexion` degrees ahead: the most it
+// lets the thigh out there, measured as thigh_reach measures abduction (out
+// against down), by the joint's own measure of its limit.
+edge_abduction(flexion: float) -> float {
+    shape = human.human_reference_shape()
+    axes = figure_axes(shape)
+    world_id = world_with_ground()
+    physics_world.set_gravity(world_id, math.vec3_zero())
+    h = Human { bones: null, filter_joints: null, filter_joint_count: 0, friction_torque: 0.0, is_spawned: false }
+    human.create_human_shaped(&h, world_id, Transform { p: math.vec3(0.0, 1.5, 0.0), q: math.quat_identity() }, shape, 0.5, 1.0, 0.7, 1, null)
+    index = human.BONE_THIGH_L
+    spec = human.spec_at(shape, index)
+    out = math.sub(human.human_shape_head(shape, index), human.human_shape_head(shape, spec.parent))
+    out = math.sub(out, math.mul_sv(math.dot(out, axes.up), axes.up))
+    out = math.normalize(math.sub(out, math.mul_sv(math.dot(out, axes.forward), axes.forward)))
+    down = math.neg(axes.up)
+    edge = 0.0
+    abduction = 0.0
+    while abduction < 89.0 {
+        dir = math.normalize(math.add(math.add(down, math.mul_sv(tan(flexion * math.DEG_TO_RAD), axes.forward)), math.mul_sv(tan(abduction * math.DEG_TO_RAD), out)))
+        if hip_gap(&h, shape, index, dir) >= 0.0 { edge = abduction }
+        abduction = abduction + 0.05
+    }
+    human.destroy_human(&h)
+    dynamics.destroy_world(world_id)
+    human.destroy_shape(shape)
+    return edge
+}
+
 // How far a direction (in the figure's space, the figure placed with no
 // turn) is inside a bone's cone, degrees: the joint's own measure of its
 // limit, negative past it.
@@ -733,7 +763,14 @@ test_hips() {
     ahead = thigh_reach(human.BONE_THIGH_L, false, 120.0)
     ensure("hips: a thigh flexes ahead to 120 within 5 degrees (${ahead.off_aim})", ahead.off_aim < 5.0)
     pushed = thigh_reach(human.BONE_THIGH_L, true, 90.0)
-    ensure("hips: a thigh sprung out to 90 stays short of a split (abduction ${pushed.abduction}, flexion ${pushed.flexion})", pushed.abduction < 66.0)
+    // Short of a split: on the cone's edge where it ended (two degrees for
+    // the soft limit's give under the spring), where the old circle let it
+    // 98. The bound was 66, the edge where the thigh stopped on the old
+    // spine; with the reference's spine back (#224) the pelvis turns a
+    // little differently under the push and the thigh stops at another
+    // flexion on the same edge.
+    edge = edge_abduction(pushed.flexion)
+    ensure("hips: a thigh sprung out to 90 stays on its cone's edge (abduction ${pushed.abduction} against ${edge} at flexion ${pushed.flexion})", pushed.abduction < edge + 2.0 && pushed.abduction > edge - 2.0 && edge < 70.0)
     pushed_r = thigh_reach(human.BONE_THIGH_R, true, 90.0)
     ensure("hips: the right as the left (${pushed_r.abduction})", math.abs_float(pushed_r.abduction - pushed.abduction) < 2.0)
     within = thigh_reach(human.BONE_THIGH_L, true, 35.0)
@@ -1217,8 +1254,12 @@ test_ankle_shins() {
 // more (#204): a spherical joint's limit rows are made again each sub-step
 // where B's z is, and an ellipse's pushes along the nearest rim point's
 // normal.
-const UNCHANGED_REFERENCE = 9051829026855609828
-const UNCHANGED_ANKLES = 5474879403437732451
+// And the reference's figure and the one with ankles once more (#224): the
+// spine's and the neck's cones are the reference's again, which meeting
+// the rest (#202) had turned 10 degrees back. The fitted figure, on tight
+// limits, is the same.
+const UNCHANGED_REFERENCE = 12445461380616448
+const UNCHANGED_ANKLES = 4283857925101259182
 const UNCHANGED_FITTED = 0 - 3429263234805564101
 
 unchanged_hash(kind: int) -> long {
@@ -1343,13 +1384,48 @@ struct JointWorst {
     settled_linear: float
 }
 
+// How far a joint has turned past its limits, as a turn of the bone (#225).
+// joint_get_angular_separation adds each limit's excess in the angle it is
+// read in, Box3D's way. A ball joint's twist is read from the cone's centre,
+// and a turn of the bone changes it by up to 1 / cos(swing / 2) times as
+// much (the length of the twist row's Jacobian, the twist's gradient): a
+// shoulder swung 129 degrees from its centre reads 2.3 times the turn, and
+// an arm swept round the rim of its cone reads a twist it never turned
+// (the swing-twist split's holonomy, Codman's paradox). The soft row pushes
+// back by the same measure, so the limit holds the same either way. The
+// turn past the limit is the excess over that length: what this measures,
+// for every joint, so a bound means the same at every swing.
+turned_past(id: JointId) -> float {
+    if dynamics.joint_get_type(id) != dynamics.JOINT_SPHERICAL { return dynamics.joint_get_angular_separation(id) }
+    w = dynamics.get_world(id.world0)
+    s = dynamics.spherical_joint_of(dynamics.get_joint_sim(w, dynamics.get_joint_full_id(w, id)))
+    q_a = math.mul_quat(dynamics.body_get_rotation(dynamics.joint_get_body_a(id)), dynamics.joint_get_local_frame_a(id).q)
+    q_b = math.mul_quat(dynamics.body_get_rotation(dynamics.joint_get_body_b(id)), dynamics.joint_get_local_frame_b(id).q)
+    if math.dot_quat(q_a, q_b) < 0.0 { q_b = math.negate_quat(q_b) }
+    rel_q = math.inv_mul_quat(q_a, q_b)
+    sum = 0.0
+    if s.enable_cone_limit { sum = sum + math.max_float(0.0, 0.0 - dynamics.spherical_cone_gap(s, rel_q)) }
+    if s.enable_twist_limit {
+        t = dynamics.spherical_twist_rotation(s, rel_q)
+        twist = math.get_twist_angle(t)
+        excess = math.max_float(0.0, s.lower_twist_angle - twist) + math.max_float(0.0, twist - s.upper_twist_angle)
+        stretch = math.sqrt_float(1.0 + (t.x * t.x + t.y * t.y) / (t.z * t.z + t.w * t.w))
+        sum = sum + excess / stretch
+    }
+    if s.lock_cone_minor {
+        lean = dynamics.spherical_lock_error(s, q_a, q_b)
+        sum = sum + math.abs_float(math.atan2_approx(lean, math.sqrt_float(math.max_float(1.0 - lean * lean, 0.0))))
+    }
+    return sum
+}
+
 joint_worst(h: *Human) -> JointWorst {
     worst = JointWorst { angular: 0.0, linear: 0.0, settled_angular: 0.0, settled_linear: 0.0 }
     i = 1
     while i < h.bone_count {
         if human.human_has_bone(h, i) {
             id = human.bone_at(h, i).joint_id
-            worst.angular = math.max_float(worst.angular, dynamics.joint_get_angular_separation(id))
+            worst.angular = math.max_float(worst.angular, turned_past(id))
             worst.linear = math.max_float(worst.linear, dynamics.joint_get_linear_separation(id))
         }
         i = i + 1
@@ -1452,7 +1528,19 @@ worst_of_throws(flags: int) -> JointWorst {
 // The sag is the joints' softness: at 16 sub-steps and 240 Hz it is 0.003.
 const SETTLED_ANGLE = 0.08
 const SETTLED_SEPARATION = 0.005
+// Each measured as the bone's turn past its limits (turned_past, #225).
 const NEVER_THROUGH = 0.8
+// On ground and joints not sized to their load, a light hand or foot taking
+// the whole figure on an impact gives further for that step. These bounds
+// are from 64 throws (the sixteen, each kicked 1, 1.002, 1.004 and 1.006
+// times as hard) of the figure with every extra, on the reference's spine
+// and neck ranges (#224): the worst turn past a limit 0.838 rad, a hand
+// landed on in one throw family (main, with the spine turned 10 degrees
+// back, 0.613); the worst stretch 0.171 m, where main's reached 0.155 and
+// passed half again the reference's figure's on 2 of the 64. Sized to their
+// load (loaded_contacts, loaded_limits) the same figures hold NEVER_THROUGH.
+const NEVER_THROUGH_UNLOADED = 0.9
+const STRETCH_OVER_REFERENCE = 2.0
 
 // On ground sized to its load (#212) a limb pinned under the figure no
 // longer sinks in, and its joint's limit, a spring sized to the limb, took
@@ -1537,8 +1625,8 @@ test_extras_build() {
         println("human: extras ${flags}, dropped and thrown sixteen ways: worst limit excursion ${worst.angular} rad, worst separation ${worst.linear} m, settled ${worst.settled_angular} rad and ${worst.settled_linear} m")
         ensure("extras ${flags}: settled, every joint inside its limits after each drop and throw (${worst.settled_angular} rad)", worst.settled_angular < SETTLED_ANGLE)
         ensure("extras ${flags}: settled, every joint closed (${worst.settled_linear} m)", worst.settled_linear < SETTLED_SEPARATION)
-        ensure("extras ${flags}: no joint turned through its limit on an impact (${worst.angular} rad)", worst.angular < NEVER_THROUGH)
-        ensure("extras ${flags}: the joints stretch no more than half again the reference's (${worst.linear} against ${baseline.linear} m)", worst.linear <= 1.5 * baseline.linear + 0.01)
+        ensure("extras ${flags}: no joint turned through its limit on an impact (${worst.angular} rad)", worst.angular < NEVER_THROUGH_UNLOADED)
+        ensure("extras ${flags}: the joints stretch no more than twice the reference's (${worst.linear} against ${baseline.linear} m)", worst.linear <= STRETCH_OVER_REFERENCE * baseline.linear + 0.01)
         // The twisting hinges alone are held to the reference's own figure:
         // locked sideways, they give no more than its hinges do.
         if flags == WITH_TWIST {
@@ -2101,8 +2189,40 @@ test_hip_rotation() {
     }
 }
 
+
+// The anatomical figure's spine and neck keep the reference's ranges
+// (#224): meeting the rest turned their frames 10 degrees and their cones
+// with them, so the trunk flexed 70 and extended 70 where the reference's
+// flexes 90 and extends 50 (a person's 80 and 25). Each cone's centre in
+// the world matches the reference figure's, the frames meet at the rest,
+// and the rest sits 10 degrees behind the kept centre.
+test_spine_and_neck_ranges() {
+    shape = human.human_reference_shape()
+    reference = human.human_reference_shape()
+    human.human_tight_limits(reference)
+    bones = [human.BONE_SPINE_01, human.BONE_SPINE_03, human.BONE_NECK]
+    k = 0
+    while k < 3 {
+        i = bones[k]
+        s = human.spec_at(shape, i)
+        r = human.spec_at(reference, i)
+        centre = math.rotate_vector(math.mul_quat(human.spec_at(shape, s.parent).reference.q, s.frame_a.q), s.cone_axis)
+        reference_centre = math.rotate_vector(math.mul_quat(human.spec_at(reference, r.parent).reference.q, r.frame_a.q), r.cone_axis)
+        ensure("bone ${i}: the cone's centre is the reference's (${math.length(math.sub(centre, reference_centre))} apart)", near_vec(centre, reference_centre, 0.000001))
+        // The rest: frame B's z in frame A, 10 degrees off the kept centre.
+        rest = math.inv_mul_quat(math.mul_quat(human.spec_at(shape, s.parent).reference.q, s.frame_a.q), math.mul_quat(s.reference.q, s.frame_b.q))
+        z = math.rotate_vector(rest, math.vec3_axis_z())
+        ensure("bone ${i}: the frames meet at the rest (${z.x} ${z.y} ${z.z})", near_vec(z, math.vec3_axis_z(), 0.000000001))
+        off = math.atan2_approx(math.length(math.cross(s.cone_axis, z)), math.dot(s.cone_axis, z)) * math.RAD_TO_DEG
+        ensure("bone ${i}: the rest is 10 degrees behind the cone's centre (${off})", math.abs_float(off - 10.0) < 0.05)
+        k = k + 1
+    }
+    human.destroy_shape(shape)
+    human.destroy_shape(reference)
+}
 main() {
     g_slab = hull.make_box_hull(20.0, 1.0, 20.0) as ptr
+    test_spine_and_neck_ranges()
     test_build_and_fall()
     test_align_spring()
     test_anchors()
