@@ -7,10 +7,10 @@ on:
       - main
   pull_request:
 
-# Pin: 0.919.0, the latest release, and aeb v0.347, the one ae3d builds
+# Pin: 0.931.0, the latest release, and aeb v0.347, the one ae3d builds
 # beside. Every module, test, benchmark and example checks clean on
-# 0.919.0 with no source change from 0.841.0, the golden trace bit for
-# bit. 0.840.0 and 0.841.0 added the ownership rules (a borrowed ptr put
+# 0.931.0 (a tracking bump from 0.919.0, no new primitive needed) with no
+# source change from 0.841.0, the golden trace bit for bit. 0.840.0 and 0.841.0 added the ownership rules (a borrowed ptr put
 # into a list or map is E0902 without @keep) and E0202 / E0305. The two functions that take over a
 # struct's buffers declare it `@keep`, which 0.838.0 checks; the
 # accessors that hand back a pointer into their argument declare it
@@ -20,7 +20,7 @@ on:
 # bootstrap version: the floor this code needs, verified by every job
 # below.
 env:
-  AE_PIN: 0.919.0
+  AE_PIN: 0.931.0
   AEB_REF: v0.347
 
 jobs:
