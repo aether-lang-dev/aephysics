@@ -310,6 +310,16 @@ torque over its stiffness. The stiffness is `constraint_hertz` (60 by
 default), capped at a quarter of the sub-step rate. Raising it, or the
 sub-step count, holds limits tighter.
 
+A joint's limits can have a softness of their own, separate from its
+point and locks: `joint_set_limit_tuning(joint, hertz, damping_ratio)`, or
+`limit_hertz` and `limit_damping_ratio` on the joint's definition. Every
+limit row of the joint is then a spring of that hertz and damping past its
+limit, a soft stop like a person's end range. 0 hertz, the default, is the
+constraint's softness, as in Box3D. With `loaded_limits` on, the load
+sizing starts from it. This is the soft limit of other engines (PhysX
+`PxJointLimitParameters`, Unity `SoftJointLimitSpring`). A passive
+moment that rises before the stop belongs in a joint spring.
+
 ## Events
 
 Events are collected during a step and read after it, from `physics_world`.
@@ -478,6 +488,10 @@ human.destroy_human(&figure)
   never pass straight. Every joint's
   frames meet at the rest pose, so its angles are measured from the rest,
   the two sides are mirrors, and a joint spring holds the rest.
+  Meeting the rest turns a frame but not its cone: the spine and the neck
+  keep the reference's ranges, the trunk flexing 90 degrees over its two
+  spine joints and extending 50 (a person's 80 and 25), the neck 40 and
+  20.
   `human_tight_limits(shape)` puts Box3D's tighter ranges, and its own
   frames, on a figure's shape before `create_human_shaped`.
 - **Feet.** With `figure.ankles = true` before creation, the feet are bones
@@ -740,6 +754,10 @@ it changes results, so Box3D's own scenes give Box3D's checksums.
   a whole turn (its quaternion negated), warm-started each step backwards:
   the parallel joint above then applied half its cap. Here the prepares
   match it too, and q and -q step alike to the bit.
+- **A joint's limits can be softer than its point** (`joint_set_limit_tuning`,
+  `limit_hertz`). Box3D's limit rows read the joint's one constraint
+  softness, so softening a stop softened the point and locks too. Off by
+  default.
 - **A joint with no dynamic body holds no impulse.** When `body_set_type`
   leaves a joint between kinematic or static bodies, it is not solved.
   Box3D keeps the impulse it last gathered. So its force kept reading that
