@@ -683,6 +683,12 @@ it changes results, so Box3D's own scenes give Box3D's checksums.
   along the normal at the nearest point of its rim. The direction a row is
   built along then turns no faster than the rim curves, so a foot pressed
   hard against its limit comes to rest instead of shaking.
+- **A parallel joint's torque cap is the torque applied.** Box3D caps the
+  impulse of the joint's two rows. Those rows are the half-angle's, about
+  half a unit long near alignment, so a joint given `max_torque` 331 N m
+  applied at most 165.6. Here the cap is on the torque the rows apply,
+  which `joint_get_constraint_torque` reports. Below the cap, results are
+  Box3D's bit for bit.
 - **An elliptical cone's separation** (`joint_get_angular_separation`) is
   measured against the ellipse's radius toward frame B's z, not against its
   major half-angle.
