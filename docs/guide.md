@@ -113,7 +113,7 @@ The world definition's fields, with their defaults:
 | `hit_event_threshold` | 1 | approach speed that makes a hit event |
 | `maximum_linear_speed` | 400 | m/s |
 | `friction_callback`, `restitution_callback` | geometric mean, maximum | how two materials mix |
-| `enable_kinematic_static_softness`, `enable_kinematic_speculation`, `enable_travel_speculation`, `canonical_begin_order` | false | see [Where aephysics goes past Box3D](#where-aephysics-goes-past-box3d) |
+| `enable_kinematic_static_softness`, `enable_kinematic_speculation`, `enable_travel_speculation`, `canonical_begin_order`, `loaded_contacts` | false | see [Where aephysics goes past Box3D](#where-aephysics-goes-past-box3d) |
 
 Most settings can change between steps through `physics_world`:
 `enable_sleeping`, `enable_continuous`, `enable_warm_starting`,
@@ -683,6 +683,21 @@ it changes results, so Box3D's own scenes give Box3D's checksums.
   along the normal at the nearest point of its rim. The direction a row is
   built along then turns no faster than the rim curves, so a foot pressed
   hard against its limit comes to rest instead of shaking.
+- **Ground contacts sized to their load** (`loaded_contacts`,
+  `physics_world.enable_loaded_contacts`). Box3D's soft contact is a spring
+  sized to the contact's own effective mass. A light body holding up a
+  heavy one through joints, such as a foot under a ragdoll, stands on a
+  spring sized to the foot. An 84 kg figure on 1.16 kg feet pitched its
+  soles 0.0125 rad into the ground and rocked on them at half a hertz,
+  barely damped; a 1 kg box under a 100 kg box sank 7 mm. With the option
+  on, a point against a static or kinematic body has its spring made, once
+  a step, for the mass its impulse held up: the same hertz and damping
+  ratio, sized to the load. The box sinks 0.07 mm, as a box on its own
+  does, and the feet lie flat. A point carrying no more than its own body
+  is unchanged, and so are contacts between two moving bodies, where a
+  light body squeezed between two near-rigid contacts shook. Joints still
+  give under such loads (#213): a limb pinned under a figure on firm ground
+  rests further past its limit than on the soft one.
 - **A parallel joint's torque cap is the torque applied.** Box3D caps the
   impulse of the joint's two rows. Those rows are the half-angle's, about
   half a unit long near alignment, so a joint given `max_torque` 331 N m

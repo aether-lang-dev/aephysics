@@ -63,6 +63,10 @@ struct StepContext {
     any_restitution: int           // set by a prepare that met a contact with restitution
     sub_step_index: int            // the sub-step the stages are running, 0 first
     body_inertias: ptr             // float[6] per awake body: its local inertia, kept from sub-step 0; null to compute it each time
+    // 1 / (|gravity| h) when contacts are sized to the load they carry
+    // (World.loaded_contacts, #212): a point's impulse times it is the mass
+    // it holds up. 0 for the reference's contacts, sized to their bodies.
+    load_scale: float
 }
 
 default_step_context(w: *World) -> StepContext {
@@ -71,7 +75,7 @@ default_step_context(w: *World) -> StepContext {
                          restitution_threshold: w.restitution_threshold, max_linear_velocity: w.max_linear_speed, world: w,
                          states: null, sims: null, enlarged_shapes: null, enlarged_shape_count: 0, bullet_bodies: null, bullet_body_count: 0,
                          awake_contact_indices: null, awake_contact_count: 0, active_color_count: 0, enable_warm_starting: w.enable_warm_starting,
-                         any_restitution: 0, sub_step_index: 0, body_inertias: null }
+                         any_restitution: 0, sub_step_index: 0, body_inertias: null , load_scale: 0.0 }
 }
 
 // One manifold point's constraint: the anchors relative to the centres
@@ -88,6 +92,10 @@ struct ManifoldConstraintPoint {
     restitution_impulse: float     // what the restitution passes added beyond the approach
     normal_mass: float
     lever_arm: float
+    // Sized to its load (#212): the softness's stiffness, hertz times the
+    // step, scaled by the mass the point held up as the step began; 0 when
+    // that is no more than its own (the reference's softness).
+    load_stiffness: float
 }
 
 // One manifold's constraint: its points, the normal and tangents, the
@@ -284,6 +292,16 @@ prepare_contact(ctx: *StepContext, c: *Contact, cc: *ContactConstraint, manifold
             k_normal = m_a + m_b + math.dot(rn_a, math.mul_mv(i_a, rn_a)) + math.dot(rn_b, math.mul_mv(i_b, rn_b))
             cp.normal_mass = 0.0
             if k_normal > 0.0 { cp.normal_mass = 1.0 / k_normal }
+            // The mass it holds up, from the impulse it ended the last step
+            // on: taken once a step, so its spring is one through the step
+            // (taken each pass, from the impulse as it grew, the spring
+            // changed under the solve and a light box under a heavy one
+            // chattered).
+            cp.load_stiffness = 0.0
+            if ctx.load_scale > 0.0 && (m_a == 0.0 || m_b == 0.0) && cp.normal_mass > 0.0 && cc.softness.impulse_scale > 0.0 {
+                carried = cp.normal_impulse * ctx.load_scale / cp.normal_mass
+                if carried > 1.0 { cp.load_stiffness = carried * cc.softness.mass_scale / cc.softness.impulse_scale }
+            }
             cp.relative_velocity = 0.0
             if sample_velocity {
                 vr_a = math.add(v_a, math.cross(w_a, r_a))
@@ -475,6 +493,17 @@ solve_contacts(ctx: *StepContext, constraints: ptr, count: int, use_bias: bool) 
                     velocity_bias = math.max_float(softness.mass_scale * softness.bias_rate * s, 0.0 - contact_speed)
                     mass_scale = softness.mass_scale
                     impulse_scale = softness.impulse_scale
+                    // Sized to the load it carries (#212): the spring the
+                    // softness makes for a body of the point's own mass,
+                    // made instead for the mass it holds up. The softness
+                    // is a stiffness k = h w (2 z + h w) over a mass;
+                    // mass_scale = k / (1 + k), impulse_scale = 1 / (1 + k),
+                    // the bias rate the same.
+                    if cp.load_stiffness > 0.0 {
+                        mass_scale = cp.load_stiffness / (1.0 + cp.load_stiffness)
+                        impulse_scale = 1.0 / (1.0 + cp.load_stiffness)
+                        velocity_bias = math.max_float(mass_scale * softness.bias_rate * s, 0.0 - contact_speed)
+                    }
                 }
                 vr_a = math.add(v_a, math.cross(w_a, r_a))
                 vr_b = math.add(v_b, math.cross(w_b, r_b))
