@@ -724,8 +724,27 @@ it changes results, so Box3D's own scenes give Box3D's checksums.
   impulse of the joint's two rows. Those rows are the half-angle's, about
   half a unit long near alignment, so a joint given `max_torque` 331 N m
   applied at most 165.6. Here the cap is on the torque the rows apply,
-  which `joint_get_constraint_torque` reports. Below the cap, results are
-  Box3D's bit for bit.
+  which `joint_get_constraint_torque` reports.
+- **A parallel joint's impulse turns with the bodies.** The rows turn with
+  the bodies between sub-steps. Box3D carries their impulse over as the old
+  rows' two numbers, so the turn shows as torque nobody solved for. Near a
+  half turn the rows' impulse is cap / (0.5 cos(angle / 2)): a joint at a
+  2 N m cap swung through it applied 15% over the cap, 38% over on the
+  crossing step, and almost nothing on the step after. Here the impulse is
+  carried into the new rows as the torque it is, and the joint applies the
+  cap and no more. When the rows haven't turned, results are Box3D's bit
+  for bit.
+- **Quaternion polarity in a joint's prepare.** q and -q are one rotation.
+  Box3D's parallel and revolute solves match B's polarity to A's, but their
+  prepares do not. So a joint past a half turn, or one whose body had spun
+  a whole turn (its quaternion negated), warm-started each step backwards:
+  the parallel joint above then applied half its cap. Here the prepares
+  match it too, and q and -q step alike to the bit.
+- **The parallel and revolute torque reads** use the frames as they now
+  stand: the axes the last sub-step solved along and the next step
+  warm-starts along. Box3D reads along
+  the step's starting axes, so near a half turn a saturated parallel joint
+  read 7.9 times its cap.
 - **An elliptical cone's separation** (`joint_get_angular_separation`) is
   measured against the ellipse's radius toward frame B's z, not against its
   major half-angle.

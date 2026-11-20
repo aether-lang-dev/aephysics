@@ -16,6 +16,7 @@ import aephysics.broad_phase
 import aephysics.dynamics
 import aephysics.contact_solver
 import aephysics.joint_solver
+import aephysics.physics_world
 
 extern exit(code: int)
 extern calloc(count: int, size: int) -> ptr
@@ -115,6 +116,135 @@ set_velocity(f: *Fixture, v: Vec3, w: Vec3) {
     state = cube_state(f)
     state.v = math.narrow3(v)
     state.w = math.narrow3(w)
+}
+
+// The fixture's cube, stepped by the world (no gravity unless asked):
+// the bodies turn between sub-steps, which a solve by hand never shows.
+struct Stepped {
+    world_id: WorldId
+    ground_id: BodyId
+    cube_id: BodyId
+}
+
+stepped(gravity: float, at: Vec3, q: Quat) -> Stepped {
+    if g_cube == null { g_cube = hull.make_box_hull(0.5, 0.5, 0.5) as ptr }
+    wdef = dynamics.default_world_def()
+    wdef.gravity = math.vec3(0.0, 0.0 - gravity, 0.0)
+    world_id = dynamics.create_world(&wdef)
+    gdef = dynamics.default_body_def()
+    ground_id = dynamics.create_body(world_id, &gdef)
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.position = at
+    cube_id = dynamics.create_body(world_id, &bdef)
+    sdef = dynamics.default_shape_def()
+    sdef.density = 1.0
+    dynamics.create_hull_shape(cube_id, &sdef, g_cube as *HullData)
+    dynamics.body_set_transform(cube_id, at, q)
+    physics_world.enable_sleeping(world_id, false)
+    return Stepped { world_id: world_id, ground_id: ground_id, cube_id: cube_id }
+}
+
+// The parallel joint at a cap of 2 N m swung through a half turn at
+// 6 rad/s. Near the half turn the rows' impulse is cap / (0.5 cos(angle / 2)),
+// and the rows turn with the cube: carried over as numbers, the torque
+// applied ran 15% over the cap, 38% over on the step crossing the half
+// turn, and the step after it applied almost nothing; the torque read,
+// along the step's starting axes, ran to 7.9 times the cap (ae3d
+// test_fall_heap). The applied torque is the cube's change of angular
+// momentum (no gravity, inertia 1/6).
+test_parallel_half_turn() {
+    axis = math.normalize(math.vec3(1.0, 0.5, 0.0))
+    s = stepped(0.0, math.vec3(0.0, 4.0, 0.0), math.make_quat_from_axis_angle(axis, 2.6))
+    pdef = dynamics.default_parallel_joint_def()
+    pdef.base.body_id_a = s.ground_id
+    pdef.base.body_id_b = s.cube_id
+    pdef.base.local_frame_a.p = math.vec3(0.0, 4.0, 0.0)
+    pdef.hertz = 60.0
+    pdef.damping_ratio = 0.5
+    pdef.max_torque = 2.0
+    pid = dynamics.create_parallel_joint(s.world_id, &pdef)
+    dynamics.body_set_angular_velocity(s.cube_id, math.mul_sv(6.0, axis))
+    worst_read = 0.0
+    least_read = 100.0
+    worst_applied = 0.0
+    least_applied = 100.0
+    widest = 0.0
+    step = 0
+    while step < 12 {
+        w0 = dynamics.body_get_angular_velocity(s.cube_id)
+        physics_world.step(s.world_id, 1.0 / 60.0, 4)
+        applied = math.length(math.mul_sv(10.0, math.sub(dynamics.body_get_angular_velocity(s.cube_id), w0)))
+        read = math.length(joint_solver.joint_get_constraint_torque(pid))
+        worst_read = math.max_float(worst_read, read)
+        least_read = math.min_float(least_read, read)
+        worst_applied = math.max_float(worst_applied, applied)
+        least_applied = math.min_float(least_applied, applied)
+        widest = math.max_float(widest, dynamics.joint_get_angular_separation(pid))
+        step = step + 1
+    }
+    ensure("parallel half turn: swung through it (${widest})", widest > 3.12)
+    small("parallel half turn: the torque read is the cap at most (${worst_read})", worst_read - 2.0, 0.00001)
+    small("parallel half turn: saturated throughout, the torque read is the cap (${least_read})", least_read - 2.0, 0.00001)
+    ensure("parallel half turn: the torque applied is the cap at most (${worst_applied})", worst_applied < 2.0001)
+    ensure("parallel half turn: the step after the half turn applies it too (${least_applied})", least_applied > 1.9)
+    dynamics.destroy_world(s.world_id)
+}
+
+// q and -q are one rotation: a joint steps the same either way, to the
+// bit. The parallel joint's and the hinge's prepare took the relative
+// rotation as the quaternions gave it and the solve matched B's polarity
+// to A's, so with B's sign flipped (past a half turn, or after a body had
+// spun a whole one) each step's first warm start pushed backwards.
+polarity_run(kind: int, negate: bool) -> Vec3 {
+    axis = math.normalize(math.vec3(1.0, 0.5, 0.0))
+    q = math.make_quat_from_axis_angle(axis, 0.8)
+    if negate { q = math.negate_quat(q) }
+    gravity = 0.0
+    at = math.vec3(0.0, 4.0, 0.0)
+    if kind == 1 {
+        gravity = 10.0
+        at = math.vec3(0.0, 4.0, 1.0)
+        q = math.make_quat_from_axis_angle(math.vec3_axis_z(), 0.4)
+        if negate { q = math.negate_quat(q) }
+    }
+    s = stepped(gravity, at, q)
+    if kind == 0 {
+        pdef = dynamics.default_parallel_joint_def()
+        pdef.base.body_id_a = s.ground_id
+        pdef.base.body_id_b = s.cube_id
+        pdef.base.local_frame_a.p = math.vec3(0.0, 4.0, 0.0)
+        pdef.hertz = 5.0
+        pdef.damping_ratio = 0.5
+        dynamics.create_parallel_joint(s.world_id, &pdef)
+        dynamics.body_set_angular_velocity(s.cube_id, math.mul_sv(2.0, axis))
+    } else {
+        // A hinge along z holding the cube overhanging along it, spinning.
+        rdef = dynamics.default_revolute_joint_def()
+        rdef.base.body_id_a = s.ground_id
+        rdef.base.body_id_b = s.cube_id
+        rdef.base.local_frame_a.p = math.vec3(0.0, 4.0, 0.0)
+        rdef.base.local_frame_b.p = math.vec3(0.0, 0.0, 0.0 - 1.0)
+        dynamics.create_revolute_joint(s.world_id, &rdef)
+        dynamics.body_set_angular_velocity(s.cube_id, math.vec3(0.3, 0.0, 9.0))
+    }
+    step = 0
+    while step < 30 {
+        physics_world.step(s.world_id, 1.0 / 60.0, 4)
+        step = step + 1
+    }
+    w = dynamics.body_get_angular_velocity(s.cube_id)
+    dynamics.destroy_world(s.world_id)
+    return w
+}
+
+test_polarity() {
+    a = polarity_run(0, false)
+    b = polarity_run(0, true)
+    ensure("parallel: q and -q step alike (${a.x} ${a.y} ${a.z} against ${b.x} ${b.y} ${b.z})", a.x == b.x && a.y == b.y && a.z == b.z)
+    a = polarity_run(1, false)
+    b = polarity_run(1, true)
+    ensure("hinge: q and -q step alike (${a.x} ${a.y} ${a.z} against ${b.x} ${b.y} ${b.z})", a.x == b.x && a.y == b.y && a.z == b.z)
 }
 
 // --- accessors (test_joint.c's per-kind checks) -------------------------------------------------------------------
@@ -1088,9 +1218,16 @@ main() {
     test_impulses()
     test_parallel_motor_wheel()
     test_point_mass_matrix()
+    // The first world stepped reserves the step's own scratch, once; the
+    // worlds stepped after it leave nothing behind.
+    hand = basics.alloc_count()
+    test_parallel_half_turn()
+    step_scratch = basics.alloc_count() - hand
+    test_polarity()
+    ensure("the stepped worlds after the first leave nothing (${basics.alloc_count() - hand - step_scratch})", basics.alloc_count() == hand + step_scratch)
     hull.destroy_hull(g_cube as *HullData)
     // The scratch stays allocated: the worlds' block, the masses, the dummy state (the modules' scratch is reserved before the count).
-    ensure("every other counted allocation was freed (${basics.alloc_count() - before})", basics.alloc_count() == before + 3)
+    ensure("every other counted allocation was freed (${basics.alloc_count() - before - step_scratch})", basics.alloc_count() == before + 3 + step_scratch)
     println("joint_solver: ${checks} checks")
     if failures == 0 {
         println("joint_solver: all checks passed")
