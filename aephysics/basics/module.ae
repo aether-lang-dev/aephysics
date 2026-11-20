@@ -22,7 +22,7 @@ import std.lanes
 import aephysics.native
 
 exports (
-    set_simd_width, get_simd_width,
+    set_simd_width, get_simd_width, CACHE_LINE, alloc_lines, free_lines,
     BitSet, IdPool, HashSet, Ints, Buffer, Stack, Arena, BlockAllocator, BLOCK_SIZE,
     block_allocator_create, block_allocator_destroy, block_allocate, block_free,
     alloc, free_bytes, alloc_count, bytes_in_use, sort_ints, set_allocator, clear_allocator, set_log_fn, set_assert_fn, log,
@@ -80,7 +80,8 @@ struct HostHooks {
 var g_hooks: ptr = null            // *HostHooks, or null for none
 
 // The alignment a host's allocator is asked for: the widest lanes' (the
-// reference's B3_ALIGNMENT).
+// reference's B3_ALIGNMENT); CACHE_LINE for the storage the step streams
+// (alloc_lines). A host's allocator gives a block at least that aligned.
 const HOST_ALIGNMENT = 32
 
 system_allocate(size: int, alignment: int) -> ptr { return calloc(1, size) }
@@ -175,6 +176,7 @@ report_failure(condition: string, file: string, line: int) {
 // Box3D's b3Alloc: zeroed and counted, so a leak is a number a test reads;
 // from the host's allocator when one is set (aligned to HOST_ALIGNMENT and
 // zeroed here), else the C runtime's (16-byte aligned by its own promise).
+// The storage the step streams comes from alloc_lines, on a cache line.
 // The counters move atomically: the collide pass and finalize allocate from
 // several workers at once (a mesh contact's triangle cache, an arena's
 // overflow, the continuous pass's sensor hits).
@@ -189,6 +191,40 @@ alloc(size: int) -> ptr {
         return block
     }
     return calloc(1, size)
+}
+
+// Storage the engine streams through every step, on a cache line: the
+// buffers its bodies, contacts and joints live in, the step's stack and
+// arenas. A body state is one 64-byte line, but calloc's 16-byte blocks
+// put most of them across two, and the solver reads two states for every
+// contact and joint. Never handed to a caller to free: those stay alloc's.
+// From the host's allocator when one is set (asked for CACHE_LINE), else
+// native.alloc_aligned (Aether's alloc.raw_aligned once aether#3778 lands).
+const CACHE_LINE = 64
+
+alloc_lines(size: int) -> ptr {
+    if size <= 0 { return null }
+    native.atomic_add((&g_alloc_count) as ptr, 1)
+    native.atomic_add((&g_bytes_in_use) as ptr, size)
+    if g_hooks != null && hooks().has_allocator {
+        allocate = hooks().allocate
+        block = allocate(size, CACHE_LINE)
+        if block != null { memset(block, 0, size) }
+        return block
+    }
+    return native.alloc_aligned(size, CACHE_LINE)
+}
+
+free_lines(block: ptr, size: int) {
+    if block == null { return }
+    native.atomic_add((&g_alloc_count) as ptr, 0 - 1)
+    native.atomic_add((&g_bytes_in_use) as ptr, 0 - size)
+    if g_hooks != null && hooks().has_allocator {
+        release = hooks().release
+        release(block, size)
+        return
+    }
+    native.release_aligned(block, size, CACHE_LINE)
 }
 
 free_bytes(block: ptr, size: int) {
@@ -853,7 +889,7 @@ buffer_create(stride: int, capacity: int) -> Buffer {
 }
 
 buffer_destroy(b: *Buffer) {
-    free_bytes(b.data, b.capacity * b.stride)
+    free_lines(b.data, b.capacity * b.stride)
     b.data = null
     b.count = 0
     b.capacity = 0
@@ -861,10 +897,10 @@ buffer_destroy(b: *Buffer) {
 
 buffer_reserve(b: *Buffer, capacity: int) {
     if capacity <= b.capacity { return }
-    fresh = alloc(capacity * b.stride)
+    fresh = alloc_lines(capacity * b.stride)
     if b.data != null {
         memcpy(fresh, b.data, b.count * b.stride)
-        free_bytes(b.data, b.capacity * b.stride)
+        free_lines(b.data, b.capacity * b.stride)
     }
     b.data = fresh
     b.capacity = capacity
@@ -1199,7 +1235,7 @@ set_bytes(s: *HashSet) -> int { return s.capacity * sizeof(SetItem) }
 // megabytes, and every field is written by the prepare that fills them
 // (the wide tail's spare lanes by the solver, expressly).
 const MAX_STACK_ENTRIES = 32
-const STACK_ALIGNMENT = 16
+const STACK_ALIGNMENT = CACHE_LINE
 
 struct StackEntry {
     data: ptr
@@ -1218,12 +1254,12 @@ struct Stack {
 }
 
 stack_create(capacity: int) -> Stack {
-    return Stack { memory: alloc(capacity), capacity: capacity, index: 0, allocation: 0, max_allocation: 0,
+    return Stack { memory: alloc_lines(capacity), capacity: capacity, index: 0, allocation: 0, max_allocation: 0,
                    entries: alloc(MAX_STACK_ENTRIES * sizeof(StackEntry)), entry_count: 0 }
 }
 
 stack_destroy(s: *Stack) {
-    free_bytes(s.memory, s.capacity)
+    free_lines(s.memory, s.capacity)
     free_bytes(s.entries, MAX_STACK_ENTRIES * sizeof(StackEntry))
     s.memory = null
     s.entries = null
@@ -1239,7 +1275,7 @@ stack_alloc(s: *Stack, size: int) -> ptr {
     entry = StackEntry { data: null, size: aligned, used_malloc: false }
     if s.index + aligned > s.capacity {
         // Past the block: the heap, and the block grows on the next create.
-        entry.data = alloc(aligned)
+        entry.data = alloc_lines(aligned)
         entry.used_malloc = true
     } else {
         entry.data = s.memory + s.index
@@ -1259,7 +1295,7 @@ stack_free(s: *Stack, mem: ptr) {
     entry = entries[s.entry_count - 1]
     if entry.data != mem { return }
     if entry.used_malloc {
-        free_bytes(mem, entry.size)
+        free_lines(mem, entry.size)
     } else {
         s.index = s.index - entry.size
     }
@@ -1271,9 +1307,9 @@ stack_free(s: *Stack, mem: ptr) {
 // is freed (the end of a step): the next step's allocations fit in it.
 stack_grow(s: *Stack) {
     if s.entry_count != 0 || s.max_allocation <= s.capacity { return }
-    free_bytes(s.memory, s.capacity)
+    free_lines(s.memory, s.capacity)
     s.capacity = s.max_allocation + s.max_allocation / 2
-    s.memory = alloc(s.capacity)
+    s.memory = alloc_lines(s.capacity)
     s.index = 0
 }
 
