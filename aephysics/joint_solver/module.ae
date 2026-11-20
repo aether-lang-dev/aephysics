@@ -1799,9 +1799,9 @@ spherical_lock_row(j: *SphericalJoint, quat_a: Quat, quat_b: Quat, inertia_sum: 
 // most joints sit inside their ranges most of the time, and making every
 // row every solve cost the spherical joint a third of its time. The minor
 // lock is an equality, always acting: its row is made every time.
-spherical_rows_where_now(j: *SphericalJoint, quat_a: Quat, quat_b: Quat, cone_gap: float, twist: float, inertia_sum: Matrix3, reach: float) {
+spherical_rows_where_now(j: *SphericalJoint, quat_a: Quat, quat_b: Quat, cone_gap: float, twist: float, inertia_sum: Matrix3, reach: float, twist_reach: float) {
     if j.enable_cone_limit && (j.swing_impulse > 0.0 || cone_gap < reach) { spherical_cone_row(j, quat_a, quat_b, inertia_sum) }
-    if j.enable_twist_limit && (j.lower_twist_impulse > 0.0 || j.upper_twist_impulse > 0.0 || twist - j.lower_twist_angle < reach || j.upper_twist_angle - twist < reach) {
+    if j.enable_twist_limit && (j.lower_twist_impulse > 0.0 || j.upper_twist_impulse > 0.0 || twist - j.lower_twist_angle < twist_reach || j.upper_twist_angle - twist < twist_reach) {
         spherical_twist_row(j, quat_a, quat_b, inertia_sum)
     }
     if j.lock_cone_minor { spherical_lock_row(j, quat_a, quat_b, inertia_sum) }
@@ -1854,10 +1854,23 @@ solve_spherical_joint(base: *JointSim, ctx: *StepContext, use_bias: bool) {
     cone_gap = 0.0
     if j.enable_cone_limit { cone_gap = dynamics.spherical_cone_gap(j, rel_q) }
     twist = 0.0
-    if j.enable_twist_limit { twist = dynamics.spherical_twist_angle(j, rel_q) }
+    // The twist row's Jacobian is ref + tan(swing / 2) perp, 1 / cos(swing / 2)
+    // long; the reach below covers a length of 2 (a swing of 120 degrees from
+    // the axis the twist is read about). A cone centred off the rest reaches
+    // past that (a shoulder's to 0.8 pi, where the Jacobian is 3.2 long), and
+    // there a twist closing on its limit could outrun the reach and keep the
+    // row a sub-step before had made. The twist's reach is stretched with the
+    // Jacobian past 2, and is the same below it, bit for bit.
+    twist_stretch = 1.0
+    if j.enable_twist_limit {
+        twist_q = dynamics.spherical_twist_rotation(j, rel_q)
+        twist = math.get_twist_angle(twist_q)
+        stretch = math.sqrt_float(1.0 + (twist_q.x * twist_q.x + twist_q.y * twist_q.y) / (twist_q.z * twist_q.z + twist_q.w * twist_q.w))
+        twist_stretch = math.max_float(1.0, 0.5 * stretch)
+    }
     if fixed_rotation == false && (j.enable_cone_limit || j.enable_twist_limit || j.lock_cone_minor) {
         reach = 2.0 * ctx.h * math.length(math.sub(w_b, w_a))
-        spherical_rows_where_now(j, quat_a, quat_b, cone_gap, twist, math.add_mm(i_a, i_b), reach)
+        spherical_rows_where_now(j, quat_a, quat_b, cone_gap, twist, math.add_mm(i_a, i_b), reach, twist_stretch * reach)
     }
     if j.enable_spring && fixed_rotation == false {
         delta_rotation = math.delta_quat_to_rotation(rel_q, j.target_rotation)

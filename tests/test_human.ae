@@ -2101,8 +2101,42 @@ test_hip_rotation() {
     }
 }
 
+
+// The anatomical figure's spine and neck keep the reference's ranges
+// (#224): meeting the rest turned their frames 10 degrees and their cones
+// with them, so the trunk flexed 70 and extended 70 where the reference's
+// flexes 90 and extends 50 (a person's 80 and 25). Each cone's centre in
+// the world matches the reference figure's, the rest reads no swing off a
+// frame that turned, and a joint whose frame did
+// not move keeps its cone on z exactly (the reference's path, bit for bit).
+test_spine_and_neck_ranges() {
+    shape = human.human_reference_shape()
+    reference = human.human_reference_shape()
+    human.human_tight_limits(reference)
+    bones = [human.BONE_SPINE_01, human.BONE_SPINE_03, human.BONE_NECK]
+    k = 0
+    while k < 3 {
+        i = bones[k]
+        s = human.spec_at(shape, i)
+        r = human.spec_at(reference, i)
+        centre = math.rotate_vector(math.mul_quat(human.spec_at(shape, s.parent).reference.q, s.frame_a.q), s.cone_axis)
+        reference_centre = math.rotate_vector(math.mul_quat(human.spec_at(reference, r.parent).reference.q, r.frame_a.q), r.cone_axis)
+        ensure("bone ${i}: the cone's centre is the reference's (${math.length(math.sub(centre, reference_centre))} apart)", near_vec(centre, reference_centre, 0.000001))
+        // The rest: frame B's z in frame A, 10 degrees off the kept centre.
+        rest = math.inv_mul_quat(math.mul_quat(human.spec_at(shape, s.parent).reference.q, s.frame_a.q), math.mul_quat(s.reference.q, s.frame_b.q))
+        z = math.rotate_vector(rest, math.vec3_axis_z())
+        ensure("bone ${i}: the frames meet at the rest (${z.x} ${z.y} ${z.z})", near_vec(z, math.vec3_axis_z(), 0.000000001))
+        off = math.atan2_approx(math.length(math.cross(s.cone_axis, z)), math.dot(s.cone_axis, z)) * math.RAD_TO_DEG
+        ensure("bone ${i}: the rest is 10 degrees behind the cone's centre (${off})", math.abs_float(off - 10.0) < 0.05)
+        k = k + 1
+    }
+    ensure("spine_02 keeps its cone on z exactly", human.spec_at(shape, human.BONE_SPINE_02).cone_axis.x == 0.0 && human.spec_at(shape, human.BONE_SPINE_02).cone_axis.y == 0.0 && human.spec_at(shape, human.BONE_SPINE_02).cone_axis.z == 1.0)
+    human.destroy_shape(shape)
+    human.destroy_shape(reference)
+}
 main() {
     g_slab = hull.make_box_hull(20.0, 1.0, 20.0) as ptr
+    test_spine_and_neck_ranges()
     test_build_and_fall()
     test_align_spring()
     test_anchors()

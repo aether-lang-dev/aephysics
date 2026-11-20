@@ -23,6 +23,7 @@ import std.string
 import aephysics.math
 import aephysics.basics
 import aephysics.distance
+import std.lanes
 
 exports (
     HullData, HalfEdge, MassData, ShapeExtent, Point2D,
@@ -1225,18 +1226,46 @@ builder_destroy(b: *HullBuilder) {
 
 // --- the hull -------------------------------------------------------------------
 
+// The vertex farthest along `direction` (b3FindHullSupportVertex): four
+// vertices a pass over the hull's single-precision rows, as the reference
+// searches. Each lane keeps the first vertex that beats it, and across the
+// lanes a tie goes to the lower index, so the padding (vertex 0 again, at an
+// index past the count) never wins. The search walked the points one at a
+// time in double: on the convex pile (32-vertex hulls) the cached face
+// axis's search alone was a twelfth of the collide pass.
 find_hull_support_vertex(h: *HullData, direction: Vec3) -> int {
-    points = hull_points(h)
-    best_index = NULL_INDEX
-    best_dot = 0.0 - math.MAX_FLOAT
+    n = h.vertex_count
+    stride = hull_soa_stride(n)
+    rows = hull_soa_vertices(h)
+    dx = lanes.splat4(direction.x as f32)
+    dy = lanes.splat4(direction.y as f32)
+    dz = lanes.splat4(direction.z as f32)
+    four = lanes.splat4(4.0)
+    index = lanes.f32x4(0.0, 1.0, 2.0, 3.0)
+    lowest = 0.0 - math.infinity_f32()
+    best_dot = lanes.splat4(lowest)
+    best_lane_index = lanes.splat4(0.0 - 1.0)
+    loop_count = (n + 3) & (0 - 4)
     i = 0
-    while i < h.vertex_count {
-        d = math.dot(direction, points[i])
-        if d > best_dot {
-            best_index = i
-            best_dot = d
+    while i < loop_count {
+        d = dx * lanes.load4(rows, i as long) + dy * lanes.load4(rows, (stride + i) as long) + dz * lanes.load4(rows, (2 * stride + i) as long)
+        better = lanes.gt4(d, best_dot)
+        best_dot = lanes.select4(better, d, best_dot)
+        best_lane_index = lanes.select4(better, index, best_lane_index)
+        index = index + four
+        i = i + 4
+    }
+    best_index = NULL_INDEX
+    best = lowest
+    lane = 0
+    while lane < 4 {
+        lane_index = lanes.lane4(best_lane_index, lane as long) as int
+        lane_dot = lanes.lane4(best_dot, lane as long)
+        if lane_index >= 0 && (lane_dot > best || (lane_dot == best && lane_index < best_index)) {
+            best_index = lane_index
+            best = lane_dot
         }
-        i = i + 1
+        lane = lane + 1
     }
     return best_index
 }
