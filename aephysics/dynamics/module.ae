@@ -144,7 +144,7 @@ exports (
     joint_set_local_frame_b, joint_get_local_frame_b, joint_set_user_data, joint_get_user_data, joint_set_collide_connected,
     joint_get_collide_connected, joint_is_awake, joint_wake_bodies, joint_set_constraint_tuning, joint_get_constraint_hertz,
     joint_get_constraint_damping_ratio, joint_set_force_threshold, joint_get_force_threshold, joint_set_torque_threshold,
-    joint_get_torque_threshold, get_joint_reaction, joint_get_linear_separation, joint_get_angular_separation,
+    joint_get_torque_threshold, get_joint_reaction, JOINT_IMPULSE_COUNT, joint_impulses_io, clear_joint_impulses, joint_get_linear_separation, joint_get_angular_separation,
     should_bodies_collide, world_set_custom_filter, world_clear_custom_filter,
     transfer_body, transfer_joint, merge_solver_sets, body_set_type, body_disable, body_enable, body_get_joint_count,
     body_get_contact_capacity, body_get_joints, world_joint_count,
@@ -7799,6 +7799,103 @@ joint_wake_bodies(id: JointId) {
     w.locked = false
 }
 
+// How many warm-start impulses a joint kind has at most (the wheel's 13);
+// their order is joint_solver.joint_get_impulses's.
+const JOINT_IMPULSE_COUNT = 13
+
+// Each impulse field of a kind, read into `values` or written from it, in
+// joint_solver.joint_get_impulses's order; the count.
+joint_impulses_io(base: *JointSim, kind: int, values: float[], write: bool) -> int {
+    if base == null { return 0 }
+    i = 0
+    if kind == JOINT_DISTANCE {
+        d = distance_joint_of(base)
+        i = impulse_io_floats((&d.impulse) as ptr, 1, values, i, write)
+        i = impulse_io_floats((&d.lower_impulse) as ptr, 1, values, i, write)
+        i = impulse_io_floats((&d.upper_impulse) as ptr, 1, values, i, write)
+        i = impulse_io_floats((&d.motor_impulse) as ptr, 1, values, i, write)
+    } else if kind == JOINT_MOTOR {
+        m = motor_joint_of(base)
+        i = impulse_io_floats((&m.linear_velocity_impulse) as ptr, 3, values, i, write)
+        i = impulse_io_floats((&m.angular_velocity_impulse) as ptr, 3, values, i, write)
+        i = impulse_io_floats((&m.linear_spring_impulse) as ptr, 3, values, i, write)
+        i = impulse_io_floats((&m.angular_spring_impulse) as ptr, 3, values, i, write)
+    } else if kind == JOINT_PARALLEL {
+        pj = parallel_joint_of(base)
+        i = impulse_io_floats((&pj.perp_impulse) as ptr, 2, values, i, write)
+    } else if kind == JOINT_PRISMATIC {
+        pr = prismatic_joint_of(base)
+        i = impulse_io_floats((&pr.perp_impulse) as ptr, 2, values, i, write)
+        i = impulse_io_floats((&pr.angular_impulse) as ptr, 3, values, i, write)
+        i = impulse_io_floats((&pr.spring_impulse) as ptr, 1, values, i, write)
+        i = impulse_io_floats((&pr.motor_impulse) as ptr, 1, values, i, write)
+        i = impulse_io_floats((&pr.lower_impulse) as ptr, 1, values, i, write)
+        i = impulse_io_floats((&pr.upper_impulse) as ptr, 1, values, i, write)
+    } else if kind == JOINT_REVOLUTE {
+        r = revolute_joint_of(base)
+        i = impulse_io_floats((&r.linear_impulse) as ptr, 3, values, i, write)
+        i = impulse_io_floats((&r.perp_impulse) as ptr, 2, values, i, write)
+        i = impulse_io_floats((&r.spring_impulse) as ptr, 1, values, i, write)
+        i = impulse_io_floats((&r.motor_impulse) as ptr, 1, values, i, write)
+        i = impulse_io_floats((&r.lower_impulse) as ptr, 1, values, i, write)
+        i = impulse_io_floats((&r.upper_impulse) as ptr, 1, values, i, write)
+    } else if kind == JOINT_SPHERICAL {
+        s = spherical_joint_of(base)
+        i = impulse_io_floats((&s.linear_impulse) as ptr, 3, values, i, write)
+        i = impulse_io_floats((&s.spring_impulse) as ptr, 3, values, i, write)
+        i = impulse_io_floats((&s.motor_impulse) as ptr, 3, values, i, write)
+        i = impulse_io_floats((&s.lower_twist_impulse) as ptr, 1, values, i, write)
+        i = impulse_io_floats((&s.upper_twist_impulse) as ptr, 1, values, i, write)
+        i = impulse_io_floats((&s.swing_impulse) as ptr, 1, values, i, write)
+        i = impulse_io_floats((&s.lock_impulse) as ptr, 1, values, i, write)
+    } else if kind == JOINT_WELD {
+        wj = weld_joint_of(base)
+        i = impulse_io_floats((&wj.linear_impulse) as ptr, 3, values, i, write)
+        i = impulse_io_floats((&wj.angular_impulse) as ptr, 3, values, i, write)
+    } else if kind == JOINT_WHEEL {
+        wh = wheel_joint_of(base)
+        i = impulse_io_floats((&wh.linear_impulse) as ptr, 2, values, i, write)
+        i = impulse_io_floats((&wh.angular_impulse) as ptr, 2, values, i, write)
+        i = impulse_io_floats((&wh.spin_impulse) as ptr, 1, values, i, write)
+        i = impulse_io_floats((&wh.suspension_spring_impulse) as ptr, 1, values, i, write)
+        i = impulse_io_floats((&wh.lower_suspension_impulse) as ptr, 1, values, i, write)
+        i = impulse_io_floats((&wh.upper_suspension_impulse) as ptr, 1, values, i, write)
+        i = impulse_io_floats((&wh.steering_spring_impulse) as ptr, 1, values, i, write)
+        i = impulse_io_floats((&wh.lower_steering_impulse) as ptr, 1, values, i, write)
+        i = impulse_io_floats((&wh.upper_steering_impulse) as ptr, 1, values, i, write)
+    }
+    return i
+}
+
+// `n` doubles at `field` (a float, or a Vec2's or Vec3's), read into
+// values[at..] or written from it (zeros, when `values` is null); the index after them.
+impulse_io_floats(field: ptr, n: int, values: float[], at: int, write: bool) -> int {
+    f = field as float[]
+    zero = (values as ptr) == null
+    k = 0
+    while k < n {
+        if write && zero {
+            f[k] = 0.0
+        } else if write {
+            f[k] = values[at + k]
+        } else {
+            values[at + k] = f[k]
+        }
+        k = k + 1
+    }
+    return at + n
+}
+
+// A joint's warm-start impulses set to zero: what a joint holds when it
+// applies none. A joint left with no dynamic body is never solved, so the
+// impulse it last gathered stayed: its force read that impulse for as long
+// as both its bodies were kinematic or static (ae3d: a knee between two
+// kinematic legs read 223 N every step), and the warm start pushed it into
+// the bodies when one turned dynamic again, after they had moved.
+clear_joint_impulses(sim: *JointSim) {
+    joint_impulses_io(sim, sim.kind, null as float[], true)
+}
+
 // The force and torque a joint's impulses amount to over a step (for the joint events).
 get_joint_reaction(w: *World, sim: *JointSim, inv_time_step: float) -> JointReaction {
     linear_impulse = 0.0
@@ -8204,6 +8301,10 @@ body_set_type(id: BodyId, kind: int) {
         if j.set_index == DISABLED_SET { continue }
         if body_at(w, j.edge_a.body_id).kind == BODY_DYNAMIC || body_at(w, j.edge_b.body_id).kind == BODY_DYNAMIC {
             transfer_joint(w, awake_set, static_set, j)
+        } else {
+            // Left with no dynamic body, the joint is not solved: it holds
+            // no impulse (Box3D keeps the last one; see clear_joint_impulses).
+            clear_joint_impulses(get_joint_sim(w, j))
         }
     }
     t = get_body_sim(w, body).transform

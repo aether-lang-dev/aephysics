@@ -3073,7 +3073,7 @@ get_joint_constraint_torque(w: *World, j: *Joint) -> Vec3 {
 //   wheel: linear xy, angular xy, spin, suspension spring, lower suspension, upper suspension,
 //          steering spring, lower steering, upper steering
 // A filter joint has none.
-const JOINT_IMPULSE_COUNT = 13
+const JOINT_IMPULSE_COUNT = dynamics.JOINT_IMPULSE_COUNT
 
 // The impulses into `out` (float[JOINT_IMPULSE_COUNT]); how many, 0 for a
 // filter joint or a stale id.
@@ -3116,82 +3116,6 @@ joint_set_impulses(id: JointId, values: ptr, count: int) {
     basics.free_bytes(probe, JOINT_IMPULSE_COUNT * 8)
     if count != expected { return }
     joint_impulses_io(base, kind, given, true)
-}
-
-// Each impulse field of a kind, read into `values` or written from it, in
-// the order above; the count.
-joint_impulses_io(base: *JointSim, kind: int, values: float[], write: bool) -> int {
-    if base == null { return 0 }
-    i = 0
-    if kind == dynamics.JOINT_DISTANCE {
-        d = dynamics.distance_joint_of(base)
-        i = io_floats((&d.impulse) as ptr, 1, values, i, write)
-        i = io_floats((&d.lower_impulse) as ptr, 1, values, i, write)
-        i = io_floats((&d.upper_impulse) as ptr, 1, values, i, write)
-        i = io_floats((&d.motor_impulse) as ptr, 1, values, i, write)
-    } else if kind == dynamics.JOINT_MOTOR {
-        m = dynamics.motor_joint_of(base)
-        i = io_floats((&m.linear_velocity_impulse) as ptr, 3, values, i, write)
-        i = io_floats((&m.angular_velocity_impulse) as ptr, 3, values, i, write)
-        i = io_floats((&m.linear_spring_impulse) as ptr, 3, values, i, write)
-        i = io_floats((&m.angular_spring_impulse) as ptr, 3, values, i, write)
-    } else if kind == dynamics.JOINT_PARALLEL {
-        pj = dynamics.parallel_joint_of(base)
-        i = io_floats((&pj.perp_impulse) as ptr, 2, values, i, write)
-    } else if kind == dynamics.JOINT_PRISMATIC {
-        pr = dynamics.prismatic_joint_of(base)
-        i = io_floats((&pr.perp_impulse) as ptr, 2, values, i, write)
-        i = io_floats((&pr.angular_impulse) as ptr, 3, values, i, write)
-        i = io_floats((&pr.spring_impulse) as ptr, 1, values, i, write)
-        i = io_floats((&pr.motor_impulse) as ptr, 1, values, i, write)
-        i = io_floats((&pr.lower_impulse) as ptr, 1, values, i, write)
-        i = io_floats((&pr.upper_impulse) as ptr, 1, values, i, write)
-    } else if kind == dynamics.JOINT_REVOLUTE {
-        r = dynamics.revolute_joint_of(base)
-        i = io_floats((&r.linear_impulse) as ptr, 3, values, i, write)
-        i = io_floats((&r.perp_impulse) as ptr, 2, values, i, write)
-        i = io_floats((&r.spring_impulse) as ptr, 1, values, i, write)
-        i = io_floats((&r.motor_impulse) as ptr, 1, values, i, write)
-        i = io_floats((&r.lower_impulse) as ptr, 1, values, i, write)
-        i = io_floats((&r.upper_impulse) as ptr, 1, values, i, write)
-    } else if kind == dynamics.JOINT_SPHERICAL {
-        s = dynamics.spherical_joint_of(base)
-        i = io_floats((&s.linear_impulse) as ptr, 3, values, i, write)
-        i = io_floats((&s.spring_impulse) as ptr, 3, values, i, write)
-        i = io_floats((&s.motor_impulse) as ptr, 3, values, i, write)
-        i = io_floats((&s.lower_twist_impulse) as ptr, 1, values, i, write)
-        i = io_floats((&s.upper_twist_impulse) as ptr, 1, values, i, write)
-        i = io_floats((&s.swing_impulse) as ptr, 1, values, i, write)
-        i = io_floats((&s.lock_impulse) as ptr, 1, values, i, write)
-    } else if kind == dynamics.JOINT_WELD {
-        wj = dynamics.weld_joint_of(base)
-        i = io_floats((&wj.linear_impulse) as ptr, 3, values, i, write)
-        i = io_floats((&wj.angular_impulse) as ptr, 3, values, i, write)
-    } else if kind == dynamics.JOINT_WHEEL {
-        wh = dynamics.wheel_joint_of(base)
-        i = io_floats((&wh.linear_impulse) as ptr, 2, values, i, write)
-        i = io_floats((&wh.angular_impulse) as ptr, 2, values, i, write)
-        i = io_floats((&wh.spin_impulse) as ptr, 1, values, i, write)
-        i = io_floats((&wh.suspension_spring_impulse) as ptr, 1, values, i, write)
-        i = io_floats((&wh.lower_suspension_impulse) as ptr, 1, values, i, write)
-        i = io_floats((&wh.upper_suspension_impulse) as ptr, 1, values, i, write)
-        i = io_floats((&wh.steering_spring_impulse) as ptr, 1, values, i, write)
-        i = io_floats((&wh.lower_steering_impulse) as ptr, 1, values, i, write)
-        i = io_floats((&wh.upper_steering_impulse) as ptr, 1, values, i, write)
-    }
-    return i
-}
-
-// `n` doubles at `field` (a float, or a Vec2's or Vec3's), read into
-// values[at..] or written from it; the index after them.
-io_floats(field: ptr, n: int, values: float[], at: int, write: bool) -> int {
-    f = field as float[]
-    k = 0
-    while k < n {
-        if write { f[k] = values[at + k] } else { values[at + k] = f[k] }
-        k = k + 1
-    }
-    return at + n
 }
 
 joint_get_constraint_force(id: JointId) -> Vec3 {
@@ -3427,3 +3351,7 @@ draw_wheel_joint(draw: *DebugDraw, sim: *JointSim, transform_a: Transform, trans
     point(frame_a.p, 5.0, debug_draw.COLOR_GRAY, draw.context)
     point(frame_b.p, 5.0, debug_draw.COLOR_DIM_GRAY, draw.context)
 }
+
+// Each impulse field of a kind, read into `values` or written from it (the
+// list lives with the joints' structs, in dynamics).
+joint_impulses_io(base: *JointSim, kind: int, values: float[], write: bool) -> int { return dynamics.joint_impulses_io(base, kind, values, write) }
