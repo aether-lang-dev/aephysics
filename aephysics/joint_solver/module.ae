@@ -1657,8 +1657,13 @@ prepare_spherical_joint(base: *JointSim, ctx: *StepContext) {
     j.delta_center = math.sub(bodies.sim_b.center, bodies.sim_a.center)
     inertia_sum = math.add_mm(math.widen_mat3(base.inv_inertia_a), math.widen_mat3(base.inv_inertia_b))
     spherical_angular_rows(j, j.frame_a.q, j.frame_b.q, inertia_sum)
-    if base.fixed_rotation == false { j.rotation_mass = math.invert_matrix(inertia_sum) } else { j.rotation_mass = math.mat3_zero() }
-    j.spring_softness = dynamics.make_soft(j.hertz, j.damping_ratio, ctx.h)
+    // The rotation's mass and the spring's softness only for the rows that
+    // read them (a ball joint with neither spring nor motor is most of a
+    // ragdoll's or a chain's): left as they were otherwise, unread.
+    if j.enable_spring || j.enable_motor {
+        if base.fixed_rotation == false { j.rotation_mass = math.invert_matrix(inertia_sum) } else { j.rotation_mass = math.mat3_zero() }
+    }
+    if j.enable_spring { j.spring_softness = dynamics.make_soft(j.hertz, j.damping_ratio, ctx.h) }
     // A spring off or of no stiffness computes no impulse; its last one is
     // dropped rather than warm-started for good.
     if j.enable_spring == false || j.hertz <= 0.0 { j.spring_impulse = math.vec3_zero() }
@@ -1785,9 +1790,16 @@ solve_spherical_joint(base: *JointSim, ctx: *StepContext, use_bias: bool) {
     v_b = math.widen3(state_b.v)
     w_b = math.widen3(state_b.w)
     fixed_rotation = base.fixed_rotation
-    quat_a = math.mul_quat(math.widen_quat(state_a.dq), j.frame_a.q)
-    quat_b = math.mul_quat(math.widen_quat(state_b.dq), j.frame_b.q)
-    rel_q = math.inv_mul_quat(quat_a, quat_b)
+    // The frames' rotations only for the rows that turn: a plain ball
+    // joint's solve is its point alone.
+    quat_a = math.quat_identity()
+    quat_b = math.quat_identity()
+    rel_q = math.quat_identity()
+    if j.enable_spring || j.enable_cone_limit || j.enable_twist_limit || j.lock_cone_minor {
+        quat_a = math.mul_quat(math.widen_quat(state_a.dq), j.frame_a.q)
+        quat_b = math.mul_quat(math.widen_quat(state_b.dq), j.frame_b.q)
+        rel_q = math.inv_mul_quat(quat_a, quat_b)
+    }
     // The limits read once, for the rows and their solves.
     cone_gap = 0.0
     if j.enable_cone_limit { cone_gap = dynamics.spherical_cone_gap(j, rel_q) }
@@ -1984,6 +1996,7 @@ spherical_joint_set_cone_ellipse(id: JointId, major_angle: float, minor_angle: f
     j.cone_angle = dynamics.clamp_spherical_cone(j, major_angle)
     j.cone_minor_angle = dynamics.spherical_cone_minor(j, minor_angle)
     j.cone_major_axis = math.narrow3(major_axis)
+    dynamics.refresh_spherical_cone(j)
 }
 // A hinge that twists (#190): the cone's minor half-angle locked at zero,
 // so frame B's z stays in the plane of the cone's centre and its major

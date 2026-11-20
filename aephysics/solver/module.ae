@@ -1194,6 +1194,11 @@ solve_step(w: *World, ctx: *StepContext) {
     wide_block = basics.stack_alloc(stack, wide_total * sizeof(WideConstraint))
     contact_block = basics.stack_alloc(stack, contact_total * sizeof(ContactConstraint))
     manifold_block = basics.stack_alloc(stack, manifold_total * sizeof(ManifoldConstraint))
+    // The wide contacts' load stiffness beside them, only when contacts are
+    // sized to their load (#212).
+    ctx.wide_base = wide_block
+    ctx.wide_loads = null
+    if ctx.load_scale > 0.0 && wide_total > 0 { ctx.wide_loads = basics.stack_alloc(stack, wide_total * dynamics.MAX_MANIFOLD_POINTS * sizeof(contact_solver_wide.WideLoad)) }
     wide_base = 0
     contact_base = 0
     manifold_base = 0
@@ -1372,6 +1377,8 @@ solve_step(w: *World, ctx: *StepContext) {
     basics.stack_free(stack, colors_block)
     basics.stack_free(stack, overflow.manifold_constraints)
     basics.stack_free(stack, overflow.contact_constraints)
+    basics.stack_free(stack, ctx.wide_loads)
+    ctx.wide_loads = null
     basics.stack_free(stack, manifold_block)
     basics.stack_free(stack, contact_block)
     basics.stack_free(stack, wide_block)

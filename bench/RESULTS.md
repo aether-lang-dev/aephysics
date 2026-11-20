@@ -15,9 +15,9 @@ the same machine, aephysics' time per step over Box3D's (`e77352c`):
 
 | scene | aephysics / Box3D | from |
 |---|---|---|
-| large pyramid: 5,050 boxes | 1.20x | [2026-10-09](#the-collide-pass-as-the-reference-keeps-it-2026-10-09-121) |
+| large pyramid: 5,050 boxes | 1.04x | [2026-11-20](#hot-and-cold-paths-and-the-layout-2026-11-20) |
 | many pyramids: 10,780 boxes | 1.16x | [2026-10-09](#the-collide-pass-as-the-reference-keeps-it-2026-10-09-121) |
-| joint grid: 10,000 spheres on 19,800 joints | 1.05x | [2026-10-09](#the-collide-pass-as-the-reference-keeps-it-2026-10-09-121) |
+| joint grid: 10,000 spheres on 19,800 joints | 0.84x | [2026-11-20](#hot-and-cold-paths-and-the-layout-2026-11-20) |
 | junkyard, washer, spinner, sleep, trees, large world | 1.04x to 1.21x | [the suite](#suite-the-references-benchmark-suite) |
 | convex pile: 5,120 hulls | 1.21x, then 1.19x with the wide separating axis test | [the suite](#suite-the-references-benchmark-suite), [2026-10-20](#the-references-wide-sat-the-lanes-transposed-the-width-at-run-time-2026-10-20-150-121-156) |
 | rain: 300 ragdolls on meshes | 1.05x | [human](#human) |
@@ -1423,6 +1423,62 @@ Within the runs' own spread (the machine was in use), and the best of
 each is the same or better with the call. The bits are the same. libm's
 `sqrtf` stays: its 64-bit x87 result rounds to a float once, and no
 float of 304 million differs from `sqrtss`.
+
+### Hot and cold paths, and the layout (2026-11-20)
+
+i7-13700K, one thread, `bench/physics_world.ae` and `bench/human.ae` against
+`*_box3d.c`, AVX2 lanes on both. The machine was running a game: each
+figure is the least of five alternated runs, and a ratio is read within one
+table. Line-level samples come from `scripts/profile.sh` with `addr2line -i`
+on the sampler's addresses, each charged to the joint or contact function it
+was inlined into.
+
+**Joint grid** (19,800 ball joints, no limits). Half the samples were the
+spherical solve, a sixth its warm start. A plain ball joint's solve built
+both frames' rotations and their relative rotation (only the spring, the
+limits and the lock read them), and its prepare inverted the inertia sum and
+made the spring's softness (only the spring and the motor read those). Each
+is now made only for a joint that reads it; the bits are the same.
+
+| stage, ms per step | before | after | Box3D |
+|---|---|---|---|
+| prepare joints | 1.71 | 1.54 | 1.13 |
+| warm start | 2.47 | 2.38 | 2.39 |
+| solve | 4.31 | 3.90 | 5.38 |
+| relax | 4.13 | 3.75 | 5.20 |
+| step | 15.34 | 14.33 | 16.99 |
+
+The prepare's remaining gap is in reading the bodies and frames in double
+(`widen3` and `widen_quat` together are a sixth of all samples, much of it the
+first touch of a body state).
+
+**A cold path that cost the hot one.** #214 put a load stiffness lane block
+in every wide contact point and wrote it each step, sized or not: the large
+pyramid went from 7.90 to 8.27 ms a step with the option off (the prepare,
+solve, relax and store each streaming the bigger points). The stiffness now
+lives beside the constraints in a block the step allocates only when
+contacts are sized to their load (`StepContext.wide_loads`); the pyramid is
+back to 8.32 against 8.35 before #214, and the sized contacts' results are
+the same to the bit.
+
+**Ragdolls** (the rain). Each spherical solve rebuilt two of the joint's
+constants up to five times, each with a square root: the turn from frame A's
+z onto the cone's centre and the ellipse's major axis. They are kept on the
+joint now (`SphericalJoint.centre_turn`, `major_dir`, refreshed when the
+cone is set; the joint data block grows from 608 to 664 bytes): the rain
+6.05 to 5.92 ms a step, the grid unchanged (15.69 and 15.65 in that
+session's runs). Box3D's own rain, 5.21 ms against our 5.50 in an earlier
+quiet round, is no longer the same scene: our figure's ranges and frames
+differ (5,017 contacts and 3,444 awake bodies against 6,855 and 3,096).
+
+**Layout.** A body state is 64 bytes, one line. A `JointSim` is 968 bytes:
+its base (masses, inertias, softnesses, the event thresholds) is 160 and all
+of it hot, the solve reading the thresholds for its events (moving them past
+the data made the solve 20% slower). A plain ball joint's warm start and
+solve touch its first 350 bytes; the rest of the data block, sized for the
+largest kind, is never read for it. Padding `JointSim` to a whole number of
+lines would save a twentieth of the lines a pass reads and cost a twentieth
+more memory: not taken.
 
 ## Build flags (inlining)
 
