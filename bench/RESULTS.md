@@ -1493,7 +1493,9 @@ contacts, joints) and the step's stack now come from `basics.alloc_lines`, on
 a 64-byte line: from the host's allocator when one is set, else
 `native.alloc_aligned` (`_aligned_malloc` or `posix_memalign`), the shape of
 Aether's `alloc.raw_aligned` (aether#3778) until that lands. Blocks a caller
-may free itself stay `calloc`'s.
+may free itself stay `calloc`'s. Since Aether 0.931.0 the blocks come from
+`alloc.raw_aligned` over the system allocator, rounded up to whole lines and
+zeroed to the last line's end as before, and the native stand-in is gone.
 
 | scene | before | after |
 |---|---|---|

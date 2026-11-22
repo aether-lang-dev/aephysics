@@ -19,6 +19,7 @@
 // sizes) are kept so a leak is a number.
 import std.string
 import std.lanes
+import std.alloc
 import aephysics.native
 
 exports (
@@ -199,8 +200,16 @@ alloc(size: int) -> ptr {
 // put most of them across two, and the solver reads two states for every
 // contact and joint. Never handed to a caller to free: those stay alloc's.
 // From the host's allocator when one is set (asked for CACHE_LINE), else
-// native.alloc_aligned (Aether's alloc.raw_aligned once aether#3778 lands).
+// Aether's alloc.raw_aligned over the system allocator. Either way the block
+// is zeroed out to the end of its last line, as calloc zeroes, so a wide
+// read that runs to the line's end reads zeros, not what malloc left.
 const CACHE_LINE = 64
+
+// `size` rounded up to whole cache lines: what alloc_lines asks the system
+// allocator for and zeroes, and what free_lines gives back.
+line_bytes(size: int) -> int {
+    return (size + CACHE_LINE - 1) & (0 - CACHE_LINE)
+}
 
 alloc_lines(size: int) -> ptr {
     if size <= 0 { return null }
@@ -212,7 +221,10 @@ alloc_lines(size: int) -> ptr {
         if block != null { memset(block, 0, size) }
         return block
     }
-    return native.alloc_aligned(size, CACHE_LINE)
+    bytes = line_bytes(size)
+    block = alloc.raw_aligned(alloc.system(), bytes, CACHE_LINE)
+    if block != null { memset(block, 0, bytes) }
+    return block
 }
 
 free_lines(block: ptr, size: int) {
@@ -224,7 +236,7 @@ free_lines(block: ptr, size: int) {
         release(block, size)
         return
     }
-    native.release_aligned(block, size, CACHE_LINE)
+    alloc.release_aligned(alloc.system(), block, line_bytes(size), CACHE_LINE)
 }
 
 free_bytes(block: ptr, size: int) {
