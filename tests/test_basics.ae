@@ -7,6 +7,7 @@
 import std.string
 import std.mem
 import aephysics.basics
+import aephysics.native
 
 extern calloc(count: int, size: int) -> ptr
 extern exit(code: int)
@@ -243,6 +244,19 @@ main() {
     basics.ints_remove_swap(&ints, 0)
     ensure("remove-swap moves the last into the hole", basics.ints_get(&ints, 0) == 98 * 98 && basics.ints_count(&ints) == 98)
     basics.ints_destroy(&ints)
+
+    // A block from alloc_lines is zeroed to the end of its last line, so a
+    // wide read running to the line's end sees zeros: 10 bytes asked, 64 zero.
+    lined = basics.alloc_lines(10)
+    ensure("alloc_lines starts on a cache line", on_line(lined))
+    zeros = 0
+    b = 0
+    while b < basics.CACHE_LINE {
+        if native.load_u8(lined, b) == 0 { zeros = zeros + 1 }
+        b = b + 1
+    }
+    ensure("and its whole last line is zero (${zeros} of 64)", zeros == basics.CACHE_LINE)
+    basics.free_lines(lined, 10)
 
     things = basics.buffer_create(sizeof(Thing), 2)
     ensure("a buffer's items start on a cache line", on_line(things.data))

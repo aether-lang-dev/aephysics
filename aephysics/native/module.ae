@@ -12,7 +12,7 @@ exports (
     atomic_load, atomic_store, atomic_add, atomic_or, atomic_cas,
     semaphore_bytes, semaphore_init, semaphore_destroy, semaphore_wait, semaphore_signal,
     name_text, prefetch, load_word, load_u8, load_u16, f32_bits, f64_bits,
-    round_down_f32, round_up_f32, alloc_aligned, release_aligned
+    round_down_f32, round_up_f32
 )
 
 // The most workers a world can have: every module's scratch is a block
@@ -47,8 +47,6 @@ extern aephysics_f64_bits(value: float) -> long @c_import
 extern aephysics_round_down_f32(x: float) -> f32 @c_import
 extern aephysics_round_up_f32(x: float) -> f32 @c_import
 extern aephysics_name_text(name: ptr) -> string
-extern aephysics_alloc_aligned(size: int, alignment: int) -> ptr
-extern aephysics_release_aligned(block: ptr, size: int, alignment: int)
 
 // The cache line at `p` fetched ahead of its use; harmless on any pointer.
 prefetch(p: ptr) { aephysics_prefetch(p) }
@@ -71,13 +69,6 @@ f64_bits(value: float) -> long { return aephysics_f64_bits(value) }
 // A double narrowed to the nearest float at or below it, or at or above.
 round_down_f32(x: float) -> f32 { return aephysics_round_down_f32(x) }
 round_up_f32(x: float) -> f32 { return aephysics_round_up_f32(x) }
-
-// A zeroed block of `size` bytes on an `alignment` boundary (a power of
-// two), given back with release_aligned and the same size and alignment
-// only: Aether's alloc.raw_aligned / alloc.release_aligned (aether#3778)
-// in waiting.
-alloc_aligned(size: int, alignment: int) -> ptr { return aephysics_alloc_aligned(size, alignment) }
-release_aligned(block: ptr, size: int, alignment: int) { aephysics_release_aligned(block, size, alignment) }
 
 // A plain zero-ended name the engine keeps, as a string; empty for none.
 name_text(name: ptr) -> string { return aephysics_name_text(name) }

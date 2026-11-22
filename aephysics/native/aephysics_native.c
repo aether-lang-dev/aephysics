@@ -209,38 +209,6 @@ void aephysics_yield(void)
 #endif
 }
 
-// A zeroed block of `size` bytes on an `alignment` boundary (a power of
-// two), and its release, which needs the same size and alignment: the shape
-// of Aether's alloc.raw_aligned / alloc.release_aligned (aether#3778), which
-// replaces these once it lands. calloc promises 16 bytes on Windows, where a
-// 64-byte body state then spans two cache lines; _aligned_malloc must be
-// freed with _aligned_free, so a block from here goes back through here.
-void *aephysics_alloc_aligned(int size, int alignment)
-{
-    if (size <= 0) return NULL;
-    size_t bytes = ((size_t)size + (size_t)alignment - 1) & ~((size_t)alignment - 1);
-#ifdef _WIN32
-    void *block = _aligned_malloc(bytes, (size_t)alignment);
-#else
-    void *block = NULL;
-    if (posix_memalign(&block, (size_t)alignment, bytes) != 0) block = NULL;
-#endif
-    if (block) memset(block, 0, bytes);
-    return block;
-}
-
-void aephysics_release_aligned(void *block, int size, int alignment)
-{
-    (void)size;
-    (void)alignment;
-    if (!block) return;
-#ifdef _WIN32
-    _aligned_free(block);
-#else
-    free(block);
-#endif
-}
-
 // The processors the machine offers, at least one.
 int aephysics_processor_count(void)
 {
