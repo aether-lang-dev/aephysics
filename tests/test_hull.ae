@@ -804,6 +804,13 @@ rows_agree(name: string, h: *HullData) {
     half_edges[0] = saved_half ^ 1
     ensure("${name}: a half-edge word with its next changed is refused as bytes", hull.bytes_valid(h, h.byte_count) == false)
     half_edges[0] = saved_half
+    // Every array where allocate_hull puts it: one moved onto another's
+    // bytes is refused.
+    saved_offset = h.soa_plane_offset
+    h.soa_plane_offset = h.edge_offset
+    ensure("${name}: a row moved onto the half-edges is refused as bytes", hull.bytes_valid(h, h.byte_count) == false)
+    h.soa_plane_offset = saved_offset
+    ensure("${name}: and accepted once put back", hull.bytes_valid(h, h.byte_count))
     ensure("${name}: valid as bytes", hull.bytes_valid(h, h.byte_count))
     saved = words[full_edges - 1]
     words[full_edges - 1] = hull.edge_word(hull.edge_word_face1(saved), hull.edge_word_face0(saved), hull.edge_word_origin0(saved), hull.edge_word_origin1(saved))

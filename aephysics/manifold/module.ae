@@ -1054,8 +1054,8 @@ clip_polygon_f(out: ClipVertexF[], polygon: ClipVertexF[], count: int, clip_norm
 //
 // Eight of B's vertices a pass are ruled out by their separation measured
 // in B's own frame (one dot product against the reference plane taken into
-// B); a vertex kept is taken into A's frame and measured as the polygon's
-// are. The side planes are the clip's, `side_count` of them at `sides`
+// B), with a margin; a vertex kept is taken into A's frame and measured as
+// the polygon's are, which decides. The side planes are the clip's, `side_count` of them at `sides`
 // (normal and offset, four floats each).
 add_near_vertices_f(out: ClipVertexF[], count: int, hull_b: *HullData, inc_face: int, ref_normal: Vec3f, ref_offset: f32,
                     r: Matrix3f, p: Vec3f, sides: f32[], side_count: int) -> int {
@@ -1068,11 +1068,19 @@ add_near_vertices_f(out: ClipVertexF[], count: int, hull_b: *HullData, inc_face:
     point_rows = rows as f32[]
     normal_in_b = math.mul_mvf(math.transposef(r), ref_normal)
     offset_in_b = math.dotf(ref_normal, p) - ref_offset
+    // The filter measures in B's frame and the test below in A's, each in
+    // single precision: its margin, a hundred-thousandth of the sizes
+    // involved (the offset and B's box by their components' sums), is ten
+    // times the worst difference of the two roundings, so it only drops a
+    // vertex the test would drop.
+    lower = hull_b.aabb.lower
+    upper = hull_b.aabb.upper
+    size = 1.0 + math.abs_float(offset_in_b as float) + math.abs_float(lower.x) + math.abs_float(lower.y) + math.abs_float(lower.z) + math.abs_float(upper.x) + math.abs_float(upper.y) + math.abs_float(upper.z)
     nx = lanes.splat8(normal_in_b.x)
     ny = lanes.splat8(normal_in_b.y)
     nz = lanes.splat8(normal_in_b.z)
     off = lanes.splat8(offset_in_b)
-    cutoff = lanes.splat8(reach)
+    cutoff = lanes.splat8(((reach as float) + 0.00001 * size) as f32)
     mask_block = near_mask()
     i = 0
     while i < hull_b.vertex_count {
@@ -1260,6 +1268,18 @@ build_edge_contact(m: *LocalManifold, hull_a: *HullData, hull_b: *HullData, tran
     return true
 }
 
+// Whether a cached axis's features are these hulls': a face of A, a face
+// of B, or an even half-edge of each (the manual kinds name none).
+sat_cache_fits(cache: *SATCache, hull_a: *HullData, hull_b: *HullData) -> bool {
+    if cache.kind == AXIS_FACE_A { return cache.index_a >= 0 && cache.index_a < hull_a.face_count }
+    if cache.kind == AXIS_FACE_B { return cache.index_b >= 0 && cache.index_b < hull_b.face_count }
+    if cache.kind == AXIS_EDGE_PAIR {
+        if cache.index_a < 0 || cache.index_a + 1 >= hull_a.edge_count || (cache.index_a & 1) != 0 { return false }
+        return cache.index_b >= 0 && cache.index_b + 1 < hull_b.edge_count && (cache.index_b & 1) == 0
+    }
+    return true
+}
+
 // Two hulls, B in A's frame. The cache's last axis is tried first: if it
 // still separates, or still builds the same contact, that is the answer.
 // Otherwise the full axis test; a face contact by preference (a one-point
@@ -1276,6 +1296,9 @@ collide_hulls(m: *LocalManifold, capacity: int, hull_a: *HullData, hull_b: *Hull
     planes_b = hull.planes(hull_b)
     points_b = hull.points(hull_b)
     cache.hit = 0
+    // A cached axis names these hulls' features (a snapshot's or a shape's
+    // whose hull changed may not): one out of range is no cache.
+    if sat_cache_fits(cache, hull_a, hull_b) == false { cache.kind = AXIS_INVALID }
 
     if cache.kind == AXIS_FACE_A {
         plane = planes_a[cache.index_a]
