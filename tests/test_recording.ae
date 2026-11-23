@@ -1228,6 +1228,7 @@ all_ops() {
     joint_solver.spherical_joint_set_cone_ellipse(j_spherical, 0.5, 0.3, math.vec3(1.0, 0.0, 0.0))
     joint_solver.spherical_joint_enable_twist_limit(j_spherical, true)
     joint_solver.spherical_joint_set_twist_limits(j_spherical, 0.0 - 0.4, 0.5)
+    joint_solver.spherical_joint_set_twist_limit_tuning(j_spherical, 7.0, 0.9)
     joint_solver.spherical_joint_enable_spring(j_spherical, true)
     joint_solver.spherical_joint_set_target_rotation(j_spherical, math.make_quat_from_axis_angle(math.vec3(0.0, 1.0, 0.0), 0.25))
     joint_solver.spherical_joint_set_spring_hertz(j_spherical, 0.75)
@@ -1272,7 +1273,7 @@ all_ops() {
     dynamics.destroy_world(world_id)
 
     // Every opcode a recording has.
-    all_op_count = 169
+    all_op_count = 170
     all_ops_list = [
         dynamics.OP_CREATE_BODY, dynamics.OP_DESTROY_BODY, dynamics.OP_BODY_SET_TRANSFORM,
         dynamics.OP_BODY_SET_LINEAR_VELOCITY, dynamics.OP_BODY_SET_ANGULAR_VELOCITY,
@@ -1345,7 +1346,8 @@ all_ops() {
         dynamics.OP_WHEEL_JOINT_SET_STEERING_LIMITS, dynamics.OP_WHEEL_JOINT_SET_TARGET_STEERING_ANGLE, dynamics.OP_ENABLE_KINEMATIC_SPECULATION,
         dynamics.OP_ENABLE_TRAVEL_SPECULATION, dynamics.OP_SPHERICAL_JOINT_LOCK_CONE_MINOR, dynamics.OP_JOINT_SET_IMPULSES,
         dynamics.OP_ENABLE_CANONICAL_BEGIN_ORDER, dynamics.OP_BODY_SET_ORDER_KEY, dynamics.OP_ENABLE_LOADED_CONTACTS, dynamics.OP_ENABLE_LOADED_LIMITS,
-        dynamics.OP_JOINT_SET_LIMIT_TUNING
+        dynamics.OP_JOINT_SET_LIMIT_TUNING,
+        dynamics.OP_SPHERICAL_JOINT_SET_TWIST_LIMIT_TUNING
     ]
     seen = calloc(4096, 4)
     mark_ops(r, seen)
