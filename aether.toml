@@ -8,11 +8,15 @@ description = "A rigid body physics engine in Aether"
 modules = "."
 
 [build]
-# What the tests and benchmarks are built with: -O3 and a wider inlining
-# budget, so the small maths (a 3x3 product, a rotation, a quaternion
-# product) inline into the solvers as the reference's static inline
-# headers do; the joint grid runs 1.6x faster than at -O2 for it. The
-# numbers are in bench/RESULTS.md under "Build flags".
+# What the tests and benchmarks are built with: -O3, and the inlining
+# budget Aether gives an optimising build since 0.937.0 (aether#3779:
+# --param inline-unit-growth=100 unless the project names its own), so
+# the small maths (a 3x3 product, a rotation, a quaternion product)
+# inline into the solvers as the reference's static inline headers do.
+# Ours of 400 was needed before it; on 0.937.0, pinned and best of 3,
+# Aether's is level with ours (joint grid 11.23 against 11.48 ms, convex
+# pile 9.95 against 9.97, washer 16.91 against 16.71, trees25 1.42
+# against 1.39). The numbers are in bench/RESULTS.md under "Build flags".
 #
 # -ffp-contract=off keeps the C compiler from fusing a multiply and an add
 # into one rounding: GCC fuses by default wherever the target has FMA
@@ -27,4 +31,4 @@ modules = "."
 # reference's AVX2 build has them; unset, the build runs on any x86-64 or
 # arm64 with the lanes as two four-wide halves. With fusing off, every
 # such build steps to the same bits (tests/golden/determinism_trace.txt).
-cflags = "-O3 --param max-inline-insns-auto=400 --param inline-unit-growth=400 -ffp-contract=off ${AETHER_AEPHYSICS_CFLAGS}"
+cflags = "-O3 -ffp-contract=off ${AETHER_AEPHYSICS_CFLAGS}"
