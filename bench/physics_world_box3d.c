@@ -12,6 +12,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
 
 static double now_ms( void )
@@ -103,8 +104,27 @@ static void print_profile( const char* name, stage_sum sum, int steps )
 			sum.integratePositions / n, sum.relax / n, sum.restitution / n, sum.store / n, sum.transforms / n, sum.refit / n, sum.other / n );
 }
 
+// AEPHYSICS_BENCH_SCENE=pyramid|pyramids|grid runs that scene alone, as
+// bench/physics_world.ae reads it, so a profile samples one scene.
+static int wanted( const char* name )
+{
+	const char* asked = getenv( "AEPHYSICS_BENCH_SCENE" );
+	if ( asked == NULL || asked[0] == 0 )
+	{
+		return 1;
+	}
+	const char* key = strcmp( name, "large pyramid" ) == 0 ? "pyramid" : strcmp( name, "many pyramids" ) == 0 ? "pyramids" : "grid";
+	return strcmp( asked, key ) == 0;
+}
+
 static void run( const char* name, b3WorldId worldId, int steps )
 {
+	if ( wanted( name ) == 0 )
+	{
+		b3DestroyWorld( worldId );
+		g_idCount = 0;
+		return;
+	}
 	// Gather the body ids through the move events after one zero step would miss sleeping ones; walk our own list instead.
 	stage_sum sum = { 0 };
 	double t0 = now_ms();
