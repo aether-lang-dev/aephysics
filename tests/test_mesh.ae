@@ -107,7 +107,7 @@ vertices_match(m: *MeshData, expected: Vec3[], count: int) -> bool {
     vertices = mesh.mesh_vertices(m)
     i = 0
     while i < count {
-        if math.distance_squared(vertices[i], expected[i]) > FLT_EPSILON { return false }
+        if math.distance_squared(math.widen3(vertices[i]), expected[i]) > FLT_EPSILON { return false }
         i = i + 1
     }
     return true
@@ -120,7 +120,7 @@ faces_up(m: *MeshData) -> bool {
     i = 0
     while i < m.triangle_count {
         t = triangles[i]
-        normal = math.cross(math.sub(vertices[t.index2], vertices[t.index1]), math.sub(vertices[t.index3], vertices[t.index1]))
+        normal = math.cross(math.sub(math.widen3(vertices[t.index2]), math.widen3(vertices[t.index1])), math.sub(math.widen3(vertices[t.index3]), math.widen3(vertices[t.index1])))
         if normal.y <= 0.0 { return false }
         i = i + 1
     }
@@ -381,7 +381,7 @@ test_ray_casts() {
         if out.hit {
             // The hit lies on the plane of the triangle it names.
             t = triangles[out.triangle_index]
-            plane = math.make_plane_from_points(vertices[t.index1], vertices[t.index2], vertices[t.index3])
+            plane = math.make_plane_from_points(math.widen3(vertices[t.index1]), math.widen3(vertices[t.index2]), math.widen3(vertices[t.index3]))
             small("wave ray: on the triangle's plane", math.plane_separation(plane, out.point), 0.00001)
             small("wave ray: the triangle's normal", math.distance(out.normal, plane.normal), 0.00001)
             ensure("wave ray: within the amplitude", math.abs_float(out.point.y) <= 0.3 + 0.00001)
@@ -427,9 +427,9 @@ test_query_and_overlap() {
         k = 0
         while k < wave.triangle_count {
             t = triangles[k]
-            a = vertices[t.index1]
-            b = vertices[t.index2]
-            d = vertices[t.index3]
+            a = math.widen3(vertices[t.index1])
+            b = math.widen3(vertices[t.index2])
+            d = math.widen3(vertices[t.index3])
             if mesh.test_bounds_triangle_overlap(c, h, a, b, d) { scan = scan + 1 }
             k = k + 1
         }
