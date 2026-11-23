@@ -352,6 +352,29 @@ test_crossed_edge() {
     ensure("crossed far: edge pair cached", cache.kind == manifold.AXIS_EDGE_PAIR)
     small("crossed far: cached separation", cache.separation - (1.5 - ROOT2), 0.00001)
 
+    // A cached axis naming features these hulls lack (a snapshot's, or a
+    // shape's whose hull changed) is no cache: the contact is the one an
+    // empty cache gives, and nothing past the hulls' arrays is read.
+    kinds = [ manifold.AXIS_FACE_A, manifold.AXIS_FACE_B, manifold.AXIS_EDGE_PAIR, manifold.AXIS_EDGE_PAIR ]
+    bad_a = [ 1000, 0, 1001, 0 - 2 ]
+    bad_b = [ 0, 1000, 0, 2 ]
+    k = 0
+    while k < 4 {
+        clean = manifold.local_manifold(points)
+        clean_cache = manifold.empty_sat_cache()
+        manifold.collide_hulls(&clean, 8, a, b, slide_x(1.3), &clean_cache)
+        want_count = clean.point_count
+        want_separation = manifold.point(&clean, 0).separation
+        stale = manifold.local_manifold(points)
+        stale_cache = manifold.empty_sat_cache()
+        stale_cache.kind = kinds[k]
+        stale_cache.index_a = bad_a[k]
+        stale_cache.index_b = bad_b[k]
+        manifold.collide_hulls(&stale, 8, a, b, slide_x(1.3), &stale_cache)
+        ensure("stale cache ${k}: the contact an empty cache gives (${stale.point_count} points)", stale.point_count == want_count && manifold.point(&stale, 0).separation == want_separation)
+        k = k + 1
+    }
+
     // The parallel-edge rejection is a sine threshold: it holds at any scale.
     scales = [ 100.0, 1.0, 0.2 ]
     i = 0
@@ -997,9 +1020,11 @@ main() {
     test_rounded_pairs()
     // The modules' scratch stays allocated: each worker's speculative
     // distance, the two clip polygons, the unreduced points, the edge
-    // contact's point, and the separating axis test's arrays (of the copy the
-    // SIMD width runs; nothing here reserves the other).
-    ensure("every other counted allocation was freed (${basics.alloc_count() - before})", basics.alloc_count() == before + 6)
+    // contact's point, the near vertices' prefilter masks, the face
+    // contact's side planes, and the separating
+    // axis test's arrays (of the copy the SIMD width runs; nothing here
+    // reserves the other).
+    ensure("every other counted allocation was freed (${basics.alloc_count() - before})", basics.alloc_count() == before + 8)
 
     println("manifold: ${checks} checks")
     if failures == 0 {

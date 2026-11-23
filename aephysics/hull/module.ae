@@ -30,6 +30,8 @@ exports (
     MAX_HULL_VERTICES, MAX_HULL_FACES, MAX_HULL_EDGES, HULL_VERSION, NULL_INDEX,
     hull_vertices, hull_points, hull_edges, hull_planes, hull_faces,
     HULL_SOA_PADDING, hull_soa_stride, hull_soa_vertices, hull_soa_normals, hull_edge_cosines,
+    hull_edge_words, edge_word, edge_word_face0, edge_word_face1, edge_word_origin0, edge_word_origin1,
+    hull_soa_plane_offsets, hull_half_edge_words, half_edge_word, half_edge_next, half_edge_twin, half_edge_origin, half_edge_face,
     create_hull, destroy_hull, clone_hull, clone_and_transform_hull, is_valid_hull, hull_bytes_valid,
     hash_hull_data, compare_hull_data,
     create_cylinder, create_cone, create_rock, create_complex_hull,
@@ -54,8 +56,10 @@ const MAX_HULL_EDGES = 128
 // The final hull's counts are capped at 256 as in the reference, whose indices are bytes.
 const HULL_MAX_COUNT = 256
 // The layout's tag: the single-precision rows the wide separating axis
-// test reads (#150) came with 0x4A4C9588.
-const HULL_VERSION = 0x4A4C9588
+// test reads (#150) came with 0x4A4C9588; the packed edge words and the
+// row of plane offsets, with the cosine row padded to whole lanes, with
+// 0x4A4C9589.
+const HULL_VERSION = 0x4A4C9589
 // The rows' lanes: a row of vertices or normals is padded to a multiple of
 // this, so eight lanes read whole blocks (the reference's B3_HULL_SOA_PADDING).
 const HULL_SOA_PADDING = 8
@@ -95,7 +99,10 @@ struct HullData {
     face_offset: int
     soa_vertex_offset: int     // f32 rows x, y, z of the vertices, each hull_soa_stride(vertex_count) long, padded with vertex 0
     soa_normal_offset: int     // f32 rows x, y, z of the face normals, each hull_soa_stride(face_count) long, padded with zeros
-    edge_cosine_offset: int    // f32 per full edge: the cosine between its two faces' normals
+    edge_cosine_offset: int    // f32 per full edge: the cosine between its two faces' normals, hull_soa_stride(edge_count / 2) long, padded with zeros
+    edge_word_offset: int      // int per full edge 2i, 2i + 1: face of 2i, face of 2i + 1, origin of 2i, origin of 2i + 1, a byte each from the low end
+    soa_plane_offset: int      // f32 row of the face planes' offsets, hull_soa_stride(face_count) long, padded with zeros
+    half_edge_word_offset: int // int per half-edge: next, twin, origin, face, a byte each from the low end (the reference's b3HullHalfEdge)
     byte_count: int
 }
 
@@ -133,6 +140,36 @@ hull_soa_stride(count: int) -> int { return (count + HULL_SOA_PADDING - 1) & (0 
 hull_soa_vertices(h: *HullData) -> ptr { return (h as ptr) + h.soa_vertex_offset }
 hull_soa_normals(h: *HullData) -> ptr { return (h as ptr) + h.soa_normal_offset }
 hull_edge_cosines(h: *HullData) -> f32[] { return ((h as ptr) + h.edge_cosine_offset) as f32[] }
+
+// A full edge's two faces and two origins in one word, where the reference
+// reads two four-byte half-edges (b3HullHalfEdge's bytes) and ours are
+// sixteen: what the separating axis test's edge loops read, one load an
+// edge. Every index is under 128, so a byte holds it and the word is
+// never negative.
+hull_edge_words(h: *HullData) -> int[] { return ((h as ptr) + h.edge_word_offset) as int[] }
+edge_word(face0: int, face1: int, origin0: int, origin1: int) -> int {
+    return face0 | (face1 << 8) | (origin0 << 16) | (origin1 << 24)
+}
+edge_word_face0(w: int) -> int { return w & 255 }
+edge_word_face1(w: int) -> int { return (w >> 8) & 255 }
+edge_word_origin0(w: int) -> int { return (w >> 16) & 255 }
+edge_word_origin1(w: int) -> int { return (w >> 24) & 255 }
+
+// A half-edge in four bytes, as the reference keeps them (b3HullHalfEdge's
+// uint8 next, twin, origin, face): what the face contacts walk a face's
+// ring and a vertex's fan by, one load a step where a HalfEdge is sixteen.
+// A hull has at most 256 half-edges and 128 faces, so a byte holds each
+// index and the word is never negative.
+hull_half_edge_words(h: *HullData) -> int[] { return ((h as ptr) + h.half_edge_word_offset) as int[] }
+half_edge_word(e: HalfEdge) -> int { return e.next | (e.twin << 8) | (e.origin << 16) | (e.face << 24) }
+half_edge_next(w: int) -> int { return w & 255 }
+half_edge_twin(w: int) -> int { return (w >> 8) & 255 }
+half_edge_origin(w: int) -> int { return (w >> 16) & 255 }
+half_edge_face(w: int) -> int { return (w >> 24) & 255 }
+
+// The planes' offsets narrowed, as a row the width of the normals' rows:
+// a face's plane separation is dot(normal, p) - offset eight faces a pass.
+hull_soa_plane_offsets(h: *HullData) -> ptr { return (h as ptr) + h.soa_plane_offset }
 
 align8(x: int) -> int { return (x + 7) & (0 - 8) }
 
@@ -1310,21 +1347,45 @@ is_valid_hull(h: *HullData) -> bool {
     }
     faces = hull_faces(h)
     planes = hull_planes(h)
+    // Every face's ring closes within a vertex per side, and the rings
+    // together hold every half-edge once: a walk of a ring or of a vertex's
+    // fan ends, and a face has at most vertex_count sides (the face
+    // contact's side planes have room for MAX_HULL_EDGES).
+    ring_total = 0
     face_index = 0
     while face_index < h.face_count {
         if math.plane_separation(planes[face_index], h.center) >= 0.0 { return false }
         base = faces[face_index]
         edge_index = base
+        sides = 0
         while true {
             next = edges[edge_index].next
             twin = edges[edge_index].twin
             if edges[edge_index].face != face_index { return false }
             if edges[twin].twin != edge_index { return false }
             if edges[next].origin != edges[twin].origin { return false }
+            sides = sides + 1
+            if sides > h.vertex_count { return false }
             edge_index = next
             if edge_index == base { break }
         }
+        ring_total = ring_total + sides
         face_index = face_index + 1
+    }
+    if ring_total != h.edge_count { return false }
+    i = 0
+    while i < h.vertex_count {
+        start = vertices[i]
+        edge_index = start
+        steps = 0
+        while true {
+            if edges[edge_index].origin != i { return false }
+            steps = steps + 1
+            if steps > h.edge_count { return false }
+            edge_index = edges[edges[edge_index].twin].next
+            if edge_index == start { break }
+        }
+        i = i + 1
     }
     if h.volume <= 0.0 || h.surface_area <= 0.0 || h.inner_radius <= 0.0 { return false }
     return true
@@ -1453,10 +1514,33 @@ refresh_hull_soa(h: *HullData) {
         n[2 * face_stride + i] = normal.z as f32
         i = i + 1
     }
-    cosines = hull_edge_cosines(h)
+    offsets = hull_soa_plane_offsets(h) as f32[]
     i = 0
-    while i < h.edge_count / 2 {
-        cosines[i] = math.dot(planes[edges[2 * i].face].normal, planes[edges[2 * i + 1].face].normal) as f32
+    while i < face_stride {
+        f32 offset = 0.0
+        if i < h.face_count { offset = planes[i].offset as f32 }
+        offsets[i] = offset
+        i = i + 1
+    }
+    half_edges = hull_half_edge_words(h)
+    i = 0
+    while i < h.edge_count {
+        half_edges[i] = half_edge_word(edges[i])
+        i = i + 1
+    }
+    cosines = hull_edge_cosines(h)
+    words = hull_edge_words(h)
+    full_edges = h.edge_count / 2
+    i = 0
+    while i < hull_soa_stride(full_edges) {
+        f32 c = 0.0
+        if i < full_edges {
+            e0 = edges[2 * i]
+            e1 = edges[2 * i + 1]
+            c = math.dot(planes[e0.face].normal, planes[e1.face].normal) as f32
+            words[i] = edge_word(e0.face, e1.face, e0.origin, e1.origin)
+        }
+        cosines[i] = c
         i = i + 1
     }
 }
@@ -1483,6 +1567,9 @@ hull_bytes_valid(h: *HullData, available: int) -> bool {
     if h.face_count < 4 || h.face_count > MAX_HULL_FACES { return false }
     // edge_count counts half-edges; the builder allows MAX_HULL_EDGES full ones (#158).
     if h.edge_count < 12 || h.edge_count > 2 * MAX_HULL_EDGES || (h.edge_count & 1) != 0 { return false }
+    // The layout allocate_hull makes for these counts: no array overlaps
+    // another or the header, so refreshing one row cannot rewrite another.
+    if has_hull_layout(h) == false { return false }
     if basics.section_fits(h.vertex_offset, h.vertex_count, 4, n) == false { return false }
     if basics.section_fits(h.point_offset, h.vertex_count, sizeof(Vec3), n) == false { return false }
     if basics.section_fits(h.edge_offset, h.edge_count, sizeof(HalfEdge), n) == false { return false }
@@ -1490,7 +1577,10 @@ hull_bytes_valid(h: *HullData, available: int) -> bool {
     if basics.section_fits(h.face_offset, h.face_count, 4, n) == false { return false }
     if basics.section_fits(h.soa_vertex_offset, 3 * hull_soa_stride(h.vertex_count), 4, n) == false { return false }
     if basics.section_fits(h.soa_normal_offset, 3 * hull_soa_stride(h.face_count), 4, n) == false { return false }
-    if basics.section_fits(h.edge_cosine_offset, h.edge_count / 2, 4, n) == false { return false }
+    if basics.section_fits(h.edge_cosine_offset, hull_soa_stride(h.edge_count / 2), 4, n) == false { return false }
+    if basics.section_fits(h.edge_word_offset, h.edge_count / 2, 4, n) == false { return false }
+    if basics.section_fits(h.soa_plane_offset, hull_soa_stride(h.face_count), 4, n) == false { return false }
+    if basics.section_fits(h.half_edge_word_offset, h.edge_count, 4, n) == false { return false }
     vertices = hull_vertices(h)
     edges = hull_edges(h)
     faces = hull_faces(h)
@@ -1506,6 +1596,22 @@ hull_bytes_valid(h: *HullData, available: int) -> bool {
         if e.origin < 0 || e.origin >= h.vertex_count || e.face < 0 || e.face >= h.face_count { return false }
         i = i + 1
     }
+    // The packed words index the separating axis test's arrays: each must
+    // be its two half-edges' faces and origins, checked above.
+    words = hull_edge_words(h)
+    i = 0
+    while i < h.edge_count / 2 {
+        e0 = edges[2 * i]
+        e1 = edges[2 * i + 1]
+        if words[i] != edge_word(e0.face, e1.face, e0.origin, e1.origin) { return false }
+        i = i + 1
+    }
+    half_edges = hull_half_edge_words(h)
+    i = 0
+    while i < h.edge_count {
+        if half_edges[i] != half_edge_word(edges[i]) { return false }
+        i = i + 1
+    }
     i = 0
     while i < h.face_count {
         if faces[i] < 0 || faces[i] >= h.edge_count { return false }
@@ -1514,39 +1620,84 @@ hull_bytes_valid(h: *HullData, available: int) -> bool {
     return is_valid_hull(h)
 }
 
+// Where each array of a hull of these counts sits in its block, and the
+// block's length: the one layout allocate_hull makes and hull_bytes_valid
+// holds bytes from outside to, so no two arrays share bytes.
+struct HullOffsets {
+    vertex_offset: int
+    point_offset: int
+    edge_offset: int
+    plane_offset: int
+    face_offset: int
+    soa_vertex_offset: int
+    soa_normal_offset: int
+    edge_cosine_offset: int
+    edge_word_offset: int
+    soa_plane_offset: int
+    half_edge_word_offset: int
+    byte_count: int
+}
+
+hull_offsets(vertex_count: int, edge_count: int, face_count: int) -> HullOffsets {
+    o = HullOffsets { vertex_offset: 0, point_offset: 0, edge_offset: 0, plane_offset: 0, face_offset: 0, soa_vertex_offset: 0,
+                      soa_normal_offset: 0, edge_cosine_offset: 0, edge_word_offset: 0, soa_plane_offset: 0, half_edge_word_offset: 0, byte_count: 0 }
+    at = align8(sizeof(HullData))
+    o.vertex_offset = at
+    at = at + align8(vertex_count * 4)
+    o.point_offset = at
+    at = at + align8(vertex_count * sizeof(Vec3))
+    o.edge_offset = at
+    at = at + align8(edge_count * sizeof(HalfEdge))
+    o.plane_offset = at
+    at = at + align8(face_count * sizeof(Plane))
+    o.face_offset = at
+    at = at + align8(face_count * 4)
+    o.soa_vertex_offset = at
+    at = at + align8(3 * hull_soa_stride(vertex_count) * 4)
+    o.soa_normal_offset = at
+    at = at + align8(3 * hull_soa_stride(face_count) * 4)
+    o.edge_cosine_offset = at
+    at = at + align8(hull_soa_stride(edge_count / 2) * 4)
+    o.edge_word_offset = at
+    at = at + align8((edge_count / 2) * 4)
+    o.soa_plane_offset = at
+    at = at + align8(hull_soa_stride(face_count) * 4)
+    o.half_edge_word_offset = at
+    at = at + align8(edge_count * 4)
+    o.byte_count = at
+    return o
+}
+
+// Whether a hull's offsets and length are the layout of its counts.
+has_hull_layout(h: *HullData) -> bool {
+    o = hull_offsets(h.vertex_count, h.edge_count, h.face_count)
+    if h.vertex_offset != o.vertex_offset || h.point_offset != o.point_offset || h.edge_offset != o.edge_offset { return false }
+    if h.plane_offset != o.plane_offset || h.face_offset != o.face_offset || h.soa_vertex_offset != o.soa_vertex_offset { return false }
+    if h.soa_normal_offset != o.soa_normal_offset || h.edge_cosine_offset != o.edge_cosine_offset { return false }
+    if h.edge_word_offset != o.edge_word_offset || h.soa_plane_offset != o.soa_plane_offset { return false }
+    return h.half_edge_word_offset == o.half_edge_word_offset && h.byte_count == o.byte_count
+}
+
 // The block for a hull of these counts, with the offsets set.
 allocate_hull(vertex_count: int, edge_count: int, face_count: int) -> *HullData {
-    byte_count = align8(sizeof(HullData))
-    vertex_offset = byte_count
-    byte_count = byte_count + align8(vertex_count * 4)
-    point_offset = byte_count
-    byte_count = byte_count + align8(vertex_count * sizeof(Vec3))
-    edge_offset = byte_count
-    byte_count = byte_count + align8(edge_count * sizeof(HalfEdge))
-    plane_offset = byte_count
-    byte_count = byte_count + align8(face_count * sizeof(Plane))
-    face_offset = byte_count
-    byte_count = byte_count + align8(face_count * 4)
-    soa_vertex_offset = byte_count
-    byte_count = byte_count + align8(3 * hull_soa_stride(vertex_count) * 4)
-    soa_normal_offset = byte_count
-    byte_count = byte_count + align8(3 * hull_soa_stride(face_count) * 4)
-    edge_cosine_offset = byte_count
-    byte_count = byte_count + align8((edge_count / 2) * 4)
-    h = basics.alloc(byte_count) as *HullData
+    o = hull_offsets(vertex_count, edge_count, face_count)
+    h = basics.alloc(o.byte_count) as *HullData
     h.version = HULL_VERSION
-    h.vertex_offset = vertex_offset
-    h.point_offset = point_offset
-    h.edge_offset = edge_offset
-    h.plane_offset = plane_offset
-    h.face_offset = face_offset
-    h.soa_vertex_offset = soa_vertex_offset
-    h.soa_normal_offset = soa_normal_offset
-    h.edge_cosine_offset = edge_cosine_offset
+    h.vertex_offset = o.vertex_offset
+    h.point_offset = o.point_offset
+    h.edge_offset = o.edge_offset
+    h.plane_offset = o.plane_offset
+    h.face_offset = o.face_offset
+    h.soa_vertex_offset = o.soa_vertex_offset
+    h.soa_normal_offset = o.soa_normal_offset
+    h.edge_cosine_offset = o.edge_cosine_offset
+    h.edge_word_offset = o.edge_word_offset
+    h.soa_plane_offset = o.soa_plane_offset
+    h.half_edge_word_offset = o.half_edge_word_offset
     h.vertex_count = vertex_count
     h.edge_count = edge_count
     h.face_count = face_count
-    h.byte_count = byte_count
+    h.byte_count = o.byte_count
     return h
 }
 

@@ -67,6 +67,7 @@ exports (
     spherical_joint_get_cone_angle, spherical_joint_set_cone_axis, spherical_joint_get_cone_axis,
     spherical_joint_set_cone_ellipse, spherical_joint_lock_cone_minor, spherical_joint_is_cone_minor_locked, spherical_joint_get_cone_minor_angle, spherical_joint_get_cone_major_axis, spherical_joint_enable_twist_limit, spherical_joint_is_twist_limit_enabled,
     spherical_joint_get_lower_twist_limit, spherical_joint_get_upper_twist_limit, spherical_joint_set_twist_limits,
+    spherical_joint_set_twist_limit_tuning, spherical_joint_get_twist_limit_tuning,
     spherical_joint_get_twist_angle, spherical_joint_enable_spring, spherical_joint_is_spring_enabled, spherical_joint_set_target_rotation,
     spherical_joint_get_target_rotation, spherical_joint_set_spring_hertz, spherical_joint_get_spring_hertz,
     spherical_joint_set_spring_damping_ratio, spherical_joint_get_spring_damping_ratio, spherical_joint_enable_motor,
@@ -209,10 +210,14 @@ struct LimitScales {
 }
 
 limit_scales(base: *JointSim, ctx: *StepContext, c: float, use_bias: bool) -> LimitScales {
+    return softened_limit_scales(base.limit_softness, ctx, c, use_bias)
+}
+
+// The same with a softness of the limit's own (a ball joint's twist stops, #231).
+softened_limit_scales(soft: Softness, ctx: *StepContext, c: float, use_bias: bool) -> LimitScales {
     if c > 0.0 { return LimitScales { bias: c * ctx.inv_h, mass_scale: 1.0, impulse_scale: 0.0 } }
     if use_bias {
-        return LimitScales { bias: base.limit_softness.bias_rate * c, mass_scale: base.limit_softness.mass_scale,
-                             impulse_scale: base.limit_softness.impulse_scale }
+        return LimitScales { bias: soft.bias_rate * c, mass_scale: soft.mass_scale, impulse_scale: soft.impulse_scale }
     }
     return LimitScales { bias: 0.0, mass_scale: 1.0, impulse_scale: 0.0 }
 }
@@ -1898,7 +1903,7 @@ solve_spherical_joint(base: *JointSim, ctx: *StepContext, use_bias: bool) {
     if j.enable_twist_limit && fixed_rotation == false {
         jacobian = j.twist_jacobian
         // Lower.
-        scales = limit_scales(base, ctx, twist - j.lower_twist_angle, use_bias)
+        scales = softened_limit_scales(j.twist_limit_softness, ctx, twist - j.lower_twist_angle, use_bias)
         cdot = math.dot(math.sub(w_b, w_a), jacobian)
         old_impulse = j.lower_twist_impulse
         delta = 0.0 - scales.mass_scale * j.twist_mass * (cdot + scales.bias) - scales.impulse_scale * old_impulse
@@ -1907,7 +1912,7 @@ solve_spherical_joint(base: *JointSim, ctx: *StepContext, use_bias: bool) {
         w_a = math.mul_sub(w_a, delta, math.mul_mv(i_a, jacobian))
         w_b = math.mul_add(w_b, delta, math.mul_mv(i_b, jacobian))
         // Upper, the signs flipped.
-        scales = limit_scales(base, ctx, j.upper_twist_angle - twist, use_bias)
+        scales = softened_limit_scales(j.twist_limit_softness, ctx, j.upper_twist_angle - twist, use_bias)
         cdot = math.dot(math.sub(w_a, w_b), jacobian)
         old_impulse = j.upper_twist_impulse
         delta = 0.0 - scales.mass_scale * j.twist_mass * (cdot + scales.bias) - scales.impulse_scale * old_impulse
@@ -2130,6 +2135,27 @@ spherical_joint_set_twist_limits(id: JointId, lower: float, upper: float) {
     pi = math.PI
     j.lower_twist_angle = math.clamp_float(math.min_float(lower, upper), 0.0 - 0.99 * pi, 0.99 * pi)
     j.upper_twist_angle = math.clamp_float(math.max_float(lower, upper), 0.0 - 0.99 * pi, 0.99 * pi)
+}
+// The twist stops' own stiffness and damping (#231), past the reference:
+// a spring of `hertz` and `damping_ratio` past either twist limit, the cone
+// keeping the joint's limit tuning (joint_set_limit_tuning sets both). A
+// hip with a soft end of flexion and a rigid twist, as a person's: UE5's
+// constraint, PhysX's D6 and Unity's ConfigurableJoint soften a swing and
+// a twist limit apart. 0 hertz is the constraint's softness.
+spherical_joint_set_twist_limit_tuning(id: JointId, hertz: float, damping_ratio: float) {
+    if dynamics.recording_on(id.world0) { recorder = dynamics.rec_begin(id.world0, dynamics.OP_SPHERICAL_JOINT_SET_TWIST_LIMIT_TUNING); dynamics.rec_id(recorder, id.index1, id.generation); dynamics.rec_float(recorder, hertz); dynamics.rec_float(recorder, damping_ratio); dynamics.rec_end(recorder) }
+    if math.is_valid_float(hertz) == false || math.is_valid_float(damping_ratio) == false || hertz < 0.0 || damping_ratio < 0.0 { return }
+    base = sim_of(id, dynamics.JOINT_SPHERICAL)
+    if base == null { return }
+    j = dynamics.spherical_joint_of(base)
+    j.twist_limit_hertz = hertz
+    j.twist_limit_damping_ratio = damping_ratio
+}
+spherical_joint_get_twist_limit_tuning(id: JointId) -> (float, float) {
+    base = sim_of(id, dynamics.JOINT_SPHERICAL)
+    if base == null { return 0.0, 0.0 }
+    j = dynamics.spherical_joint_of(base)
+    return j.twist_limit_hertz, j.twist_limit_damping_ratio
 }
 spherical_joint_get_twist_angle(id: JointId) -> float {
     base = sim_of(id, dynamics.JOINT_SPHERICAL)
@@ -2950,9 +2976,15 @@ prepare_joint(base: *JointSim, ctx: *StepContext) {
     hertz = math.min_float(base.constraint_hertz, 0.25 * ctx.inv_h)
     base.constraint_softness = dynamics.make_soft(hertz, base.constraint_damping_ratio, ctx.h)
     // The limits' own stiffness (#226), else the constraint's; held as it is.
-    base.limit_softness = base.constraint_softness
-    if base.limit_hertz > 0.0 { base.limit_softness = dynamics.make_soft(math.min_float(base.limit_hertz, 0.25 * ctx.inv_h), base.limit_damping_ratio, ctx.h) }
-    if ctx.limit_load_scale > 0.0 && ctx.enable_warm_starting { size_limits_to_load(base, ctx) }
+    base.limit_softness = limit_softness_of(base, ctx, base.limit_hertz, base.limit_damping_ratio)
+    // A ball joint's twist stops may have their own (#231).
+    if base.kind == dynamics.JOINT_SPHERICAL {
+        s = dynamics.spherical_joint_of(base)
+        s.twist_limit_softness = base.limit_softness
+        if s.twist_limit_hertz != base.limit_hertz || s.twist_limit_damping_ratio != base.limit_damping_ratio {
+            s.twist_limit_softness = limit_softness_of(base, ctx, s.twist_limit_hertz, s.twist_limit_damping_ratio)
+        }
+    }
     kind = base.kind
     if kind == dynamics.JOINT_PARALLEL { prepare_parallel_joint(base, ctx) }
     else if kind == dynamics.JOINT_DISTANCE { prepare_distance_joint(base, ctx) }
@@ -2978,17 +3010,26 @@ prepare_joint(base: *JointSim, ctx: *StepContext) {
 // 1 / (1 + k), the same bias rate. Only the limits, which push one way: the
 // point and the locks sized so too held a light foot between them and the
 // ground too stiffly for one pass to settle, and a welded figure toppled.
-size_limits_to_load(base: *JointSim, ctx: *StepContext) {
+size_limits_to_load(base: *JointSim, ctx: *StepContext, soft: Softness) -> Softness {
     w = ctx.world
     sim_a = dynamics.get_body_sim(w, dynamics.body_at(w, base.body_id_a))
     sim_b = dynamics.get_body_sim(w, dynamics.body_at(w, base.body_id_b))
     inv_mass = sim_a.inv_mass + sim_b.inv_mass
-    soft = base.limit_softness
-    if inv_mass <= 0.0 || soft.impulse_scale <= 0.0 { return }
+    if inv_mass <= 0.0 || soft.impulse_scale <= 0.0 { return soft }
     carried = dynamics.get_joint_reaction(w, base, 1.0).force * ctx.limit_load_scale * inv_mass
-    if carried <= 1.0 { return }
+    if carried <= 1.0 { return soft }
     k = carried * soft.mass_scale / soft.impulse_scale
-    base.limit_softness = Softness { bias_rate: soft.bias_rate, mass_scale: k / (1.0 + k), impulse_scale: 1.0 / (1.0 + k) }
+    return Softness { bias_rate: soft.bias_rate, mass_scale: k / (1.0 + k), impulse_scale: 1.0 / (1.0 + k) }
+}
+
+// A limit's softness for this step: of `hertz` and `damping_ratio` (held
+// to a quarter of the sub-step rate), the constraint's at 0 hertz, sized to
+// the joint's load when loaded limits are on.
+limit_softness_of(base: *JointSim, ctx: *StepContext, hertz: float, damping_ratio: float) -> Softness {
+    soft = base.constraint_softness
+    if hertz > 0.0 { soft = dynamics.make_soft(math.min_float(hertz, 0.25 * ctx.inv_h), damping_ratio, ctx.h) }
+    if ctx.limit_load_scale > 0.0 && ctx.enable_warm_starting { soft = size_limits_to_load(base, ctx, soft) }
+    return soft
 }
 
 warm_start_joint(base: *JointSim, ctx: *StepContext) {

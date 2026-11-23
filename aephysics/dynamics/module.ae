@@ -56,7 +56,7 @@ import aephysics.broad_phase
 import aephysics.mesh_contact
 
 exports (
-    reserve_scratch, mesh_cache_of, convex_cache_of, CONTACT_CACHE_WORDS,
+    reserve_scratch, mesh_cache_of, convex_cache_of, ConvexCache, CONTACT_CACHE_WORDS,
     WorldDef, BodyDef, ShapeDef, MotionLocks, WorldId, BodyId, ShapeId,
     World, Body, BodySim, BodyState, WorldShape, Contact, ContactEdge, Joint, JointEdge,
     SolverSet, Island, IslandSim, ContactLink, JointLink,
@@ -94,7 +94,7 @@ exports (
     intern_tag, clear_tags, intern_geometry, rec_commit_query, rec_aabb, rec_query_filter, rec_shape_proxy, rec_plane_result, rec_capsule_value,
     rec_float, rec_bool, rec_vec3, rec_quat, rec_transform, rec_id, rec_string, rec_raw, rec_geometry, finish_recording, recorded_geometry_at,
     OP_STATE_HASH, OP_BOUNDS, OP_END, OP_QUERY_TAG, OP_QUERY_OVERLAP_AABB, OP_QUERY_OVERLAP_SHAPE, OP_QUERY_CAST_RAY,
-    OP_QUERY_CAST_SHAPE, OP_QUERY_CAST_RAY_CLOSEST, OP_QUERY_CAST_MOVER, OP_QUERY_COLLIDE_MOVER, OP_CREATE_BODY, OP_DESTROY_BODY, OP_BODY_SET_TRANSFORM, OP_BODY_SET_LINEAR_VELOCITY, OP_BODY_SET_ANGULAR_VELOCITY, OP_BODY_SET_TARGET_TRANSFORM, OP_BODY_APPLY_FORCE, OP_BODY_APPLY_FORCE_TO_CENTER, OP_BODY_APPLY_TORQUE, OP_BODY_APPLY_LINEAR_IMPULSE, OP_BODY_APPLY_LINEAR_IMPULSE_TO_CENTER, OP_BODY_APPLY_ANGULAR_IMPULSE, OP_BODY_SET_BULLET, OP_BODY_SET_MASS_DATA, OP_BODY_APPLY_MASS_FROM_SHAPES, OP_BODY_SET_LINEAR_DAMPING, OP_BODY_SET_ANGULAR_DAMPING, OP_BODY_SET_GRAVITY_SCALE, OP_BODY_SET_AWAKE, OP_BODY_ENABLE_SLEEP, OP_BODY_SET_SLEEP_THRESHOLD, OP_BODY_SET_MOTION_LOCKS, OP_CREATE_SPHERE_SHAPE, OP_CREATE_CAPSULE_SHAPE, OP_CREATE_HULL_SHAPE, OP_CREATE_TRANSFORMED_HULL_SHAPE, OP_CREATE_MESH_SHAPE, OP_CREATE_HEIGHT_FIELD_SHAPE, OP_CREATE_COMPOUND_SHAPE, OP_DESTROY_SHAPE, OP_SHAPE_SET_DENSITY, OP_SHAPE_SET_FILTER, OP_SHAPE_SET_SURFACE_MATERIAL, OP_SHAPE_SET_SPHERE, OP_SHAPE_SET_CAPSULE, OP_SHAPE_SET_HULL, OP_SHAPE_SET_MESH, OP_SHAPE_SET_FRICTION, OP_SHAPE_SET_RESTITUTION, OP_SHAPE_SET_MESH_MATERIAL, OP_SHAPE_ENABLE_PRE_SOLVE_EVENTS, OP_BODY_ENABLE_HIT_EVENTS, OP_BODY_ALLOW_FAST_ROTATION, OP_BODY_ENABLE_CONTACT_RECYCLING, OP_BODY_SET_SAFETY_FACTOR, OP_SHAPE_APPLY_WIND, OP_BODY_SET_NAME, OP_SHAPE_SET_NAME, OP_CREATE_DISTANCE_JOINT, OP_CREATE_MOTOR_JOINT, OP_CREATE_FILTER_JOINT, OP_CREATE_PARALLEL_JOINT, OP_CREATE_PRISMATIC_JOINT, OP_CREATE_REVOLUTE_JOINT, OP_CREATE_SPHERICAL_JOINT, OP_CREATE_WELD_JOINT, OP_CREATE_WHEEL_JOINT, OP_DESTROY_JOINT, OP_JOINT_SET_LOCAL_FRAME_A, OP_JOINT_SET_LOCAL_FRAME_B, OP_JOINT_SET_COLLIDE_CONNECTED, OP_JOINT_WAKE_BODIES, OP_JOINT_SET_CONSTRAINT_TUNING, OP_JOINT_SET_FORCE_THRESHOLD, OP_JOINT_SET_TORQUE_THRESHOLD, OP_BODY_SET_TYPE, OP_BODY_DISABLE, OP_BODY_ENABLE, OP_SHAPE_ENABLE_SENSOR_EVENTS, OP_SHAPE_ENABLE_CONTACT_EVENTS, OP_SHAPE_ENABLE_HIT_EVENTS, OP_STEP, OP_ENABLE_SLEEPING, OP_ENABLE_WARM_STARTING, OP_ENABLE_CONTINUOUS, OP_ENABLE_SPECULATIVE, OP_SET_RESTITUTION_THRESHOLD, OP_SET_RESTITUTION_ITERATIONS, OP_ENABLE_RESTITUTION_PROPAGATION, OP_ENABLE_KINEMATIC_STATIC_SOFTNESS, OP_SET_HIT_EVENT_THRESHOLD, OP_SET_CONTACT_TUNING, OP_SET_CONTACT_RECYCLE_DISTANCE, OP_SET_MAXIMUM_LINEAR_SPEED, OP_SET_GRAVITY, OP_REBUILD_STATIC_TREE, OP_EXPLODE, OP_DISTANCE_JOINT_SET_LENGTH, OP_DISTANCE_JOINT_ENABLE_LIMIT, OP_DISTANCE_JOINT_SET_LENGTH_RANGE, OP_DISTANCE_JOINT_ENABLE_SPRING, OP_DISTANCE_JOINT_SET_SPRING_FORCE_RANGE, OP_DISTANCE_JOINT_SET_SPRING_HERTZ, OP_DISTANCE_JOINT_SET_SPRING_DAMPING_RATIO, OP_DISTANCE_JOINT_ENABLE_MOTOR, OP_DISTANCE_JOINT_SET_MOTOR_SPEED, OP_DISTANCE_JOINT_SET_MAX_MOTOR_FORCE, OP_MOTOR_JOINT_SET_LINEAR_VELOCITY, OP_MOTOR_JOINT_SET_ANGULAR_VELOCITY, OP_MOTOR_JOINT_SET_MAX_VELOCITY_TORQUE, OP_MOTOR_JOINT_SET_MAX_VELOCITY_FORCE, OP_MOTOR_JOINT_SET_LINEAR_HERTZ, OP_MOTOR_JOINT_SET_LINEAR_DAMPING_RATIO, OP_MOTOR_JOINT_SET_ANGULAR_HERTZ, OP_MOTOR_JOINT_SET_ANGULAR_DAMPING_RATIO, OP_MOTOR_JOINT_SET_MAX_SPRING_FORCE, OP_MOTOR_JOINT_SET_MAX_SPRING_TORQUE, OP_PARALLEL_JOINT_SET_SPRING_HERTZ, OP_PARALLEL_JOINT_SET_SPRING_DAMPING_RATIO, OP_PARALLEL_JOINT_SET_MAX_TORQUE, OP_PRISMATIC_JOINT_ENABLE_SPRING, OP_PRISMATIC_JOINT_SET_SPRING_HERTZ, OP_PRISMATIC_JOINT_SET_SPRING_DAMPING_RATIO, OP_PRISMATIC_JOINT_SET_TARGET_TRANSLATION, OP_PRISMATIC_JOINT_ENABLE_LIMIT, OP_PRISMATIC_JOINT_SET_LIMITS, OP_PRISMATIC_JOINT_ENABLE_MOTOR, OP_PRISMATIC_JOINT_SET_MOTOR_SPEED, OP_PRISMATIC_JOINT_SET_MAX_MOTOR_FORCE, OP_REVOLUTE_JOINT_ENABLE_LIMIT, OP_REVOLUTE_JOINT_SET_LIMITS, OP_REVOLUTE_JOINT_ENABLE_SPRING, OP_REVOLUTE_JOINT_SET_TARGET_ANGLE, OP_REVOLUTE_JOINT_SET_SPRING_HERTZ, OP_REVOLUTE_JOINT_SET_SPRING_DAMPING_RATIO, OP_REVOLUTE_JOINT_ENABLE_MOTOR, OP_REVOLUTE_JOINT_SET_MOTOR_SPEED, OP_REVOLUTE_JOINT_SET_MAX_MOTOR_TORQUE, OP_SPHERICAL_JOINT_ENABLE_CONE_LIMIT, OP_SPHERICAL_JOINT_SET_CONE_LIMIT, OP_SPHERICAL_JOINT_SET_CONE_AXIS, OP_SPHERICAL_JOINT_SET_CONE_ELLIPSE, OP_SPHERICAL_JOINT_ENABLE_TWIST_LIMIT, OP_SPHERICAL_JOINT_SET_TWIST_LIMITS, OP_SPHERICAL_JOINT_ENABLE_SPRING, OP_SPHERICAL_JOINT_SET_TARGET_ROTATION, OP_SPHERICAL_JOINT_SET_SPRING_HERTZ, OP_SPHERICAL_JOINT_SET_SPRING_DAMPING_RATIO, OP_SPHERICAL_JOINT_ENABLE_MOTOR, OP_SPHERICAL_JOINT_SET_MOTOR_VELOCITY, OP_SPHERICAL_JOINT_SET_MAX_MOTOR_TORQUE, OP_WELD_JOINT_SET_LINEAR_HERTZ, OP_WELD_JOINT_SET_LINEAR_DAMPING_RATIO, OP_WELD_JOINT_SET_ANGULAR_HERTZ, OP_WELD_JOINT_SET_ANGULAR_DAMPING_RATIO, OP_WHEEL_JOINT_ENABLE_SUSPENSION, OP_WHEEL_JOINT_SET_SUSPENSION_HERTZ, OP_WHEEL_JOINT_SET_SUSPENSION_DAMPING_RATIO, OP_WHEEL_JOINT_ENABLE_SUSPENSION_LIMIT, OP_WHEEL_JOINT_SET_SUSPENSION_LIMITS, OP_WHEEL_JOINT_ENABLE_SPIN_MOTOR, OP_WHEEL_JOINT_SET_SPIN_MOTOR_SPEED, OP_WHEEL_JOINT_SET_MAX_SPIN_TORQUE, OP_WHEEL_JOINT_ENABLE_STEERING, OP_WHEEL_JOINT_SET_STEERING_HERTZ, OP_WHEEL_JOINT_SET_STEERING_DAMPING_RATIO, OP_WHEEL_JOINT_SET_MAX_STEERING_TORQUE, OP_WHEEL_JOINT_ENABLE_STEERING_LIMIT, OP_WHEEL_JOINT_SET_STEERING_LIMITS, OP_WHEEL_JOINT_SET_TARGET_STEERING_ANGLE, OP_ENABLE_KINEMATIC_SPECULATION, OP_ENABLE_TRAVEL_SPECULATION, OP_SPHERICAL_JOINT_LOCK_CONE_MINOR, OP_JOINT_SET_IMPULSES, OP_ENABLE_CANONICAL_BEGIN_ORDER, OP_BODY_SET_ORDER_KEY, OP_ENABLE_LOADED_CONTACTS, OP_ENABLE_LOADED_LIMITS, OP_JOINT_SET_LIMIT_TUNING,
+    OP_QUERY_CAST_SHAPE, OP_QUERY_CAST_RAY_CLOSEST, OP_QUERY_CAST_MOVER, OP_QUERY_COLLIDE_MOVER, OP_CREATE_BODY, OP_DESTROY_BODY, OP_BODY_SET_TRANSFORM, OP_BODY_SET_LINEAR_VELOCITY, OP_BODY_SET_ANGULAR_VELOCITY, OP_BODY_SET_TARGET_TRANSFORM, OP_BODY_APPLY_FORCE, OP_BODY_APPLY_FORCE_TO_CENTER, OP_BODY_APPLY_TORQUE, OP_BODY_APPLY_LINEAR_IMPULSE, OP_BODY_APPLY_LINEAR_IMPULSE_TO_CENTER, OP_BODY_APPLY_ANGULAR_IMPULSE, OP_BODY_SET_BULLET, OP_BODY_SET_MASS_DATA, OP_BODY_APPLY_MASS_FROM_SHAPES, OP_BODY_SET_LINEAR_DAMPING, OP_BODY_SET_ANGULAR_DAMPING, OP_BODY_SET_GRAVITY_SCALE, OP_BODY_SET_AWAKE, OP_BODY_ENABLE_SLEEP, OP_BODY_SET_SLEEP_THRESHOLD, OP_BODY_SET_MOTION_LOCKS, OP_CREATE_SPHERE_SHAPE, OP_CREATE_CAPSULE_SHAPE, OP_CREATE_HULL_SHAPE, OP_CREATE_TRANSFORMED_HULL_SHAPE, OP_CREATE_MESH_SHAPE, OP_CREATE_HEIGHT_FIELD_SHAPE, OP_CREATE_COMPOUND_SHAPE, OP_DESTROY_SHAPE, OP_SHAPE_SET_DENSITY, OP_SHAPE_SET_FILTER, OP_SHAPE_SET_SURFACE_MATERIAL, OP_SHAPE_SET_SPHERE, OP_SHAPE_SET_CAPSULE, OP_SHAPE_SET_HULL, OP_SHAPE_SET_MESH, OP_SHAPE_SET_FRICTION, OP_SHAPE_SET_RESTITUTION, OP_SHAPE_SET_MESH_MATERIAL, OP_SHAPE_ENABLE_PRE_SOLVE_EVENTS, OP_BODY_ENABLE_HIT_EVENTS, OP_BODY_ALLOW_FAST_ROTATION, OP_BODY_ENABLE_CONTACT_RECYCLING, OP_BODY_SET_SAFETY_FACTOR, OP_SHAPE_APPLY_WIND, OP_BODY_SET_NAME, OP_SHAPE_SET_NAME, OP_CREATE_DISTANCE_JOINT, OP_CREATE_MOTOR_JOINT, OP_CREATE_FILTER_JOINT, OP_CREATE_PARALLEL_JOINT, OP_CREATE_PRISMATIC_JOINT, OP_CREATE_REVOLUTE_JOINT, OP_CREATE_SPHERICAL_JOINT, OP_CREATE_WELD_JOINT, OP_CREATE_WHEEL_JOINT, OP_DESTROY_JOINT, OP_JOINT_SET_LOCAL_FRAME_A, OP_JOINT_SET_LOCAL_FRAME_B, OP_JOINT_SET_COLLIDE_CONNECTED, OP_JOINT_WAKE_BODIES, OP_JOINT_SET_CONSTRAINT_TUNING, OP_JOINT_SET_FORCE_THRESHOLD, OP_JOINT_SET_TORQUE_THRESHOLD, OP_BODY_SET_TYPE, OP_BODY_DISABLE, OP_BODY_ENABLE, OP_SHAPE_ENABLE_SENSOR_EVENTS, OP_SHAPE_ENABLE_CONTACT_EVENTS, OP_SHAPE_ENABLE_HIT_EVENTS, OP_STEP, OP_ENABLE_SLEEPING, OP_ENABLE_WARM_STARTING, OP_ENABLE_CONTINUOUS, OP_ENABLE_SPECULATIVE, OP_SET_RESTITUTION_THRESHOLD, OP_SET_RESTITUTION_ITERATIONS, OP_ENABLE_RESTITUTION_PROPAGATION, OP_ENABLE_KINEMATIC_STATIC_SOFTNESS, OP_SET_HIT_EVENT_THRESHOLD, OP_SET_CONTACT_TUNING, OP_SET_CONTACT_RECYCLE_DISTANCE, OP_SET_MAXIMUM_LINEAR_SPEED, OP_SET_GRAVITY, OP_REBUILD_STATIC_TREE, OP_EXPLODE, OP_DISTANCE_JOINT_SET_LENGTH, OP_DISTANCE_JOINT_ENABLE_LIMIT, OP_DISTANCE_JOINT_SET_LENGTH_RANGE, OP_DISTANCE_JOINT_ENABLE_SPRING, OP_DISTANCE_JOINT_SET_SPRING_FORCE_RANGE, OP_DISTANCE_JOINT_SET_SPRING_HERTZ, OP_DISTANCE_JOINT_SET_SPRING_DAMPING_RATIO, OP_DISTANCE_JOINT_ENABLE_MOTOR, OP_DISTANCE_JOINT_SET_MOTOR_SPEED, OP_DISTANCE_JOINT_SET_MAX_MOTOR_FORCE, OP_MOTOR_JOINT_SET_LINEAR_VELOCITY, OP_MOTOR_JOINT_SET_ANGULAR_VELOCITY, OP_MOTOR_JOINT_SET_MAX_VELOCITY_TORQUE, OP_MOTOR_JOINT_SET_MAX_VELOCITY_FORCE, OP_MOTOR_JOINT_SET_LINEAR_HERTZ, OP_MOTOR_JOINT_SET_LINEAR_DAMPING_RATIO, OP_MOTOR_JOINT_SET_ANGULAR_HERTZ, OP_MOTOR_JOINT_SET_ANGULAR_DAMPING_RATIO, OP_MOTOR_JOINT_SET_MAX_SPRING_FORCE, OP_MOTOR_JOINT_SET_MAX_SPRING_TORQUE, OP_PARALLEL_JOINT_SET_SPRING_HERTZ, OP_PARALLEL_JOINT_SET_SPRING_DAMPING_RATIO, OP_PARALLEL_JOINT_SET_MAX_TORQUE, OP_PRISMATIC_JOINT_ENABLE_SPRING, OP_PRISMATIC_JOINT_SET_SPRING_HERTZ, OP_PRISMATIC_JOINT_SET_SPRING_DAMPING_RATIO, OP_PRISMATIC_JOINT_SET_TARGET_TRANSLATION, OP_PRISMATIC_JOINT_ENABLE_LIMIT, OP_PRISMATIC_JOINT_SET_LIMITS, OP_PRISMATIC_JOINT_ENABLE_MOTOR, OP_PRISMATIC_JOINT_SET_MOTOR_SPEED, OP_PRISMATIC_JOINT_SET_MAX_MOTOR_FORCE, OP_REVOLUTE_JOINT_ENABLE_LIMIT, OP_REVOLUTE_JOINT_SET_LIMITS, OP_REVOLUTE_JOINT_ENABLE_SPRING, OP_REVOLUTE_JOINT_SET_TARGET_ANGLE, OP_REVOLUTE_JOINT_SET_SPRING_HERTZ, OP_REVOLUTE_JOINT_SET_SPRING_DAMPING_RATIO, OP_REVOLUTE_JOINT_ENABLE_MOTOR, OP_REVOLUTE_JOINT_SET_MOTOR_SPEED, OP_REVOLUTE_JOINT_SET_MAX_MOTOR_TORQUE, OP_SPHERICAL_JOINT_ENABLE_CONE_LIMIT, OP_SPHERICAL_JOINT_SET_CONE_LIMIT, OP_SPHERICAL_JOINT_SET_CONE_AXIS, OP_SPHERICAL_JOINT_SET_CONE_ELLIPSE, OP_SPHERICAL_JOINT_ENABLE_TWIST_LIMIT, OP_SPHERICAL_JOINT_SET_TWIST_LIMITS, OP_SPHERICAL_JOINT_ENABLE_SPRING, OP_SPHERICAL_JOINT_SET_TARGET_ROTATION, OP_SPHERICAL_JOINT_SET_SPRING_HERTZ, OP_SPHERICAL_JOINT_SET_SPRING_DAMPING_RATIO, OP_SPHERICAL_JOINT_ENABLE_MOTOR, OP_SPHERICAL_JOINT_SET_MOTOR_VELOCITY, OP_SPHERICAL_JOINT_SET_MAX_MOTOR_TORQUE, OP_WELD_JOINT_SET_LINEAR_HERTZ, OP_WELD_JOINT_SET_LINEAR_DAMPING_RATIO, OP_WELD_JOINT_SET_ANGULAR_HERTZ, OP_WELD_JOINT_SET_ANGULAR_DAMPING_RATIO, OP_WHEEL_JOINT_ENABLE_SUSPENSION, OP_WHEEL_JOINT_SET_SUSPENSION_HERTZ, OP_WHEEL_JOINT_SET_SUSPENSION_DAMPING_RATIO, OP_WHEEL_JOINT_ENABLE_SUSPENSION_LIMIT, OP_WHEEL_JOINT_SET_SUSPENSION_LIMITS, OP_WHEEL_JOINT_ENABLE_SPIN_MOTOR, OP_WHEEL_JOINT_SET_SPIN_MOTOR_SPEED, OP_WHEEL_JOINT_SET_MAX_SPIN_TORQUE, OP_WHEEL_JOINT_ENABLE_STEERING, OP_WHEEL_JOINT_SET_STEERING_HERTZ, OP_WHEEL_JOINT_SET_STEERING_DAMPING_RATIO, OP_WHEEL_JOINT_SET_MAX_STEERING_TORQUE, OP_WHEEL_JOINT_ENABLE_STEERING_LIMIT, OP_WHEEL_JOINT_SET_STEERING_LIMITS, OP_WHEEL_JOINT_SET_TARGET_STEERING_ANGLE, OP_ENABLE_KINEMATIC_SPECULATION, OP_ENABLE_TRAVEL_SPECULATION, OP_SPHERICAL_JOINT_LOCK_CONE_MINOR, OP_JOINT_SET_IMPULSES, OP_ENABLE_CANONICAL_BEGIN_ORDER, OP_BODY_SET_ORDER_KEY, OP_ENABLE_LOADED_CONTACTS, OP_ENABLE_LOADED_LIMITS, OP_JOINT_SET_LIMIT_TUNING, OP_SPHERICAL_JOINT_SET_TWIST_LIMIT_TUNING,
     create_compound_shape, destroy_shape, shape_is_valid, get_shape_full_id, get_shape, shape_get_body,
     shape_get_aabb, shape_get_type, shape_get_density, shape_set_density, shape_get_filter, shape_set_filter,
     shape_get_surface_material, shape_set_surface_material, shape_get_material_count, shape_is_sensor,
@@ -213,7 +213,7 @@ const JOINT_SPHERICAL = 6
 const JOINT_WELD = 7
 const JOINT_WHEEL = 8
 const TIME_TO_SLEEP = 0.5
-const JOINT_DATA_BYTES = 664   // JointSim.data: room for the largest kind's data (the spherical joint's 664)
+const JOINT_DATA_BYTES = 704   // JointSim.data: room for the largest kind's data (the spherical joint's 704)
 // The shape kinds (the shape module's, restated).
 const KIND_SPHERE = 0
 const KIND_CAPSULE = 1
@@ -528,16 +528,18 @@ struct BodyState {
 // else is a body's own scale or a rate, single precision as the
 // reference keeps it. What the recycling and the constraint prepares read
 // first comes first: the pose, the centre, the flags and extents, the
-// masses (the first three cache lines).
+// masses (the first three cache lines). The collide pass reads the pose,
+// the flags and the local centre of both bodies of every contact: they
+// are the first 72 bytes, two lines at most (prefetch_sim fetches both).
 struct BodySim {
     transform: Transform           // of the body's origin
-    center: Vec3                   // of mass, in world space
     flags: int
+    local_center: Vec3f
+    center: Vec3                   // of mass, in world space
     min_extent: f32
     max_extent: Vec3f
     inv_mass: f32
     inv_inertia_world: Matrix3f
-    local_center: Vec3f
     rotation0: Quatf               // for the time of impact
     center0: Vec3
     force: Vec3f
@@ -552,28 +554,32 @@ struct BodySim {
 // A shape in the world: its geometry (the shape module's Shape, with
 // its density) and its place among its body's shapes and in the broad phase.
 // Its fat box, the bounds the broad phase holds, is kept apart in the
-// world's fat_aabbs (the collide pass reads only that of a shape); what
-// finalize reads to refit it comes first, the geometry and the rest after.
+// world's fat_aabbs (the collide pass reads only that of a shape). What the
+// collide pass reads of both shapes of every contact it remakes comes
+// first, in the first 96 bytes: the flags, the material it mixes, and the
+// geometry's kind and pointers (collide_range fetches them four contacts
+// ahead). Finalize's refit, once a shape a step where the narrow phase is
+// twice a contact, reads the box and the rest after.
 struct WorldShape {
     id: int                        // NULL_INDEX when the slot is free
     body_id: int
+    flags: int
+    material_count: int
+    material: SurfaceMaterial      // the one material when materials is null
+    geometry: Shape
     aabb: AABB
     aabb_margin: float
     proxy_key: int
     prev_shape_id: int
     next_shape_id: int
     sensor_index: int
-    geometry: Shape
     explosion_scale: float
     local_centroid: Vec3
-    material_count: int
-    material: SurfaceMaterial      // the one material when materials is null
     materials: ptr                 // SurfaceMaterial[] when there are several
     filter: Filter
     user_data: ptr
     user_shape: ptr                // the host's drawable (create_debug_shape's), or null
     generation: int
-    flags: int
     name_id: int                   // the name's id in the world's name cache, or NULL_NAME
 }
 
@@ -623,14 +629,26 @@ struct Contact {
     // A mesh contact's triangles or a convex contact's simplex or axis, in
     // the same bytes (the reference's union): mesh_cache_of and
     // convex_cache_of, by SIM_MESH_CONTACT. CONTACT_CACHE_WORDS words cover
-    // the larger, a TriangleCache (80 bytes).
+    // the larger. A convex contact's axis comes first: its 24 bytes end on
+    // the contact's third cache line, which the collide pass reads for the
+    // friction and the tangent velocity, so the hull pair's cached axis
+    // costs no line of its own (it sat on the fourth before).
     caches: long[10]
     generation: int
 }
 
 const CONTACT_CACHE_WORDS = 10
+
+// A convex contact's warm start: the hull pair's last axis, or the
+// simplex of a hull against a sphere or a capsule (the reference's
+// b3ContactCache union keeps one or the other in the same bytes).
+struct ConvexCache {
+    sat_cache: SATCache
+    simplex_cache: SimplexCache
+}
+
 mesh_cache_of(c: *Contact) -> *MeshContactCache { return (&c.caches) as *MeshContactCache }
-convex_cache_of(c: *Contact) -> *TriangleCache { return (&c.caches) as *TriangleCache }
+convex_cache_of(c: *Contact) -> *ConvexCache { return (&c.caches) as *ConvexCache }
 
 // A contact point the solver works on: anchors relative to the bodies'
 // centres of mass in world space, the separation, the impulses. Single
@@ -1053,6 +1071,13 @@ struct SphericalJoint {
     lock_axis: Vec3
     lock_impulse: float
     lock_mass: float
+    // The twist stops' own stiffness (#231): joint_set_limit_tuning sets
+    // it with the cone's, spherical_joint_set_twist_limit_tuning alone, as
+    // UE5's constraint, PhysX's D6 and Unity's ConfigurableJoint soften a
+    // swing and a twist limit apart. 0 hertz is the constraint's softness.
+    twist_limit_hertz: float
+    twist_limit_damping_ratio: float
+    twist_limit_softness: Softness // made each prepare, as the joint's limit_softness
 }
 
 struct WeldJoint {
@@ -1130,7 +1155,7 @@ struct JointSim {
     limit_softness: Softness       // the limits' rows': their own (#226) or the constraint softness, sized to the joint's load (#213)
     force_threshold: float         // the solve's joint event test
     torque_threshold: float
-    data: long[83]                 // JOINT_DATA_BYTES
+    data: long[88]                 // JOINT_DATA_BYTES
     joint_id: int
     body_id_a: int
     body_id_b: int
@@ -2507,7 +2532,7 @@ struct RecordedGeometry {
 // which older players skip.
 const RECORDING_MAGIC = 0x43525041    // "APRC", little-endian
 const RECORDING_MAJOR_VERSION = 1
-const RECORDING_MINOR_VERSION = 7
+const RECORDING_MINOR_VERSION = 8
 const RECORDING_HEADER_BYTES = 32
 
 const OP_STATE_HASH = 2
@@ -2690,6 +2715,7 @@ const OP_BODY_SET_ORDER_KEY = 181
 const OP_ENABLE_LOADED_CONTACTS = 182
 const OP_ENABLE_LOADED_LIMITS = 183
 const OP_JOINT_SET_LIMIT_TUNING = 184
+const OP_SPHERICAL_JOINT_SET_TWIST_LIMIT_TUNING = 185
 
 // Whether the world of this index is recording: the hooks' test, false
 // for an index that is not a world's.
@@ -4962,8 +4988,8 @@ create_contact(w: *World, shape_a: *WorldShape, shape_b: *WorldShape, child_inde
         mesh_caches = (&c.caches) as MeshContactCache[]
         mesh_caches[0] = mesh_contact.cache_create()
     } else {
-        convex_caches = (&c.caches) as TriangleCache[]
-        convex_caches[0] = TriangleCache { triangle_index: NULL_INDEX, simplex_cache: distance.empty_cache(), sat_cache: manifold.empty_sat_cache() }
+        convex_caches = (&c.caches) as ConvexCache[]
+        convex_caches[0] = ConvexCache { sat_cache: manifold.empty_sat_cache(), simplex_cache: distance.empty_cache() }
     }
     // Into body A's list.
     c.edge_a = ContactEdge { body_id: shape_a.body_id, prev_key: NULL_INDEX, next_key: body_a.head_contact_key }
@@ -6395,11 +6421,37 @@ struct CollideTask {
     indices: ptr                   // int[], the contacts of the pass
 }
 
-// An awake or static body's sim, by a contact's encoding: its transform
-// and centre lead it.
+// An awake or static body's sim, by a contact's encoding: the first 72
+// bytes, its transform, flags and local centre, what the collide pass reads.
 prefetch_sim(w: *World, encoded: int) {
-    if encoded >= 0 { native.prefetch(body_sim_at(solver_set_at(w, AWAKE_SET), encoded) as ptr) }
-    else if encoded < NULL_INDEX { native.prefetch(body_sim_at(solver_set_at(w, STATIC_SET), 0 - encoded - 2) as ptr) }
+    sim = null
+    if encoded >= 0 { sim = body_sim_at(solver_set_at(w, AWAKE_SET), encoded) as ptr }
+    else if encoded < NULL_INDEX { sim = body_sim_at(solver_set_at(w, STATIC_SET), 0 - encoded - 2) as ptr }
+    if sim != null {
+        native.prefetch(sim)
+        native.prefetch(sim + 71)
+    }
+}
+
+// Every cache line of a contact (256 bytes, four lines, its buffer on a
+// line): the pass reads the first three and a hull against a sphere or a
+// capsule the fourth (the reference's b3PrefetchContact).
+prefetch_contact(c: *Contact) {
+    p = c as ptr
+    native.prefetch(p)
+    native.prefetch(p + 64)
+    native.prefetch(p + 128)
+    native.prefetch(p + 192)
+}
+
+// The first 96 bytes of a shape, what the narrow phase reads (flags,
+// material, the geometry's kind and pointers): three lines at most, the
+// shapes' 400-byte slots not being on lines of their own.
+prefetch_shape(s: *WorldShape) {
+    p = s as ptr
+    native.prefetch(p)
+    native.prefetch(p + 64)
+    native.prefetch(p + 95)
 }
 
 collide_range(start: int, end: int, worker: int, context: ptr) {
@@ -6414,12 +6466,17 @@ collide_range(start: int, end: int, worker: int, context: ptr) {
         // Further in, what a contact leads to: its bodies' sims four ahead,
         // the contact fetched by then (the fat boxes are dense, and the
         // shapes are read only when the manifolds are made again).
-        if i + 8 < end { native.prefetch(contact_at(w, indices[i + 8]) as ptr) }
+        if i + 8 < end { prefetch_contact(contact_at(w, indices[i + 8])) }
         if i + 4 < end {
             ahead = contact_at(w, indices[i + 4])
             native.prefetch(ahead.manifolds)
             prefetch_sim(w, ahead.encoded_body_sim_a)
             prefetch_sim(w, ahead.encoded_body_sim_b)
+            prefetch_shape(world_shape_at(w, ahead.shape_id_a))
+            prefetch_shape(world_shape_at(w, ahead.shape_id_b))
+            boxes = w.fat_aabbs.data
+            native.prefetch(boxes + ahead.shape_id_a * sizeof(AABBf))
+            native.prefetch(boxes + ahead.shape_id_b * sizeof(AABBf))
         }
         collide_contact(w, indices[i])
         i = i + 1
@@ -7388,6 +7445,8 @@ create_spherical_joint_internal(world_id: WorldId, def: *SphericalJointDef) -> J
     s.enable_cone_limit = def.enable_cone_limit
     s.enable_twist_limit = def.enable_twist_limit
     s.enable_motor = def.enable_motor
+    s.twist_limit_hertz = def.base.limit_hertz
+    s.twist_limit_damping_ratio = def.base.limit_damping_ratio
     w.locked = false
     return make_joint_id(w, pair.joint)
 }
@@ -7769,6 +7828,12 @@ joint_set_limit_tuning(id: JointId, hertz: float, damping_ratio: float) {
     sim = get_joint_sim(w, get_joint_full_id(w, id))
     sim.limit_hertz = hertz
     sim.limit_damping_ratio = damping_ratio
+    // A ball joint's twist stops with its cone.
+    if sim.kind == JOINT_SPHERICAL {
+        s = spherical_joint_of(sim)
+        s.twist_limit_hertz = hertz
+        s.twist_limit_damping_ratio = damping_ratio
+    }
 }
 joint_get_limit_tuning(id: JointId) -> (float, float) {
     w = world_at(id.world0)

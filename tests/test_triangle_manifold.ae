@@ -135,6 +135,32 @@ test_triangle_edge() {
         }
         i = i + 1
     }
+    // A cached axis naming features the triangle or hull lacks (a
+    // snapshot's triangle cache) is no cache: the contact is the one an
+    // empty cache gives, and nothing past the hull's arrays is read.
+    triangle_point = math.mul_add(hull_point, 0.0 - 0.01, axis)
+    v1 = math.mul_add(triangle_point, 0.0 - 1.0, tri_edge)
+    v2 = math.mul_add(triangle_point, 1.0, tri_edge)
+    v3 = math.mul_add(v1, 1.5, math.cross(tri_normal, tri_edge))
+    clean = manifold.local_manifold(points)
+    clean_cache = manifold.empty_sat_cache()
+    triangle_manifold.collide_triangle_and_hull(&clean, 8, v1, v2, v3, 0, h, &clean_cache, true)
+    kinds = [ manifold.AXIS_FACE_B, manifold.AXIS_EDGE_PAIR, manifold.AXIS_EDGE_PAIR, manifold.AXIS_EDGE_PAIR ]
+    bad_a = [ 0, 0, 7, 0 ]
+    bad_b = [ 1000, 1000, 0, 3 ]
+    k = 0
+    while k < 4 {
+        stale = manifold.local_manifold(points)
+        stale_cache = manifold.empty_sat_cache()
+        stale_cache.kind = kinds[k]
+        stale_cache.index_a = bad_a[k]
+        stale_cache.index_b = bad_b[k]
+        triangle_manifold.collide_triangle_and_hull(&stale, 8, v1, v2, v3, 0, h, &stale_cache, true)
+        same = stale.point_count == clean.point_count
+        if same && clean.point_count > 0 { same = manifold.point(&stale, 0).separation == manifold.point(&clean, 0).separation }
+        ensure("triangle stale cache ${k}: the contact an empty cache gives (${stale.point_count} points)", same)
+        k = k + 1
+    }
     // The tipped plane buries a hull corner: only the edge axis can cull.
     culled = [ 0.03, 0.05 ]
     i = 0

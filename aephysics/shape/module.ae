@@ -48,17 +48,20 @@ const SHAPE_HEIGHT_FIELD = 4
 const SHAPE_COMPOUND = 5
 const SHAPE_KIND_COUNT = 6
 
-// A shape of one kind: the fields of the other kinds are unused.
+// A shape of one kind: the fields of the other kinds are unused (the
+// reference's union). The kind and the geometry pointers come first, in
+// the first 32 bytes, so the narrow phase reading a hull's kind and data
+// touches one cache line of the shape; the inline sphere and capsule after.
 struct Shape {
     kind: int
-    density: float
     material_count: int
-    sphere: Sphere
-    capsule: Capsule
     hull: *HullData
-    mesh: Mesh
     height_field: *HeightFieldData
     compound: *CompoundData
+    density: float
+    mesh: Mesh
+    sphere: Sphere
+    capsule: Capsule
 }
 
 // Who collides with whom: a shape is in the categories of its bits and

@@ -751,6 +751,99 @@ test_overlap_planes() {
     hull.destroy_hull(box)
 }
 
+// The rows the separating axis test reads in place of the half-edges and
+// planes agree with them: each full edge's packed word holds its two
+// half-edges' faces and origins, the offset row is the planes' offsets
+// narrowed, and both rows of a face count, and the cosine row, are zero
+// past their counts. A hull whose word disagrees is refused as bytes.
+rows_agree(name: string, h: *HullData) {
+    edges = hull.edges(h)
+    planes = hull.planes(h)
+    words = hull.edge_words(h)
+    offsets = hull.soa_plane_offsets(h) as f32[]
+    cosines = hull.edge_cosines(h)
+    full_edges = h.edge_count / 2
+    wrong = 0
+    i = 0
+    while i < full_edges {
+        e0 = edges[2 * i]
+        e1 = edges[2 * i + 1]
+        w = words[i]
+        if hull.edge_word_face0(w) != e0.face || hull.edge_word_face1(w) != e1.face { wrong = wrong + 1 }
+        if hull.edge_word_origin0(w) != e0.origin || hull.edge_word_origin1(w) != e1.origin { wrong = wrong + 1 }
+        i = i + 1
+    }
+    ensure("${name}: every edge word is its half-edges' faces and origins (${wrong} wrong)", wrong == 0)
+    i = 0
+    wrong = 0
+    while i < hull.soa_stride(h.face_count) {
+        f32 expected = 0.0
+        if i < h.face_count { expected = planes[i].offset as f32 }
+        if offsets[i] != expected { wrong = wrong + 1 }
+        i = i + 1
+    }
+    ensure("${name}: the offset row is the planes' offsets, zero past them (${wrong} wrong)", wrong == 0)
+    i = full_edges
+    wrong = 0
+    while i < hull.soa_stride(full_edges) {
+        if cosines[i] != (0.0 as f32) { wrong = wrong + 1 }
+        i = i + 1
+    }
+    ensure("${name}: the cosine row is zero past the edges", wrong == 0)
+    half_edges = hull.half_edge_words(h)
+    i = 0
+    wrong = 0
+    while i < h.edge_count {
+        w = half_edges[i]
+        e = edges[i]
+        if hull.half_edge_next(w) != e.next || hull.half_edge_twin(w) != e.twin || hull.half_edge_origin(w) != e.origin || hull.half_edge_face(w) != e.face { wrong = wrong + 1 }
+        i = i + 1
+    }
+    ensure("${name}: every half-edge word is its half-edge (${wrong} wrong)", wrong == 0)
+    saved_half = half_edges[0]
+    half_edges[0] = saved_half ^ 1
+    ensure("${name}: a half-edge word with its next changed is refused as bytes", hull.bytes_valid(h, h.byte_count) == false)
+    half_edges[0] = saved_half
+    // Every array where allocate_hull puts it: one moved onto another's
+    // bytes is refused.
+    saved_offset = h.soa_plane_offset
+    h.soa_plane_offset = h.edge_offset
+    ensure("${name}: a row moved onto the half-edges is refused as bytes", hull.bytes_valid(h, h.byte_count) == false)
+    h.soa_plane_offset = saved_offset
+    ensure("${name}: and accepted once put back", hull.bytes_valid(h, h.byte_count))
+    ensure("${name}: valid as bytes", hull.bytes_valid(h, h.byte_count))
+    saved = words[full_edges - 1]
+    words[full_edges - 1] = hull.edge_word(hull.edge_word_face1(saved), hull.edge_word_face0(saved), hull.edge_word_origin0(saved), hull.edge_word_origin1(saved))
+    ensure("${name}: a word with its faces swapped is refused as bytes", hull.bytes_valid(h, h.byte_count) == false)
+    words[full_edges - 1] = saved
+    ensure("${name}: and accepted once restored", hull.bytes_valid(h, h.byte_count))
+}
+
+test_rows() {
+    block = cube_corners()
+    cube = hull.create_hull(block as Vec3[], 8, 8)
+    ensure("rows: cube built", cube != null)
+    if cube != null {
+        rows_agree("rows: cube", cube)
+        moved = hull.clone_and_transform_hull(cube, Transform { p: math.vec3(1.0, 2.0, 3.0), q: math.make_quat_from_axis_angle(math.normalize(math.vec3(1.0, 2.0, 0.5)), 0.7) }, math.vec3(0.0 - 2.0, 1.0, 3.0))
+        ensure("rows: transformed cube built", moved != null)
+        if moved != null {
+            rows_agree("rows: transformed cube", moved)
+            hull.destroy_hull(moved)
+        }
+        hull.destroy_hull(cube)
+    }
+    free(block)
+    // Past 128 half-edges, and a face count that is not a multiple of eight.
+    cylinder = hull.create_cylinder(2.0, 1.0, 0.0, 29)
+    ensure("rows: cylinder built", cylinder != null)
+    if cylinder != null {
+        ensure("rows: cylinder past 128 half-edges, faces not a multiple of eight (${cylinder.edge_count}, ${cylinder.face_count})", cylinder.edge_count > 128 && (cylinder.face_count & 7) != 0)
+        rows_agree("rows: cylinder", cylinder)
+        hull.destroy_hull(cylinder)
+    }
+}
+
 main() {
     before = basics.alloc_count()
     test_cube()
@@ -761,6 +854,7 @@ main() {
     test_clone()
     test_cylinder()
     test_overlap_planes()
+    test_rows()
     test_sphere_reduction()
     test_sphere_stress()
     test_merge_churn_stress()

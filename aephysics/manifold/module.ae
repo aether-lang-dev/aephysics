@@ -230,6 +230,17 @@ clip_points() -> ptr { return native.scratch(g_clip_points, MAX_CLIP_POINTS * si
 // The edge contact's point, built apart before it may replace a face contact's.
 var g_edge_point: ptr = null
 edge_point() -> ptr { return native.scratch(g_edge_point, 2 * sizeof(LocalManifoldPoint)) }
+// add_near_vertices' wide prefilter: -1 for each of B's vertices that may
+// lie within reach of the reference plane, 0 for one that cannot (ints, a
+// hull's vertices and a lane's tail).
+var g_near_mask: ptr = null
+const NEAR_MASK_COUNT = hull.MAX_HULL_VERTICES + 8
+near_mask() -> ptr { return native.scratch(g_near_mask, NEAR_MASK_COUNT * 4) }
+// The reference face's side planes, as the face contact clips by them
+// (normal and offset, four floats each, a face's edges at most).
+var g_side_planes: ptr = null
+const SIDE_PLANE_BYTES = 4 * 4 * hull.MAX_HULL_EDGES
+side_planes() -> ptr { return native.scratch(g_side_planes, SIDE_PLANE_BYTES) }
 
 // Each worker's speculative distance: how far apart two shapes keep
 // points, SPECULATIVE_DISTANCE but while the collide pass reaches out for
@@ -264,6 +275,8 @@ scratch_ready() {
         g_clip2 = basics.alloc(native.MAX_WORKERS * (CLIP_CAPACITY * sizeof(ClipVertex)))
         g_clip_points = basics.alloc(native.MAX_WORKERS * (MAX_CLIP_POINTS * sizeof(LocalManifoldPoint)))
         g_edge_point = basics.alloc(native.MAX_WORKERS * (2 * sizeof(LocalManifoldPoint)))
+        g_near_mask = basics.alloc(native.MAX_WORKERS * (NEAR_MASK_COUNT * 4))
+        g_side_planes = basics.alloc(native.MAX_WORKERS * SIDE_PLANE_BYTES)
     }
 }
 
@@ -915,24 +928,116 @@ get_best_axis(query: *AxisQuery) -> SeparatingAxis {
     return query.face_b
 }
 
-// The incident face of the hull, in frame A, as a clip polygon with each
-// vertex tagged by its edges; separations from the reference plane.
-build_polygon(out: ClipVertex[], transform: Transform, h: *HullData, inc_face: int, ref_plane: Plane) -> int {
+
+
+// --- the face contact, in single precision ------------------------------------------------
+
+// A clipped polygon's vertex in A's frame, single precision as the
+// reference's b3ClipVertex: the face contact is a hull pair's own
+// coordinates (B taken into A's frame), never a world position.
+struct ClipVertexF {
+    position: Vec3f
+    separation: f32
+    pair: FeaturePair
+}
+
+// A hull's vertex and face normal from its single-precision rows.
+row_point(rows: f32[], stride: int, i: int) -> Vec3f { return math.vec3f(rows[i], rows[stride + i], rows[2 * stride + i]) }
+
+// The face of the hull most anti-parallel to the reference normal, found
+// from the closest vertex: the edge out of it most perpendicular to the
+// normal, then the more anti-parallel of that edge's two faces. Extended
+// from the plain search so a wedge gets the right incident face. Walked by
+// the four-byte half-edges, from the single-precision rows.
+find_incident_face_f(h: *HullData, ref_normal: Vec3f, vertex_index: int) -> int {
+    vertices = hull.vertices(h)
+    words = hull.half_edge_words(h)
+    rows = hull.soa_vertices(h) as f32[]
+    stride = hull.soa_stride(h.vertex_count)
+    normals = hull.soa_normals(h) as f32[]
+    face_stride = hull.soa_stride(h.face_count)
+    min_edge = NULL_INDEX
+    f32 min_projection = math.infinity_f32()
+    start = vertices[vertex_index]
+    edge_origin = row_point(rows, stride, hull.half_edge_origin(words[start]))
+    edge_index = start
+    while true {
+        twin = words[hull.half_edge_twin(words[edge_index])]
+        axis = math.normalizef(math.subf(row_point(rows, stride, hull.half_edge_origin(twin)), edge_origin))
+        projection = math.abs_f32(math.dotf(axis, ref_normal))
+        if projection < min_projection {
+            min_edge = edge_index
+            min_projection = projection
+        }
+        edge_index = hull.half_edge_next(twin)
+        if edge_index == start { break }
+    }
+    w = words[min_edge]
+    face1 = hull.half_edge_face(w)
+    face2 = hull.half_edge_face(words[hull.half_edge_twin(w)])
+    if math.dotf(row_point(normals, face_stride, face1), ref_normal) < math.dotf(row_point(normals, face_stride, face2), ref_normal) { return face1 }
+    return face2
+}
+
+// B's incident face as a polygon in A's frame (r, p), each vertex's
+// separation from the reference plane (normal, offset) with it.
+build_polygon_f(out: ClipVertexF[], r: Matrix3f, p: Vec3f, h: *HullData, inc_face: int, ref_normal: Vec3f, ref_offset: f32) -> int {
     faces = hull.faces(h)
-    edges = hull.edges(h)
-    points = hull.points(h)
+    words = hull.half_edge_words(h)
+    rows = hull.soa_vertices(h) as f32[]
+    stride = hull.soa_stride(h.vertex_count)
     start = faces[inc_face]
     edge_index = start
     out_count = 0
-    m = math.make_matrix_from_quat(transform.q)
     while true {
-        next_index = edges[edge_index].next
-        position = math.add(math.mul_mv(m, points[edges[next_index].origin]), transform.p)
-        out[out_count] = ClipVertex { position: position, separation: math.plane_separation(ref_plane, position),
-                                      pair: make_feature_pair(FEATURE_SHAPE_B, edge_index, FEATURE_SHAPE_B, next_index) }
+        next_index = hull.half_edge_next(words[edge_index])
+        position = math.addf(math.mul_mvf(r, row_point(rows, stride, hull.half_edge_origin(words[next_index]))), p)
+        out[out_count] = ClipVertexF { position: position, separation: math.dotf(ref_normal, position) - ref_offset,
+                                       pair: make_feature_pair(FEATURE_SHAPE_B, edge_index, FEATURE_SHAPE_B, next_index) }
         out_count = out_count + 1
         edge_index = next_index
         if edge_index == start || out_count >= MAX_CLIP_POINTS { break }
+    }
+    return out_count
+}
+
+// The polygon against the side plane (normal, offset) of A's edge `edge`:
+// the vertices behind it, and where an edge crosses it, with the crossing
+// edge's feature (Sutherland-Hodgman, b3ClipPolygon).
+clip_polygon_f(out: ClipVertexF[], polygon: ClipVertexF[], count: int, clip_normal: Vec3f, clip_offset: f32, edge: int, ref_normal: Vec3f, ref_offset: f32) -> int {
+    f32 zero = 0.0
+    vertex1 = polygon[count - 1]
+    distance1 = math.dotf(clip_normal, vertex1.position) - clip_offset
+    out_count = 0
+    i = 0
+    while i < count {
+        vertex2 = polygon[i]
+        distance2 = math.dotf(clip_normal, vertex2.position) - clip_offset
+        if distance1 <= zero && distance2 <= zero {
+            out[out_count] = vertex2
+            out_count = out_count + 1
+        } else if distance1 <= zero && distance2 > zero {
+            fraction = distance1 / (distance1 - distance2)
+            position = math.mul_addf(vertex1.position, fraction, math.subf(vertex2.position, vertex1.position))
+            v = ClipVertexF { position: position, separation: math.dotf(ref_normal, position) - ref_offset, pair: vertex2.pair }
+            v.pair.owner2 = FEATURE_SHAPE_A
+            v.pair.index2 = edge
+            out[out_count] = v
+            out_count = out_count + 1
+        } else if distance2 <= zero && distance1 > zero {
+            fraction = distance1 / (distance1 - distance2)
+            position = math.mul_addf(vertex1.position, fraction, math.subf(vertex2.position, vertex1.position))
+            v = ClipVertexF { position: position, separation: math.dotf(ref_normal, position) - ref_offset, pair: vertex1.pair }
+            v.pair.owner1 = FEATURE_SHAPE_A
+            v.pair.index1 = edge
+            out[out_count] = v
+            out_count = out_count + 1
+            out[out_count] = vertex2
+            out_count = out_count + 1
+        }
+        vertex1 = vertex2
+        distance1 = distance2
+        i = i + 1
     }
     return out_count
 }
@@ -946,63 +1051,74 @@ build_polygon(out: ClipVertex[], transform: Transform, h: *HullData, inc_face: i
 // contact lifts it back out, and the hull rocks for good (#134). A box
 // resting flat has no such vertex (its others are a body's height up), so
 // the reference's stacks are untouched.
-add_near_vertices(out: ClipVertex[], count: int, hull_a: *HullData, ref_face: int, ref_plane: Plane,
-                  hull_b: *HullData, inc_face: int, transform_b_to_a: Transform) -> int {
-    reach = speculative_distance()
-    faces_a = hull.faces(hull_a)
-    edges_a = hull.edges(hull_a)
-    points_a = hull.points(hull_a)
+//
+// Eight of B's vertices a pass are ruled out by their separation measured
+// in B's own frame (one dot product against the reference plane taken into
+// B), with a margin; a vertex kept is taken into A's frame and measured as
+// the polygon's are, which decides. The side planes are the clip's, `side_count` of them at `sides`
+// (normal and offset, four floats each).
+add_near_vertices_f(out: ClipVertexF[], count: int, hull_b: *HullData, inc_face: int, ref_normal: Vec3f, ref_offset: f32,
+                    r: Matrix3f, p: Vec3f, sides: f32[], side_count: int) -> int {
+    f32 reach = speculative_distance() as f32
+    f32 zero = 0.0
     faces_b = hull.faces(hull_b)
-    edges_b = hull.edges(hull_b)
-    points_b = hull.points(hull_b)
-    m = math.make_matrix_from_quat(transform_b_to_a.q)
-    // A vertex's separation from the reference plane, measured in B's own
-    // frame: dot(R^T n, v) + dot(n, p) - offset, one dot product where the
-    // vertex taken into A's frame and measured costs a matrix product and a
-    // dot (that was three quarters of this pass). It only rules vertices
-    // out: the margin is a millionth of the sizes involved, past any
-    // difference in rounding between the two forms by nine orders, and a
-    // vertex it keeps is taken into A's frame and measured as before, so the
-    // contact is the same to the bit.
-    normal_in_b = math.inv_rotate_vector(transform_b_to_a.q, ref_plane.normal)
-    offset_in_b = math.dot(ref_plane.normal, transform_b_to_a.p) - ref_plane.offset
-    size = 1.0 + math.abs_float(offset_in_b) + math.length(hull_b.aabb.lower) + math.length(hull_b.aabb.upper)
-    cutoff = reach + 0.000001 * size
+    words_b = hull.half_edge_words(hull_b)
+    rows = hull.soa_vertices(hull_b)
+    stride = hull.soa_stride(hull_b.vertex_count)
+    point_rows = rows as f32[]
+    normal_in_b = math.mul_mvf(math.transposef(r), ref_normal)
+    offset_in_b = math.dotf(ref_normal, p) - ref_offset
+    // The filter measures in B's frame and the test below in A's, each in
+    // single precision: its margin, a hundred-thousandth of the sizes
+    // involved (the offset and B's box by their components' sums), is ten
+    // times the worst difference of the two roundings, so it only drops a
+    // vertex the test would drop.
+    lower = hull_b.aabb.lower
+    upper = hull_b.aabb.upper
+    size = 1.0 + math.abs_float(offset_in_b as float) + math.abs_float(lower.x) + math.abs_float(lower.y) + math.abs_float(lower.z) + math.abs_float(upper.x) + math.abs_float(upper.y) + math.abs_float(upper.z)
+    nx = lanes.splat8(normal_in_b.x)
+    ny = lanes.splat8(normal_in_b.y)
+    nz = lanes.splat8(normal_in_b.z)
+    off = lanes.splat8(offset_in_b)
+    cutoff = lanes.splat8(((reach as float) + 0.00001 * size) as f32)
+    mask_block = near_mask()
+    i = 0
+    while i < hull_b.vertex_count {
+        d = nx * lanes.load8(rows, i as long) + ny * lanes.load8(rows, (stride + i) as long) + nz * lanes.load8(rows, (2 * stride + i) as long) + off
+        lanes.store8(mask_block, i as long, lanes.from_bits8(lanes.lt8(d, cutoff)))
+        i = i + 8
+    }
+    near = mask_block as int[]
     out_count = count
     v = 0
     while v < hull_b.vertex_count && out_count < MAX_CLIP_POINTS {
-        if math.dot(normal_in_b, points_b[v]) + offset_in_b >= cutoff {
+        if near[v] == 0 {
             v = v + 1
             continue
         }
-        position = math.add(math.mul_mv(m, points_b[v]), transform_b_to_a.p)
-        separation = math.plane_separation(ref_plane, position)
+        position = math.addf(math.mul_mvf(r, row_point(point_rows, stride, v)), p)
+        separation = math.dotf(ref_normal, position) - ref_offset
         if separation < reach {
             // Not one of the incident face's own (those were clipped already).
             on_face = false
             start_b = faces_b[inc_face]
             edge_b = start_b
             while true {
-                if edges_b[edge_b].origin == v { on_face = true }
-                edge_b = edges_b[edge_b].next
+                w = words_b[edge_b]
+                if hull.half_edge_origin(w) == v { on_face = true }
+                edge_b = hull.half_edge_next(w)
                 if edge_b == start_b || on_face { break }
             }
             // Over the reference face: behind every side plane.
             inside = on_face == false
-            start_a = faces_a[ref_face]
-            edge_a = start_a
-            while inside {
-                next_a = edges_a[edge_a].next
-                vertex1 = points_a[edges_a[edge_a].origin]
-                vertex2 = points_a[edges_a[next_a].origin]
-                binormal = math.cross(math.normalize(math.sub(vertex2, vertex1)), ref_plane.normal)
-                if math.plane_separation(math.make_plane_from_normal_and_point(binormal, vertex1), position) > 0.0 { inside = false }
-                edge_a = next_a
-                if edge_a == start_a { break }
+            k = 0
+            while inside && k < side_count {
+                if sides[4 * k] * position.x + sides[4 * k + 1] * position.y + sides[4 * k + 2] * position.z - sides[4 * k + 3] > zero { inside = false }
+                k = k + 1
             }
             if inside {
-                out[out_count] = ClipVertex { position: position, separation: separation,
-                                              pair: make_feature_pair(FEATURE_SHAPE_B, NEAR_VERTEX, FEATURE_SHAPE_B, v) }
+                out[out_count] = ClipVertexF { position: position, separation: separation,
+                                               pair: make_feature_pair(FEATURE_SHAPE_B, NEAR_VERTEX, FEATURE_SHAPE_B, v) }
                 out_count = out_count + 1
             }
         }
@@ -1013,35 +1129,48 @@ add_near_vertices(out: ClipVertex[], count: int, hull_a: *HullData, ref_face: in
 
 // The face contact with A's face as the reference: B's incident face
 // clipped to A's side planes, the points halfway between the surfaces,
-// reduced to four.
+// reduced to four. Single precision throughout, from the hulls' rows and
+// four-byte half-edges, as the reference's b3BuildFaceAContact: B's pose
+// in A's frame is a hull pair's own scale, so nothing here is a world
+// position; the points are widened as they are kept.
 build_face_a_contact(m: *LocalManifold, capacity: int, hull_a: *HullData, hull_b: *HullData, transform_b_to_a: Transform,
                      query: SeparatingAxis, cache: *SATCache) -> bool {
     reach = speculative_distance()
     faces_a = hull.faces(hull_a)
-    edges_a = hull.edges(hull_a)
-    planes_a = hull.planes(hull_a)
-    points_a = hull.points(hull_a)
+    words_a = hull.half_edge_words(hull_a)
+    rows_a = hull.soa_vertices(hull_a) as f32[]
+    stride_a = hull.soa_stride(hull_a.vertex_count)
+    normals_a = hull.soa_normals(hull_a) as f32[]
+    offsets_a = hull.soa_plane_offsets(hull_a) as f32[]
     ref_face = query.index_a
-    ref_plane = planes_a[ref_face]
-
-    ref_normal_in_b = math.inv_rotate_vector(transform_b_to_a.q, ref_plane.normal)
-    inc_face = find_incident_face(hull_b, ref_normal_in_b, query.index_b)
+    ref_normal = row_point(normals_a, hull.soa_stride(hull_a.face_count), ref_face)
+    ref_offset = offsets_a[ref_face]
+    r = math.narrow_mat3(math.make_matrix_from_quat(transform_b_to_a.q))
+    p = math.narrow3(transform_b_to_a.p)
+    inc_face = find_incident_face_f(hull_b, math.mul_mvf(math.transposef(r), ref_normal), query.index_b)
 
     scratch_ready()
-    input = clip1() as ClipVertex[]
-    output = clip2() as ClipVertex[]
-    point_count = build_polygon(input, transform_b_to_a, hull_b, inc_face, ref_plane)
+    input = clip1() as ClipVertexF[]
+    output = clip2() as ClipVertexF[]
+    point_count = build_polygon_f(input, r, p, hull_b, inc_face, ref_normal, ref_offset)
 
+    sides = side_planes() as f32[]
+    side_count = 0
     start = faces_a[ref_face]
     edge_index = start
     while true {
-        next_index = edges_a[edge_index].next
-        vertex1 = points_a[edges_a[edge_index].origin]
-        vertex2 = points_a[edges_a[next_index].origin]
-        tangent = math.normalize(math.sub(vertex2, vertex1))
-        binormal = math.cross(tangent, ref_plane.normal)
-        clip_plane = math.make_plane_from_normal_and_point(binormal, vertex1)
-        point_count = clip_polygon(output, input, point_count, clip_plane, edge_index, ref_plane)
+        w = words_a[edge_index]
+        next_index = hull.half_edge_next(w)
+        vertex1 = row_point(rows_a, stride_a, hull.half_edge_origin(w))
+        vertex2 = row_point(rows_a, stride_a, hull.half_edge_origin(words_a[next_index]))
+        binormal = math.crossf(math.normalizef(math.subf(vertex2, vertex1)), ref_normal)
+        side_offset = math.dotf(binormal, vertex1)
+        sides[4 * side_count] = binormal.x
+        sides[4 * side_count + 1] = binormal.y
+        sides[4 * side_count + 2] = binormal.z
+        sides[4 * side_count + 3] = side_offset
+        side_count = side_count + 1
+        point_count = clip_polygon_f(output, input, point_count, binormal, side_offset, edge_index, ref_normal, ref_offset)
         swap = input
         input = output
         output = swap
@@ -1053,19 +1182,20 @@ build_face_a_contact(m: *LocalManifold, capacity: int, hull_a: *HullData, hull_b
         if edge_index == start { break }
     }
     point_count = math.min_int(point_count, MAX_CLIP_POINTS)
-    point_count = add_near_vertices(input, point_count, hull_a, ref_face, ref_plane, hull_b, inc_face, transform_b_to_a)
+    point_count = add_near_vertices_f(input, point_count, hull_b, inc_face, ref_normal, ref_offset, r, p, sides, side_count)
 
     points = clip_points() as LocalManifoldPoint[]
     min_separation = math.MAX_FLOAT
-    m.normal = ref_plane.normal
+    m.normal = math.widen3(ref_normal)
+    f32 half = 0.5
     i = 0
     while i < point_count {
         cp = input[i]
         // Halfway between the surfaces, so the points stay put when the
         // reference face swaps from A to B.
-        points[i] = LocalManifoldPoint { point: math.mul_sub(cp.position, 0.5 * cp.separation, ref_plane.normal),
-                                         separation: cp.separation, pair: cp.pair, triangle_index: NULL_INDEX }
-        min_separation = math.min_float(min_separation, cp.separation)
+        points[i] = LocalManifoldPoint { point: math.widen3(math.mul_subf(cp.position, half * cp.separation, ref_normal)),
+                                         separation: cp.separation as float, pair: cp.pair, triangle_index: NULL_INDEX }
+        min_separation = math.min_float(min_separation, cp.separation as float)
         i = i + 1
     }
     if min_separation >= reach {
@@ -1138,6 +1268,18 @@ build_edge_contact(m: *LocalManifold, hull_a: *HullData, hull_b: *HullData, tran
     return true
 }
 
+// Whether a cached axis's features are these hulls': a face of A, a face
+// of B, or an even half-edge of each (the manual kinds name none).
+sat_cache_fits(cache: *SATCache, hull_a: *HullData, hull_b: *HullData) -> bool {
+    if cache.kind == AXIS_FACE_A { return cache.index_a >= 0 && cache.index_a < hull_a.face_count }
+    if cache.kind == AXIS_FACE_B { return cache.index_b >= 0 && cache.index_b < hull_b.face_count }
+    if cache.kind == AXIS_EDGE_PAIR {
+        if cache.index_a < 0 || cache.index_a + 1 >= hull_a.edge_count || (cache.index_a & 1) != 0 { return false }
+        return cache.index_b >= 0 && cache.index_b + 1 < hull_b.edge_count && (cache.index_b & 1) == 0
+    }
+    return true
+}
+
 // Two hulls, B in A's frame. The cache's last axis is tried first: if it
 // still separates, or still builds the same contact, that is the answer.
 // Otherwise the full axis test; a face contact by preference (a one-point
@@ -1154,6 +1296,9 @@ collide_hulls(m: *LocalManifold, capacity: int, hull_a: *HullData, hull_b: *Hull
     planes_b = hull.planes(hull_b)
     points_b = hull.points(hull_b)
     cache.hit = 0
+    // A cached axis names these hulls' features (a snapshot's or a shape's
+    // whose hull changed may not): one out of range is no cache.
+    if sat_cache_fits(cache, hull_a, hull_b) == false { cache.kind = AXIS_INVALID }
 
     if cache.kind == AXIS_FACE_A {
         plane = planes_a[cache.index_a]

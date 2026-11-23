@@ -320,6 +320,16 @@ sizing starts from it. This is the soft limit of other engines (PhysX
 `PxJointLimitParameters`, Unity `SoftJointLimitSpring`). A passive
 moment that rises before the stop belongs in a joint spring.
 
+A ball joint's twist stops can be tuned apart from its cone:
+`spherical_joint_set_twist_limit_tuning(joint, hertz, damping_ratio)`.
+`joint_set_limit_tuning` sets both, and a new joint's twist follows its
+definition's `limit_hertz`. Each row's stiffness is its own effective
+inertia times (2 pi hertz) squared, so one hertz is a different torque per
+radian about the twist and across the cone. A hip with a soft end of
+flexion and a rigid twist takes 0 hertz for the twist. UE5's constraint,
+PhysX's D6 and Unity's ConfigurableJoint soften swing and twist limits
+apart in the same way.
+
 ## Events
 
 Events are collected during a step and read after it, from `physics_world`.
@@ -491,7 +501,9 @@ human.destroy_human(&figure)
   Meeting the rest turns a frame but not its cone: the spine and the neck
   keep the reference's ranges, the trunk flexing 90 degrees over its two
   spine joints and extending 50 (a person's 80 and 25), the neck 40 and
-  20.
+  20. Each cone sits off the rig's own rest as the reference's sits off
+  its rest, 10 degrees forward, so a fitted rig whose spine curves
+  differently keeps the same ranges about its own posture.
   `human_tight_limits(shape)` puts Box3D's tighter ranges, and its own
   frames, on a figure's shape before `create_human_shaped`.
 - **Feet.** With `figure.ankles = true` before creation, the feet are bones
@@ -757,7 +769,8 @@ it changes results, so Box3D's own scenes give Box3D's checksums.
 - **A joint's limits can be softer than its point** (`joint_set_limit_tuning`,
   `limit_hertz`). Box3D's limit rows read the joint's one constraint
   softness, so softening a stop softened the point and locks too. Off by
-  default.
+  default. A ball joint's twist stops take a tuning of their own
+  (`spherical_joint_set_twist_limit_tuning`).
 - **A joint with no dynamic body holds no impulse.** When `body_set_type`
   leaves a joint between kinematic or static bodies, it is not solved.
   Box3D keeps the impulse it last gathered. So its force kept reading that

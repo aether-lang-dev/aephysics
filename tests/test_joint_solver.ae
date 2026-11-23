@@ -342,6 +342,76 @@ test_limit_tuning() {
     dynamics.destroy_world(s.world_id)
 }
 
+// A ball joint's twist stops tuned apart from its cone (#231). A cube
+// hangs off the joint's side, so gravity turns it about frame A's z, the
+// twist axis, against a twist stop of 0.2; a torque about x swings it
+// against a cone of 0.2. Both stops given 2 Hz give past their limits;
+// the twist given back the constraint's softness (0 hertz) holds at its
+// stop while the cone still gives, as a hip with a soft end of flexion and
+// a rigid twist would.
+struct SwingTwist {
+    twist: float
+    swing: float
+}
+
+twist_run(limit_hertz: float, twist_hertz: float, twist_own: bool) -> SwingTwist {
+    s = stepped(10.0, math.vec3(1.0, 4.0, 0.0), math.quat_identity())
+    sdef = dynamics.default_spherical_joint_def()
+    sdef.base.body_id_a = s.ground_id
+    sdef.base.body_id_b = s.cube_id
+    sdef.base.local_frame_a.p = math.vec3(0.0, 4.0, 0.0)
+    sdef.base.local_frame_b.p = math.vec3(0.0 - 1.0, 0.0, 0.0)
+    sdef.base.limit_hertz = limit_hertz
+    sdef.base.limit_damping_ratio = 1.0
+    sdef.enable_twist_limit = true
+    sdef.lower_twist_angle = 0.0 - 0.2
+    sdef.upper_twist_angle = 0.2
+    sdef.enable_cone_limit = true
+    sdef.cone_angle = 0.2
+    id = dynamics.create_spherical_joint(s.world_id, &sdef)
+    if twist_own { joint_solver.spherical_joint_set_twist_limit_tuning(id, twist_hertz, 1.0) }
+    step = 0
+    while step < 240 {
+        dynamics.body_apply_torque(s.cube_id, math.vec3(8.0, 0.0, 0.0), true)
+        physics_world.step(s.world_id, 1.0 / 60.0, 4)
+        step = step + 1
+    }
+    out = SwingTwist { twist: joint_solver.spherical_joint_get_twist_angle(id), swing: joint_solver.spherical_joint_get_cone_angle(id) }
+    dynamics.destroy_world(s.world_id)
+    return out
+}
+
+test_twist_limit_tuning() {
+    hard = twist_run(0.0, 0.0, false)
+    soft = twist_run(2.0, 0.0, false)
+    split = twist_run(2.0, 0.0, true)
+    println("joint_solver: twist tuning: rigid twist ${hard.twist} swing ${hard.swing}; both 2 Hz ${soft.twist} ${soft.swing}; cone 2 Hz, twist rigid ${split.twist} ${split.swing}")
+    ensure("twist tuning: the constraint's stops hold near their limits (${hard.twist}, ${hard.swing})", math.abs_float(hard.twist) < 0.21 && hard.swing < 0.21)
+    ensure("twist tuning: both at 2 Hz give past them (${soft.twist}, ${soft.swing})", math.abs_float(soft.twist) > 0.25 && soft.swing > 0.25)
+    ensure("twist tuning: the twist given back the constraint's holds (${split.twist})", math.abs_float(split.twist) < 0.21)
+    ensure("twist tuning: and the cone still gives (${split.swing})", split.swing > 0.25)
+    // The accessors: set with the joint's limits, alone, read back, refused.
+    s = stepped(0.0, math.vec3(1.0, 4.0, 0.0), math.quat_identity())
+    sdef = dynamics.default_spherical_joint_def()
+    sdef.base.body_id_a = s.ground_id
+    sdef.base.body_id_b = s.cube_id
+    sdef.base.limit_hertz = 3.0
+    sdef.base.limit_damping_ratio = 0.4
+    id = dynamics.create_spherical_joint(s.world_id, &sdef)
+    hertz, ratio = joint_solver.spherical_joint_get_twist_limit_tuning(id)
+    ensure("twist tuning: a new joint's twist follows its limits (${hertz}, ${ratio})", hertz == 3.0 && ratio == 0.4)
+    joint_solver.spherical_joint_set_twist_limit_tuning(id, 9.0, 1.5)
+    hertz, ratio = joint_solver.spherical_joint_get_twist_limit_tuning(id)
+    ensure("twist tuning: set alone (${hertz}, ${ratio})", hertz == 9.0 && ratio == 1.5 && dynamics.joint_get_limit_hertz(id) == 3.0)
+    joint_solver.spherical_joint_set_twist_limit_tuning(id, 0.0 - 1.0, 1.0)
+    hertz, ratio = joint_solver.spherical_joint_get_twist_limit_tuning(id)
+    ensure("twist tuning: a negative hertz refused", hertz == 9.0)
+    dynamics.joint_set_limit_tuning(id, 6.0, 0.8)
+    hertz, ratio = joint_solver.spherical_joint_get_twist_limit_tuning(id)
+    ensure("twist tuning: the joint's limit tuning sets the twist's too (${hertz}, ${ratio})", hertz == 6.0 && ratio == 0.8)
+    dynamics.destroy_world(s.world_id)
+}
+
 test_polarity() {
     a = polarity_run(0, false)
     b = polarity_run(0, true)
@@ -1330,6 +1400,7 @@ main() {
     test_polarity()
     test_inert_joint()
     test_limit_tuning()
+    test_twist_limit_tuning()
     ensure("the stepped worlds after the first leave nothing (${basics.alloc_count() - hand - step_scratch})", basics.alloc_count() == hand + step_scratch)
     hull.destroy_hull(g_cube as *HullData)
     // The scratch stays allocated: the worlds' block, the masses, the dummy state (the modules' scratch is reserved before the count).

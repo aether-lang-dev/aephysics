@@ -126,6 +126,18 @@ triangle_proxy(v1: Vec3, v2: Vec3, v3: Vec3) -> ShapeProxy {
     return distance.shape_proxy(triangle_points(), 3, 0.0)
 }
 
+// Whether a triangle's cached axis names its features: a face of the hull
+// for the hull's face, a triangle edge (0 to 2) and an even half-edge of
+// the hull for an edge pair; the triangle's own face names none.
+triangle_cache_fits(cache: *SATCache, h: *HullData) -> bool {
+    if cache.kind == AXIS_FACE_B { return cache.index_b >= 0 && cache.index_b < h.face_count }
+    if cache.kind == AXIS_EDGE_PAIR {
+        if cache.index_a < 0 || cache.index_a > 2 { return false }
+        return cache.index_b >= 0 && cache.index_b + 1 < h.edge_count && (cache.index_b & 1) == 0
+    }
+    return true
+}
+
 triangle_vertex(t: *TriangleData, i: int) -> Vec3 {
     if i == 0 { return t.v1 }
     if i == 1 { return t.v2 }
@@ -744,6 +756,10 @@ collide_triangle_and_hull(m: *LocalManifold, capacity: int, v1: Vec3, v2: Vec3, 
     points = hull.points(hull_b)
     speculative = 0.0
     if enable_speculative { speculative = reach }
+    // A cached axis naming features this triangle or hull lacks (a
+    // snapshot's triangle cache, or a mesh shape's whose hull changed) is
+    // no cache: B's planes and half-edges were read unchecked by it.
+    if triangle_cache_fits(cache, hull_b) == false { cache.kind = AXIS_INVALID }
     cache.hit = 1
 
     if cache.kind == AXIS_FACE_A {

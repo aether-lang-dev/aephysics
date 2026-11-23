@@ -1519,6 +1519,25 @@ budget stays; the case is with the Aether session.
 
 ## Build flags (inlining)
 
+Since Aether 0.937.0 (aether#3779) `ae build` gives an optimising build
+`--param inline-unit-growth=100` unless the project names its own, and
+`aether.toml` names none: pinned to one core, best of 3 alternated runs
+(ms per step), on 0.937.0 with our 400s, with Aether's alone, and with
+only `max-inline-insns-auto=400` on top of it:
+
+| scene | 0.936.0, ours | 0.937.0, ours | 0.937.0, Aether's | Aether's + auto=400 |
+|---|---|---|---|---|
+| joint grid | 11.52 | 11.48 | 11.23 | 11.37 |
+| large pyramid | 6.75 | 6.67 | 6.69 | 7.03 |
+| convex pile | 10.12 | 9.97 | 9.95 | 10.41 |
+| washer | 17.12 | 16.71 | 16.91 | 17.30 |
+| trees25 | 1.54 | 1.39 | 1.42 | 1.43 |
+
+Aether's budget is level with ours, within the noise; trees25's 10%
+over 0.936.0 is 0.937.0's returned views (aether#3787). What follows is
+how the budget came to be needed.
+
+
 The generated C of every Aether function is a plain `static` function,
 never `static inline`, and gcc's -O2 keeps the small maths (a 3x3
 product, a rotation, a quaternion product) out of line: a sampling

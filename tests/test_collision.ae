@@ -173,10 +173,11 @@ main() {
     test_large_world_manifold()
     test_large_world_aabb()
     // The scratch made on first use and kept is all that stays: the manifold
-    // module's five blocks (each worker's speculative distance, the clip
-    // polygons, the points, the edge contact's point) and the separating
-    // axis test's arrays (of the copy the SIMD width runs).
-    ensure("every other counted allocation was freed (${basics.alloc_count() - before})", basics.alloc_count() == before + 6)
+    // module's seven blocks (each worker's speculative distance, the clip
+    // polygons, the points, the edge contact's point, the face contact's side planes, the near vertices'
+    // prefilter masks) and the separating axis test's arrays (of the copy
+    // the SIMD width runs).
+    ensure("every other counted allocation was freed (${basics.alloc_count() - before})", basics.alloc_count() == before + 8)
 
     println("collision: ${checks} checks")
     if failures == 0 {

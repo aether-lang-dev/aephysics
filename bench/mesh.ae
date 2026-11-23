@@ -40,8 +40,18 @@ main() {
     }
     t1 = clock()
     // The wave mesh uses the median split; the same triangles through the SAH.
+    // A mesh keeps its vertices in single precision, a definition takes
+    // them in double: widened into a buffer of the definition's own.
+    stored = mesh.mesh_vertices(data)
+    wide_block = calloc(data.vertex_count, sizeof(Vec3))
+    wide = wide_block as Vec3[]
+    k = 0
+    while k < data.vertex_count {
+        wide[k] = math.widen3(stored[k])
+        k = k + 1
+    }
     def = mesh.mesh_def()
-    def.vertices = (data as ptr) + data.vertex_offset
+    def.vertices = wide_block
     def.vertex_count = data.vertex_count
     def.indices = (data as ptr) + data.triangle_offset
     def.triangle_count = data.triangle_count
@@ -54,6 +64,7 @@ main() {
         i = i + 1
     }
     t2 = clock()
+    free(wide_block)
 
     sh = mesh.mesh(data, math.vec3_one())
     ray_hits = 0

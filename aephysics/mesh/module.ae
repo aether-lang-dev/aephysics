@@ -46,7 +46,7 @@ extern memset(block: ptr, value: int, size: int) -> ptr
 extern floor(x: float) -> float
 
 const NULL_INDEX = 0 - 1
-const MESH_VERSION = 0x2AAB9A00
+const MESH_VERSION = 0x2AAB9A01
 const BIN_COUNT = 8
 const BINS_BYTES = 3 * BIN_COUNT * 52    // the bins of three axes: a box (48 bytes) and a count each
 const DESIRED_TRIANGLES_PER_LEAF = 4
@@ -77,14 +77,28 @@ struct MeshTriangle {
     index3: int
 }
 
-// A BVH node. For an internal node `axis` is the split axis (0..2) and
-// `count_or_offset` the offset of the right child (the left follows);
-// for a leaf `axis` is LEAF_NODE and `count_or_offset` the triangle count.
-struct MeshNode {
+// A BVH node as the builder makes it, in double. For an internal node
+// `axis` is the split axis (0..2) and `count_or_offset` the offset of the
+// right child (the left follows); for a leaf `axis` is LEAF_NODE and
+// `count_or_offset` the triangle count.
+struct BuildNode {
     lower: Vec3
     axis: int
     count_or_offset: int
     upper: Vec3
+    triangle_offset: int
+}
+
+// A BVH node as the mesh keeps it, the reference's b3MeshNode: 32 bytes,
+// two to a cache line, the box in single precision (exact: the vertices
+// are single precision, and a box is their least and greatest
+// coordinates), the axis in the low two bits of axis_offset and the right
+// child's offset or the leaf's triangle count above them (node_axis,
+// node_count).
+struct MeshNode {
+    lower: Vec3f
+    axis_offset: int
+    upper: Vec3f
     triangle_offset: int
 }
 
@@ -143,14 +157,19 @@ mesh_def() -> MeshDef {
 mesh(data: *MeshData, scale: Vec3) -> Mesh { return Mesh { data: data, scale: scale } }
 
 mesh_nodes(m: *MeshData) -> MeshNode[] { return ((m as ptr) + m.node_offset) as MeshNode[] }
-mesh_vertices(m: *MeshData) -> Vec3[] { return ((m as ptr) + m.vertex_offset) as Vec3[] }
+// The vertices in single precision, as the reference keeps them: a mesh's
+// own coordinates, at its scale only when a triangle is read.
+mesh_vertices(m: *MeshData) -> Vec3f[] { return ((m as ptr) + m.vertex_offset) as Vec3f[] }
 mesh_triangles(m: *MeshData) -> MeshTriangle[] { return ((m as ptr) + m.triangle_offset) as MeshTriangle[] }
 mesh_material_indices(m: *MeshData) -> int[] { return ((m as ptr) + m.material_offset) as int[] }
 mesh_flags(m: *MeshData) -> int[] { return ((m as ptr) + m.flags_offset) as int[] }
 
 align8(x: int) -> int { return (x + 7) & (0 - 8) }
-is_leaf(n: MeshNode) -> bool { return n.axis == LEAF_NODE }
-node_aabb(n: MeshNode) -> AABB { return AABB { lower: n.lower, upper: n.upper } }
+node_axis(n: MeshNode) -> int { return n.axis_offset & 3 }
+// An internal node's right child's offset, or a leaf's triangle count.
+node_count(n: MeshNode) -> int { return n.axis_offset >> 2 }
+is_leaf(n: MeshNode) -> bool { return node_axis(n) == LEAF_NODE }
+node_aabb(n: MeshNode) -> AABB { return AABB { lower: math.widen3(n.lower), upper: math.widen3(n.upper) } }
 
 axis_of(v: Vec3, axis: int) -> float {
     if axis == 0 { return v.x }
@@ -202,7 +221,7 @@ node_height(nodes: MeshNode[], index: int) -> int {
     n = nodes[index]
     if is_leaf(n) { return 0 }
     left = node_height(nodes, index + 1)
-    right = node_height(nodes, index + n.count_or_offset)
+    right = node_height(nodes, index + node_count(n))
     return 1 + math.max_int(left, right)
 }
 
@@ -234,7 +253,7 @@ is_consistent_on(stack_block: ptr, m: *MeshData) -> bool {
         bounds = node_aabb(n)
         if is_leaf(n) == false {
             child1 = index + 1
-            child2 = index + n.count_or_offset
+            child2 = index + node_count(n)
             if math.aabb_contains(bounds, node_aabb(nodes[child1])) == false { return false }
             if math.aabb_contains(bounds, node_aabb(nodes[child2])) == false { return false }
             if count + 2 > MESH_STACK_SIZE { return false }
@@ -244,13 +263,13 @@ is_consistent_on(stack_block: ptr, m: *MeshData) -> bool {
         } else {
             triangle_bounds = math.aabb_empty()
             i = 0
-            while i < n.count_or_offset {
+            while i < node_count(n) {
                 triangle_index = n.triangle_offset + i
                 if triangle_index < 0 || triangle_index >= m.triangle_count { return false }
                 t = triangles[triangle_index]
-                triangle_bounds = math.aabb_add_point(triangle_bounds, vertices[t.index1])
-                triangle_bounds = math.aabb_add_point(triangle_bounds, vertices[t.index2])
-                triangle_bounds = math.aabb_add_point(triangle_bounds, vertices[t.index3])
+                triangle_bounds = math.aabb_add_point(triangle_bounds, math.widen3(vertices[t.index1]))
+                triangle_bounds = math.aabb_add_point(triangle_bounds, math.widen3(vertices[t.index2]))
+                triangle_bounds = math.aabb_add_point(triangle_bounds, math.widen3(vertices[t.index3]))
                 i = i + 1
             }
             if math.aabb_contains(bounds, triangle_bounds) == false { return false }
@@ -278,7 +297,7 @@ mesh_bytes_valid(m: *MeshData, available: int) -> bool {
     if n < sizeof(MeshData) || n > available { return false }
     if m.node_count < 1 || m.vertex_count < 0 || m.triangle_count < 0 { return false }
     if basics.section_fits(m.node_offset, m.node_count, sizeof(MeshNode), n) == false { return false }
-    if basics.section_fits(m.vertex_offset, m.vertex_count, sizeof(Vec3), n) == false { return false }
+    if basics.section_fits(m.vertex_offset, m.vertex_count, sizeof(Vec3f), n) == false { return false }
     if basics.section_fits(m.triangle_offset, m.triangle_count, sizeof(MeshTriangle), n) == false { return false }
     if basics.section_fits(m.material_offset, m.triangle_count, 4, n) == false { return false }
     if basics.section_fits(m.flags_offset, m.triangle_count, 4, n) == false { return false }
@@ -287,11 +306,11 @@ mesh_bytes_valid(m: *MeshData, available: int) -> bool {
     while i < m.node_count {
         node = nodes[i]
         if is_leaf(node) {
-            if node.count_or_offset < 0 || node.triangle_offset < 0 { return false }
-            if node.count_or_offset > m.triangle_count - node.triangle_offset { return false }
+            if node_count(node) < 0 || node.triangle_offset < 0 { return false }
+            if node_count(node) > m.triangle_count - node.triangle_offset { return false }
         } else {
-            if node.axis < 0 || node.axis > 2 { return false }
-            if i + 1 >= m.node_count || node.count_or_offset < 2 || node.count_or_offset >= m.node_count - i { return false }
+            if node_axis(node) < 0 || node_axis(node) > 2 { return false }
+            if i + 1 >= m.node_count || node_count(node) < 2 || node_count(node) >= m.node_count - i { return false }
         }
         i = i + 1
     }
@@ -619,8 +638,8 @@ split_median(primitives: Primitive[], first: int, count: int) -> Split {
     return Split { left_bounds: left_bounds, right_bounds: right_bounds, axis: axis, index: i1 }
 }
 
-store_leaf(nodes: MeshNode[], index: int, bounds: AABB, triangle_count: int, triangle_offset: int) {
-    nodes[index] = MeshNode { lower: bounds.lower, axis: LEAF_NODE, count_or_offset: triangle_count, upper: bounds.upper,
+store_leaf(nodes: BuildNode[], index: int, bounds: AABB, triangle_count: int, triangle_offset: int) {
+    nodes[index] = BuildNode { lower: bounds.lower, axis: LEAF_NODE, count_or_offset: triangle_count, upper: bounds.upper,
                               triangle_offset: triangle_offset }
 }
 
@@ -644,7 +663,7 @@ struct Built {
 // array (node_count[0] is the bump pointer). The heights come back with
 // the indices: carried in heap blocks, two a node, they were a fifth of
 // the build.
-build_recursive(nodes: MeshNode[], node_count: int[], primitives: Primitive[], first: int, count: int, use_median_split: bool,
+build_recursive(nodes: BuildNode[], node_count: int[], primitives: Primitive[], first: int, count: int, use_median_split: bool,
                 bins: ptr) -> Built {
     if count > DESIRED_TRIANGLES_PER_LEAF {
         split = no_split()
@@ -665,7 +684,7 @@ build_recursive(nodes: MeshNode[], node_count: int[], primitives: Primitive[], f
         left = build_recursive(nodes, node_count, primitives, first, split.index, use_median_split, bins)
         right = build_recursive(nodes, node_count, primitives, first + split.index, count - split.index, use_median_split, bins)
         bounds = math.aabb_union(split.left_bounds, split.right_bounds)
-        nodes[index] = MeshNode { lower: bounds.lower, axis: split.axis, count_or_offset: right.index - index, upper: bounds.upper,
+        nodes[index] = BuildNode { lower: bounds.lower, axis: split.axis, count_or_offset: right.index - index, upper: bounds.upper,
                                   triangle_offset: 0 }
         return Built { index: index, height: math.max_int(left.height, right.height) + 1 }
     }
@@ -706,19 +725,19 @@ sort_mesh_triangles_on(stack_block: ptr, m: *MeshData) -> bool {
             if count >= MESH_STACK_SIZE - 2 {
                 ok = false
             } else {
-                stack[count] = index + n.count_or_offset
+                stack[count] = index + node_count(n)
                 stack[count + 1] = index + 1
                 count = count + 2
             }
         } else {
             i = 0
-            while i < n.count_or_offset {
+            while i < node_count(n) {
                 temp_triangles[offset + i] = triangles[n.triangle_offset + i]
                 temp_materials[offset + i] = materials[n.triangle_offset + i]
                 i = i + 1
             }
             nodes[index].triangle_offset = offset
-            offset = offset + n.count_or_offset
+            offset = offset + node_count(n)
         }
     }
     if ok {
@@ -780,7 +799,7 @@ identify_edges(m: *MeshData) {
             edges[e + 6] = 1        // triangles on this edge
             k = k + 1
         }
-        normals[i] = math.normalize(math.cross(math.sub(vertices[t.index2], vertices[t.index1]), math.sub(vertices[t.index3], vertices[t.index1])))
+        normals[i] = math.normalize(math.cross(math.sub(math.widen3(vertices[t.index2]), math.widen3(vertices[t.index1])), math.sub(math.widen3(vertices[t.index3]), math.widen3(vertices[t.index1]))))
         i = i + 1
     }
 
@@ -860,7 +879,7 @@ identify_edges(m: *MeshData) {
             if edge2 == 1 { opposite = triangle2.index1 }
             if edge2 == 2 { opposite = triangle2.index2 }
             triangle1 = triangles[t1]
-            signed_volume = math.signed_volume(vertices[triangle1.index1], vertices[triangle1.index2], vertices[triangle1.index3], vertices[opposite])
+            signed_volume = math.signed_volume(math.widen3(vertices[triangle1.index1]), math.widen3(vertices[triangle1.index2]), math.widen3(vertices[triangle1.index3]), math.widen3(vertices[opposite]))
             cos_angle = math.dot(normals[t1], normals[t2])
             if signed_volume > 0.0 || cos_angle > cos_5_deg {
                 flags[t1] = flags[t1] | edge_flag_bit(edge1, false)
@@ -929,6 +948,13 @@ create_mesh(def: *MeshDef, degenerate_indices: ptr, degenerate_capacity: int) ->
         }
         memcpy(indices_block, def.indices, 3 * triangle_count * 4)
     }
+    // Single precision, as the mesh keeps them (the reference's input is
+    // single precision): the areas, boxes and tree below are of these.
+    i = 0
+    while i < vertex_count {
+        vertices[i] = math.widen3(math.narrow3(vertices[i]))
+        i = i + 1
+    }
 
     primitives_block = basics.alloc(triangle_count * sizeof(Primitive))
     primitives = primitives_block as Primitive[]
@@ -974,8 +1000,8 @@ create_mesh(def: *MeshDef, degenerate_indices: ptr, degenerate_capacity: int) ->
 
     // The tree, which reorders the primitives.
     node_capacity = 2 * triangle_count - 1
-    temp_nodes_block = basics.alloc(node_capacity * sizeof(MeshNode))
-    temp_nodes = temp_nodes_block as MeshNode[]
+    temp_nodes_block = basics.alloc(node_capacity * sizeof(BuildNode))
+    temp_nodes = temp_nodes_block as BuildNode[]
     counters_block = basics.alloc(8)
     counters = counters_block as int[]
     counters[0] = 0
@@ -991,7 +1017,7 @@ create_mesh(def: *MeshDef, degenerate_indices: ptr, degenerate_capacity: int) ->
     node_offset = byte_count
     byte_count = byte_count + align8(node_count * sizeof(MeshNode))
     vertex_offset = byte_count
-    byte_count = byte_count + align8(vertex_count * sizeof(Vec3))
+    byte_count = byte_count + align8(vertex_count * sizeof(Vec3f))
     triangle_offset = byte_count
     byte_count = byte_count + align8(triangle_count * sizeof(MeshTriangle))
     material_offset = byte_count
@@ -1015,8 +1041,22 @@ create_mesh(def: *MeshDef, degenerate_indices: ptr, degenerate_capacity: int) ->
     m.material_count = material_count
     m.flags_offset = flags_offset
 
-    memcpy((m as ptr) + node_offset, temp_nodes_block, node_count * sizeof(MeshNode))
-    memcpy((m as ptr) + vertex_offset, vertices_block, vertex_count * sizeof(Vec3))
+    // The nodes and vertices narrowed: exact, every coordinate being single
+    // precision already (a box is its triangles' least and greatest).
+    stored_nodes = mesh_nodes(m)
+    i = 0
+    while i < node_count {
+        b = temp_nodes[i]
+        stored_nodes[i] = MeshNode { lower: math.narrow3(b.lower), axis_offset: b.axis | (b.count_or_offset << 2),
+                                     upper: math.narrow3(b.upper), triangle_offset: b.triangle_offset }
+        i = i + 1
+    }
+    stored_vertices = mesh_vertices(m)
+    i = 0
+    while i < vertex_count {
+        stored_vertices[i] = math.narrow3(vertices[i])
+        i = i + 1
+    }
     triangles = mesh_triangles(m)
     materials = mesh_material_indices(m)
     flags = mesh_flags(m)
@@ -1038,7 +1078,7 @@ create_mesh(def: *MeshDef, degenerate_indices: ptr, degenerate_capacity: int) ->
     }
 
     ok = sort_mesh_triangles(m)
-    basics.free_bytes(temp_nodes_block, node_capacity * sizeof(MeshNode))
+    basics.free_bytes(temp_nodes_block, node_capacity * sizeof(BuildNode))
     basics.free_bytes(primitives_block, def.triangle_count * sizeof(Primitive))
     basics.free_bytes(indices_block, 3 * def.triangle_count * 4)
     basics.free_bytes(vertices_block, def.vertex_count * sizeof(Vec3))
@@ -1395,13 +1435,13 @@ scaled_triangle(m: *MeshData, index: int, scale: Vec3, ccw: bool, out: Vec3[]) {
     triangles = mesh_triangles(m)
     vertices = mesh_vertices(m)
     t = triangles[index]
-    out[0] = math.mul(scale, vertices[t.index1])
+    out[0] = math.mul(scale, math.widen3(vertices[t.index1]))
     if ccw {
-        out[1] = math.mul(scale, vertices[t.index2])
-        out[2] = math.mul(scale, vertices[t.index3])
+        out[1] = math.mul(scale, math.widen3(vertices[t.index2]))
+        out[2] = math.mul(scale, math.widen3(vertices[t.index3]))
     } else {
-        out[1] = math.mul(scale, vertices[t.index3])
-        out[2] = math.mul(scale, vertices[t.index2])
+        out[1] = math.mul(scale, math.widen3(vertices[t.index3]))
+        out[2] = math.mul(scale, math.widen3(vertices[t.index2]))
     }
 }
 
@@ -1437,12 +1477,12 @@ overlap_mesh_on(stack_block: ptr, sh: Mesh, shape_transform: Transform, proxy: S
         if math.aabb_overlaps(node_aabb(n), bounds) {
             if is_leaf(n) {
                 i = 0
-                while i < n.count_or_offset {
+                while i < node_count(n) {
                     t = triangles[n.triangle_offset + i]
-                    if test_bounds_triangle_overlap(center, extent, vertices[t.index1], vertices[t.index2], vertices[t.index3]) {
-                        tri[0] = math.mul(sh.scale, vertices[t.index1])
-                        tri[1] = math.mul(sh.scale, vertices[t.index2])
-                        tri[2] = math.mul(sh.scale, vertices[t.index3])
+                    if test_bounds_triangle_overlap(center, extent, math.widen3(vertices[t.index1]), math.widen3(vertices[t.index2]), math.widen3(vertices[t.index3])) {
+                        tri[0] = math.mul(sh.scale, math.widen3(vertices[t.index1]))
+                        tri[1] = math.mul(sh.scale, math.widen3(vertices[t.index2]))
+                        tri[2] = math.mul(sh.scale, math.widen3(vertices[t.index3]))
                         cache.count = 0
                         output = distance.shape_distance(&input, &cache, null, 0)
                         if output.distance < 0.1 * math.LINEAR_SLOP { return true }
@@ -1451,7 +1491,7 @@ overlap_mesh_on(stack_block: ptr, sh: Mesh, shape_transform: Transform, proxy: S
                 }
             } else {
                 if count < MESH_STACK_SIZE {
-                    stack[count] = index + n.count_or_offset
+                    stack[count] = index + node_count(n)
                     count = count + 1
                 }
                 index = index + 1
@@ -1499,10 +1539,10 @@ ray_cast_mesh_on(stack_block: ptr, sh: Mesh, origin: Vec3, translation: Vec3, ma
     index = 0
     while true {
         n = nodes[index]
-        if math.slab_overlap(n.lower, n.upper, ray_start, ray_inv, best.fraction) {
+        if math.slab_overlap(math.widen3(n.lower), math.widen3(n.upper), ray_start, ray_inv, best.fraction) {
             if is_leaf(n) {
                 i = 0
-                while i < n.count_or_offset {
+                while i < node_count(n) {
                     triangle_index = n.triangle_offset + i
                     scaled_triangle(m, triangle_index, scale, ccw, tri)
                     alpha = intersect_ray_triangle(origin, translation, tri[0], tri[1], tri[2])
@@ -1521,11 +1561,11 @@ ray_cast_mesh_on(stack_block: ptr, sh: Mesh, origin: Vec3, translation: Vec3, ma
                 // The far child waits on the stack; a tree deeper than the stack
                 // (a pathological one) drops it rather than write past the stack.
                 far = index + 1
-                if axis_of(ray_delta, n.axis) > 0.0 {
-                    far = index + n.count_or_offset
+                if axis_of(ray_delta, node_axis(n)) > 0.0 {
+                    far = index + node_count(n)
                     index = index + 1
                 } else {
-                    index = index + n.count_or_offset
+                    index = index + node_count(n)
                 }
                 if count < MESH_STACK_SIZE {
                     stack[count] = far
@@ -1578,10 +1618,10 @@ shape_cast_mesh_on(stack_block: ptr, sh: Mesh, proxy: ShapeProxy, translation: V
     index = 0
     while true {
         n = nodes[index]
-        if math.slab_overlap(math.sub(n.lower, inv_extent), math.add(n.upper, inv_extent), inv_start, inv_inv, best.fraction) {
+        if math.slab_overlap(math.sub(math.widen3(n.lower), inv_extent), math.add(math.widen3(n.upper), inv_extent), inv_start, inv_inv, best.fraction) {
             if is_leaf(n) {
                 i = 0
-                while i < n.count_or_offset {
+                while i < node_count(n) {
                     triangle_index = n.triangle_offset + i
                     scaled_triangle(m, triangle_index, scale, ccw, tri)
                     tri_box = AABB { lower: math.sub(math.min_vec3(tri[0], math.min_vec3(tri[1], tri[2])), extents),
@@ -1614,11 +1654,11 @@ shape_cast_mesh_on(stack_block: ptr, sh: Mesh, proxy: ShapeProxy, translation: V
                 // The far child waits on the stack (dropped, not written past the
                 // stack, by a tree deeper than it).
                 far = index + 1
-                if axis_of(inv_delta, n.axis) > 0.0 {
-                    far = index + n.count_or_offset
+                if axis_of(inv_delta, node_axis(n)) > 0.0 {
+                    far = index + node_count(n)
                     index = index + 1
                 } else {
-                    index = index + n.count_or_offset
+                    index = index + node_count(n)
                 }
                 if count < MESH_STACK_SIZE {
                     stack[count] = far
@@ -1649,10 +1689,10 @@ get_mesh_triangle(sh: Mesh, triangle_index: int) -> Triangle {
         if (f & triangle_manifold.INVERSE_CONCAVE_EDGE1) != 0 { inverted = inverted | triangle_manifold.CONCAVE_EDGE1 }
         if (f & triangle_manifold.INVERSE_CONCAVE_EDGE2) != 0 { inverted = inverted | triangle_manifold.CONCAVE_EDGE2 }
         if (f & triangle_manifold.INVERSE_CONCAVE_EDGE3) != 0 { inverted = inverted | triangle_manifold.CONCAVE_EDGE3 }
-        return Triangle { v1: math.mul(scale, vertices[t.index1]), v2: math.mul(scale, vertices[t.index3]), v3: math.mul(scale, vertices[t.index2]),
+        return Triangle { v1: math.mul(scale, math.widen3(vertices[t.index1])), v2: math.mul(scale, math.widen3(vertices[t.index3])), v3: math.mul(scale, math.widen3(vertices[t.index2])),
                           i1: t.index1, i2: t.index3, i3: t.index2, flags: inverted }
     }
-    return Triangle { v1: math.mul(scale, vertices[t.index1]), v2: math.mul(scale, vertices[t.index2]), v3: math.mul(scale, vertices[t.index3]),
+    return Triangle { v1: math.mul(scale, math.widen3(vertices[t.index1])), v2: math.mul(scale, math.widen3(vertices[t.index2])), v3: math.mul(scale, math.widen3(vertices[t.index3])),
                       i1: t.index1, i2: t.index2, i3: t.index3, flags: f }
 }
 
@@ -1713,12 +1753,12 @@ collide_mover_and_mesh_on(stack_block: ptr, planes: PlaneResult[], capacity: int
         if math.aabb_overlaps(node_aabb(n), inv_bounds) {
             if is_leaf(n) {
                 i = 0
-                while i < n.count_or_offset {
+                while i < node_count(n) {
                     triangle_index = n.triangle_offset + i
                     t = triangles[triangle_index]
-                    v1 = vertices[t.index1]
-                    v2 = vertices[t.index2]
-                    v3 = vertices[t.index3]
+                    v1 = math.widen3(vertices[t.index1])
+                    v2 = math.widen3(vertices[t.index2])
+                    v3 = math.widen3(vertices[t.index3])
                     if ccw == false {
                         swap = v2
                         v2 = v3
@@ -1744,7 +1784,7 @@ collide_mover_and_mesh_on(stack_block: ptr, planes: PlaneResult[], capacity: int
                 }
             } else {
                 if count < MESH_STACK_SIZE {
-                    stack[count] = index + n.count_or_offset
+                    stack[count] = index + node_count(n)
                     count = count + 1
                 }
                 index = index + 1
@@ -1785,12 +1825,12 @@ query_mesh_on(stack_block: ptr, sh: Mesh, bounds: AABB, visitor: fn(Vec3, Vec3, 
         if math.aabb_overlaps(node_aabb(n), inv_bounds) {
             if is_leaf(n) {
                 i = 0
-                while i < n.count_or_offset {
+                while i < node_count(n) {
                     triangle_index = n.triangle_offset + i
                     t = triangles[triangle_index]
-                    v1 = vertices[t.index1]
-                    v2 = vertices[t.index2]
-                    v3 = vertices[t.index3]
+                    v1 = math.widen3(vertices[t.index1])
+                    v2 = math.widen3(vertices[t.index2])
+                    v3 = math.widen3(vertices[t.index3])
                     if test_bounds_triangle_overlap(inv_center, inv_extent, v1, v2, v3) {
                         a = math.mul(scale, v1)
                         b = math.mul(scale, v2)
@@ -1806,7 +1846,7 @@ query_mesh_on(stack_block: ptr, sh: Mesh, bounds: AABB, visitor: fn(Vec3, Vec3, 
                 }
             } else {
                 if count < MESH_STACK_SIZE {
-                    stack[count] = index + n.count_or_offset
+                    stack[count] = index + node_count(n)
                     count = count + 1
                 }
                 index = index + 1

@@ -44,7 +44,7 @@ extern memcpy(dst: ptr, src: ptr, size: int) -> ptr
 extern memset(block: ptr, value: int, size: int) -> ptr
 
 const SNAPSHOT_MAGIC = 0x4E535041    // "APSN", little-endian
-const SNAPSHOT_VERSION = 10
+const SNAPSHOT_VERSION = 11
 const NULL_INDEX = 0 - 1
 
 // --- the bytes written -------------------------------------------------------------------------------
@@ -1047,7 +1047,10 @@ replace_pool(dst: *IdPool, src: @keep IdPool) {
 // (the ground) is named by its shape id, which restore_body_set translates
 // through its shape map.
 const BODY_SET_MAGIC = 0x53425041    // "APBS", little-endian
-const BODY_SET_VERSION = 1
+// 2: the body sims lead with the flags and local centre, and a convex
+// contact's cache with its axis (aephysics#229); a set of either order is
+// the other's bytes misread, so the version says which.
+const BODY_SET_VERSION = 2
 
 // The flags a contact carries as its state; the rest are its shapes' and
 // bodies' settings, which the world it is made again in gives it.

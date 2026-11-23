@@ -2452,6 +2452,13 @@ dispatch_call(p: *Player, op: int) -> bool {
         if p.ok { dynamics.joint_set_constraint_tuning(a_joint_id_id, a_float_hertz, a_float_damping_ratio) }
         return true
     }
+    if op == dynamics.OP_SPHERICAL_JOINT_SET_TWIST_LIMIT_TUNING {
+        a_joint_id_id = read_joint_id(p)
+        a_float_hertz = read_float(p)
+        a_float_damping_ratio = read_float(p)
+        if p.ok { joint_solver.spherical_joint_set_twist_limit_tuning(a_joint_id_id, a_float_hertz, a_float_damping_ratio) }
+        return true
+    }
     if op == dynamics.OP_JOINT_SET_LIMIT_TUNING {
         a_joint_id_id = read_joint_id(p)
         a_float_hertz = read_float(p)

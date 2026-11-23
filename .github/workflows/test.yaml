@@ -7,10 +7,13 @@ on:
       - main
   pull_request:
 
-# Pin: 0.936.0, the latest release, and aeb v0.347, the one ae3d builds
-# beside. Every module, test, benchmark and example checks clean on
-# 0.936.0 (a tracking bump from 0.935.0, itself from 0.933.0, itself from 0.931.0, itself from 0.919.0, no new primitive
-# needed) with no source change from 0.841.0, the golden trace bit for bit. 0.840.0 and 0.841.0 added the ownership rules (a borrowed ptr put
+# Pin: 0.937.0, the latest release, and aeb v0.347, the one ae3d builds
+# beside. 0.937.0 brings returned views tracked by their mark
+# (aether#3787) and the GCC inlining budget on optimising builds
+# (aether#3779), for which aether.toml dropped its own; every module,
+# test, benchmark and example checks clean on it, the golden trace bit
+# for bit against 0.936.0 (itself a tracking bump from 0.935.0, 0.933.0,
+# 0.931.0 and 0.919.0) with no source change from 0.841.0. 0.840.0 and 0.841.0 added the ownership rules (a borrowed ptr put
 # into a list or map is E0902 without @keep) and E0202 / E0305. The two functions that take over a
 # struct's buffers declare it `@keep`, which 0.838.0 checks; the
 # accessors that hand back a pointer into their argument declare it
@@ -20,7 +23,7 @@ on:
 # bootstrap version: the floor this code needs, verified by every job
 # below.
 env:
-  AE_PIN: 0.936.0
+  AE_PIN: 0.937.0
   AEB_REF: v0.347
 
 jobs:
