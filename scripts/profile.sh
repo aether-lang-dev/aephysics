@@ -22,6 +22,15 @@ out="target/profile"
 cflags="$(sed -n 's/^cflags = "\(.*\)"/\1/p' aether.toml)"
 # aether.toml's ${AETHER_AEPHYSICS_CFLAGS}, expanded as ae expands it (empty when unset).
 cflags="${cflags//'${AETHER_AEPHYSICS_CFLAGS}'/${AETHER_AEPHYSICS_CFLAGS:-}}"
+# The inlining budget ae build gives an optimising build since Aether
+# 0.937.0 (aether#3779) when the project names none: without it this
+# build kept the small maths (mul_quat, make_matrix_from_quat) out of
+# line where ae build's own inlines them, and its profile showed calls
+# the shipped program never makes.
+case "$cflags" in
+    *inline-unit-growth*) ;;
+    *) cflags="$cflags --param inline-unit-growth=100" ;;
+esac
 # The compile flags ae gives a C build, whole: since Aether 0.795 the std and
 # runtime directories come as `-idirafter <dir>` pairs (aether#2552), which
 # a filter on single tokens would split.
