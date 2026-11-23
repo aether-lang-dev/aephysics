@@ -178,6 +178,39 @@ skew_times(r: Vec3, c: Vec3) -> Vec3 {
     return math.vec3((0.0 - r.z) * c.y + r.y * c.z, r.z * c.x + (0.0 - r.x) * c.z, (0.0 - r.y) * c.x + r.x * c.y)
 }
 
+// The same in single precision, for the plain ball joint's point.
+skew_sandwich_f(i: Matrix3f, r: Vec3f) -> Matrix3f {
+    f32 zero = 0.0
+    mx = math.vec3f(i.cy.x * r.z + i.cz.x * (zero - r.y), i.cy.y * r.z + i.cz.y * (zero - r.y), i.cy.z * r.z + i.cz.z * (zero - r.y))
+    my = math.vec3f(i.cx.x * (zero - r.z) + i.cz.x * r.x, i.cx.y * (zero - r.z) + i.cz.y * r.x, i.cx.z * (zero - r.z) + i.cz.z * r.x)
+    mz = math.vec3f(i.cx.x * r.y + i.cy.x * (zero - r.x), i.cx.y * r.y + i.cy.y * (zero - r.x), i.cx.z * r.y + i.cy.z * (zero - r.x))
+    return Matrix3f { cx: skew_times_f(r, mx), cy: skew_times_f(r, my), cz: skew_times_f(r, mz) }
+}
+skew_times_f(r: Vec3f, c: Vec3f) -> Vec3f {
+    f32 zero = 0.0
+    return math.vec3f((zero - r.z) * c.y + r.y * c.z, r.z * c.x + (zero - r.x) * c.z, (zero - r.y) * c.x + r.x * c.y)
+}
+point_mass_matrix_f(m_a: f32, i_a: Matrix3f, r_a: Vec3f, m_b: f32, i_b: Matrix3f, r_b: Vec3f) -> Matrix3f {
+    k_a = skew_sandwich_f(i_a, r_a)
+    k_b = skew_sandwich_f(i_b, r_b)
+    k = Matrix3f { cx: math.negf(math.addf(k_a.cx, k_b.cx)), cy: math.negf(math.addf(k_a.cy, k_b.cy)), cz: math.negf(math.addf(k_a.cz, k_b.cz)) }
+    m = m_a + m_b
+    k.cx.x = k.cx.x + m
+    k.cy.y = k.cy.y + m
+    k.cz.z = k.cz.z + m
+    return k
+}
+// m^-1 a, zero for a singular m (b3Solve3).
+solve3_f(m: Matrix3f, a: Vec3f) -> Vec3f {
+    d = math.detf(m)
+    if math.abs_f32(d) > (1000.0 * math.TINY) as f32 {
+        f32 one = 1.0
+        inv = one / d
+        return math.vec3f(inv * math.dotf(math.crossf(m.cy, m.cz), a), inv * math.dotf(math.crossf(m.cz, m.cx), a), inv * math.dotf(math.crossf(m.cx, m.cy), a))
+    }
+    return math.vec3f(0.0, 0.0, 0.0)
+}
+
 // The point constraint's mass matrix: (mA + mB) I - skew(rA) iA skew(rA) - skew(rB) iB skew(rB).
 point_mass_matrix(m_a: float, i_a: Matrix3, r_a: Vec3, m_b: float, i_b: Matrix3, r_b: Vec3) -> Matrix3 {
     k_a = skew_sandwich(&i_a, r_a)
@@ -1710,6 +1743,9 @@ prepare_spherical_joint(base: *JointSim, ctx: *StepContext) {
     j.frame_a = world_frame(bodies.sim_a, base.local_frame_a)
     j.frame_b = world_frame(bodies.sim_b, base.local_frame_b)
     j.delta_center = math.sub(bodies.sim_b.center, bodies.sim_a.center)
+    j.anchor_a = math.narrow3(j.frame_a.p)
+    j.anchor_b = math.narrow3(j.frame_b.p)
+    j.delta_center_f = math.narrow3(j.delta_center)
     inertia_sum = math.add_mm(math.widen_mat3(base.inv_inertia_a), math.widen_mat3(base.inv_inertia_b))
     spherical_angular_rows(j, j.frame_a.q, j.frame_b.q, inertia_sum)
     // The rotation's mass and the spring's softness only for the rows that
@@ -1812,8 +1848,77 @@ spherical_rows_where_now(j: *SphericalJoint, quat_a: Quat, quat_b: Quat, cone_ga
     if j.lock_cone_minor { spherical_lock_row(j, quat_a, quat_b, inertia_sum) }
 }
 
+// A ball joint with nothing but its point: no spring, motor, limits or lock.
+spherical_is_plain(j: *SphericalJoint) -> bool {
+    return (j.enable_spring || j.enable_motor || j.enable_cone_limit || j.enable_twist_limit || j.lock_cone_minor) == false
+}
+
+// The plain ball joint's warm start and solve in single precision, as the
+// reference's b3WarmStartSphericalJoint and b3SolveSphericalJoint do the
+// point: the anchors and the centres' offset made in the prepare, the
+// inertias as the body sims keep them, the impulse kept in double but
+// always a single's value.
+warm_start_spherical_point_f(base: *JointSim, ctx: *StepContext, j: *SphericalJoint) {
+    state_a = state_of(ctx, j.index_a)
+    state_b = state_of(ctx, j.index_b)
+    r_a = math.rotate_vectorf(state_a.dq, j.anchor_a)
+    r_b = math.rotate_vectorf(state_b.dq, j.anchor_b)
+    p = math.narrow3(j.linear_impulse)
+    f32 m_a = base.inv_mass_a as f32
+    f32 m_b = base.inv_mass_b as f32
+    if (state_a.flags & dynamics.DYNAMIC_FLAG) != 0 {
+        state_a.v = math.mul_subf(state_a.v, m_a, p)
+        state_a.w = math.subf(state_a.w, math.mul_mvf(base.inv_inertia_a, math.crossf(r_a, p)))
+    }
+    if (state_b.flags & dynamics.DYNAMIC_FLAG) != 0 {
+        state_b.v = math.mul_addf(state_b.v, m_b, p)
+        state_b.w = math.addf(state_b.w, math.mul_mvf(base.inv_inertia_b, math.crossf(r_b, p)))
+    }
+}
+
+solve_spherical_point_f(base: *JointSim, ctx: *StepContext, j: *SphericalJoint, use_bias: bool) {
+    state_a = state_of(ctx, j.index_a)
+    state_b = state_of(ctx, j.index_b)
+    f32 m_a = base.inv_mass_a as f32
+    f32 m_b = base.inv_mass_b as f32
+    v_a = state_a.v
+    w_a = state_a.w
+    v_b = state_b.v
+    w_b = state_b.w
+    r_a = math.rotate_vectorf(state_a.dq, j.anchor_a)
+    r_b = math.rotate_vectorf(state_b.dq, j.anchor_b)
+    cdot = math.subf(math.subf(math.addf(v_b, math.crossf(w_b, r_b)), v_a), math.crossf(w_a, r_a))
+    bias = math.vec3f(0.0, 0.0, 0.0)
+    f32 mass_scale = 1.0
+    f32 impulse_scale = 0.0
+    if use_bias {
+        separation = math.addf(math.addf(math.subf(state_b.dp, state_a.dp), math.subf(r_b, r_a)), j.delta_center_f)
+        bias = math.mul_svf(base.constraint_softness.bias_rate as f32, separation)
+        mass_scale = base.constraint_softness.mass_scale as f32
+        impulse_scale = base.constraint_softness.impulse_scale as f32
+    }
+    k = point_mass_matrix_f(m_a, base.inv_inertia_a, r_a, m_b, base.inv_inertia_b, r_b)
+    b = solve3_f(k, math.addf(cdot, bias))
+    old = math.narrow3(j.linear_impulse)
+    f32 zero = 0.0
+    impulse = math.mul_subf(math.mul_svf(zero - mass_scale, b), impulse_scale, old)
+    j.linear_impulse = math.widen3(math.addf(old, impulse))
+    if (state_a.flags & dynamics.DYNAMIC_FLAG) != 0 {
+        state_a.v = math.mul_subf(v_a, m_a, impulse)
+        state_a.w = math.subf(w_a, math.mul_mvf(base.inv_inertia_a, math.crossf(r_a, impulse)))
+    }
+    if (state_b.flags & dynamics.DYNAMIC_FLAG) != 0 {
+        state_b.v = math.mul_addf(v_b, m_b, impulse)
+        state_b.w = math.addf(w_b, math.mul_mvf(base.inv_inertia_b, math.crossf(r_b, impulse)))
+    }
+}
+
 warm_start_spherical_joint(base: *JointSim, ctx: *StepContext) {
     j = dynamics.spherical_joint_of(base)
+    if spherical_is_plain(j) {
+        warm_start_spherical_point_f(base, ctx, j)
+        return
+    }
     state_a = state_of(ctx, j.index_a)
     state_b = state_of(ctx, j.index_b)
     r_a = math.rotate_vector(math.widen_quat(state_a.dq), j.frame_a.p)
@@ -1833,6 +1938,11 @@ warm_start_spherical_joint(base: *JointSim, ctx: *StepContext) {
 // target angular velocity, the twist limits about frame B's z axis,
 // the cone limit about frame A's, and the point-to-point.
 solve_spherical_joint(base: *JointSim, ctx: *StepContext, use_bias: bool) {
+    plain = dynamics.spherical_joint_of(base)
+    if spherical_is_plain(plain) {
+        solve_spherical_point_f(base, ctx, plain, use_bias)
+        return
+    }
     m_a = base.inv_mass_a
     m_b = base.inv_mass_b
     i_a = math.widen_mat3(base.inv_inertia_a)

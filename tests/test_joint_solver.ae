@@ -1060,7 +1060,10 @@ test_spherical() {
     joint_solver.spherical_joint_enable_twist_limit(id, false)
     joint_solver.spherical_joint_enable_spring(id, true)
     joint_solver.spherical_joint_set_spring_hertz(id, 2.0)
-    set_velocity(&f, math.vec3_zero(), math.vec3(1.0, 0.0, 0.0))
+    // Sliding as well as turning, so the point carries an impulse of its
+    // own (held at the cube's centre, the turn alone gives it none: a
+    // check of more than zero passed before on rounding's 1e-46).
+    set_velocity(&f, math.vec3(1.0, 0.0, 0.0), math.vec3(1.0, 0.0, 0.0))
     solve_biased(&f, id)
     ensure("spring: an impulse to drop", math.length(j.spring_impulse) > 0.0)
     joint_solver.spherical_joint_enable_spring(id, false)
@@ -1073,7 +1076,8 @@ test_spherical() {
     ensure("plain point: an impulse to give back", math.length(linear) > 0.0)
     set_velocity(&f, math.vec3_zero(), math.vec3_zero())
     joint_solver.warm_start_joint(sim(&f, id), &f.ctx)
-    v = math.narrow3(math.mul_sv(sim(&f, id).inv_mass_b, linear))
+    // The plain point's warm start is single precision (the reference's).
+    v = math.mul_svf(sim(&f, id).inv_mass_b as f32, math.narrow3(linear))
     ensure("plain point: the warm start moves the cube by the point's impulse", state.v.x == v.x && state.v.y == v.y && state.v.z == v.z)
     ensure("plain point: and does not turn it", state.w.x == 0.0 && state.w.y == 0.0 && state.w.z == 0.0)
     dynamics.destroy_world(f.world_id)
