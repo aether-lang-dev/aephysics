@@ -2219,6 +2219,73 @@ test_spine_and_neck_ranges() {
     }
     human.destroy_shape(shape)
     human.destroy_shape(reference)
+    test_fitted_spine_cones()
+}
+
+// The landmarks of the reference with its spine curved and its neck leant
+// forward (test_fit_curved's rig): spine_03 turned 0.1326 rad forward, the
+// neck back 0.157 from it and 14 cm ahead.
+curved_landmarks(reference: ptr) -> ptr {
+    block = landmarks(reference)
+    v = block as Vec3[]
+    tail_at = (block + human.BONE_COUNT * sizeof(Vec3)) as Vec3[]
+    toe_at = (block + 2 * human.BONE_COUNT * sizeof(Vec3)) as Vec3[]
+    fl = math.sub(toe_at[0], tail_at[human.BONE_CALF_L])
+    fr = math.sub(toe_at[1], tail_at[human.BONE_CALF_R])
+    forward = math.normalize(math.vec3(fl.x + fr.x, 0.0, fl.z + fr.z))
+    side = math.cross(math.vec3(0.0, 1.0, 0.0), forward)
+    spine = v[human.BONE_SPINE_01]
+    lower = math.length(math.sub(v[human.BONE_SPINE_03], spine))
+    chest_at = math.mul_add(spine, lower, math.rotate_vector(math.make_quat_from_axis_angle(side, 0.1326), math.vec3(0.0, 1.0, 0.0)))
+    upper = math.length(math.sub(v[human.BONE_NECK], v[human.BONE_SPINE_03]))
+    neck_at = math.mul_add(math.mul_add(chest_at, upper, math.rotate_vector(math.make_quat_from_axis_angle(side, 0.0 - 0.157), math.vec3(0.0, 1.0, 0.0))), 0.14, forward)
+    moved = math.sub(neck_at, v[human.BONE_NECK])
+    v[human.BONE_SPINE_03] = chest_at
+    v[human.BONE_NECK] = neck_at
+    tail_at[human.BONE_SPINE_01] = chest_at
+    tail_at[human.BONE_SPINE_03] = neck_at
+    tail_at[human.BONE_NECK] = math.add(tail_at[human.BONE_NECK], moved)
+    arms = [human.BONE_UPPER_ARM_L, human.BONE_UPPER_ARM_R, human.BONE_LOWER_ARM_L, human.BONE_LOWER_ARM_R]
+    k = 0
+    while k < 4 {
+        v[arms[k]] = math.add(v[arms[k]], moved)
+        tail_at[arms[k]] = math.add(tail_at[arms[k]], moved)
+        k = k + 1
+    }
+    return block
+}
+
+// On a rig whose spine and neck sit at other angles than the reference's,
+// each of their cones is centred 10 degrees off the rig's own rest, as the
+// reference's are off its rest (#230): fitted and given the anatomical
+// limits, the frames meet at the rest and the centre is 10 degrees from it.
+// Kept on the parent in the reference's direction, a box man's neck rest
+// lay 39 degrees off its centre and outside its 30-degree cone.
+test_fitted_spine_cones() {
+    reference = human.human_reference_shape()
+    shape = human.human_reference_shape()
+    block = curved_landmarks(reference)
+    human.human_fit_shape(shape, block, block + human.BONE_COUNT * sizeof(Vec3), block + 2 * human.BONE_COUNT * sizeof(Vec3))
+    free(block)
+    human.human_anatomical_limits(shape)
+    bones = [human.BONE_SPINE_01, human.BONE_SPINE_03, human.BONE_NECK]
+    k = 0
+    while k < 3 {
+        i = bones[k]
+        s = human.spec_at(shape, i)
+        rest = math.inv_mul_quat(math.mul_quat(human.spec_at(shape, s.parent).reference.q, s.frame_a.q), math.mul_quat(s.reference.q, s.frame_b.q))
+        z = math.rotate_vector(rest, math.vec3_axis_z())
+        ensure("fitted spine: bone ${i}'s frames meet at the rest", near_vec(z, math.vec3_axis_z(), 0.000000001))
+        off = math.atan2_approx(math.length(math.cross(s.cone_axis, z)), math.dot(s.cone_axis, z)) * math.RAD_TO_DEG
+        ensure("fitted spine: bone ${i}'s rest is 10 degrees from its cone's centre on a curved rig (${off})", math.abs_float(off - 10.0) < 0.05)
+        // The same way as the reference's: the centre and the reference's
+        // read in each joint's own frame at rest agree.
+        r = human.spec_at(reference, i)
+        ensure("fitted spine: bone ${i}'s centre is the reference's in the joint's frame (${math.length(math.sub(s.cone_axis, r.cone_axis))})", near_vec(s.cone_axis, r.cone_axis, 0.000001))
+        k = k + 1
+    }
+    human.destroy_shape(shape)
+    human.destroy_shape(reference)
 }
 main() {
     g_slab = hull.make_box_hull(20.0, 1.0, 20.0) as ptr

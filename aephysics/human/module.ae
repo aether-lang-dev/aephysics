@@ -892,11 +892,13 @@ human_anatomical_limits(shape: ptr) {
     toes = math.add(math.sub(human_shape_toe(shape, BONE_CALF_L), human_shape_tail(shape, BONE_CALF_L)),
                     math.sub(human_shape_toe(shape, BONE_CALF_R), human_shape_tail(shape, BONE_CALF_R)))
     forward = math.normalize(across(toes, up))
+    reference = reference_tight_shape()
     i = 0
     while i < BONE_COUNT {
-        if spec_at(shape, i).parent >= 0 { meet_at_rest(shape, i) }
+        if spec_at(shape, i).parent >= 0 { meet_at_rest(shape, reference, i) }
         i = i + 1
     }
+    destroy_shape(reference)
     aim_cone(shape, BONE_UPPER_ARM_L, up, forward, SHOULDER_CONE, 0.3, 0.0 - 0.4, 0.866)
     aim_cone(shape, BONE_UPPER_ARM_R, up, forward, SHOULDER_CONE, 0.3, 0.0 - 0.4, 0.866)
     aim_twist(shape, BONE_UPPER_ARM_L, up, forward, SHOULDER_INTERNAL_ROTATION, SHOULDER_EXTERNAL_ROTATION)
@@ -940,31 +942,45 @@ human_tight_limits(shape: ptr) {
 }
 
 // A joint's frame on its parent turned onto its frame on the bone as the
-// shape stands, so the two meet at the rest (#202). The cone stays where it
-// was on the parent, as human_fit_shape keeps an off-axis one: turning the
-// frame is a change of where the zero is read from, not of the range (#224).
-// The reference's spine_01, spine_03 and neck frames sit 10 degrees forward
-// of the rest, so their cones of 35, 35 and 30 degrees are centred 10
-// forward of upright: the trunk flexes 90 over the two spine joints and
-// extends 50, as a person's flexes further than it extends (AAOS 1965:
+// shape stands, so the two meet at the rest (#202), and its cone centred
+// off that rest as the reference figure's is off its own (#224, #230). The
+// reference's spine_01, spine_03 and neck frames sit 10 degrees forward of
+// its rest, so their cones of 35, 35 and 30 degrees are centred 10 forward
+// of upright: the trunk flexes 90 over the two spine joints and extends
+// 50, as a person's flexes further than it extends (AAOS 1965:
 // thoracolumbar flexion 80, extension 25), and the neck flexes 40 and
 // extends 20. Turned with the frame onto the rest, the trunk flexed 70 and
-// extended 70, and the neck 30 each way. The turn at these joints is a
-// swing alone (its twist under 0.0001 degrees), so the twist read about the
-// kept centre is the reference's to 2e-6 rad, and the rest reads none. The
-// limbs' cones are aimed afresh after this.
-meet_at_rest(shape: ptr, index: int) {
+// extended 70, and the neck 30 each way.
+//
+// The offset is the reference's: its frame's turn from its rest, in the
+// joint's own frame at rest, taken from `reference` (reference_tight_shape)
+// and put on this shape's rest. A rig whose bones sit at other angles gets
+// its cone 10 degrees forward of its own rest; keeping the reference's
+// centre on the parent instead left a box man's neck 39 degrees off its
+// rest and outside its own cone (ae3d, 2026-11-23). On the reference figure
+// it is the centre it has always had, and meeting a met shape again moves
+// nothing. The turn at these joints is a swing alone (its twist under
+// 0.0001 degrees), so the twist read about the centre is the reference's to
+// 2e-6 rad, and the rest reads none. The limbs' cones are aimed afresh
+// after this.
+meet_at_rest(shape: ptr, reference: ptr, index: int) {
     spec = spec_at(shape, index)
     parent = spec_at(shape, spec.parent)
-    centre = math.rotate_vector(spec.frame_a.q, spec.cone_axis)
+    t = spec_at(reference, index)
+    t_parent = spec_at(reference, t.parent)
+    // The reference's centre and major axis on its parent, read back in its
+    // frame at rest (the same operations as on the reference itself, so its
+    // figure is the same to the bit).
+    reference_rest = math.normalize_quat(math.inv_mul_quat(t_parent.reference.q, math.mul_quat(t.reference.q, t.frame_b.q)))
+    centre = math.rotate_vector(t.frame_a.q, t.cone_axis)
     // An ellipse whose major axis is left zero reaches along frame A's x:
     // kept as that, or it would turn with the frame while its centre stays.
-    stored_major = spec.cone_major_axis
-    if spec.swing_minor_degrees > 0.0 && math.length_squared(stored_major) == 0.0 { stored_major = math.vec3_axis_x() }
-    major = math.rotate_vector(spec.frame_a.q, stored_major)
+    stored_major = t.cone_major_axis
+    if t.swing_minor_degrees > 0.0 && math.length_squared(stored_major) == 0.0 { stored_major = math.vec3_axis_x() }
+    major = math.rotate_vector(t.frame_a.q, stored_major)
     spec.frame_a.q = math.normalize_quat(math.inv_mul_quat(parent.reference.q, math.mul_quat(spec.reference.q, spec.frame_b.q)))
-    spec.cone_axis = math.inv_rotate_vector(spec.frame_a.q, centre)
-    spec.cone_major_axis = math.inv_rotate_vector(spec.frame_a.q, major)
+    spec.cone_axis = math.inv_rotate_vector(reference_rest, centre)
+    spec.cone_major_axis = math.inv_rotate_vector(reference_rest, major)
 }
 
 // A limb's twist range, `inward` and `outward` degrees about itself from
