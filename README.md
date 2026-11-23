@@ -54,7 +54,7 @@ Install Aether with the version-pinned installer (it puts `ae` and `aeb` in
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/aether-lang-dev/aeb/main/get.sh \
-  | AE_PIN=0.933.0 AEB_REF=v0.347 sh
+  | AE_PIN=0.939.0 AEB_REF=v0.347 sh
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
