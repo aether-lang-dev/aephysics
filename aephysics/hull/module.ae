@@ -31,7 +31,7 @@ exports (
     hull_vertices, hull_points, hull_edges, hull_planes, hull_faces,
     HULL_SOA_PADDING, hull_soa_stride, hull_soa_vertices, hull_soa_normals, hull_edge_cosines,
     hull_edge_words, edge_word, edge_word_face0, edge_word_face1, edge_word_origin0, edge_word_origin1,
-    hull_soa_plane_offsets,
+    hull_soa_plane_offsets, hull_half_edge_words, half_edge_word, half_edge_next, half_edge_twin, half_edge_origin, half_edge_face,
     create_hull, destroy_hull, clone_hull, clone_and_transform_hull, is_valid_hull, hull_bytes_valid,
     hash_hull_data, compare_hull_data,
     create_cylinder, create_cone, create_rock, create_complex_hull,
@@ -102,6 +102,7 @@ struct HullData {
     edge_cosine_offset: int    // f32 per full edge: the cosine between its two faces' normals, hull_soa_stride(edge_count / 2) long, padded with zeros
     edge_word_offset: int      // int per full edge 2i, 2i + 1: face of 2i, face of 2i + 1, origin of 2i, origin of 2i + 1, a byte each from the low end
     soa_plane_offset: int      // f32 row of the face planes' offsets, hull_soa_stride(face_count) long, padded with zeros
+    half_edge_word_offset: int // int per half-edge: next, twin, origin, face, a byte each from the low end (the reference's b3HullHalfEdge)
     byte_count: int
 }
 
@@ -153,6 +154,18 @@ edge_word_face0(w: int) -> int { return w & 255 }
 edge_word_face1(w: int) -> int { return (w >> 8) & 255 }
 edge_word_origin0(w: int) -> int { return (w >> 16) & 255 }
 edge_word_origin1(w: int) -> int { return (w >> 24) & 255 }
+
+// A half-edge in four bytes, as the reference keeps them (b3HullHalfEdge's
+// uint8 next, twin, origin, face): what the face contacts walk a face's
+// ring and a vertex's fan by, one load a step where a HalfEdge is sixteen.
+// A hull has at most 256 half-edges and 128 faces, so a byte holds each
+// index and the word is never negative.
+hull_half_edge_words(h: *HullData) -> int[] { return ((h as ptr) + h.half_edge_word_offset) as int[] }
+half_edge_word(e: HalfEdge) -> int { return e.next | (e.twin << 8) | (e.origin << 16) | (e.face << 24) }
+half_edge_next(w: int) -> int { return w & 255 }
+half_edge_twin(w: int) -> int { return (w >> 8) & 255 }
+half_edge_origin(w: int) -> int { return (w >> 16) & 255 }
+half_edge_face(w: int) -> int { return (w >> 24) & 255 }
 
 // The planes' offsets narrowed, as a row the width of the normals' rows:
 // a face's plane separation is dot(normal, p) - offset eight faces a pass.
@@ -1485,6 +1498,12 @@ refresh_hull_soa(h: *HullData) {
         offsets[i] = offset
         i = i + 1
     }
+    half_edges = hull_half_edge_words(h)
+    i = 0
+    while i < h.edge_count {
+        half_edges[i] = half_edge_word(edges[i])
+        i = i + 1
+    }
     cosines = hull_edge_cosines(h)
     words = hull_edge_words(h)
     full_edges = h.edge_count / 2
@@ -1534,6 +1553,7 @@ hull_bytes_valid(h: *HullData, available: int) -> bool {
     if basics.section_fits(h.edge_cosine_offset, hull_soa_stride(h.edge_count / 2), 4, n) == false { return false }
     if basics.section_fits(h.edge_word_offset, h.edge_count / 2, 4, n) == false { return false }
     if basics.section_fits(h.soa_plane_offset, hull_soa_stride(h.face_count), 4, n) == false { return false }
+    if basics.section_fits(h.half_edge_word_offset, h.edge_count, 4, n) == false { return false }
     vertices = hull_vertices(h)
     edges = hull_edges(h)
     faces = hull_faces(h)
@@ -1557,6 +1577,12 @@ hull_bytes_valid(h: *HullData, available: int) -> bool {
         e0 = edges[2 * i]
         e1 = edges[2 * i + 1]
         if words[i] != edge_word(e0.face, e1.face, e0.origin, e1.origin) { return false }
+        i = i + 1
+    }
+    half_edges = hull_half_edge_words(h)
+    i = 0
+    while i < h.edge_count {
+        if half_edges[i] != half_edge_word(edges[i]) { return false }
         i = i + 1
     }
     i = 0
@@ -1590,6 +1616,8 @@ allocate_hull(vertex_count: int, edge_count: int, face_count: int) -> *HullData 
     byte_count = byte_count + align8((edge_count / 2) * 4)
     soa_plane_offset = byte_count
     byte_count = byte_count + align8(hull_soa_stride(face_count) * 4)
+    half_edge_word_offset = byte_count
+    byte_count = byte_count + align8(edge_count * 4)
     h = basics.alloc(byte_count) as *HullData
     h.version = HULL_VERSION
     h.vertex_offset = vertex_offset
@@ -1602,6 +1630,7 @@ allocate_hull(vertex_count: int, edge_count: int, face_count: int) -> *HullData 
     h.edge_cosine_offset = edge_cosine_offset
     h.edge_word_offset = edge_word_offset
     h.soa_plane_offset = soa_plane_offset
+    h.half_edge_word_offset = half_edge_word_offset
     h.vertex_count = vertex_count
     h.edge_count = edge_count
     h.face_count = face_count

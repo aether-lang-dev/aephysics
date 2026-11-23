@@ -790,6 +790,20 @@ rows_agree(name: string, h: *HullData) {
         i = i + 1
     }
     ensure("${name}: the cosine row is zero past the edges", wrong == 0)
+    half_edges = hull.half_edge_words(h)
+    i = 0
+    wrong = 0
+    while i < h.edge_count {
+        w = half_edges[i]
+        e = edges[i]
+        if hull.half_edge_next(w) != e.next || hull.half_edge_twin(w) != e.twin || hull.half_edge_origin(w) != e.origin || hull.half_edge_face(w) != e.face { wrong = wrong + 1 }
+        i = i + 1
+    }
+    ensure("${name}: every half-edge word is its half-edge (${wrong} wrong)", wrong == 0)
+    saved_half = half_edges[0]
+    half_edges[0] = saved_half ^ 1
+    ensure("${name}: a half-edge word with its next changed is refused as bytes", hull.bytes_valid(h, h.byte_count) == false)
+    half_edges[0] = saved_half
     ensure("${name}: valid as bytes", hull.bytes_valid(h, h.byte_count))
     saved = words[full_edges - 1]
     words[full_edges - 1] = hull.edge_word(hull.edge_word_face1(saved), hull.edge_word_face0(saved), hull.edge_word_origin0(saved), hull.edge_word_origin1(saved))

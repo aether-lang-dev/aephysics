@@ -997,10 +997,11 @@ main() {
     test_rounded_pairs()
     // The modules' scratch stays allocated: each worker's speculative
     // distance, the two clip polygons, the unreduced points, the edge
-    // contact's point, the near vertices' prefilter masks, and the separating
+    // contact's point, the near vertices' prefilter masks, the face
+    // contact's side planes, and the separating
     // axis test's arrays (of the copy the SIMD width runs; nothing here
     // reserves the other).
-    ensure("every other counted allocation was freed (${basics.alloc_count() - before})", basics.alloc_count() == before + 7)
+    ensure("every other counted allocation was freed (${basics.alloc_count() - before})", basics.alloc_count() == before + 8)
 
     println("manifold: ${checks} checks")
     if failures == 0 {
