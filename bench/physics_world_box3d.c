@@ -115,7 +115,7 @@ static void run( const char* name, b3WorldId worldId, int steps )
 	}
 	double t1 = now_ms();
 	b3Counters counters = b3World_GetCounters( worldId );
-	printf( "box3d physics_world: %s: %d steps of %d bodies %.1f ms, %.3f ms per step (height sum %.3f, %d contacts, %d joints)\n", name,
+	printf( "box3d physics_world: %s: %d steps of %d bodies %.3f ms, %.6f ms per step (height sum %.3f, %d contacts, %d joints)\n", name,
 			steps, counters.bodyCount, t1 - t0, ( t1 - t0 ) / steps, heightSum( worldId, g_ids, g_idCount ), counters.contactCount,
 			counters.jointCount );
 	print_profile( name, sum, steps );

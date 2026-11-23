@@ -213,7 +213,7 @@ const JOINT_SPHERICAL = 6
 const JOINT_WELD = 7
 const JOINT_WHEEL = 8
 const TIME_TO_SLEEP = 0.5
-const JOINT_DATA_BYTES = 704   // JointSim.data: room for the largest kind's data (the spherical joint's 704)
+const JOINT_DATA_BYTES = 744   // JointSim.data: room for the largest kind's data (the spherical joint's 744)
 // The shape kinds (the shape module's, restated).
 const KIND_SPHERE = 0
 const KIND_CAPSULE = 1
@@ -1078,6 +1078,13 @@ struct SphericalJoint {
     twist_limit_hertz: float
     twist_limit_damping_ratio: float
     twist_limit_softness: Softness // made each prepare, as the joint's limit_softness
+    // The point's anchors (frame A's and B's origins, world rotation,
+    // relative to the centres of mass) and the centres' offset, single
+    // precision as the reference keeps them: a plain ball joint's point
+    // is solved in single precision from these (spherical_point_f).
+    anchor_a: Vec3f
+    anchor_b: Vec3f
+    delta_center_f: Vec3f
 }
 
 struct WeldJoint {
@@ -1155,7 +1162,7 @@ struct JointSim {
     limit_softness: Softness       // the limits' rows': their own (#226) or the constraint softness, sized to the joint's load (#213)
     force_threshold: float         // the solve's joint event test
     torque_threshold: float
-    data: long[88]                 // JOINT_DATA_BYTES
+    data: long[93]                 // JOINT_DATA_BYTES
     joint_id: int
     body_id_a: int
     body_id_b: int
