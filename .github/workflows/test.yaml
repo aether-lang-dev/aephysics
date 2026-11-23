@@ -7,8 +7,10 @@ on:
       - main
   pull_request:
 
-# Pin: 0.937.0, the latest release, and aeb v0.347, the one ae3d builds
-# beside. 0.937.0 brings returned views tracked by their mark
+# Pin: 0.938.0, the latest release, and aeb v0.347, the one ae3d builds
+# beside. 0.938.0 is a tracking bump (aether#3821's discarded
+# slice-returning calls clean under clang -Wunused-value, #3818's
+# correctly rounded float parsing on mingw-w64). 0.937.0 brought returned views tracked by their mark
 # (aether#3787) and the GCC inlining budget on optimising builds
 # (aether#3779), for which aether.toml dropped its own; every module,
 # test, benchmark and example checks clean on it, the golden trace bit
@@ -23,7 +25,7 @@ on:
 # bootstrap version: the floor this code needs, verified by every job
 # below.
 env:
-  AE_PIN: 0.937.0
+  AE_PIN: 0.938.0
   AEB_REF: v0.347
 
 jobs:
