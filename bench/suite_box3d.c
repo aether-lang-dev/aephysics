@@ -91,7 +91,7 @@ static void Run( const Scene* scene )
 
 	double timed = scene->steps - 1;
 	b3Counters counters = b3World_GetCounters( worldId );
-	printf( "box3d suite: %s: %d steps of %d bodies %.1f ms, %.3f ms per step (height sum %.3f, %d contacts, %d joints, %d awake)\n",
+	printf( "box3d suite: %s: %d steps of %d bodies %.3f ms, %.6f ms per step (height sum %.3f, %d contacts, %d joints, %d awake)\n",
 			scene->name, scene->steps, counters.bodyCount, t1 - t0, ( t1 - t0 ) / timed, HeightSum( worldId ), counters.contactCount,
 			counters.jointCount, b3World_GetAwakeBodyCount( worldId ) );
 	printf( "box3d phases ms/step: pairs %.6f collide %.6f\n", pairs / timed, collide / timed );
