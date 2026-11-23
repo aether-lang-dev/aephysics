@@ -552,28 +552,32 @@ struct BodySim {
 // A shape in the world: its geometry (the shape module's Shape, with
 // its density) and its place among its body's shapes and in the broad phase.
 // Its fat box, the bounds the broad phase holds, is kept apart in the
-// world's fat_aabbs (the collide pass reads only that of a shape); what
-// finalize reads to refit it comes first, the geometry and the rest after.
+// world's fat_aabbs (the collide pass reads only that of a shape). What the
+// collide pass reads of both shapes of every contact it remakes comes
+// first, in the first 96 bytes: the flags, the material it mixes, and the
+// geometry's kind and pointers (collide_range fetches them four contacts
+// ahead). Finalize's refit, once a shape a step where the narrow phase is
+// twice a contact, reads the box and the rest after.
 struct WorldShape {
     id: int                        // NULL_INDEX when the slot is free
     body_id: int
+    flags: int
+    material_count: int
+    material: SurfaceMaterial      // the one material when materials is null
+    geometry: Shape
     aabb: AABB
     aabb_margin: float
     proxy_key: int
     prev_shape_id: int
     next_shape_id: int
     sensor_index: int
-    geometry: Shape
     explosion_scale: float
     local_centroid: Vec3
-    material_count: int
-    material: SurfaceMaterial      // the one material when materials is null
     materials: ptr                 // SurfaceMaterial[] when there are several
     filter: Filter
     user_data: ptr
     user_shape: ptr                // the host's drawable (create_debug_shape's), or null
     generation: int
-    flags: int
     name_id: int                   // the name's id in the world's name cache, or NULL_NAME
 }
 
@@ -6414,6 +6418,27 @@ prefetch_sim(w: *World, encoded: int) {
     else if encoded < NULL_INDEX { native.prefetch(body_sim_at(solver_set_at(w, STATIC_SET), 0 - encoded - 2) as ptr) }
 }
 
+// Every cache line of a contact (256 bytes, four lines, its buffer on a
+// line): the pass reads the first three and a hull against a sphere or a
+// capsule the fourth (the reference's b3PrefetchContact).
+prefetch_contact(c: *Contact) {
+    p = c as ptr
+    native.prefetch(p)
+    native.prefetch(p + 64)
+    native.prefetch(p + 128)
+    native.prefetch(p + 192)
+}
+
+// The first 96 bytes of a shape, what the narrow phase reads (flags,
+// material, the geometry's kind and pointers): three lines at most, the
+// shapes' 400-byte slots not being on lines of their own.
+prefetch_shape(s: *WorldShape) {
+    p = s as ptr
+    native.prefetch(p)
+    native.prefetch(p + 64)
+    native.prefetch(p + 95)
+}
+
 collide_range(start: int, end: int, worker: int, context: ptr) {
     task = context as *CollideTask
     indices = task.indices as int[]
@@ -6426,12 +6451,14 @@ collide_range(start: int, end: int, worker: int, context: ptr) {
         // Further in, what a contact leads to: its bodies' sims four ahead,
         // the contact fetched by then (the fat boxes are dense, and the
         // shapes are read only when the manifolds are made again).
-        if i + 8 < end { native.prefetch(contact_at(w, indices[i + 8]) as ptr) }
+        if i + 8 < end { prefetch_contact(contact_at(w, indices[i + 8])) }
         if i + 4 < end {
             ahead = contact_at(w, indices[i + 4])
             native.prefetch(ahead.manifolds)
             prefetch_sim(w, ahead.encoded_body_sim_a)
             prefetch_sim(w, ahead.encoded_body_sim_b)
+            prefetch_shape(world_shape_at(w, ahead.shape_id_a))
+            prefetch_shape(world_shape_at(w, ahead.shape_id_b))
         }
         collide_contact(w, indices[i])
         i = i + 1
