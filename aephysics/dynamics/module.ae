@@ -528,16 +528,18 @@ struct BodyState {
 // else is a body's own scale or a rate, single precision as the
 // reference keeps it. What the recycling and the constraint prepares read
 // first comes first: the pose, the centre, the flags and extents, the
-// masses (the first three cache lines).
+// masses (the first three cache lines). The collide pass reads the pose,
+// the flags and the local centre of both bodies of every contact: they
+// are the first 72 bytes, two lines at most (prefetch_sim fetches both).
 struct BodySim {
     transform: Transform           // of the body's origin
-    center: Vec3                   // of mass, in world space
     flags: int
+    local_center: Vec3f
+    center: Vec3                   // of mass, in world space
     min_extent: f32
     max_extent: Vec3f
     inv_mass: f32
     inv_inertia_world: Matrix3f
-    local_center: Vec3f
     rotation0: Quatf               // for the time of impact
     center0: Vec3
     force: Vec3f
@@ -6411,11 +6413,16 @@ struct CollideTask {
     indices: ptr                   // int[], the contacts of the pass
 }
 
-// An awake or static body's sim, by a contact's encoding: its transform
-// and centre lead it.
+// An awake or static body's sim, by a contact's encoding: the first 72
+// bytes, its transform, flags and local centre, what the collide pass reads.
 prefetch_sim(w: *World, encoded: int) {
-    if encoded >= 0 { native.prefetch(body_sim_at(solver_set_at(w, AWAKE_SET), encoded) as ptr) }
-    else if encoded < NULL_INDEX { native.prefetch(body_sim_at(solver_set_at(w, STATIC_SET), 0 - encoded - 2) as ptr) }
+    sim = null
+    if encoded >= 0 { sim = body_sim_at(solver_set_at(w, AWAKE_SET), encoded) as ptr }
+    else if encoded < NULL_INDEX { sim = body_sim_at(solver_set_at(w, STATIC_SET), 0 - encoded - 2) as ptr }
+    if sim != null {
+        native.prefetch(sim)
+        native.prefetch(sim + 71)
+    }
 }
 
 // Every cache line of a contact (256 bytes, four lines, its buffer on a
@@ -6459,6 +6466,9 @@ collide_range(start: int, end: int, worker: int, context: ptr) {
             prefetch_sim(w, ahead.encoded_body_sim_b)
             prefetch_shape(world_shape_at(w, ahead.shape_id_a))
             prefetch_shape(world_shape_at(w, ahead.shape_id_b))
+            boxes = w.fat_aabbs.data
+            native.prefetch(boxes + ahead.shape_id_a * sizeof(AABBf))
+            native.prefetch(boxes + ahead.shape_id_b * sizeof(AABBf))
         }
         collide_contact(w, indices[i])
         i = i + 1
