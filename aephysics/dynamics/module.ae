@@ -56,7 +56,7 @@ import aephysics.broad_phase
 import aephysics.mesh_contact
 
 exports (
-    reserve_scratch, mesh_cache_of, convex_cache_of, CONTACT_CACHE_WORDS,
+    reserve_scratch, mesh_cache_of, convex_cache_of, ConvexCache, CONTACT_CACHE_WORDS,
     WorldDef, BodyDef, ShapeDef, MotionLocks, WorldId, BodyId, ShapeId,
     World, Body, BodySim, BodyState, WorldShape, Contact, ContactEdge, Joint, JointEdge,
     SolverSet, Island, IslandSim, ContactLink, JointLink,
@@ -623,14 +623,26 @@ struct Contact {
     // A mesh contact's triangles or a convex contact's simplex or axis, in
     // the same bytes (the reference's union): mesh_cache_of and
     // convex_cache_of, by SIM_MESH_CONTACT. CONTACT_CACHE_WORDS words cover
-    // the larger, a TriangleCache (80 bytes).
+    // the larger. A convex contact's axis comes first: its 24 bytes end on
+    // the contact's third cache line, which the collide pass reads for the
+    // friction and the tangent velocity, so the hull pair's cached axis
+    // costs no line of its own (it sat on the fourth before).
     caches: long[10]
     generation: int
 }
 
 const CONTACT_CACHE_WORDS = 10
+
+// A convex contact's warm start: the hull pair's last axis, or the
+// simplex of a hull against a sphere or a capsule (the reference's
+// b3ContactCache union keeps one or the other in the same bytes).
+struct ConvexCache {
+    sat_cache: SATCache
+    simplex_cache: SimplexCache
+}
+
 mesh_cache_of(c: *Contact) -> *MeshContactCache { return (&c.caches) as *MeshContactCache }
-convex_cache_of(c: *Contact) -> *TriangleCache { return (&c.caches) as *TriangleCache }
+convex_cache_of(c: *Contact) -> *ConvexCache { return (&c.caches) as *ConvexCache }
 
 // A contact point the solver works on: anchors relative to the bodies'
 // centres of mass in world space, the separation, the impulses. Single
@@ -4962,8 +4974,8 @@ create_contact(w: *World, shape_a: *WorldShape, shape_b: *WorldShape, child_inde
         mesh_caches = (&c.caches) as MeshContactCache[]
         mesh_caches[0] = mesh_contact.cache_create()
     } else {
-        convex_caches = (&c.caches) as TriangleCache[]
-        convex_caches[0] = TriangleCache { triangle_index: NULL_INDEX, simplex_cache: distance.empty_cache(), sat_cache: manifold.empty_sat_cache() }
+        convex_caches = (&c.caches) as ConvexCache[]
+        convex_caches[0] = ConvexCache { sat_cache: manifold.empty_sat_cache(), simplex_cache: distance.empty_cache() }
     }
     // Into body A's list.
     c.edge_a = ContactEdge { body_id: shape_a.body_id, prev_key: NULL_INDEX, next_key: body_a.head_contact_key }
