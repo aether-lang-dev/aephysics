@@ -7,10 +7,12 @@ on:
       - main
   pull_request:
 
-# Pin: 0.939.0, the latest release, and aeb v0.347, the one ae3d builds
-# beside. 0.939.0 is a tracking bump again, no source change (it removes
-# std.http.client's process-wide pool; nothing here makes HTTP requests);
-# 0.938.0 was a tracking bump (aether#3821's discarded
+# Pin: 0.940.0, the latest release, and aeb v0.347, the one ae3d builds
+# beside. 0.940.0 brings lane min/max as minps/maxps (aether#3815) and
+# --param relation-block-limit=0 on every GCC compile (aether#3848),
+# neither changing a bit of ours. 0.939.0 was a tracking bump, no source
+# change (it removes std.http.client's process-wide pool; nothing here
+# makes HTTP requests); 0.938.0 was a tracking bump (aether#3821's discarded
 # slice-returning calls clean under clang -Wunused-value, #3818's
 # correctly rounded float parsing on mingw-w64). 0.937.0 brought returned views tracked by their mark
 # (aether#3787) and the GCC inlining budget on optimising builds
@@ -27,7 +29,7 @@ on:
 # bootstrap version: the floor this code needs, verified by every job
 # below.
 env:
-  AE_PIN: 0.939.0
+  AE_PIN: 0.940.0
   AEB_REF: v0.347
 
 jobs:
