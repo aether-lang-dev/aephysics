@@ -236,17 +236,22 @@ integrate_positions(ctx: *StepContext) {
     integrate_positions_range(ctx, 0, awake.body_states.count)
 }
 
+// The velocities, the change of position and the change of rotation are
+// stored in single precision, and are advanced in it, as the reference
+// advances them (b3IntegratePositionsTask): the speeds clamped, then the
+// sub-step's motion added. Widened to double and back, the same sums cost
+// six conversions a vector and a double square root a body.
 integrate_positions_range(ctx: *StepContext, start: int, end: int) {
-    h = ctx.h
-    max_linear_speed = ctx.max_linear_velocity
-    max_angular_speed = MAX_ROTATION * ctx.inv_dt
+    h = ctx.h as f32
+    max_linear_speed = ctx.max_linear_velocity as f32
+    max_angular_speed = (MAX_ROTATION * ctx.inv_dt) as f32
     max_linear_squared = max_linear_speed * max_linear_speed
     max_angular_squared = max_angular_speed * max_angular_speed
     i = start
     while i < end {
         state = state_at(ctx.states, i)
-        v = math.widen3(state.v)
-        wv = math.widen3(state.w)
+        v = state.v
+        wv = state.w
         flags = state.flags
         if (flags & dynamics.LOCK_LINEAR_X) != 0 { v.x = 0.0 }
         if (flags & dynamics.LOCK_LINEAR_Y) != 0 { v.y = 0.0 }
@@ -254,20 +259,31 @@ integrate_positions_range(ctx: *StepContext, start: int, end: int) {
         if (flags & dynamics.LOCK_ANGULAR_X) != 0 { wv.x = 0.0 }
         if (flags & dynamics.LOCK_ANGULAR_Y) != 0 { wv.y = 0.0 }
         if (flags & dynamics.LOCK_ANGULAR_Z) != 0 { wv.z = 0.0 }
-        if math.dot(v, v) > max_linear_squared {
-            v = math.mul_sv(max_linear_speed / math.length(v), v)
+        if math.dotf(v, v) > max_linear_squared {
+            v = math.mul_svf(max_linear_speed / math.lengthf(v), v)
             state.flags = state.flags | dynamics.IS_SPEED_CAPPED
         }
-        if math.dot(wv, wv) > max_angular_squared && (flags & dynamics.ALLOW_FAST_ROTATION) == 0 {
-            wv = math.mul_sv(max_angular_speed / math.length(wv), wv)
+        if math.dotf(wv, wv) > max_angular_squared && (flags & dynamics.ALLOW_FAST_ROTATION) == 0 {
+            wv = math.mul_svf(max_angular_speed / math.lengthf(wv), wv)
             state.flags = state.flags | dynamics.IS_SPEED_CAPPED
         }
-        state.v = math.narrow3(v)
-        state.w = math.narrow3(wv)
-        state.dp = math.narrow3(math.mul_add(math.widen3(state.dp), h, v))
-        state.dq = math.narrow_quat(math.integrate_rotation(math.widen_quat(state.dq), math.mul_sv(h, wv)))
+        state.v = v
+        state.w = wv
+        state.dp = math.mul_addf(state.dp, h, v)
+        state.dq = integrate_rotationf(state.dq, math.mul_svf(h, wv))
         i = i + 1
     }
+}
+
+// b3IntegrateRotation in single precision, its sums in its order: the
+// derivative (0.5 * delta, 0) * q, added to q, renormalised.
+integrate_rotationf(q: Quatf, delta_rotation: Vec3f) -> Quatf {
+    half = math.mul_svf(0.5, delta_rotation)
+    qv = Vec3f { x: q.x, y: q.y, z: q.z }
+    // b3MulQuat(qd, q) with qd's scalar part zero.
+    t = math.mul_addf(math.mul_addf(math.crossf(half, qv), 0.0, qv), q.w, half)
+    qd_w = 0.0 * q.w - math.dotf(half, qv)
+    return math.normalize_quatf(Quatf { x: q.x + t.x, y: q.y + t.y, z: q.z + t.z, w: qd_w + q.w })
 }
 
 // --- continuous collision ------------------------------------------------------------------------------------
@@ -508,23 +524,30 @@ finalize_range(start: int, end: int, worker: int, context: ptr) {
     enable_sleep = w.enable_sleep
     enable_continuous = w.enable_continuous
     time_step = ctx.dt
-    inv_time_step = ctx.inv_dt
+    inv_time_step_f = ctx.inv_dt as f32
     bullets = ctx.bullet_bodies as int[]
     sim_index = start
     while sim_index < end {
         state = state_at(ctx.states, sim_index)
         sim = sim_at(ctx.sims, sim_index)
-        v = math.widen3(state.v)
-        wv = math.widen3(state.w)
-        local_omega = math.inv_rotate_vector(sim.transform.q, wv)
-        local_delta_rotation = math.inv_rotate_vector(sim.transform.q, math.qv(math.widen_quat(state.dq)))
+        // The sleep velocity is the reference's single precision estimate
+        // (the rates, the extents and the step's motion are all float),
+        // under the rotation as it was before this step, rounded to float.
+        // The pose itself moves in double.
+        vf = state.v
+        wf = state.w
+        start_q = math.narrow_quat(sim.transform.q)
+        local_omega = math.inv_rotate_vectorf(start_q, wf)
+        local_delta_rotation = math.inv_rotate_vectorf(start_q, Vec3f { x: state.dq.x, y: state.dq.y, z: state.dq.z })
         sim.center = math.add(sim.center, math.widen3(state.dp))
         sim.transform.q = math.normalize_quat(math.mul_quat(math.widen_quat(state.dq), sim.transform.q))
-        velocity_arc = math.modified_cross(math.abs_vec3(local_omega), math.widen3(sim.max_extent))
-        max_velocity = math.length(v) + math.length(velocity_arc)
-        rotation_arc = math.modified_cross(math.abs_vec3(local_delta_rotation), math.widen3(sim.max_extent))
-        max_delta_position = math.length(math.widen3(state.dp)) + 2.0 * math.length(rotation_arc)
-        sleep_velocity = math.max_float(max_velocity, 0.5 * inv_time_step * max_delta_position)
+        velocity_arc = math.modified_crossf(math.abs_vec3f(local_omega), sim.max_extent)
+        max_velocity_f = math.lengthf(vf) + math.lengthf(velocity_arc)
+        rotation_arc = math.modified_crossf(math.abs_vec3f(local_delta_rotation), sim.max_extent)
+        max_delta_position_f = math.lengthf(state.dp) + 2.0 * math.lengthf(rotation_arc)
+        max_velocity = max_velocity_f as float
+        max_delta_position = max_delta_position_f as float
+        sleep_velocity = math.max_f32(max_velocity_f, 0.5 * inv_time_step_f * max_delta_position_f) as float
         state.dp = math.vec3f_zero()
         state.dq = math.quatf_identity()
         sim.transform.p = math.sub(sim.center, math.rotate_vector(sim.transform.q, math.widen3(sim.local_center)))
@@ -562,8 +585,7 @@ finalize_range(start: int, end: int, worker: int, context: ptr) {
             sim.rotation0 = math.narrow_quat(sim.transform.q)
             body.sleep_time = body.sleep_time + time_step
         }
-        rotation = math.make_matrix_from_quat(sim.transform.q)
-        sim.inv_inertia_world = math.narrow_mat3(math.mul_mm(math.mul_mm(rotation, math.widen_mat3(sim.inv_inertia_local)), math.transpose(rotation)))
+        sim.inv_inertia_world = math.rotate_inertiaf(math.narrow_quat(sim.transform.q), sim.inv_inertia_local)
         island = dynamics.island_at(w, body.island_id)
         if body.sleep_time < dynamics.TIME_TO_SLEEP {
             basics.bitset_set(&tc.awake_island_bits, island.local_index)
@@ -584,8 +606,13 @@ finalize_range(start: int, end: int, worker: int, context: ptr) {
             // when every contact does (enable_travel_speculation, #173); its
             // shapes' own bounds stay where they are.
             sweeps = ((w.enable_kinematic_speculation && body.kind == dynamics.BODY_KINEMATIC) || w.enable_travel_speculation) && time_step > 0.0
-            travel = math.mul_sv(time_step, v)
-            turn = time_step * math.length(wv) * math.length(math.widen3(sim.max_extent))
+            // The sweep's reach, worked out only for a body that sweeps.
+            travel = math.vec3_zero()
+            turn = 0.0
+            if sweeps {
+                travel = math.mul_sv(time_step, math.widen3(vf))
+                turn = time_step * math.length(math.widen3(wf)) * math.length(math.widen3(sim.max_extent))
+            }
             while shape_id != NULL_INDEX {
                 s = dynamics.world_shape_at(w, shape_id)
                 s.aabb = shape.compute_fat_shape_aabb(&s.geometry, t, dynamics.SPECULATIVE_DISTANCE)

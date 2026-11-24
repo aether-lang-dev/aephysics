@@ -4056,8 +4056,7 @@ update_body_mass_data(w: *World, body: *Body) {
     determinant = math.det(body.inertia)
     if determinant > 0.0 {
         sim.inv_inertia_local = math.narrow_mat3(math.invert_t(body.inertia))
-        rotation = math.make_matrix_from_quat(sim.transform.q)
-        sim.inv_inertia_world = math.narrow_mat3(math.mul_mm(math.mul_mm(rotation, math.widen_mat3(sim.inv_inertia_local)), math.transpose(rotation)))
+        sim.inv_inertia_world = math.rotate_inertiaf(math.narrow_quat(sim.transform.q), sim.inv_inertia_local)
     }
     // The centre of mass moves: the velocity follows the new material point.
     old_center = sim.center
@@ -4112,8 +4111,7 @@ body_set_transform(id: BodyId, position: Vec3, rotation: Quat) {
     sim.center = math.transform_point(sim.transform, math.widen3(sim.local_center))
     sim.rotation0 = math.narrow_quat(rotation)
     sim.center0 = sim.center
-    r = math.make_matrix_from_quat(rotation)
-    sim.inv_inertia_world = math.narrow_mat3(math.mul_mm(math.mul_mm(r, math.widen_mat3(sim.inv_inertia_local)), math.transpose(r)))
+    sim.inv_inertia_world = math.rotate_inertiaf(sim.rotation0, sim.inv_inertia_local)
     shape_id = body.head_shape_id
     while shape_id != NULL_INDEX {
         s = world_shape_at(w, shape_id)
@@ -4424,8 +4422,7 @@ body_set_mass_data(id: BodyId, mass_data: MassData) {
     determinant = math.det(body.inertia)
     if determinant > 0.0 {
         sim.inv_inertia_local = math.narrow_mat3(math.invert_t(body.inertia))
-        r = math.make_matrix_from_quat(sim.transform.q)
-        sim.inv_inertia_world = math.narrow_mat3(math.mul_mm(math.mul_mm(r, math.widen_mat3(sim.inv_inertia_local)), math.transpose(r)))
+        sim.inv_inertia_world = math.rotate_inertiaf(math.narrow_quat(sim.transform.q), sim.inv_inertia_local)
     } else {
         sim.inv_inertia_local = math.narrow_mat3(math.mat3_zero())
         sim.inv_inertia_world = math.narrow_mat3(math.mat3_zero())
