@@ -7,8 +7,11 @@ on:
       - main
   pull_request:
 
-# Pin: 0.940.0, the latest release, and aeb v0.347, the one ae3d builds
-# beside. 0.940.0 brings lane min/max as minps/maxps (aether#3815) and
+# Pin: 0.941.0, the latest release, and aeb v0.347, the one ae3d builds
+# beside. 0.941.0 was a tracking bump, no source change (actor message
+# batching and the account trip under a parent account, #3857 and #3858;
+# nothing here sends actor messages or sets a memory account). 0.940.0
+# brings lane min/max as minps/maxps (aether#3815) and
 # --param relation-block-limit=0 on every GCC compile (aether#3848),
 # neither changing a bit of ours. 0.939.0 was a tracking bump, no source
 # change (it removes std.http.client's process-wide pool; nothing here
@@ -29,7 +32,7 @@ on:
 # bootstrap version: the floor this code needs, verified by every job
 # below.
 env:
-  AE_PIN: 0.940.0
+  AE_PIN: 0.941.0
   AEB_REF: v0.347
 
 jobs:
