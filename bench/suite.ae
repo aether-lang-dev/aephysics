@@ -25,6 +25,7 @@ import aephysics.distance
 import aephysics.dynamics
 import aephysics.joint_solver
 import aephysics.physics_world
+import aephysics.solver
 
 extern calloc(count: int, size: int) -> ptr
 extern free(p: ptr)
@@ -123,6 +124,10 @@ run_steps(steps: int) -> int {
 
 run(name: string, world_id: WorldId, scene_steps: int, scene: int) {
     steps = run_steps(scene_steps)
+    // AEPHYSICS_BENCH_NO_SLEEP=1: no body sleeps, so a long profile of a
+    // scene with few moving bodies keeps sampling their steps.
+    no_sleep = os.getenv("AEPHYSICS_BENCH_NO_SLEEP")
+    if no_sleep != null && string.equals(no_sleep, "1") == 1 { physics_world.enable_sleeping(world_id, false) }
     scene_step(scene, world_id, 0)
     physics_world.step(world_id, TIME_STEP, SUB_STEPS)
     pairs_ms = 0.0
@@ -154,6 +159,9 @@ run(name: string, world_id: WorldId, scene_steps: int, scene: int) {
     println("aephysics suite: ${name}: ${steps} steps of ${counters.body_count} bodies ${ms(t1 - t0)} ms, ${ms(t1 - t0) / timed} ms per step (height sum ${height_sum(world_id)}, ${counters.contact_count} contacts, ${counters.joint_count} joints, ${awake} awake)")
     println("aephysics phases ms/step: pairs ${pairs_ms / timed} collide ${collide_ms / timed}")
     println("aephysics stages ms/step: solve ${solve_ms / timed} transforms ${transforms_ms / timed} refit ${refit_ms / timed} sleep ${sleep_ms / timed} sensors ${sensors_ms / timed}")
+    // The solve's own stages under AEPHYSICS_STAGES=1, beside the
+    // reference's (bench/suite_box3d.c prints the same columns).
+    solver.stage_report()
     spinner_joint = g_spinner as JointId[]
     if spinner_joint[0].index1 != 0 {
         println("aephysics spinner angle ${joint_solver.revolute_joint_get_angle(spinner_joint[0])}")

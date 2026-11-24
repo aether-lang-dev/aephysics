@@ -36,6 +36,7 @@ exports (
     mul_addf, mul_subf, mul_svf, crossf, normalizef, perpf, is_normalizedf,
     min_vec3f, max_vec3f, lerpf, abs_f32, min_f32, max_f32, clamp_f32, sqrt_f32,
     mul_mvf, add_mmf, transposef, detf, invert_matrixf, rotate_vectorf, inv_rotate_vectorf,
+    mul_mmf, make_matrix_from_quatf, rotate_inertiaf, abs_vec3f, modified_crossf,
     mul_quatf, normalize_quatf,
     PI, TWO_PI, PI_OVER_TWO, PI_OVER_FOUR, SQRT3, DEG_TO_RAD, RAD_TO_DEG, MIN_SCALE,
     EPSILON, TINY, MAX_FLOAT, HUGE,
@@ -1341,6 +1342,41 @@ transposef(m: Matrix3f) -> Matrix3f {
 }
 
 detf(m: Matrix3f) -> f32 { return dotf(m.cx, crossf(m.cy, m.cz)) }
+
+mul_mmf(a: Matrix3f, b: Matrix3f) -> Matrix3f { return Matrix3f { cx: mul_mvf(a, b.cx), cy: mul_mvf(a, b.cy), cz: mul_mvf(a, b.cz) } }
+
+// b3MakeMatrixFromQuat: the rotation matrix of a unit quaternion.
+make_matrix_from_quatf(q: Quatf) -> Matrix3f {
+    xx = q.x * q.x
+    yy = q.y * q.y
+    zz = q.z * q.z
+    xy = q.x * q.y
+    xz = q.x * q.z
+    xw = q.x * q.w
+    yz = q.y * q.z
+    yw = q.y * q.w
+    zw = q.z * q.w
+    return Matrix3f { cx: Vec3f { x: 1.0 - 2.0 * (yy + zz), y: 2.0 * (xy + zw), z: 2.0 * (xz - yw) },
+                      cy: Vec3f { x: 2.0 * (xy - zw), y: 1.0 - 2.0 * (xx + zz), z: 2.0 * (yz + xw) },
+                      cz: Vec3f { x: 2.0 * (xz + yw), y: 2.0 * (yz - xw), z: 1.0 - 2.0 * (xx + yy) } }
+}
+
+// A body's inverse inertia in world axes, R * I^-1 * R^T, in single
+// precision as the reference keeps it (b3FinalizeBodiesTask,
+// b3UpdateBodyMassData): the local inertia and the result are float, and
+// the rotation is the body's, rounded to float.
+rotate_inertiaf(q: Quatf, local: Matrix3f) -> Matrix3f {
+    rotation = make_matrix_from_quatf(q)
+    return mul_mmf(mul_mmf(rotation, local), transposef(rotation))
+}
+
+abs_vec3f(a: Vec3f) -> Vec3f { return Vec3f { x: abs_f32(a.x), y: abs_f32(a.y), z: abs_f32(a.z) } }
+
+// b3ModifiedCross: the cross product with every term added, the bound of
+// the arc an extent sweeps at the absolute angular rate.
+modified_crossf(a: Vec3f, b: Vec3f) -> Vec3f {
+    return Vec3f { x: a.y * b.z + a.z * b.y, y: a.z * b.x + a.x * b.z, z: a.x * b.y + a.y * b.x }
+}
 
 // The inverse, or zero when singular.
 invert_matrixf(m: Matrix3f) -> Matrix3f {

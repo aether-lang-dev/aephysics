@@ -1003,11 +1003,13 @@ store_wide_range(ctx: *StepContext, color: *GraphColor, start: int, end: int, hi
             native.prefetch(next.manifolds.l7)
         }
         m = ptr_lane(&c.manifolds, l) as *Manifold
-        f1 = lane(c.friction_impulse.x, l)
-        f2 = lane(c.friction_impulse.y, l)
-        m.friction_impulse = math.narrow3(math.vec3(f1 * lane(c.tangent1.x, l) + f2 * lane(tangent2.x, l),
-                                       f1 * lane(c.tangent1.y, l) + f2 * lane(tangent2.y, l),
-                                       f1 * lane(c.tangent1.z, l) + f2 * lane(tangent2.z, l)))
+        // In single precision, as the reference stores it.
+        lw = l as long
+        f1 = lanes.lane8(c.friction_impulse.x, lw)
+        f2 = lanes.lane8(c.friction_impulse.y, lw)
+        m.friction_impulse = Vec3f { x: f1 * lanes.lane8(c.tangent1.x, lw) + f2 * lanes.lane8(tangent2.x, lw),
+                                     y: f1 * lanes.lane8(c.tangent1.y, lw) + f2 * lanes.lane8(tangent2.y, lw),
+                                     z: f1 * lanes.lane8(c.tangent1.z, lw) + f2 * lanes.lane8(tangent2.z, lw) }
         m.twist_impulse = lane(c.twist_impulse, l)
         m.rolling_impulse = Vec3f { x: lanes.lane8(c.rolling_impulse.x, l as long), y: lanes.lane8(c.rolling_impulse.y, l as long), z: lanes.lane8(c.rolling_impulse.z, l as long) }
         point_count = m.point_count

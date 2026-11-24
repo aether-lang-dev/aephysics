@@ -1257,10 +1257,12 @@ test_ankle_shins() {
 // And the reference's figure and the one with ankles once more (#224): the
 // spine's and the neck's cones are the reference's again, which meeting
 // the rest (#202) had turned 10 degrees back. The fitted figure, on tight
-// limits, is the same.
-const UNCHANGED_REFERENCE = 12445461380616448
-const UNCHANGED_ANKLES = 4283857925101259182
-const UNCHANGED_FITTED = 0 - 3429263234805564101
+// limits, is the same. And all three once more (#236): positions are
+// integrated, sleep velocities estimated and world inertias rotated in
+// single precision, as the reference does all three.
+const UNCHANGED_REFERENCE = 0 - 6053521641230789644
+const UNCHANGED_ANKLES = 2128129581247374618
+const UNCHANGED_FITTED = 5240714714354427579
 
 unchanged_hash(kind: int) -> long {
     world_id = world_with_ground()

@@ -64,6 +64,12 @@ static void Run( const Scene* scene )
 
 	b3WorldId worldId = b3CreateWorld( &worldDef );
 	scene->create( worldId );
+	// AEPHYSICS_BENCH_NO_SLEEP=1, as bench/suite.ae reads it.
+	const char* noSleep = getenv( "AEPHYSICS_BENCH_NO_SLEEP" );
+	if ( noSleep != NULL && strcmp( noSleep, "1" ) == 0 )
+	{
+		b3World_EnableSleeping( worldId, false );
+	}
 
 	float timeStep = 1.0f / 60.0f;
 	int subStepCount = 4;
@@ -83,6 +89,9 @@ static void Run( const Scene* scene )
 	}
 
 	double pairs = 0.0, collide = 0.0, solve = 0.0, transforms = 0.0, refit = 0.0, sleep = 0.0, sensors = 0.0;
+	// The solve's own stages, as bench/physics_world_box3d.c sums them, to
+	// read beside ours (AEPHYSICS_STAGES=1).
+	double prepare = 0.0, integrateV = 0.0, warm = 0.0, impulses = 0.0, integrateP = 0.0, relax = 0.0, restitution = 0.0, store = 0.0;
 	double t0 = now_ms();
 	for ( int stepIndex = 1; stepIndex < steps; ++stepIndex )
 	{
@@ -99,6 +108,14 @@ static void Run( const Scene* scene )
 		refit += p.refit;
 		sleep += p.sleepIslands;
 		sensors += p.sensors;
+		prepare += p.prepareConstraints;
+		integrateV += p.integrateVelocities;
+		warm += p.warmStart;
+		impulses += p.solveImpulses;
+		integrateP += p.integratePositions;
+		relax += p.relaxImpulses;
+		restitution += p.restitution;
+		store += p.storeImpulses;
 	}
 	double t1 = now_ms();
 
@@ -110,6 +127,9 @@ static void Run( const Scene* scene )
 	printf( "box3d phases ms/step: pairs %.6f collide %.6f\n", pairs / timed, collide / timed );
 	printf( "box3d stages ms/step: solve %.6f transforms %.6f refit %.6f sleep %.6f sensors %.6f\n", solve / timed, transforms / timed,
 			refit / timed, sleep / timed, sensors / timed );
+	printf( "box3d solve ms/step: prepare %.6f integrate_v %.6f warm %.6f solve %.6f integrate_p %.6f relax %.6f restitution %.6f store %.6f\n",
+			prepare / timed, integrateV / timed, warm / timed, impulses / timed, integrateP / timed, relax / timed, restitution / timed,
+			store / timed );
 	if ( strcmp( scene->name, "spinner" ) == 0 )
 	{
 		printf( "box3d spinner angle %.6f\n", GetSpinnerAngle() );

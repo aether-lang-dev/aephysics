@@ -1517,6 +1517,42 @@ GCC's -O3 heuristics decline them (they take a 72-byte matrix or a
 32-byte quaternion by value, and grow as their own callees inline). The
 budget stays; the case is with the Aether session.
 
+### Single precision where the reference keeps it (2026-11-24, #236)
+
+The suite now prints the solve's own stages under `AEPHYSICS_STAGES=1`,
+and `bench/suite_box3d.c` the reference's beside them (`box3d solve
+ms/step`). `AEPHYSICS_BENCH_NO_SLEEP=1` keeps every body awake in both,
+so a long profile of a scene with few moving bodies (the large world)
+keeps sampling their steps. Ours times every block and the reference
+every stage, so our small stages read high by the clocks.
+
+On the sleep scene two stages stood out beside the contact solver:
+integrating the positions (0.068 ms against 0.044) and finalizing the
+bodies (0.134 against 0.098). Both widened the float velocities and
+motions to double, worked in double, and narrowed back, where the
+reference works in float throughout: a body's sleep velocity took five
+square roots of std.math (an out-of-line call, aether#3852), its world
+inertia two double 3x3 products. Now the positions are integrated, the
+sleep velocity estimated and the world inertia rotated (at all four
+places it is made) in single precision, the reference's own sums; the
+pose itself still moves in double. The sweep's reach is worked out only
+for a body that sweeps, and the stored friction impulse is a float sum.
+
+Pinned to one core, best of five, ms per step (before, after, Box3D):
+
+| Scene | before | after | Box3D |
+|---|---|---|---|
+| sleep | 1.948 | 1.917 | 1.767 |
+| large world | 0.0110 | 0.0107 | 0.0089 |
+| convex pile | 9.63 | 9.49 | 8.57 |
+| washer | 15.23 | 15.08 | 14.36 |
+
+The results move (the golden trace and the figures' hashes in
+test_human): the falling ragdolls sleep at step 256 where they slept at
+271 (the reference's own builds: 273 and 274). That is the pile's chaos,
+not the estimate: the sleep estimate alone back in double still sleeps
+at 256, the inertia alone back in double at 264.
+
 ## Build flags (inlining)
 
 Since Aether 0.937.0 (aether#3779) `ae build` gives an optimising build
