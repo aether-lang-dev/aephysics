@@ -159,6 +159,15 @@ run(name: string, world_id: WorldId, scene_steps: int, scene: int) {
     println("aephysics suite: ${name}: ${steps} steps of ${counters.body_count} bodies ${ms(t1 - t0)} ms, ${ms(t1 - t0) / timed} ms per step (height sum ${height_sum(world_id)}, ${counters.contact_count} contacts, ${counters.joint_count} joints, ${awake} awake)")
     println("aephysics phases ms/step: pairs ${pairs_ms / timed} collide ${collide_ms / timed}")
     println("aephysics stages ms/step: solve ${solve_ms / timed} transforms ${transforms_ms / timed} refit ${refit_ms / timed} sleep ${sleep_ms / timed} sensors ${sensors_ms / timed}")
+    // The graph's colours, each one's contacts and joints (the overflow
+    // last), as bench/suite_box3d.c prints the reference's.
+    colors = "aephysics colors:"
+    ci = 0
+    while ci < 24 {
+        if counters.color_counts[ci] > 0 { colors = "${colors} ${ci}:${counters.color_counts[ci]}" }
+        ci = ci + 1
+    }
+    println(colors)
     // The solve's own stages under AEPHYSICS_STAGES=1, beside the
     // reference's (bench/suite_box3d.c prints the same columns).
     solver.stage_report()
@@ -189,6 +198,29 @@ ground_box(world_id: WorldId, y: float, hx: float, hy: float, hz: float) -> Body
     sdef = dynamics.default_shape_def()
     dynamics.create_hull_shape(body, &sdef, keep_hull(hull.make_box_hull(hx, hy, hz)))
     return body
+}
+
+// --- tiny: a step with almost nothing in it ------------------------------------------------------------------
+
+// Not the reference's: a ground box and eight spheres resting on it, never
+// sleeping, so a step's fixed cost (the stages, the blocks, the passes over
+// empty sets) is most of what is timed. bench/suite_box3d.c builds the
+// same scene with the reference's calls.
+tiny() {
+    world_id = world_with(1, 8, 1, 8, 64)
+    ground_box(world_id, 0.0 - 1.0, 20.0, 1.0, 20.0)
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.enable_sleep = false
+    sdef = dynamics.default_shape_def()
+    i = 0
+    while i < 8 {
+        bdef.position = math.vec3(2.0 * (i as float) - 7.0, 0.5, 0.0)
+        body = dynamics.create_body(world_id, &bdef)
+        dynamics.create_sphere_shape(body, &sdef, manifold.sphere(math.vec3_zero(), 0.5))
+        i = i + 1
+    }
+    run("tiny", world_id, 20000, SCENE_NONE)
 }
 
 // --- convex pile: a huge pile of PEEL's large convexes ------------------------------------------------------
@@ -885,6 +917,7 @@ main() {
     if wanted("trees50") { trees("trees50", 2) }
     if wanted("trees100") { trees("trees100", 1) }
     if wanted("washer") { washer() }
+    if wanted("tiny") { tiny() }
     if wanted("sat") { sat_runs() }
     free(g_hulls)
     free(g_meshes)
