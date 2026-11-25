@@ -137,6 +137,9 @@ run(name: string, world_id: WorldId, scene_steps: int, scene: int) {
     refit_ms = 0.0
     sleep_ms = 0.0
     sensors_ms = 0.0
+    setup_ms = 0.0
+    constraints_ms = 0.0
+    bullets_ms = 0.0
     t0 = clock()
     s = 1
     while s < steps {
@@ -150,6 +153,9 @@ run(name: string, world_id: WorldId, scene_steps: int, scene: int) {
         refit_ms = refit_ms + seen.refit
         sleep_ms = sleep_ms + seen.sleep_islands
         sensors_ms = sensors_ms + seen.sensors
+        setup_ms = setup_ms + seen.solver_setup
+        constraints_ms = constraints_ms + seen.constraints
+        bullets_ms = bullets_ms + seen.bullets
         s = s + 1
     }
     t1 = clock()
@@ -159,6 +165,8 @@ run(name: string, world_id: WorldId, scene_steps: int, scene: int) {
     println("aephysics suite: ${name}: ${steps} steps of ${counters.body_count} bodies ${ms(t1 - t0)} ms, ${ms(t1 - t0) / timed} ms per step (height sum ${height_sum(world_id)}, ${counters.contact_count} contacts, ${counters.joint_count} joints, ${awake} awake)")
     println("aephysics phases ms/step: pairs ${pairs_ms / timed} collide ${collide_ms / timed}")
     println("aephysics stages ms/step: solve ${solve_ms / timed} transforms ${transforms_ms / timed} refit ${refit_ms / timed} sleep ${sleep_ms / timed} sensors ${sensors_ms / timed}")
+    // Inside the solve, as the reference's b3Profile splits it.
+    println("aephysics solve parts ms/step: setup ${setup_ms / timed} constraints ${constraints_ms / timed} transforms ${transforms_ms / timed} bullets ${bullets_ms / timed}")
     // The graph's colours, each one's contacts and joints (the overflow
     // last), as bench/suite_box3d.c prints the reference's.
     colors = "aephysics colors:"
