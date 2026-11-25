@@ -97,7 +97,17 @@ void aephysics_release_slots(int start, int count)
 // exits. Elsewhere the compiler's TLS is native already, and a pthread
 // key's destructor gives the slot back.
 #ifdef _WIN32
-static DWORD g_worker_slot = TLS_OUT_OF_INDEXES;
+// The slot's index, read by aephysics_worker_index_inline
+// (aephysics_inline.h) as well, which takes the thread's value straight
+// from its TEB.TlsSlots, the array TlsGetValue reads for an index under 64:
+// the offset it uses is checked here against winternl.h.
+#include <stddef.h>
+#include <winternl.h>
+#if defined(__x86_64__)
+_Static_assert(offsetof(TEB, TlsSlots) == 0x1480, "TEB.TlsSlots moved: aephysics_worker_index_inline reads it at gs:0x1480");
+#endif
+DWORD aephysics_tls_slot = TLS_OUT_OF_INDEXES;
+#define g_worker_slot aephysics_tls_slot
 static DWORD g_owned_slot = FLS_OUT_OF_INDEXES;
 
 static void WINAPI release_owned_slot(void *value)

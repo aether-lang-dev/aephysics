@@ -20,6 +20,7 @@ exports (
 const MAX_WORKERS = 64
 
 extern aephysics_worker_index() -> int
+extern aephysics_worker_index_inline() -> int @c_import
 extern aephysics_set_worker_index(index: int)
 extern aephysics_claim_slots(count: int) -> int
 extern aephysics_release_slots(start: int, count: int)
@@ -77,7 +78,7 @@ name_text(name: ptr) -> string { return aephysics_name_text(name) }
 // world's step, else the slot the thread claimed the first time it asked
 // (given back when it exits). Every module's scratch is a block per slot
 // chosen by this, so threads querying a world at once never share one.
-worker_index() -> int { return aephysics_worker_index() }
+worker_index() -> int { return aephysics_worker_index_inline() }
 set_worker_index(index: int) { aephysics_set_worker_index(index) }
 
 // A run of `count` worker slots claimed (the first, or -1 when none is
@@ -120,4 +121,4 @@ semaphore_signal(s: ptr, count: int) { aephysics_semaphore_signal(s, count) }
 // MAX_WORKERS blocks of `bytes`: what the reference keeps on the stack
 // of each thread, kept here as one block per worker since Aether has
 // neither stack arrays nor thread-local variables.
-scratch(blocks: @into ptr, bytes: int) -> ptr { return blocks + aephysics_worker_index() * bytes }
+scratch(blocks: @into ptr, bytes: int) -> ptr { return blocks + aephysics_worker_index_inline() * bytes }
