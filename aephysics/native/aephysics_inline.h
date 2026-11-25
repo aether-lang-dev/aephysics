@@ -21,6 +21,32 @@ static inline void aephysics_prefetch(const void *p)
 #endif
 }
 
+// Which worker the calling thread is (aephysics_worker_index in
+// aephysics_native.c), without a call where that can be had. On 64-bit
+// Windows the worker's slot is a native TLS index, and TlsGetValue for an
+// index under 64 reads the thread's TEB.TlsSlots[index]: read here in place,
+// one load from gs (the offset is checked against winternl.h in
+// aephysics_native.c). Every per-worker scratch block is chosen through
+// this, tens of millions of times a run of the convex pile, where the call
+// into kernel32 was 2% of the step. A slot not yet made, an index past 64
+// or a thread that has not claimed one goes through the function.
+int aephysics_worker_index(void);
+#if defined(_WIN32) && defined(__x86_64__)
+extern unsigned long aephysics_tls_slot;
+static inline int aephysics_worker_index_inline(void)
+{
+    unsigned long slot = aephysics_tls_slot;
+    if (slot < 64) {
+        unsigned long long stored;
+        __asm__ __volatile__("movq %%gs:0x1480(,%1,8), %0" : "=r"(stored) : "r"((unsigned long long)slot));
+        if (stored != 0) return (int)(stored - 1);
+    }
+    return aephysics_worker_index();
+}
+#else
+static inline int aephysics_worker_index_inline(void) { return aephysics_worker_index(); }
+#endif
+
 // A spin's pause: the processor's hint that the thread is waiting.
 static inline void aephysics_pause(void)
 {
