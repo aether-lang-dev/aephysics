@@ -957,7 +957,9 @@ find_incident_face_f(h: *HullData, ref_normal: Vec3f, vertex_index: int) -> int 
     normals = hull.soa_normals(h) as f32[]
     face_stride = hull.soa_stride(h.face_count)
     min_edge = NULL_INDEX
-    f32 min_projection = math.infinity_f32()
+    // FLT_MAX as the reference starts (minEdgeProjection): a constant, where
+    // infinity was a division every call.
+    f32 min_projection = math.MAX_FLOAT as f32
     start = vertices[vertex_index]
     edge_origin = row_point(rows, stride, hull.half_edge_origin(words[start]))
     edge_index = start

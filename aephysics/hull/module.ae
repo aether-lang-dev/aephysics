@@ -1279,7 +1279,9 @@ find_hull_support_vertex(h: *HullData, direction: Vec3) -> int {
     dz = lanes.splat4(direction.z as f32)
     four = lanes.splat4(4.0)
     index = lanes.f32x4(0.0, 1.0, 2.0, 3.0)
-    lowest = 0.0 - math.infinity_f32()
+    // -FLT_MAX as the reference starts: a constant, where infinity was a
+    // division every call.
+    lowest = 0.0 - (math.MAX_FLOAT as f32)
     best_dot = lanes.splat4(lowest)
     best_lane_index = lanes.splat4(0.0 - 1.0)
     loop_count = (n + 3) & (0 - 4)
@@ -1292,19 +1294,29 @@ find_hull_support_vertex(h: *HullData, direction: Vec3) -> int {
         index = index + four
         i = i + 4
     }
-    best_index = NULL_INDEX
-    best = lowest
-    lane = 0
-    while lane < 4 {
-        lane_index = lanes.lane4(best_lane_index, lane as long) as int
-        lane_dot = lanes.lane4(best_dot, lane as long)
-        if lane_index >= 0 && (lane_dot > best || (lane_dot == best && lane_index < best_index)) {
-            best_index = lane_index
-            best = lane_dot
-        }
-        lane = lane + 1
+    // The lanes read at fixed indices: lanes.lane4 takes the vector by
+    // value, and a loop's index made each read a spill and a reload. The
+    // vertex indices stay floats (whole numbers, compared exactly) until
+    // the one checked conversion at the end. The reference's rule: the
+    // greatest dot, a tie to the lower vertex.
+    pick = SupportPick { index: 0.0 - 1.0, dot: lowest }
+    pick = support_pick(pick, lanes.lane4(best_lane_index, 0), lanes.lane4(best_dot, 0))
+    pick = support_pick(pick, lanes.lane4(best_lane_index, 1), lanes.lane4(best_dot, 1))
+    pick = support_pick(pick, lanes.lane4(best_lane_index, 2), lanes.lane4(best_dot, 2))
+    pick = support_pick(pick, lanes.lane4(best_lane_index, 3), lanes.lane4(best_dot, 3))
+    return pick.index as int
+}
+
+struct SupportPick {
+    index: f32
+    dot: f32
+}
+
+support_pick(pick: SupportPick, lane_index: f32, lane_dot: f32) -> SupportPick {
+    if lane_index >= 0.0 && (lane_dot > pick.dot || (lane_dot == pick.dot && lane_index < pick.index)) {
+        return SupportPick { index: lane_index, dot: lane_dot }
     }
-    return best_index
+    return pick
 }
 
 find_hull_support_face(h: *HullData, direction: Vec3) -> int {
