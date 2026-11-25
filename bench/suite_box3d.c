@@ -91,6 +91,7 @@ static void Run( const Scene* scene )
 	double pairs = 0.0, collide = 0.0, solve = 0.0, transforms = 0.0, refit = 0.0, sleep = 0.0, sensors = 0.0;
 	// The solve's own stages, as bench/physics_world_box3d.c sums them, to
 	// read beside ours (AEPHYSICS_STAGES=1).
+	double setup = 0.0, constraints = 0.0, bullets = 0.0;
 	double prepare = 0.0, integrateV = 0.0, warm = 0.0, impulses = 0.0, integrateP = 0.0, relax = 0.0, restitution = 0.0, store = 0.0;
 	double t0 = now_ms();
 	for ( int stepIndex = 1; stepIndex < steps; ++stepIndex )
@@ -108,6 +109,9 @@ static void Run( const Scene* scene )
 		refit += p.refit;
 		sleep += p.sleepIslands;
 		sensors += p.sensors;
+		setup += p.solverSetup;
+		constraints += p.constraints;
+		bullets += p.bullets;
 		prepare += p.prepareConstraints;
 		integrateV += p.integrateVelocities;
 		warm += p.warmStart;
@@ -127,6 +131,8 @@ static void Run( const Scene* scene )
 	printf( "box3d phases ms/step: pairs %.6f collide %.6f\n", pairs / timed, collide / timed );
 	printf( "box3d stages ms/step: solve %.6f transforms %.6f refit %.6f sleep %.6f sensors %.6f\n", solve / timed, transforms / timed,
 			refit / timed, sleep / timed, sensors / timed );
+	printf( "box3d solve parts ms/step: setup %.6f constraints %.6f transforms %.6f bullets %.6f\n", setup / timed, constraints / timed,
+			transforms / timed, bullets / timed );
 	printf( "box3d colors:" );
 	for ( int i = 0; i < 24; ++i )
 	{

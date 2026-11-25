@@ -44,7 +44,7 @@ extern memcpy(dst: ptr, src: ptr, size: int) -> ptr
 extern memset(block: ptr, value: int, size: int) -> ptr
 
 const SNAPSHOT_MAGIC = 0x4E535041    // "APSN", little-endian
-const SNAPSHOT_VERSION = 12
+const SNAPSHOT_VERSION = 13
 const NULL_INDEX = 0 - 1
 
 // --- the bytes written -------------------------------------------------------------------------------
