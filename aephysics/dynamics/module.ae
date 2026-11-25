@@ -1035,6 +1035,15 @@ struct SphericalJoint {
     index_a: int
     index_b: int
     linear_impulse: Vec3
+    // The point's anchors (frame A's and B's origins, world rotation,
+    // relative to the centres of mass) and the centres' offset, single
+    // precision as the reference keeps them: a plain ball joint's point
+    // is solved in single precision from these (spherical_point_f). Beside
+    // the flags, the indices and the impulse, so that solve's every pass
+    // reads one span of the joint, not that and a line 700 bytes on.
+    anchor_a: Vec3f
+    anchor_b: Vec3f
+    delta_center_f: Vec3f
     frame_a: Transform
     frame_b: Transform
     delta_center: Vec3
@@ -1078,13 +1087,6 @@ struct SphericalJoint {
     twist_limit_hertz: float
     twist_limit_damping_ratio: float
     twist_limit_softness: Softness // made each prepare, as the joint's limit_softness
-    // The point's anchors (frame A's and B's origins, world rotation,
-    // relative to the centres of mass) and the centres' offset, single
-    // precision as the reference keeps them: a plain ball joint's point
-    // is solved in single precision from these (spherical_point_f).
-    anchor_a: Vec3f
-    anchor_b: Vec3f
-    delta_center_f: Vec3f
 }
 
 struct WeldJoint {
