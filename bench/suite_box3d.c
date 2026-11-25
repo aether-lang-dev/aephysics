@@ -127,6 +127,15 @@ static void Run( const Scene* scene )
 	printf( "box3d phases ms/step: pairs %.6f collide %.6f\n", pairs / timed, collide / timed );
 	printf( "box3d stages ms/step: solve %.6f transforms %.6f refit %.6f sleep %.6f sensors %.6f\n", solve / timed, transforms / timed,
 			refit / timed, sleep / timed, sensors / timed );
+	printf( "box3d colors:" );
+	for ( int i = 0; i < 24; ++i )
+	{
+		if ( counters.colorCounts[i] > 0 )
+		{
+			printf( " %d:%d", i, counters.colorCounts[i] );
+		}
+	}
+	printf( "\n" );
 	printf( "box3d solve ms/step: prepare %.6f integrate_v %.6f warm %.6f solve %.6f integrate_p %.6f relax %.6f restitution %.6f store %.6f\n",
 			prepare / timed, integrateV / timed, warm / timed, impulses / timed, integrateP / timed, relax / timed, restitution / timed,
 			store / timed );
@@ -141,6 +150,30 @@ static void Run( const Scene* scene )
 		scene->destroy();
 	}
 	ResetGroundShapeId();
+}
+
+// Not the reference's: a ground box and eight spheres resting on it, never
+// sleeping, as bench/suite.ae's tiny builds it, so a step's fixed cost is
+// most of what is timed.
+static void CreateTiny( b3WorldId worldId )
+{
+	b3BodyDef groundDef = b3DefaultBodyDef();
+	groundDef.position = (b3Pos){ 0.0f, -1.0f, 0.0f };
+	b3BodyId groundId = b3CreateBody( worldId, &groundDef );
+	b3BoxHull box = b3MakeBoxHull( 20.0f, 1.0f, 20.0f );
+	b3ShapeDef shapeDef = b3DefaultShapeDef();
+	b3CreateHullShape( groundId, &shapeDef, &box.base );
+
+	b3BodyDef bodyDef = b3DefaultBodyDef();
+	bodyDef.type = b3_dynamicBody;
+	bodyDef.enableSleep = false;
+	b3Sphere sphere = { { 0.0f, 0.0f, 0.0f }, 0.5f };
+	for ( int i = 0; i < 8; ++i )
+	{
+		bodyDef.position = (b3Pos){ 2.0f * i - 7.0f, 0.5f, 0.0f };
+		b3BodyId bodyId = b3CreateBody( worldId, &bodyDef );
+		b3CreateSphereShape( bodyId, &shapeDef, &sphere );
+	}
 }
 
 // benchmark/main.c's RunSatBenchmarks: each hull pair's GJK cold and warm
@@ -193,6 +226,7 @@ int main( void )
 		{ "trees50", NULL, CreateTrees50, DestroyTrees, NULL, 500 },
 		{ "trees100", NULL, CreateTrees100, DestroyTrees, NULL, 500 },
 		{ "washer", GetWasherCapacity, CreateWasher, NULL, NULL, 1000 },
+		{ "tiny", NULL, CreateTiny, NULL, NULL, 20000 },
 	};
 
 	const char* asked = getenv( "AEPHYSICS_BENCH_SCENE" );
