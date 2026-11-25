@@ -179,10 +179,20 @@ compute_shape_aabb(shape: *Shape, t: Transform) -> AABB {
 // The bounds under a transform inflated by a margin: built in the shape's
 // frame and inflated before the translation, so the margin survives far
 // from the origin.
+//
+// Every awake body's shapes go through here each step (finalize). The
+// convex kinds, nearly all of them, take their own small bounds here,
+// which inline; the rest go through compute_shape_aabb, whose dispatch
+// over every kind stays a call, with its transform and box through memory.
 compute_fat_shape_aabb(shape: *Shape, t: Transform, extra: float) -> AABB {
     r = math.vec3(extra, extra, extra)
     rotation = Transform { p: math.vec3_zero(), q: t.q }
-    local_box = compute_shape_aabb(shape, rotation)
+    kind = shape.kind
+    local_box = AABB { lower: math.vec3_zero(), upper: math.vec3_zero() }
+    if kind == SHAPE_HULL { local_box = hull.compute_hull_aabb(shape.hull, rotation) }
+    else if kind == SHAPE_SPHERE { local_box = sphere.compute_sphere_aabb(shape.sphere, rotation) }
+    else if kind == SHAPE_CAPSULE { local_box = capsule.compute_capsule_aabb(shape.capsule, rotation) }
+    else { local_box = compute_shape_aabb(shape, rotation) }
     local_box.lower = math.sub(local_box.lower, r)
     local_box.upper = math.add(local_box.upper, r)
     return math.offset_aabb(local_box, t.p)
