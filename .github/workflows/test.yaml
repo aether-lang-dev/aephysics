@@ -7,8 +7,10 @@ on:
       - main
   pull_request:
 
-# Pin: 0.944.0, the latest release, and aeb v0.347, the one ae3d builds
-# beside. 0.944.0 brings std.math's square root inline (aether#3852, an
+# Pin: 0.945.0, the latest release, and aeb v0.347, the one ae3d builds
+# beside. 0.945.0 is a tracking bump, no source change (struct literal
+# fields and glob imports kept apart from module vars, macOS cross-built
+# dylibs). 0.944.0 brings std.math's square root inline (aether#3852, an
 # out-of-line call before: trees25 3% faster) and a returned view's
 # release without a call (#3853); 0.942.0 and 0.943.0 were runtime and
 # actor fixes nothing here uses. 0.941.0 was a tracking bump, no source change (actor message
@@ -35,7 +37,7 @@ on:
 # bootstrap version: the floor this code needs, verified by every job
 # below.
 env:
-  AE_PIN: 0.944.0
+  AE_PIN: 0.945.0
   AEB_REF: v0.347
 
 jobs:
