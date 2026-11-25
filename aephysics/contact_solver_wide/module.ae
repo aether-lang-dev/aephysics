@@ -99,12 +99,17 @@ struct PtrW {
     l7: ptr
 }
 
-// A lane of a wide value, read by index: the store works a contact at
-// a time, where the stages before it work eight.
-lane(f: f32x8, index: int) -> float { return (lanes.lane8(f, index as long)) as float }
-
 int_lane(v: *IntW, index: int) -> int {
     lanes = (v as ptr) as int[]
+    return lanes[index]
+}
+
+// A lane of a wide value where it lies in memory, read as one float (the
+// reference's ((float*)&value)[lane]). lanes.lane8 takes the vector by
+// value, and an index known only at run time costs a 32-byte load, a spill
+// and a reload.
+lane_at(v: ptr, index: int) -> f32 {
+    lanes = v as f32[]
     return lanes[index]
 }
 
@@ -1005,21 +1010,21 @@ store_wide_range(ctx: *StepContext, color: *GraphColor, start: int, end: int, hi
         m = ptr_lane(&c.manifolds, l) as *Manifold
         // In single precision, as the reference stores it.
         lw = l as long
-        f1 = lanes.lane8(c.friction_impulse.x, lw)
-        f2 = lanes.lane8(c.friction_impulse.y, lw)
-        m.friction_impulse = Vec3f { x: f1 * lanes.lane8(c.tangent1.x, lw) + f2 * lanes.lane8(tangent2.x, lw),
-                                     y: f1 * lanes.lane8(c.tangent1.y, lw) + f2 * lanes.lane8(tangent2.y, lw),
-                                     z: f1 * lanes.lane8(c.tangent1.z, lw) + f2 * lanes.lane8(tangent2.z, lw) }
-        m.twist_impulse = lane(c.twist_impulse, l)
-        m.rolling_impulse = Vec3f { x: lanes.lane8(c.rolling_impulse.x, l as long), y: lanes.lane8(c.rolling_impulse.y, l as long), z: lanes.lane8(c.rolling_impulse.z, l as long) }
+        f1 = lane_at((&c.friction_impulse.x) as ptr, l)
+        f2 = lane_at((&c.friction_impulse.y) as ptr, l)
+        m.friction_impulse = Vec3f { x: f1 * lane_at((&c.tangent1.x) as ptr, l) + f2 * lanes.lane8(tangent2.x, lw),
+                                     y: f1 * lane_at((&c.tangent1.y) as ptr, l) + f2 * lanes.lane8(tangent2.y, lw),
+                                     z: f1 * lane_at((&c.tangent1.z) as ptr, l) + f2 * lanes.lane8(tangent2.z, lw) }
+        m.twist_impulse = lane_at((&c.twist_impulse) as ptr, l)
+        m.rolling_impulse = Vec3f { x: lane_at((&c.rolling_impulse.x) as ptr, l), y: lane_at((&c.rolling_impulse.y) as ptr, l), z: lane_at((&c.rolling_impulse.z) as ptr, l) }
         point_count = m.point_count
         point_index = 0
         while point_index < point_count {
             cp = wide_point_at(c, point_index)
             mp = dynamics.manifold_point_at(m, point_index)
-            mp.normal_impulse = lane(cp.normal_impulse, l)
-            mp.total_normal_impulse = lane(cp.total_normal_impulse, l)
-            mp.normal_velocity = lane(cp.relative_velocity, l)
+            mp.normal_impulse = lane_at((&cp.normal_impulse) as ptr, l)
+            mp.total_normal_impulse = lane_at((&cp.total_normal_impulse) as ptr, l)
+            mp.normal_velocity = lane_at((&cp.relative_velocity) as ptr, l)
             point_index = point_index + 1
         }
         if (c.hit_lanes & (1 << l)) != 0 {
