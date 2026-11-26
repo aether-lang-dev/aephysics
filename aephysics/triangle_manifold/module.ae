@@ -248,7 +248,12 @@ collide_triangle_and_sphere(m: *LocalManifold, capacity: int, v1: Vec3, v2: Vec3
 
     d = math.sqrt_float(squared_distance)
     normal = math.normalize(math.cross(math.sub(v2, v1), math.sub(v3, v1)))
-    if d * d > 1000.0 * FLOAT_MIN { normal = math.mul_sv(1.0 / d, math.sub(center, closest.point)) }
+    // The normal from the centre to its closest point in single precision,
+    // the manifold's own and the reference's (b3CollideTriangleAndSphere
+    // works in float): the double closest point keeps a last bit of noise
+    // across a resting sphere's normal, which pushed it sideways each step
+    // (collide_hull_and_sphere has the same note).
+    if d * d > 1000.0 * FLOAT_MIN { normal = math.widen3(math.normalizef(math.subf(math.narrow3(center), math.narrow3(closest.point)))) }
     contact = math.mul_sv(0.5, math.add(math.sub(center, math.mul_sv(radius, normal)), closest.point))
     m.normal = normal
     m.point_count = 1

@@ -612,11 +612,23 @@ collide_hull_and_sphere(m: *LocalManifold, capacity: int, hull_a: *HullData, sph
         return
     }
     if output.distance > 100.0 * FLOAT_EPSILON {
-        // Shallow.
-        normal = math.normalize(math.sub(output.point_b, output.point_a))
-        c_a = math.mul_add(center, radius_a - math.dot(math.sub(center, output.point_a), normal), normal)
-        c_b = math.mul_sub(center, radius_b, normal)
-        one_point(m, normal, math.lerp(c_a, c_b, 0.5), output.distance - radius, feature_pair_single())
+        // Shallow: the normal and point from the closest points in single
+        // precision, the manifold's own and the reference's (its distance
+        // runs in float). In double the closest points keep a last bit of
+        // noise (8.9e-16 across a resting sphere's normal), which a float
+        // drops: kept, it pushed a resting sphere sideways each step, and
+        // the residual it rolled with never came to the exact zero the
+        // reference rests at, leaving subnormal velocities every later
+        // step paid for in microcode assists.
+        point_a = math.narrow3(output.point_a)
+        point_b = math.narrow3(output.point_b)
+        centre_f = math.narrow3(center)
+        normal_f = math.normalizef(math.subf(point_b, point_a))
+        f32 radius_a_f = radius_a as f32
+        f32 radius_b_f = radius_b as f32
+        c_a = math.mul_addf(centre_f, radius_a_f - math.dotf(math.subf(centre_f, point_a), normal_f), normal_f)
+        c_b = math.mul_subf(centre_f, radius_b_f, normal_f)
+        one_point(m, math.widen3(normal_f), math.widen3(math.lerpf(c_a, c_b, 0.5)), output.distance - radius, feature_pair_single())
         return
     }
     // Deep: the face the centre is least below.
