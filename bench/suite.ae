@@ -231,6 +231,27 @@ tiny() {
     run("tiny", world_id, 20000, SCENE_NONE)
 }
 
+// Not the reference's either: the same eight spheres touching in a row,
+// so their contacts with each other take colours beside the ground's and
+// a step's fixed cost per colour shows (the large world's spheres meet
+// four colours a step with almost nothing in each).
+tiny_row() {
+    world_id = world_with(1, 8, 1, 8, 64)
+    ground_box(world_id, 0.0 - 1.0, 20.0, 1.0, 20.0)
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    bdef.enable_sleep = false
+    sdef = dynamics.default_shape_def()
+    i = 0
+    while i < 8 {
+        bdef.position = math.vec3((i as float) - 3.5, 0.5, 0.0)
+        body = dynamics.create_body(world_id, &bdef)
+        dynamics.create_sphere_shape(body, &sdef, manifold.sphere(math.vec3_zero(), 0.5))
+        i = i + 1
+    }
+    run("tiny_row", world_id, 20000, SCENE_NONE)
+}
+
 // --- convex pile: a huge pile of PEEL's large convexes ------------------------------------------------------
 
 convex_pile() {
@@ -926,6 +947,7 @@ main() {
     if wanted("trees100") { trees("trees100", 1) }
     if wanted("washer") { washer() }
     if wanted("tiny") { tiny() }
+    if wanted("tiny_row") { tiny_row() }
     if wanted("sat") { sat_runs() }
     free(g_hulls)
     free(g_meshes)

@@ -182,6 +182,28 @@ static void CreateTiny( b3WorldId worldId )
 	}
 }
 
+// The same eight spheres touching in a row, as bench/suite.ae's tiny_row.
+static void CreateTinyRow( b3WorldId worldId )
+{
+	b3BodyDef groundDef = b3DefaultBodyDef();
+	groundDef.position = (b3Pos){ 0.0f, -1.0f, 0.0f };
+	b3BodyId groundId = b3CreateBody( worldId, &groundDef );
+	b3BoxHull box = b3MakeBoxHull( 20.0f, 1.0f, 20.0f );
+	b3ShapeDef shapeDef = b3DefaultShapeDef();
+	b3CreateHullShape( groundId, &shapeDef, &box.base );
+
+	b3BodyDef bodyDef = b3DefaultBodyDef();
+	bodyDef.type = b3_dynamicBody;
+	bodyDef.enableSleep = false;
+	b3Sphere sphere = { { 0.0f, 0.0f, 0.0f }, 0.5f };
+	for ( int i = 0; i < 8; ++i )
+	{
+		bodyDef.position = (b3Pos){ (float)i - 3.5f, 0.5f, 0.0f };
+		b3BodyId bodyId = b3CreateBody( worldId, &bodyDef );
+		b3CreateSphereShape( bodyId, &shapeDef, &sphere );
+	}
+}
+
 // benchmark/main.c's RunSatBenchmarks: each hull pair's GJK cold and warm
 // and SAT with and without the inscribed-sphere bound, the best of four
 // runs of twenty repeats, in microseconds a query.
@@ -233,6 +255,7 @@ int main( void )
 		{ "trees100", NULL, CreateTrees100, DestroyTrees, NULL, 500 },
 		{ "washer", GetWasherCapacity, CreateWasher, NULL, NULL, 1000 },
 		{ "tiny", NULL, CreateTiny, NULL, NULL, 20000 },
+		{ "tiny_row", NULL, CreateTinyRow, NULL, NULL, 20000 },
 	};
 
 	const char* asked = getenv( "AEPHYSICS_BENCH_SCENE" );
