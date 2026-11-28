@@ -154,7 +154,7 @@ read_float(r: *Reader) -> float {
     }
     r.at = t.end
     word = string.substring(r.text, t.start, t.end)
-    value, err = string.to_double(word)
+    value, err = string.to_float(word)
     string.free(word)
     if string.length(err) > 0 { r.ok = false }
     return value
